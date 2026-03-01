@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Surefire\Surefire.csproj" />
+    <ProjectReference Include="..\..\src\Surefire.Dashboard\Surefire.Dashboard.csproj" />
+  </ItemGroup>
+</Project>

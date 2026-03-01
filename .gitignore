@@ -1,0 +1,33 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.vs/
+.vs/
+*.DotSettings.user
+publish/
+TestResults/
+
+## Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+## IDE
+.idea/
+*.swp
+*.swo
+*~
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Misc
+*.log
+.env
+.env.*
+!.env.example

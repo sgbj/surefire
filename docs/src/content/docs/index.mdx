@@ -1,0 +1,63 @@
+---
+title: Docs
+description: Distributed job scheduling for .NET
+template: splash
+hero:
+  title: Surefire
+  tagline: Distributed job scheduling for .NET with minimal API ergonomics.
+  actions:
+    - text: Get started
+      link: /surefire/getting-started/
+      icon: right-arrow
+---
+
+import { Card, CardGrid, Code } from '@astrojs/starlight/components';
+
+![Surefire dashboard](../../assets/dashboard.png)
+
+## Features
+
+<CardGrid>
+  <Card title="Minimal API style" icon="rocket">
+    Register jobs with delegates, just like you'd register endpoints. Parameters come from DI, arguments, or the job context.
+  </Card>
+  <Card title="Distributed" icon="random">
+    Run multiple nodes. Surefire makes sure each job runs exactly once — no double execution.
+  </Card>
+  <Card title="Dashboard" icon="laptop">
+    Ships with a real-time dashboard. Live log streaming, progress bars, job management, and node monitoring.
+  </Card>
+  <Card title="Batteries included" icon="puzzle">
+    Retries with backoff, cron scheduling, timeouts, concurrency limits, lifecycle callbacks, and OpenTelemetry traces out of the box.
+  </Card>
+</CardGrid>
+
+## Example
+
+export const sample = `using Surefire;
+using Surefire.Dashboard;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSurefire();
+
+var app = builder.Build();
+
+app.AddJob("Add", (int a, int b) => a + b);
+
+app.AddJob("SlowJob", async (JobContext jobContext, ILogger<Program> logger, CancellationToken ct) =>
+{
+    for (var i = 1; i <= 10; i++)
+    {
+        logger.LogInformation("Step {i}/10", i);
+        await jobContext.ReportProgressAsync(i / 10.0);
+        await Task.Delay(1000, ct);
+    }
+}).WithDescription("A slow job that reports progress")
+  .WithCron("* * * * *");
+
+app.MapSurefireDashboard();
+
+app.Run();`;
+
+<Code code={sample} lang="csharp" />
