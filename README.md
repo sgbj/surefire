@@ -4,12 +4,15 @@ Distributed job scheduling for .NET with minimal API ergonomics.
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddSurefire();
+
 var app = builder.Build();
 
 app.AddJob("Hello", () => "Hello, World!");
 
 app.MapSurefireDashboard();
+
 app.Run();
 ```
 
@@ -36,7 +39,9 @@ using Surefire;
 using Surefire.Dashboard;
 
 var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddSurefire();
+
 var app = builder.Build();
 
 // Simple job
@@ -67,6 +72,7 @@ app.AddJob("Flaky", () =>
 }).WithRetry(3);
 
 app.MapSurefireDashboard();
+
 app.Run();
 ```
 
@@ -131,7 +137,7 @@ The dashboard is embedded in the NuGet package. It includes:
 
 ## Documentation
 
-See the [full documentation](https://batary.dev) for more details.
+See the [full documentation](https://batary.dev/surefire) for more details.
 
 ## License
 
