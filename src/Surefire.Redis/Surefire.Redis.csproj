@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <ItemGroup>
+        <ProjectReference Include="..\Surefire\Surefire.csproj"/>
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="StackExchange.Redis"/>
+    </ItemGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Surefire.Tests.Redis"/>
+    </ItemGroup>
+</Project>

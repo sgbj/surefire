@@ -1,0 +1,140 @@
+---
+import { Image } from 'astro:assets';
+import dashboard from '../assets/dashboard.png';
+import dashboardLight from '../assets/dashboard-light.png';
+import jobs from '../assets/jobs.png';
+import jobsLight from '../assets/jobs-light.png';
+import jobDetail from '../assets/job-detail.png';
+import jobDetailLight from '../assets/job-detail-light.png';
+import runs from '../assets/runs.png';
+import runsLight from '../assets/runs-light.png';
+import queues from '../assets/queues.png';
+import queuesLight from '../assets/queues-light.png';
+import nodes from '../assets/nodes.png';
+import nodesLight from '../assets/nodes-light.png';
+import nodeDetail from '../assets/node-detail.png';
+import nodeDetailLight from '../assets/node-detail-light.png';
+import runDetail from '../assets/run-detail.png';
+import runDetailLight from '../assets/run-detail-light.png';
+import runDetailError from '../assets/run-detail-error.png';
+import runDetailErrorLight from '../assets/run-detail-error-light.png';
+import jobDetailsTrigger from '../assets/job-details-trigger.png';
+import jobDetailsTriggerLight from '../assets/job-details-trigger-light.png';
+import commandPalette from '../assets/command-palette.png';
+import commandPaletteLight from '../assets/command-palette-light.png';
+
+const slides = [
+  { src: dashboard, srcLight: dashboardLight, alt: 'Dashboard', label: 'Dashboard' },
+  { src: jobs, srcLight: jobsLight, alt: 'Jobs', label: 'Jobs' },
+  { src: jobDetail, srcLight: jobDetailLight, alt: 'Job detail', label: 'Job detail' },
+  { src: jobDetailsTrigger, srcLight: jobDetailsTriggerLight, alt: 'Trigger a job run', label: 'Trigger run' },
+  { src: runs, srcLight: runsLight, alt: 'Runs', label: 'Runs' },
+  { src: runDetail, srcLight: runDetailLight, alt: 'Run detail', label: 'Run detail' },
+  { src: runDetailError, srcLight: runDetailErrorLight, alt: 'Run detail error', label: 'Error details' },
+  { src: queues, srcLight: queuesLight, alt: 'Queues', label: 'Queues' },
+  { src: nodes, srcLight: nodesLight, alt: 'Nodes', label: 'Nodes' },
+  { src: nodeDetail, srcLight: nodeDetailLight, alt: 'Node detail', label: 'Node detail' },
+  { src: commandPalette, srcLight: commandPaletteLight, alt: 'Command palette', label: 'Command palette' },
+];
+---
+
+<div class="not-content carousel">
+  <div class="carousel-viewport">
+    {slides.map((slide, i) => (
+      <div class:list={['carousel-slide', { active: i === 0 }]} data-index={i}>
+        {slide.srcLight ? (
+          <>
+            <Image src={slide.src} alt={slide.alt} class="dark-only" />
+            <Image src={slide.srcLight} alt={slide.alt} class="light-only" />
+          </>
+        ) : (
+          <Image src={slide.src} alt={slide.alt} />
+        )}
+      </div>
+    ))}
+  </div>
+  <div class="carousel-dots">
+    {slides.map((slide, i) => (
+      <button class:list={['carousel-dot', { active: i === 0 }]} data-index={i} aria-label={slide.label} />
+    ))}
+  </div>
+</div>
+
+<style>
+  .carousel-viewport {
+    position: relative;
+    overflow: hidden;
+  }
+
+
+
+  .carousel-slide {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+  }
+
+  .carousel-slide.active {
+    opacity: 1;
+  }
+
+  .carousel-slide:first-child {
+    position: relative;
+  }
+
+  .carousel-slide :global(img) {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  .carousel-slide :global(img.light-only) {
+    position: absolute;
+    inset: 0;
+  }
+
+  :global(img.light-only) { visibility: hidden; }
+  :root[data-theme='light'] :global(img.dark-only) { visibility: hidden; }
+  :root[data-theme='light'] :global(img.light-only) { visibility: visible; }
+
+  .carousel-dots {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .carousel-dot {
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 50%;
+    border: none;
+    background: var(--sl-color-gray-4);
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.2s ease;
+  }
+
+  .carousel-dot:hover {
+    background: var(--sl-color-gray-2);
+  }
+
+  .carousel-dot.active {
+    background: var(--sl-color-accent);
+  }
+</style>
+
+<script>
+  const dots = document.querySelectorAll('.carousel-dot');
+  const slides = document.querySelectorAll('.carousel-slide');
+
+  dots.forEach(dot => {
+    dot.addEventListener('click', () => {
+      const idx = Number(dot.getAttribute('data-index'));
+      slides.forEach(s => s.classList.toggle('active', Number(s.getAttribute('data-index')) === idx));
+      dots.forEach(d => d.classList.toggle('active', Number(d.getAttribute('data-index')) === idx));
+    });
+  });
+</script>

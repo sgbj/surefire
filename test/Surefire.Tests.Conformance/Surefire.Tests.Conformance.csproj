@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>false</IsTestProject>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Surefire\Surefire.csproj"/>
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="xunit"/>
+        <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing"/>
+    </ItemGroup>
+</Project>

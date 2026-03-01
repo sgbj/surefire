@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <RootNamespace>Surefire.Dashboard</RootNamespace>
+        <Description>Embedded web dashboard for monitoring Surefire jobs</Description>
+        <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+        <DashboardUiDir>$(MSBuildProjectDirectory)/ui</DashboardUiDir>
+        <DashboardUiOutputDir>$(BaseIntermediateOutputPath)dashboard-ui</DashboardUiOutputDir>
+        <DashboardUiStampFile>$(DashboardUiOutputDir)/.buildstamp</DashboardUiStampFile>
+    </PropertyGroup>
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+        <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" />
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\Surefire\Surefire.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/package.json" />
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/package-lock.json" Condition="Exists('$(DashboardUiDir)/package-lock.json')" />
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/vite.config.*" />
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/tsconfig*.json" />
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/index.html" />
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/src/**/*" />
+        <DashboardUiBuildInput Include="$(DashboardUiDir)/public/**/*" Condition="Exists('$(DashboardUiDir)/public')" />
+    </ItemGroup>
+
+    <Target Name="BuildDashboardUi"
+            BeforeTargets="_CalculateEmbeddedFilesManifestInputs;PrepareResourceNames"
+            Inputs="@(DashboardUiBuildInput)"
+            Outputs="$(DashboardUiOutputDir)/index.html;$(DashboardUiStampFile)"
+            Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipDashboardUiBuild)' != 'true'">
+        <Exec WorkingDirectory="$(DashboardUiDir)"
+              Command="npm ci --no-audit --no-fund"
+              Condition="!Exists('$(DashboardUiDir)/node_modules')" />
+        <Exec WorkingDirectory="$(DashboardUiDir)"
+              Command="npm run build:embed" />
+        <Touch Files="$(DashboardUiStampFile)" AlwaysCreate="true" />
+        <Error Condition="!Exists('$(DashboardUiOutputDir)/index.html')"
+               Text="Dashboard UI build output missing: $(DashboardUiOutputDir)/index.html" />
+        <ItemGroup>
+            <DashboardUiAsset Include="$(DashboardUiOutputDir)/**/*" />
+            <DashboardUiAsset Remove="@(DashboardUiAsset)"
+                              Condition="!$([System.IO.File]::Exists('%(DashboardUiAsset.FullPath)'))" />
+            <EmbeddedResource Include="@(DashboardUiAsset)">
+                <LogicalName>wwwroot/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+            </EmbeddedResource>
+        </ItemGroup>
+    </Target>
+</Project>

@@ -1,0 +1,1437 @@
+using System.Collections;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
+using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace Surefire;
+
+internal sealed partial class SurefireExecutorService(
+    IJobStore store,
+    INotificationProvider notifications,
+    JobRegistry registry,
+    ActiveRunTracker activeRunTracker,
+    IServiceScopeFactory scopeFactory,
+    SurefireOptions options,
+    TimeProvider timeProvider,
+    SurefireInstrumentation instrumentation,
+    ILogger<SurefireExecutorService> logger) : BackgroundService
+{
+    private readonly ConcurrentDictionary<string, Task> _activeTasks = new(StringComparer.Ordinal);
+
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _runCancellation =
+        new(StringComparer.Ordinal);
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var subscription = await notifications.SubscribeAsync(
+            NotificationChannels.RunCreated,
+            _ => ReleaseWakeupAsync(wakeup),
+            stoppingToken);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (options.MaxNodeConcurrency is { } max && _activeTasks.Count >= max)
+                {
+                    await WaitForWakeupAsync(wakeup, stoppingToken);
+                    continue;
+                }
+
+                var claimed = await store.ClaimRunAsync(
+                    options.NodeName,
+                    registry.GetJobNames(),
+                    registry.GetQueueNames(),
+                    stoppingToken);
+
+                if (claimed is null)
+                {
+                    await WaitForWakeupAsync(wakeup, stoppingToken);
+                    continue;
+                }
+
+                instrumentation.RecordRunClaimed();
+
+                var executionTask = ExecuteClaimedRunAsync(claimed, stoppingToken);
+                _activeTasks[claimed.Id] = executionTask;
+                activeRunTracker.Add(claimed.Id);
+                _ = executionTask.ContinueWith(_ =>
+                    {
+                        _activeTasks.TryRemove(claimed.Id, out var ignored);
+                        activeRunTracker.Remove(claimed.Id);
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log.ExecutorLoopFailed(logger, ex);
+                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+            }
+        }
+
+        await WaitForActiveRunsAsync();
+    }
+
+    private async Task ExecuteClaimedRunAsync(JobRun run, CancellationToken stoppingToken)
+    {
+        using var runCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        _runCancellation[run.Id] = runCts;
+        var monitorTask = MonitorExternalRunStateAsync(run.Id, runCts, stoppingToken);
+
+        await using var cancellationSubscription = await notifications.SubscribeAsync(
+            NotificationChannels.RunCancel(run.Id),
+            _ =>
+            {
+                runCts.Cancel();
+                return Task.CompletedTask;
+            },
+            stoppingToken);
+        using var activity = await StartRunActivityAsync(run, runCts.Token);
+        var context = new JobContext
+        {
+            RunId = run.Id,
+            RootRunId = run.RootRunId ?? run.Id,
+            JobName = run.JobName,
+            Attempt = run.Attempt,
+            BatchRunId = run.ParentRunId,
+            CancellationToken = runCts.Token,
+            Store = store,
+            Notifications = notifications,
+            TimeProvider = timeProvider,
+            NodeName = run.NodeName ?? options.NodeName
+        };
+        using var jobContextScope = JobContext.EnterScope(context);
+
+        try
+        {
+            if (!registry.TryGet(run.JobName, out var job))
+            {
+                if (await TryTransitionToDeadLetterAsync(run, "No handler registered for this job.", stoppingToken))
+                {
+                    instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
+                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
+                    await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
+                    await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, stoppingToken);
+                }
+
+                return;
+            }
+
+            if (job.Definition.Timeout is { } timeout)
+            {
+                runCts.CancelAfter(timeout);
+            }
+
+            // Resolve handler/filter dependencies in a per-run scope (for scoped services).
+            await using var scope = scopeFactory.CreateAsyncScope();
+
+            var invocation = await ExecuteThroughFiltersAsync(job, run, context, scope.ServiceProvider, runCts.Token);
+            context.Result = invocation.ResultObject;
+
+            var completedAt = timeProvider.GetUtcNow();
+
+            var completed = RunStatusTransition.RunningToCompleted(
+                run.Id,
+                run.Attempt,
+                completedAt,
+                run.NotBefore,
+                run.NodeName,
+                1,
+                invocation.ResultJson,
+                null,
+                run.StartedAt,
+                completedAt);
+
+            if (await store.TryTransitionRunAsync(completed, runCts.Token))
+            {
+                instrumentation.RecordRunCompleted(run.StartedAt, completedAt);
+                await RunPostCompletionHousekeepingAsync(
+                    job,
+                    run,
+                    context,
+                    scope.ServiceProvider,
+                    stoppingToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            var cancelledAt = timeProvider.GetUtcNow();
+            var cancelled = RunStatusTransition.ToCancelled(
+                JobStatus.Running,
+                run.Id,
+                run.Attempt,
+                cancelledAt,
+                cancelledAt,
+                run.NotBefore,
+                run.NodeName,
+                run.Progress,
+                null,
+                run.Result,
+                run.StartedAt,
+                cancelledAt);
+
+            if (await store.TryTransitionRunAsync(cancelled, CancellationToken.None))
+            {
+                instrumentation.RecordRunCancelled(run.StartedAt, cancelledAt);
+                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+                    CancellationToken.None);
+                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            await AppendAttemptFailureEventAsync(run, ex, CancellationToken.None);
+
+            if (registry.TryGet(run.JobName, out var job))
+            {
+                var canRetry = run.Attempt <= job.Definition.RetryPolicy.MaxRetries;
+                var attemptError = BuildDeadLetterError(ex);
+                if (canRetry)
+                {
+                    var notBefore = timeProvider.GetUtcNow() + job.Definition.RetryPolicy.GetDelay(run.Attempt + 1);
+                    var retrying = RunStatusTransition.RunningToRetrying(
+                        run.Id,
+                        run.Attempt,
+                        notBefore,
+                        run.NodeName,
+                        run.Progress,
+                        attemptError,
+                        run.Result,
+                        timeProvider.GetUtcNow());
+
+                    if (await store.TryTransitionRunAsync(retrying, CancellationToken.None))
+                    {
+                        logger.LogWarning(
+                            ex,
+                            "Attempt {Attempt} failed. Retrying at {NotBefore} (max retries: {MaxRetries}).",
+                            run.Attempt,
+                            notBefore,
+                            job.Definition.RetryPolicy.MaxRetries);
+
+                        if (ex is not OperationCanceledException)
+                        {
+                            await using var retryScope = scopeFactory.CreateAsyncScope();
+                            var retryContext = new JobContext
+                            {
+                                RunId = run.Id,
+                                RootRunId = run.RootRunId ?? run.Id,
+                                JobName = run.JobName,
+                                Attempt = run.Attempt,
+                                BatchRunId = run.ParentRunId,
+                                CancellationToken = CancellationToken.None,
+                                Store = store,
+                                Notifications = notifications,
+                                TimeProvider = timeProvider,
+                                NodeName = run.NodeName ?? options.NodeName,
+                                Exception = ex
+                            };
+
+                            await InvokeLifecycleCallbacksAsync(
+                                [.. options.OnRetryCallbacks, .. job.OnRetryCallbacks],
+                                retryContext,
+                                retryScope.ServiceProvider,
+                                CancellationToken.None);
+                        }
+
+                        var pending = RunStatusTransition.RetryingToPending(
+                            run.Id,
+                            run.Attempt,
+                            notBefore,
+                            null,
+                            run.Progress,
+                            attemptError,
+                            run.Result);
+
+                        if (await store.TryTransitionRunAsync(pending, CancellationToken.None))
+                        {
+                            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
+                                CancellationToken.None);
+                            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id,
+                                CancellationToken.None);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (registry.TryGet(run.JobName, out var deadLetterJob)
+                && ex is not OperationCanceledException)
+            {
+                await using var callbackScope = scopeFactory.CreateAsyncScope();
+                var callbackContext = new JobContext
+                {
+                    RunId = run.Id,
+                    RootRunId = run.RootRunId ?? run.Id,
+                    JobName = run.JobName,
+                    Attempt = run.Attempt,
+                    BatchRunId = run.ParentRunId,
+                    CancellationToken = CancellationToken.None,
+                    Store = store,
+                    Notifications = notifications,
+                    TimeProvider = timeProvider,
+                    NodeName = run.NodeName ?? options.NodeName,
+                    Exception = ex
+                };
+
+                await InvokeLifecycleCallbacksAsync(
+                    [.. options.OnDeadLetterCallbacks, .. deadLetterJob.OnDeadLetterCallbacks],
+                    callbackContext,
+                    callbackScope.ServiceProvider,
+                    CancellationToken.None);
+            }
+
+            if (await TryTransitionToDeadLetterAsync(run, BuildDeadLetterError(ex), CancellationToken.None))
+            {
+                logger.LogError(ex, "Run moved to dead letter after attempt {Attempt}.", run.Attempt);
+
+                instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
+                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+                    CancellationToken.None);
+                await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, CancellationToken.None);
+                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, CancellationToken.None);
+            }
+        }
+        finally
+        {
+            _runCancellation.TryRemove(run.Id, out _);
+            runCts.Cancel();
+            await monitorTask;
+            runCts.Dispose();
+        }
+    }
+
+    private async Task<Activity?> StartRunActivityAsync(JobRun run, CancellationToken cancellationToken)
+    {
+        var parent = await ResolveParentActivityContextAsync(run, cancellationToken);
+        var activity = parent is { } parentContext
+            ? instrumentation.ActivitySource.StartActivity("surefire.run.execute", ActivityKind.Consumer, parentContext)
+            : instrumentation.ActivitySource.StartActivity("surefire.run.execute", ActivityKind.Consumer);
+
+        if (activity is null)
+        {
+            return null;
+        }
+
+        activity.SetTag("surefire.run.id", run.Id);
+        activity.SetTag("surefire.run.job", run.JobName);
+        activity.SetTag("surefire.run.attempt", run.Attempt);
+        activity.SetTag("surefire.run.parent", run.ParentRunId);
+
+        var traceId = activity.TraceId.ToString();
+        var spanId = activity.SpanId.ToString();
+        if (!string.Equals(run.TraceId, traceId, StringComparison.Ordinal)
+            || !string.Equals(run.SpanId, spanId, StringComparison.Ordinal))
+        {
+            run.TraceId = traceId;
+            run.SpanId = spanId;
+
+            try
+            {
+                await store.UpdateRunAsync(new()
+                {
+                    Id = run.Id,
+                    JobName = run.JobName,
+                    NodeName = run.NodeName,
+                    Progress = run.Progress,
+                    TraceId = traceId,
+                    SpanId = spanId,
+                    LastHeartbeatAt = timeProvider.GetUtcNow()
+                }, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Log.FailedToPersistTraceContext(logger, ex, run.Id);
+            }
+        }
+
+        return activity;
+    }
+
+    private async Task<ActivityContext?> ResolveParentActivityContextAsync(JobRun run,
+        CancellationToken cancellationToken)
+    {
+        if (TryParseActivityContext(run.TraceId, run.SpanId, out var runContext))
+        {
+            return runContext;
+        }
+
+        if (run.ParentRunId is null)
+        {
+            return null;
+        }
+
+        var parentRun = await store.GetRunAsync(run.ParentRunId, cancellationToken);
+        if (parentRun is null)
+        {
+            return null;
+        }
+
+        return TryParseActivityContext(parentRun.TraceId, parentRun.SpanId, out var parentContext)
+            ? parentContext
+            : null;
+    }
+
+    private static bool TryParseActivityContext(string? traceId, string? spanId, out ActivityContext context)
+    {
+        if (string.IsNullOrWhiteSpace(traceId) || string.IsNullOrWhiteSpace(spanId))
+        {
+            context = default;
+            return false;
+        }
+
+        try
+        {
+            var parsedTraceId = ActivityTraceId.CreateFromString(traceId.AsSpan());
+            var parsedSpanId = ActivitySpanId.CreateFromString(spanId.AsSpan());
+            context = new(parsedTraceId, parsedSpanId, ActivityTraceFlags.Recorded);
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+        }
+
+        context = default;
+        return false;
+    }
+
+    private async Task<bool> TryTransitionToDeadLetterAsync(JobRun run, string error,
+        CancellationToken cancellationToken)
+    {
+        var deadLetter = RunStatusTransition.RunningToDeadLetter(
+            run.Id,
+            run.Attempt,
+            timeProvider.GetUtcNow(),
+            run.NotBefore,
+            run.NodeName,
+            run.Progress,
+            error,
+            run.Result,
+            run.StartedAt,
+            timeProvider.GetUtcNow());
+
+        return await store.TryTransitionRunAsync(deadLetter, cancellationToken);
+    }
+
+    private static string BuildDeadLetterError(Exception exception) => exception.ToString();
+
+    private async Task MaybeCompleteBatchAsync(string? batchRunId, string? childRunId, bool failed,
+        CancellationToken cancellationToken)
+    {
+        if (batchRunId is null)
+        {
+            return;
+        }
+
+        var batchRun = await store.GetRunAsync(batchRunId, cancellationToken);
+        if (batchRun?.BatchTotal is null)
+        {
+            return;
+        }
+
+        var counters = await store.IncrementBatchCounterAsync(batchRunId, failed, cancellationToken);
+        await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId ?? batchRunId,
+            cancellationToken);
+        if (counters.Completed + counters.Failed < counters.Total)
+        {
+            return;
+        }
+
+        var coordinator = await store.GetRunAsync(batchRunId, cancellationToken);
+        if (coordinator is null || coordinator.Status.IsTerminal)
+        {
+            return;
+        }
+
+        var coordinatorStartedAt = coordinator.StartedAt ??
+                                   await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
+
+        var transition = counters.Failed == 0
+            ? RunStatusTransition.RunningToCompleted(
+                coordinator.Id,
+                coordinator.Attempt,
+                timeProvider.GetUtcNow(),
+                coordinator.NotBefore,
+                coordinator.NodeName,
+                1,
+                null,
+                null,
+                coordinatorStartedAt,
+                timeProvider.GetUtcNow())
+            : RunStatusTransition.RunningToDeadLetter(
+                coordinator.Id,
+                coordinator.Attempt,
+                timeProvider.GetUtcNow(),
+                coordinator.NotBefore,
+                coordinator.NodeName,
+                1,
+                $"Batch completed with {counters.Failed} failed run(s).",
+                null,
+                coordinatorStartedAt,
+                timeProvider.GetUtcNow());
+
+        if (await store.TryTransitionRunAsync(transition, cancellationToken))
+        {
+            await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
+                cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
+                cancellationToken);
+        }
+    }
+
+    private async Task<DateTimeOffset?> GetBatchEarliestChildStartedAtAsync(string batchRunId,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset? earliest = null;
+        var skip = 0;
+        const int take = 200;
+
+        while (true)
+        {
+            var page = await store.GetRunsAsync(
+                new()
+                {
+                    ParentRunId = batchRunId,
+                    OrderBy = RunOrderBy.CreatedAt
+                },
+                skip,
+                take,
+                cancellationToken);
+
+            if (page.Items.Count == 0)
+            {
+                break;
+            }
+
+            foreach (var child in page.Items)
+            {
+                if (child.StartedAt is not { } startedAt)
+                {
+                    continue;
+                }
+
+                earliest = earliest is null || startedAt < earliest
+                    ? startedAt
+                    : earliest;
+            }
+
+            skip += page.Items.Count;
+        }
+
+        return earliest;
+    }
+
+    private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, JobRun run,
+        JobContext context, IServiceProvider services, CancellationToken cancellationToken)
+    {
+        var allFilterTypes = new List<Type>(options.FilterTypes.Count + registration.FilterTypes.Count);
+        allFilterTypes.AddRange(options.FilterTypes);
+        allFilterTypes.AddRange(registration.FilterTypes);
+
+        var invocation = InvocationResult.Empty;
+        JobFilterDelegate pipeline = async _ =>
+        {
+            invocation = await InvokeHandlerAsync(registration, run, context, services, cancellationToken);
+        };
+
+        for (var i = allFilterTypes.Count - 1; i >= 0; i--)
+        {
+            var filter = (IJobFilter)ActivatorUtilities.GetServiceOrCreateInstance(services, allFilterTypes[i]);
+            var next = pipeline;
+            pipeline = ctx => filter.InvokeAsync(ctx, next);
+        }
+
+        await pipeline(context);
+        return invocation;
+    }
+
+    private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, JobRun run, JobContext context,
+        IServiceProvider services, CancellationToken cancellationToken)
+    {
+        var parameters = registration.Handler.Method.GetParameters();
+        var args = await BindParametersAsync(parameters, run, context, services, cancellationToken);
+
+        object? invocationResult;
+        try
+        {
+            invocationResult = registration.Handler.DynamicInvoke(args);
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is { })
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw;
+        }
+
+        var (hasResult, value) = await AwaitResultAsync(invocationResult, registration.Handler.Method.ReturnType);
+        if (!hasResult)
+        {
+            return InvocationResult.Empty;
+        }
+
+        if (value is null)
+        {
+            return new(
+                "null",
+                null,
+                null);
+        }
+
+        if (TryGetAsyncEnumerableElementType(value.GetType(), out _))
+        {
+            var items = await MaterializeAsyncEnumerableAsync(value, run, cancellationToken);
+            var resultJson = $"[{string.Join(',', items)}]";
+            return new(
+                resultJson,
+                value,
+                items);
+        }
+
+        return new(
+            JsonSerializer.Serialize(value, options.SerializerOptions),
+            value,
+            null);
+    }
+
+    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, JobRun run,
+        JobContext context, IServiceProvider services, CancellationToken cancellationToken)
+    {
+        using var doc = run.Arguments is null ? null : JsonDocument.Parse(run.Arguments);
+        var root = doc?.RootElement;
+        var declaredInputArguments = await GetDeclaredInputArgumentsAsync(run.Id, cancellationToken);
+        var values = new object?[parameters.Length];
+
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var parameter = parameters[i];
+            if (parameter.ParameterType == typeof(JobContext))
+            {
+                values[i] = context;
+                continue;
+            }
+
+            if (parameter.ParameterType == typeof(CancellationToken))
+            {
+                values[i] = context.CancellationToken;
+                continue;
+            }
+
+            var service = services.GetService(parameter.ParameterType);
+            if (service is { })
+            {
+                values[i] = service;
+                continue;
+            }
+
+            if (root is { ValueKind: JsonValueKind.Object }
+                && TryGetJsonProperty(root.Value, parameter.Name!, out var property))
+            {
+                values[i] = BindJsonValue(property, parameter.ParameterType, options.SerializerOptions);
+                continue;
+            }
+
+            if (CanBindFromInputStream(parameter.ParameterType))
+            {
+                if (TryGetDeclaredInputArgumentName(
+                        parameters,
+                        parameter,
+                        root,
+                        declaredInputArguments,
+                        out var argumentName))
+                {
+                    values[i] = await BindStreamInputParameterAsync(
+                        run.Id,
+                        argumentName,
+                        parameter.ParameterType,
+                        cancellationToken);
+                    continue;
+                }
+            }
+
+            if (root.HasValue && root.Value.ValueKind != JsonValueKind.Object)
+            {
+                values[i] = BindJsonValue(root.Value, parameter.ParameterType, options.SerializerOptions);
+                continue;
+            }
+
+            if (parameter.HasDefaultValue)
+            {
+                values[i] = parameter.DefaultValue;
+                continue;
+            }
+
+            throw new InvalidOperationException(
+                $"Unable to bind parameter '{parameter.Name}' for job '{context.JobName}'.");
+        }
+
+        return values;
+    }
+
+    private async Task<HashSet<string>> GetDeclaredInputArgumentsAsync(string runId,
+        CancellationToken cancellationToken)
+    {
+        var events = await store.GetEventsAsync(
+            runId,
+            0,
+            [RunEventType.InputDeclared],
+            0,
+            cancellationToken);
+
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var @event in events)
+        {
+            var declaration = JsonSerializer.Deserialize<InputDeclarationEnvelope>(
+                @event.Payload,
+                options.SerializerOptions);
+            if (declaration?.Arguments is null)
+            {
+                continue;
+            }
+
+            foreach (var argument in declaration.Arguments)
+            {
+                if (!string.IsNullOrWhiteSpace(argument))
+                {
+                    names.Add(argument);
+                }
+            }
+        }
+
+        return names;
+    }
+
+    private static bool TryGetDeclaredInputArgumentName(
+        ParameterInfo[] parameters,
+        ParameterInfo parameter,
+        JsonElement? root,
+        HashSet<string> declaredInputArguments,
+        out string argumentName)
+    {
+        argumentName = string.Empty;
+        if (parameter.Name is null)
+        {
+            return false;
+        }
+
+        if (declaredInputArguments.Contains(parameter.Name))
+        {
+            argumentName = parameter.Name;
+            return true;
+        }
+
+        if (!root.HasValue
+            && parameters.Length == 1
+            && declaredInputArguments.Contains("$root"))
+        {
+            argumentName = "$root";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool CanBindFromInputStream(Type targetType)
+    {
+        if (targetType.IsGenericType
+            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            return true;
+        }
+
+        return TryGetCollectionElementType(targetType, out _, out _);
+    }
+
+    private async Task<object?> BindStreamInputParameterAsync(string runId, string argumentName,
+        Type targetType, CancellationToken cancellationToken)
+    {
+        if (targetType.IsGenericType
+            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            var itemType = targetType.GetGenericArguments()[0];
+            var method = typeof(SurefireExecutorService)
+                .GetMethod(nameof(CreateInputStreamAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(itemType);
+            return method.Invoke(this, [runId, argumentName, cancellationToken]);
+        }
+
+        if (TryGetCollectionElementType(targetType, out var elementType, out var asArray))
+        {
+            var method = typeof(SurefireExecutorService)
+                .GetMethod(nameof(MaterializeInputStreamAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(elementType);
+            var list = (IList)await (Task<object>)method.Invoke(this,
+                [runId, argumentName, cancellationToken])!;
+
+            if (asArray)
+            {
+                var toArrayMethod = typeof(SurefireExecutorService)
+                    .GetMethod(nameof(ToArray), BindingFlags.Static | BindingFlags.NonPublic)!
+                    .MakeGenericMethod(elementType);
+                return toArrayMethod.Invoke(null, [list]);
+            }
+
+            return list;
+        }
+
+        throw new InvalidOperationException(
+            $"Parameter type '{targetType.Name}' cannot bind streamed input argument '{argumentName}'.");
+    }
+
+    private static bool TryGetCollectionElementType(Type targetType, out Type elementType, out bool asArray)
+    {
+        if (targetType.IsArray)
+        {
+            elementType = targetType.GetElementType()!;
+            asArray = true;
+            return true;
+        }
+
+        if (targetType.IsGenericType)
+        {
+            var definition = targetType.GetGenericTypeDefinition();
+            if (definition == typeof(List<>)
+                || definition == typeof(IReadOnlyList<>)
+                || definition == typeof(IList<>)
+                || definition == typeof(IEnumerable<>))
+            {
+                elementType = targetType.GetGenericArguments()[0];
+                asArray = false;
+                return true;
+            }
+        }
+
+        elementType = null!;
+        asArray = false;
+        return false;
+    }
+
+    private static T[] ToArray<T>(IList values)
+    {
+        var result = new T[values.Count];
+        for (var i = 0; i < values.Count; i++)
+        {
+            result[i] = (T)values[i]!;
+        }
+
+        return result;
+    }
+
+    private object CreateInputStreamAsync<T>(string runId, string argumentName,
+        CancellationToken cancellationToken) =>
+        ReadInputStreamAsync<T>(runId, argumentName, cancellationToken);
+
+    private async Task<object> MaterializeInputStreamAsync<T>(string runId, string argumentName,
+        CancellationToken cancellationToken)
+    {
+        var items = new List<T>();
+        await foreach (var item in ReadInputStreamAsync<T>(runId, argumentName, cancellationToken))
+        {
+            items.Add(item);
+        }
+
+        return items;
+    }
+
+    private async IAsyncEnumerable<T> ReadInputStreamAsync<T>(string runId, string argumentName,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var subscription = await notifications.SubscribeAsync(
+            NotificationChannels.RunInput(runId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+
+        long sinceId = 0;
+        var completed = false;
+
+        while (!completed)
+        {
+            var events = await store.GetEventsAsync(runId, sinceId,
+                [RunEventType.Input, RunEventType.InputComplete],
+                0,
+                cancellationToken);
+
+            foreach (var @event in events)
+            {
+                sinceId = @event.Id;
+                var envelope = JsonSerializer.Deserialize<InputEnvelope>(@event.Payload, options.SerializerOptions);
+                if (envelope is null
+                    || !string.Equals(envelope.Argument, argumentName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (@event.EventType == RunEventType.Input)
+                {
+                    if (envelope.Payload is { })
+                    {
+                        yield return JsonSerializer.Deserialize<T>(envelope.Payload, options.SerializerOptions)!;
+                    }
+
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(envelope.Error))
+                {
+                    throw new InvalidOperationException(
+                        $"Input stream '{argumentName}' for run '{runId}' ended with error: {envelope.Error}");
+                }
+
+                completed = true;
+                break;
+            }
+
+            if (!completed)
+            {
+                await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+            }
+        }
+    }
+
+    private static object? BindJsonValue(JsonElement value, Type targetType, JsonSerializerOptions serializerOptions)
+    {
+        if (targetType.IsGenericType
+            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            var elementType = targetType.GetGenericArguments()[0];
+            var listType = typeof(List<>).MakeGenericType(elementType);
+            var list = JsonSerializer.Deserialize(value.GetRawText(), listType, serializerOptions);
+            var method = typeof(SurefireExecutorService)
+                .GetMethod(nameof(ToAsyncEnumerable), BindingFlags.Static | BindingFlags.NonPublic)!
+                .MakeGenericMethod(elementType);
+            return method.Invoke(null, [list]);
+        }
+
+        return JsonSerializer.Deserialize(value.GetRawText(), targetType, serializerOptions);
+    }
+
+    private static IAsyncEnumerable<T> ToAsyncEnumerable<T>(IEnumerable<T>? values)
+    {
+        return values is null ? EmptyAsync() : YieldAsync(values);
+
+        static async IAsyncEnumerable<T> YieldAsync(IEnumerable<T> source)
+        {
+            foreach (var item in source)
+            {
+                yield return item;
+                await Task.Yield();
+            }
+        }
+
+        static async IAsyncEnumerable<T> EmptyAsync()
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+
+    private static bool TryGetJsonProperty(JsonElement root, string propertyName, out JsonElement value)
+    {
+        foreach (var property in root.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            value = property.Value;
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static async Task<(bool HasResult, object? Value)> AwaitResultAsync(
+        object? invocationResult,
+        Type declaredReturnType)
+    {
+        if (declaredReturnType == typeof(void)
+            || declaredReturnType == typeof(Task)
+            || declaredReturnType == typeof(ValueTask))
+        {
+            if (invocationResult is Task noResultTask)
+            {
+                await noResultTask;
+            }
+            else if (invocationResult is ValueTask noResultValueTask)
+            {
+                await noResultValueTask;
+            }
+
+            return (false, null);
+        }
+
+        switch (invocationResult)
+        {
+            case null:
+                return (true, null);
+            case Task task:
+                await task;
+                return (true, GetTaskResult(task));
+            case ValueTask valueTask:
+                await valueTask;
+                return (false, null);
+            default:
+            {
+                var type = invocationResult.GetType();
+                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
+                {
+                    var asTaskMethod = type.GetMethod("AsTask")!;
+                    var task = (Task)asTaskMethod.Invoke(invocationResult, null)!;
+                    await task;
+                    return (true, GetTaskResult(task));
+                }
+
+                return (true, invocationResult);
+            }
+        }
+    }
+
+    private static object? GetTaskResult(Task task)
+    {
+        var taskType = task.GetType();
+        if (!taskType.IsGenericType)
+        {
+            return null;
+        }
+
+        return taskType.GetProperty("Result")?.GetValue(task);
+    }
+
+    private static bool TryGetAsyncEnumerableElementType(Type type, out Type elementType)
+    {
+        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            elementType = type.GetGenericArguments()[0];
+            return true;
+        }
+
+        var asyncEnumerable = type.GetInterfaces().FirstOrDefault(i =>
+            i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>));
+        if (asyncEnumerable is { })
+        {
+            elementType = asyncEnumerable.GetGenericArguments()[0];
+            return true;
+        }
+
+        elementType = null!;
+        return false;
+    }
+
+    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, JobRun run,
+        CancellationToken cancellationToken)
+    {
+        var items = new List<string>();
+        var streamType = stream.GetType();
+        var elementType = streamType.GetInterfaces()
+            .First(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+            .GetGenericArguments()[0];
+        var method = typeof(SurefireExecutorService)
+            .GetMethod(nameof(MaterializeCoreAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
+            .MakeGenericMethod(elementType);
+        var task = (Task<List<string>>)method.Invoke(this, [stream, run, cancellationToken])!;
+        var serialized = await task;
+        items.AddRange(serialized);
+        return items;
+    }
+
+    private async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
+        JobRun run,
+        CancellationToken cancellationToken)
+    {
+        var items = new List<string>();
+        await foreach (var item in stream.WithCancellation(cancellationToken))
+        {
+            var payload = JsonSerializer.Serialize(item, options.SerializerOptions);
+            items.Add(payload);
+            await AppendOutputEventAsync(run, payload, cancellationToken);
+        }
+
+        await AppendOutputCompleteEventAsync(run, cancellationToken);
+
+        return items;
+    }
+
+    private async Task AppendOutputEventAsync(JobRun run, string payload,
+        CancellationToken cancellationToken)
+    {
+        await store.AppendEventsAsync(
+        [
+            new()
+            {
+                RunId = run.Id,
+                EventType = RunEventType.Output,
+                Payload = payload,
+                CreatedAt = timeProvider.GetUtcNow(),
+                Attempt = run.Attempt
+            }
+        ], cancellationToken);
+
+        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
+        if (run.ParentRunId is { } batchRunId)
+        {
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+        }
+    }
+
+    private async Task AppendOutputCompleteEventAsync(JobRun run, CancellationToken cancellationToken)
+    {
+        await store.AppendEventsAsync(
+        [
+            new()
+            {
+                RunId = run.Id,
+                EventType = RunEventType.OutputComplete,
+                Payload = "{}",
+                CreatedAt = timeProvider.GetUtcNow(),
+                Attempt = run.Attempt
+            }
+        ], cancellationToken);
+
+        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
+        if (run.ParentRunId is { } batchRunId)
+        {
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+        }
+    }
+
+    private async Task MonitorExternalRunStateAsync(string runId, CancellationTokenSource runCts,
+        CancellationToken stoppingToken)
+    {
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var eventSub = await notifications.SubscribeAsync(
+            NotificationChannels.RunEvent(runId),
+            _ => ReleaseWakeupAsync(wakeup),
+            stoppingToken);
+        await using var completionSub = await notifications.SubscribeAsync(
+            NotificationChannels.RunCompleted(runId),
+            _ => ReleaseWakeupAsync(wakeup),
+            stoppingToken);
+
+        while (!runCts.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await wakeup.WaitAsync(options.PollingInterval, runCts.Token);
+                if (runCts.IsCancellationRequested)
+                    return;
+                var current = await store.GetRunAsync(runId, stoppingToken);
+                if (current is null || current.Status.IsTerminal)
+                {
+                    runCts.Cancel();
+                    return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.FailedToMonitorRunState(logger, ex, runId);
+            }
+        }
+    }
+
+    private async Task TryCreateContinuousRunAsync(RegisteredJob job, JobRun completedRun,
+        CancellationToken cancellationToken)
+    {
+        if (!job.Definition.IsContinuous || completedRun.ParentRunId is { })
+        {
+            return;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var nextRun = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = completedRun.JobName,
+            Status = JobStatus.Pending,
+            Arguments = completedRun.Arguments,
+            CreatedAt = now,
+            NotBefore = now,
+            Priority = job.Definition.Priority,
+            QueuePriority = 0,
+            Progress = 0,
+            DeduplicationId = BuildContinuousDeduplicationId(completedRun.Id),
+            Attempt = 0
+        };
+
+        var created = await store.TryCreateRunAsync(
+            nextRun,
+            job.Definition.MaxConcurrency ?? 1,
+            cancellationToken: cancellationToken);
+        if (!created)
+        {
+            return;
+        }
+
+        await notifications.PublishAsync(NotificationChannels.RunCreated, nextRun.Id, cancellationToken);
+    }
+
+    private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, JobRun run, JobContext context,
+        IServiceProvider services, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await InvokeLifecycleCallbacksAsync(
+                [.. options.OnSuccessCallbacks, .. job.OnSuccessCallbacks],
+                context,
+                services,
+                stoppingToken);
+
+            await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
+            await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, false, stoppingToken);
+            await TryCreateContinuousRunAsync(job, run, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.PostCompletionHousekeepingFailed(logger, ex, run.Id, run.JobName);
+        }
+    }
+
+    private static string BuildContinuousDeduplicationId(string completedRunId)
+        => $"continuous:{completedRunId}";
+
+    private async Task InvokeLifecycleCallbacksAsync(IReadOnlyList<Delegate> callbacks, JobContext context,
+        IServiceProvider services, CancellationToken cancellationToken)
+    {
+        foreach (var callback in callbacks)
+        {
+            try
+            {
+                await InvokeCallbackAsync(callback, context, services, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Log.LifecycleCallbackFailed(logger, ex, context.JobName);
+            }
+        }
+    }
+
+    private async Task AppendAttemptFailureEventAsync(JobRun run, Exception exception,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = JsonSerializer.Serialize(new AttemptFailureEnvelope
+            {
+                Attempt = run.Attempt,
+                OccurredAt = timeProvider.GetUtcNow(),
+                ExceptionType = exception.GetType().FullName ?? exception.GetType().Name,
+                Message = exception.Message,
+                StackTrace = exception.ToString()
+            }, options.SerializerOptions);
+
+            await store.AppendEventsAsync(
+            [
+                new()
+                {
+                    RunId = run.Id,
+                    EventType = RunEventType.AttemptFailure,
+                    Payload = payload,
+                    CreatedAt = timeProvider.GetUtcNow(),
+                    Attempt = run.Attempt
+                }
+            ], cancellationToken);
+
+            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
+            if (run.ParentRunId is { } batchRunId)
+            {
+                await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.FailedToAppendAttemptFailure(logger, ex, run.Id);
+        }
+    }
+
+    private static async Task InvokeCallbackAsync(Delegate callback, JobContext context,
+        IServiceProvider services, CancellationToken cancellationToken)
+    {
+        var parameters = callback.Method.GetParameters();
+        var args = new object?[parameters.Length];
+
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var parameter = parameters[i];
+            if (parameter.ParameterType == typeof(JobContext))
+            {
+                args[i] = context;
+                continue;
+            }
+
+            if (parameter.ParameterType == typeof(CancellationToken))
+            {
+                args[i] = cancellationToken;
+                continue;
+            }
+
+            if (context.Exception is { } && parameter.ParameterType.IsInstanceOfType(context.Exception))
+            {
+                args[i] = context.Exception;
+                continue;
+            }
+
+            if (context.Result is { } && parameter.ParameterType.IsInstanceOfType(context.Result))
+            {
+                args[i] = context.Result;
+                continue;
+            }
+
+            var service = services.GetService(parameter.ParameterType);
+            if (service is { })
+            {
+                args[i] = service;
+                continue;
+            }
+
+            if (parameter.HasDefaultValue)
+            {
+                args[i] = parameter.DefaultValue;
+                continue;
+            }
+
+            throw new InvalidOperationException(
+                $"Unable to bind callback parameter '{parameter.Name}' for job '{context.JobName}'.");
+        }
+
+        var returned = callback.DynamicInvoke(args);
+        if (returned is Task task)
+        {
+            await task;
+            return;
+        }
+
+        if (returned is ValueTask valueTask)
+        {
+            await valueTask;
+            return;
+        }
+
+        if (returned is { })
+        {
+            var type = returned.GetType();
+            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
+            {
+                var asTaskMethod = type.GetMethod("AsTask")!;
+                var convertedTask = (Task)asTaskMethod.Invoke(returned, null)!;
+                await convertedTask;
+            }
+        }
+    }
+
+    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
+    {
+        try
+        {
+            wakeup.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
+    {
+        await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+    }
+
+    private async Task WaitForActiveRunsAsync()
+    {
+        if (_activeTasks.Count == 0)
+        {
+            return;
+        }
+
+        using var timeoutCts = new CancellationTokenSource(options.ShutdownTimeout);
+        try
+        {
+            await Task.WhenAll(_activeTasks.Values).WaitAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            foreach (var cts in _runCancellation.Values)
+            {
+                cts.Cancel();
+            }
+        }
+    }
+
+    private sealed class InputDeclarationEnvelope
+    {
+        public required string[] Arguments { get; init; }
+    }
+
+    private sealed class InputEnvelope
+    {
+        public required string Argument { get; init; }
+        public required long Sequence { get; init; }
+        public string? Payload { get; init; }
+        public required bool IsComplete { get; init; }
+        public string? Error { get; init; }
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(EventId = 1101, Level = LogLevel.Error, Message = "Executor loop failed.")]
+        public static partial void ExecutorLoopFailed(ILogger logger, Exception exception);
+
+        [LoggerMessage(EventId = 1102, Level = LogLevel.Warning,
+            Message = "Failed to persist trace context for run '{RunId}'.")]
+        public static partial void FailedToPersistTraceContext(ILogger logger, Exception exception, string runId);
+
+        [LoggerMessage(EventId = 1103, Level = LogLevel.Warning,
+            Message = "Failed to monitor run state for run '{RunId}'.")]
+        public static partial void FailedToMonitorRunState(ILogger logger, Exception exception, string runId);
+
+        [LoggerMessage(EventId = 1104, Level = LogLevel.Warning,
+            Message = "Lifecycle callback failed for job '{JobName}'.")]
+        public static partial void LifecycleCallbackFailed(ILogger logger, Exception exception, string jobName);
+
+        [LoggerMessage(EventId = 1105, Level = LogLevel.Warning,
+            Message = "Failed to append attempt failure event for run '{RunId}'.")]
+        public static partial void FailedToAppendAttemptFailure(ILogger logger, Exception exception, string runId);
+
+        [LoggerMessage(EventId = 1106, Level = LogLevel.Warning,
+            Message = "Post-completion housekeeping failed for run '{RunId}' (job '{JobName}').")]
+        public static partial void PostCompletionHousekeepingFailed(ILogger logger, Exception exception, string runId,
+            string jobName);
+    }
+
+    private sealed record InvocationResult(
+        string? ResultJson,
+        object? ResultObject,
+        IReadOnlyList<string>? OutputItems)
+    {
+        public static InvocationResult Empty { get; } = new(null, null, null);
+    }
+
+    private sealed class AttemptFailureEnvelope
+    {
+        public required int Attempt { get; init; }
+        public required DateTimeOffset OccurredAt { get; init; }
+        public required string ExceptionType { get; init; }
+        public required string Message { get; init; }
+        public required string StackTrace { get; init; }
+    }
+}

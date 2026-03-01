@@ -1,0 +1,75 @@
+---
+title: Docs
+description: Distributed job scheduling for .NET with a minimal API style
+template: splash
+hero:
+  title: Surefire
+  tagline: Distributed job scheduling for .NET with a minimal API style.
+  actions:
+    - text: Get started
+      link: /surefire/getting-started/installation/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/sgbj/surefire
+      icon: github
+      variant: minimal
+---
+
+import { Card, CardGrid, Code } from '@astrojs/starlight/components';
+import ScreenshotCarousel from '../../components/ScreenshotCarousel.astro';
+
+<svg class="hero-chart" viewBox="0 0 1200 200" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="hero-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" class="hero-grad-start" />
+      <stop offset="100%" class="hero-grad-end" />
+    </linearGradient>
+  </defs>
+  <path class="hero-area" d="M0,168 C70,178 130,186 220,150 C300,118 360,172 500,128 C620,92 690,138 820,82 C910,44 980,104 1105,42 C1145,24 1175,32 1200,18 L1200,200 L0,200 Z" fill="url(#hero-fill)" />
+  <path class="hero-line" d="M0,168 C70,178 130,186 220,150 C300,118 360,172 500,128 C620,92 690,138 820,82 C910,44 980,104 1105,42 C1145,24 1175,32 1200,18" fill="none" stroke-width="2.5" />
+</svg>
+
+<ScreenshotCarousel />
+
+## Features
+
+<CardGrid>
+  <Card title="Minimal API style" icon="rocket">
+    Register jobs with delegates using the same fluent style as endpoint mapping, with arguments resolved from DI and run payloads.
+  </Card>
+  <Card title="Distributed" icon="random">
+    Run multiple nodes with coordinated scheduling and recovery.
+  </Card>
+  <Card title="Real-time dashboard" icon="laptop">
+    Built-in UI with live log streaming, progress tracking, job management, and node monitoring.
+  </Card>
+  <Card title="Feature rich" icon="puzzle">
+    Retries, cron scheduling, queues, rate limiting, concurrency limits, lifecycle hooks, streaming with `IAsyncEnumerable<T>`, and OpenTelemetry.
+  </Card>
+</CardGrid>
+
+## Example
+
+export const sample = `var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddSurefire();
+
+var app = builder.Build();
+
+app.AddJob("Add", (int a, int b) => a + b);
+
+app.AddJob("DataImport", async (ILogger<Program> logger, CancellationToken ct) =>
+{
+    for (var i = 1; i <= 10; i++)
+    {
+        logger.LogInformation("Step {Step}/10", i);
+        await Task.Delay(1000, ct);
+    }
+}).WithDescription("Imports data and reports progress")
+  .WithCron("* * * * *");
+
+app.MapSurefireDashboard();
+
+app.Run();`;
+
+<Code code={sample} lang="csharp" />

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <ItemGroup>
+        <InternalsVisibleTo Include="Surefire.Tests.Sqlite"/>
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\Surefire\Surefire.csproj"/>
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="Microsoft.Data.Sqlite"/>
+    </ItemGroup>
+</Project>

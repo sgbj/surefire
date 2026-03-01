@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test-dotnet:
+    name: Build and Test .NET
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/Surefire.Dashboard/ui/package-lock.json
+
+      - name: Restore solution
+        run: dotnet restore surefire.slnx
+
+      - name: Build solution
+        run: dotnet build surefire.slnx --configuration Release --no-restore
+
+      - name: Run all tests (including store suites)
+        run: dotnet test surefire.slnx --configuration Release --no-build --verbosity normal
