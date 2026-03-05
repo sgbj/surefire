@@ -9,7 +9,7 @@ export default defineConfig({
 		starlight({
 			title: 'Surefire',
 			description: 'Distributed job scheduling for .NET',
-			social: [{ icon: 'github', label: 'GitHub', link: 'https://github.com/sgbj/surefire' }],
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/sgbj/surefire' }],
 			customCss: ['./src/styles/custom.css'],
 			expressiveCode: {
 				styleOverrides: { borderRadius: '0.5rem' },
