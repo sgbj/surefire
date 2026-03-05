@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RootNamespace>Surefire</RootNamespace>
+    <Description>A resilient, distributed job scheduling library for .NET</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Surefire.PostgreSql" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Cronos" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />

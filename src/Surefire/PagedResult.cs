@@ -1,7 +1,7 @@
 namespace Surefire;
 
-public sealed class PagedResult<T>
+public sealed record PagedResult<T>
 {
-    public required IReadOnlyList<T> Items { get; set; }
-    public int TotalCount { get; set; }
+    public required IReadOnlyList<T> Items { get; init; }
+    public int TotalCount { get; init; }
 }

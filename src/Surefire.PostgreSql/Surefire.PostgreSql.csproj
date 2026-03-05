@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RootNamespace>Surefire.PostgreSql</RootNamespace>
+    <Description>PostgreSQL storage provider for Surefire job scheduling</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Surefire\Surefire.csproj" />
   </ItemGroup>

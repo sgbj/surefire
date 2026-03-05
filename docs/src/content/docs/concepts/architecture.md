@@ -10,7 +10,7 @@ Surefire has a few moving parts:
 - **Jobs** are registered at startup — a name and a delegate.
 - **Runs** are individual executions of a job. They go through a lifecycle: pending, running, completed/failed/cancelled.
 - **Nodes** are your app instances. Each one runs a scheduler that picks up pending runs.
-- **Stores** hold everything — job definitions, runs, logs. Ships with an in-memory store.
+- **Stores** hold everything — job definitions, runs, logs. Ships with an in-memory store and a PostgreSQL store.
 
 ## How a job runs
 
@@ -32,7 +32,7 @@ When a job fails and has `MaxAttempts > 1`:
 
 1. The current run is marked as `Failed`.
 2. A new run is created with the next attempt number and a delay based on the backoff policy (fixed or exponential).
-3. The retry links back to the original run via `OriginalRunId`.
+3. The retry links back to the original run via `RetryOfRunId`.
 4. If all attempts are used up, the final run is marked `Dead Letter` instead of `Failed`.
 
 ## Node health
@@ -40,14 +40,14 @@ When a job fails and has `MaxAttempts > 1`:
 Nodes send heartbeats on an interval. If a node goes silent for longer than `StaleNodeThreshold` (default 2 minutes), another node will clean up after it:
 
 - Runs that were still executing on the dead node get failed and retried (if retries are configured).
-- Jobs that no remaining node can handle are removed.
+- Job definitions that no remaining node can handle are removed from the store. They're automatically re-created when a capable node starts up.
 - The stale node is removed from the registry.
 
 ## Notifications
 
 Surefire uses a pub/sub system (`INotificationProvider`) for real-time updates. The dashboard's live log streaming and progress updates are built on this — the SSE endpoint subscribes to a run's channels and forwards messages to the browser.
 
-The in-memory provider works within a single process. For multi-process deployments, you'd swap in a Redis or database-backed provider.
+The in-memory provider works within a single process. The `Surefire.PostgreSql` package includes a PostgreSQL-backed provider using LISTEN/NOTIFY for multi-process deployments.
 
 ## Logging
 

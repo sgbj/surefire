@@ -2,5 +2,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Surefire\Surefire.csproj" />
     <ProjectReference Include="..\..\src\Surefire.Dashboard\Surefire.Dashboard.csproj" />
+    <ProjectReference Include="..\..\src\Surefire.PostgreSql\Surefire.PostgreSql.csproj" />
   </ItemGroup>
 </Project>

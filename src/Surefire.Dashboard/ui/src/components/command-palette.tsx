@@ -90,7 +90,6 @@ export function CommandPalette() {
                 <CommandItem key={node.name} onSelect={() => go(`/nodes/${encodeURIComponent(node.name)}`)}>
                   <Server className="h-4 w-4" />
                   <span>{node.name}</span>
-                  <span className="ml-auto text-xs text-muted-foreground">{node.status === 0 ? 'Online' : 'Offline'}</span>
                 </CommandItem>
               ))}
             </CommandGroup>

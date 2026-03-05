@@ -50,7 +50,7 @@ Click into a run to see:
 
 ## Nodes
 
-Lists all scheduler nodes with their status, last heartbeat, running job count, and registered jobs.
+Lists all scheduler nodes with their last heartbeat, running job count, and registered jobs.
 
 Click into a node to see what jobs it handles and its recent run history.
 
@@ -59,9 +59,8 @@ Click into a node to see what jobs it handles and its recent run history.
 The dashboard also exposes a REST API at `{prefix}/api/`. A few examples:
 
 ```
-GET  /api/stats?since=2025-01-01T00:00:00Z&bucketMinutes=60
 GET  /api/jobs
-GET  /api/runs?jobName=Cleanup&status=3&take=20
+GET  /api/runs?jobName=Cleanup&take=20
 POST /api/jobs/Cleanup/trigger
 POST /api/runs/{id}/cancel
 GET  /api/runs/{id}/stream          (SSE)

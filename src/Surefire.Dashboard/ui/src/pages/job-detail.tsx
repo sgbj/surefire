@@ -9,20 +9,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
 import { DataTable } from '@/components/data-table';
-import { SortableHeader } from '@/components/sortable-header';
 import { StatusBadge } from '@/components/status-badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Spinner } from '@/components/ui/spinner';
 import { formatDate, formatDuration, formatTimeSpan } from '@/lib/format';
-
-function DtDd({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <dt className="text-sm text-muted-foreground">{label}</dt>
-      <dd className="text-sm">{children}</dd>
-    </div>
-  );
-}
+import { DtDd } from '@/components/dt-dd';
 
 const runColumns: ColumnDef<JobRun>[] = [
   {
@@ -36,12 +27,12 @@ const runColumns: ColumnDef<JobRun>[] = [
   },
   {
     accessorKey: "status",
-    header: ({ column }) => <SortableHeader column={column}>Status</SortableHeader>,
+    header: "Status",
     cell: ({ row }) => <StatusBadge status={row.original.status} />,
   },
   {
     accessorKey: "createdAt",
-    header: ({ column }) => <SortableHeader column={column}>Created</SortableHeader>,
+    header: "Created",
     cell: ({ row }) => <span className="text-sm">{formatDate(row.original.createdAt)}</span>,
   },
   {
@@ -51,7 +42,7 @@ const runColumns: ColumnDef<JobRun>[] = [
   },
   {
     accessorKey: "attempt",
-    header: ({ column }) => <SortableHeader column={column}>Attempt</SortableHeader>,
+    header: "Attempt",
   },
 ];
 
@@ -97,10 +88,10 @@ export function JobDetailPage() {
 
   const toggleEnabled = useMutation({
     mutationFn: (isEnabled: boolean) => api.updateJob(name!, { isEnabled }),
-    onSuccess: () => {
+    onSuccess: (_data, isEnabled) => {
       queryClient.invalidateQueries({ queryKey: ['job', name] });
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      toast.success(job?.isEnabled ? 'Job disabled' : 'Job enabled');
+      toast.success(isEnabled ? 'Job enabled' : 'Job disabled');
     },
     onError: () => toast.error('Failed to update job'),
   });

@@ -10,7 +10,7 @@ import {
   type VisibilityState,
 } from "@tanstack/react-table"
 import { type Dispatch, type SetStateAction, useState } from "react"
-import { ChevronFirst, ChevronLast, ChevronLeft, ChevronRight, Settings2 } from "lucide-react"
+import { Settings2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -19,6 +19,15 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination"
 import {
   Select,
   SelectContent,
@@ -34,6 +43,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+
+function getPageNumbers(current: number, total: number): (number | "ellipsis")[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
+  const pages: (number | "ellipsis")[] = [1]
+  if (current > 3) pages.push("ellipsis")
+  for (let i = Math.max(2, current - 1); i <= Math.min(total - 1, current + 1); i++) pages.push(i)
+  if (current < total - 2) pages.push("ellipsis")
+  if (total > 1) pages.push(total)
+  return pages
+}
 
 interface DataTableBaseProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
@@ -89,16 +108,16 @@ export function DataTable<TData, TValue>({
       columnVisibility,
       pagination,
     },
-    onSortingChange: (updater) => {
-      setSorting(updater)
-      if (!isServer) {
+    ...(!isServer && {
+      onSortingChange: (updater: SortingState | ((prev: SortingState) => SortingState)) => {
+        setSorting(updater)
         onPaginationChange((prev: PaginationState) => ({ ...prev, pageIndex: 0 }))
-      }
-    },
+      },
+    }),
     onColumnVisibilityChange: setColumnVisibility,
     onPaginationChange,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
+    ...(!isServer && { getSortedRowModel: getSortedRowModel() }),
     ...(!isServer && { getPaginationRowModel: getPaginationRowModel() }),
     ...(isServer && {
       manualPagination: true,
@@ -184,6 +203,41 @@ export function DataTable<TData, TValue>({
           {totalCount} {totalCount === 1 ? "result" : "results"}
         </div>
         <div className="flex items-center gap-4">
+          {currentPageCount > 1 && (
+            <Pagination className="mx-0 w-auto">
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious
+                    onClick={() => table.previousPage()}
+                    className={!table.getCanPreviousPage() ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                  />
+                </PaginationItem>
+                {getPageNumbers(pagination.pageIndex + 1, currentPageCount).map((page, i) =>
+                  page === "ellipsis" ? (
+                    <PaginationItem key={`e${i}`}>
+                      <PaginationEllipsis />
+                    </PaginationItem>
+                  ) : (
+                    <PaginationItem key={page}>
+                      <PaginationLink
+                        isActive={page === pagination.pageIndex + 1}
+                        onClick={() => table.setPageIndex(page - 1)}
+                        className="cursor-pointer"
+                      >
+                        {page}
+                      </PaginationLink>
+                    </PaginationItem>
+                  )
+                )}
+                <PaginationItem>
+                  <PaginationNext
+                    onClick={() => table.nextPage()}
+                    className={!table.getCanNextPage() ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                  />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          )}
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground whitespace-nowrap">Rows</span>
             <Select
@@ -207,43 +261,6 @@ export function DataTable<TData, TValue>({
                 ))}
               </SelectContent>
             </Select>
-          </div>
-          <span className="text-sm text-muted-foreground tabular-nums whitespace-nowrap">
-            Page {pagination.pageIndex + 1} of {currentPageCount || 1}
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => table.firstPage()}
-              disabled={!table.getCanPreviousPage()}
-            >
-              <ChevronFirst />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => table.previousPage()}
-              disabled={!table.getCanPreviousPage()}
-            >
-              <ChevronLeft />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => table.nextPage()}
-              disabled={!table.getCanNextPage()}
-            >
-              <ChevronRight />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => table.lastPage()}
-              disabled={!table.getCanNextPage()}
-            >
-              <ChevronLast />
-            </Button>
           </div>
         </div>
       </div>

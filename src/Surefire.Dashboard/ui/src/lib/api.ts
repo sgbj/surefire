@@ -6,6 +6,9 @@ async function fetchApi<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await res.text().catch(() => '');
     throw new Error(`API error ${res.status}: ${body}`);
   }
+  if (res.status === 204) {
+    return undefined as T;
+  }
   return res.json();
 }
 
@@ -65,7 +68,8 @@ export interface JobRun {
   traceId?: string;
   spanId?: string;
   parentRunId?: string;
-  originalRunId?: string;
+  retryOfRunId?: string;
+  rerunOfRunId?: string;
   notBefore?: string;
 }
 
@@ -73,7 +77,6 @@ export interface NodeInfo {
   name: string;
   startedAt: string;
   lastHeartbeatAt: string;
-  status: number;
   runningCount: number;
   registeredJobNames: string[];
 }
@@ -96,7 +99,7 @@ export const JobStatusLabels: Record<number, string> = {
   2: 'Completed',
   3: 'Failed',
   4: 'Cancelled',
-  5: 'Dead Letter',
+  5: 'Dead letter',
 };
 
 export const JobStatusColors: Record<number, string> = {
@@ -130,18 +133,18 @@ export const api = {
   triggerJob: (name: string, opts?: { args?: unknown; notBefore?: string }) =>
     fetchApi<{ runId: string }>(`/jobs/${encodeURIComponent(name)}/trigger`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: opts ? JSON.stringify(opts) : undefined,
+      ...(opts ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) } : {}),
     }),
-  getRuns: (params?: { jobName?: string; status?: number; nodeName?: string; parentRunId?: string; originalRunId?: string; skip?: number; take?: number; createdAfter?: string; createdBefore?: string }) => {
+  getRuns: (params?: { jobName?: string; status?: number; nodeName?: string; parentRunId?: string; retryOfRunId?: string; rerunOfRunId?: string; skip?: number; take?: number; createdAfter?: string; createdBefore?: string }) => {
     const search = new URLSearchParams();
     if (params?.jobName) search.set('jobName', params.jobName);
     if (params?.status !== undefined) search.set('status', params.status.toString());
     if (params?.nodeName) search.set('nodeName', params.nodeName);
     if (params?.parentRunId) search.set('parentRunId', params.parentRunId);
-    if (params?.originalRunId) search.set('originalRunId', params.originalRunId);
-    if (params?.skip) search.set('skip', params.skip.toString());
-    if (params?.take) search.set('take', params.take.toString());
+    if (params?.retryOfRunId) search.set('retryOfRunId', params.retryOfRunId);
+    if (params?.rerunOfRunId) search.set('rerunOfRunId', params.rerunOfRunId);
+    if (params?.skip != null) search.set('skip', params.skip.toString());
+    if (params?.take != null) search.set('take', params.take.toString());
     if (params?.createdAfter) search.set('createdAfter', params.createdAfter);
     if (params?.createdBefore) search.set('createdBefore', params.createdBefore);
     const qs = search.toString();

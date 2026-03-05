@@ -64,6 +64,7 @@ export function formatTimeSpan(ts?: string | null): string {
 }
 
 export function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   const totalSeconds = Math.floor(ms / 1000);
   if (totalSeconds < 60) return `${totalSeconds}s`;
   const m = Math.floor(totalSeconds / 60);

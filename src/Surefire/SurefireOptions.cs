@@ -1,9 +1,12 @@
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
 
 public sealed class SurefireOptions
 {
+    public IServiceCollection Services { get; internal set; } = null!;
+
     internal List<Func<IServiceProvider, JobContext, Task>> OnSuccessCallbacks { get; } = [];
     internal List<Func<IServiceProvider, JobContext, Task>> OnFailureCallbacks { get; } = [];
     internal List<Func<IServiceProvider, JobContext, Task>> OnRetryCallbacks { get; } = [];
@@ -16,7 +19,7 @@ public sealed class SurefireOptions
     public TimeSpan? RetentionPeriod { get; set; } = TimeSpan.FromDays(7);
     public TimeSpan RetentionCheckInterval { get; set; } = TimeSpan.FromMinutes(5);
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(15);
-    public JsonSerializerOptions SerializerOptions { get; set; } = JsonSerializerOptions.Web;
+    public JsonSerializerOptions SerializerOptions { get; set; } = new(JsonSerializerOptions.Web);
     public bool AutoMigrate { get; set; } = true;
 
     public SurefireOptions OnSuccess(Delegate callback)

@@ -9,10 +9,14 @@ public sealed class JobRegistry
     internal void Register(RegisteredJob job)
     {
         Jobs[job.Definition.Name] = job;
+        _cachedNames = null;
     }
 
     internal RegisteredJob? Get(string name) =>
         Jobs.TryGetValue(name, out var job) ? job : null;
 
-    public IReadOnlyCollection<string> GetJobNames() => [.. Jobs.Keys];
+    private IReadOnlyCollection<string>? _cachedNames;
+
+    public IReadOnlyCollection<string> GetJobNames() =>
+        _cachedNames ??= [.. Jobs.Keys];
 }

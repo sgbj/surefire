@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Surefire;
 
 public sealed class JobContext
@@ -14,6 +16,7 @@ public sealed class JobContext
     internal IJobStore Store { get; set; } = null!;
     internal INotificationProvider Notifications { get; set; } = null!;
     internal JobRun Run { get; set; } = null!;
+    internal TimeProvider TimeProvider { get; set; } = TimeProvider.System;
 
     public async Task ReportProgressAsync(double progress)
     {
@@ -21,6 +24,15 @@ public sealed class JobContext
         ArgumentOutOfRangeException.ThrowIfGreaterThan(progress, 1.0);
         Run.Progress = progress;
         await Store.UpdateRunAsync(Run, CancellationToken);
-        await Notifications.PublishAsync(NotificationChannels.RunProgress(RunId), progress.ToString(), CancellationToken);
+
+        var evt = new RunEvent
+        {
+            RunId = RunId,
+            EventType = RunEventType.Progress,
+            Payload = JsonSerializer.Serialize(new { value = progress }),
+            CreatedAt = TimeProvider.GetUtcNow()
+        };
+        await Store.AppendEventAsync(evt, CancellationToken);
+        await Notifications.PublishAsync(NotificationChannels.RunEvent(RunId), "", CancellationToken);
     }
 }

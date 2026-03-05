@@ -9,6 +9,7 @@ export default defineConfig({
 		starlight({
 			title: 'Surefire',
 			description: 'Distributed job scheduling for .NET',
+			social: [{ icon: 'github', label: 'GitHub', link: 'https://github.com/sgbj/surefire' }],
 			customCss: ['./src/styles/custom.css'],
 			expressiveCode: {
 				styleOverrides: { borderRadius: '0.5rem' },
@@ -17,7 +18,7 @@ export default defineConfig({
 				{
 					label: 'Getting started',
 					items: [
-						{ label: 'Introduction', slug: 'getting-started' },
+						{ label: 'Getting started', slug: 'getting-started' },
 					],
 				},
 				{

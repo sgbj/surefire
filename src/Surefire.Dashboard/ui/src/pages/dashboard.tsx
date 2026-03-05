@@ -18,7 +18,7 @@ const chartConfig = {
   pending: { label: 'Pending', color: 'var(--status-pending)' },
   running: { label: 'Running', color: 'var(--status-running)' },
   cancelled: { label: 'Cancelled', color: 'var(--status-cancelled)' },
-  deadLetter: { label: 'Dead Letter', color: 'var(--status-dead-letter)' },
+  deadLetter: { label: 'Dead letter', color: 'var(--status-dead-letter)' },
 } satisfies ChartConfig;
 
 const PERIODS: Record<string, { hours: number; bucketMinutes: number }> = {
@@ -70,7 +70,7 @@ export function DashboardPage() {
         <StatCard title="Total jobs" value={stats.totalJobs} />
         <StatCard title="Total runs" value={stats.totalRuns} />
         <StatCard title="Active runs" value={stats.activeRuns} />
-        <StatCard title="Success rate" value={`${stats.successRate.toFixed(1)}%`} />
+        <StatCard title="Success rate" value={`${(stats.successRate ?? 0).toFixed(1)}%`} />
       </div>
 
       <div className="space-y-4">

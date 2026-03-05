@@ -10,13 +10,13 @@ public static class HostExtensions
         var registry = host.Services.GetRequiredService<JobRegistry>();
         var options = host.Services.GetRequiredService<SurefireOptions>();
 
-        var (compiledHandler, hasReturnValue) = ParameterBinder.Compile(handler, options.SerializerOptions);
+        var result = ParameterBinder.Compile(handler, options.SerializerOptions);
 
         var registeredJob = new RegisteredJob
         {
             Definition = new JobDefinition { Name = name },
-            CompiledHandler = compiledHandler,
-            HasReturnValue = hasReturnValue
+            CompiledHandler = result.Handler,
+            HasReturnValue = result.HasReturnValue
         };
 
         registry.Register(registeredJob);

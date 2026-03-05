@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { type ColumnDef } from '@tanstack/react-table';
 import { api, type NodeInfo } from '@/lib/api';
-import { Badge } from '@/components/ui/badge';
 import { DataTable } from '@/components/data-table';
 import { SortableHeader } from '@/components/sortable-header';
 import { Input } from '@/components/ui/input';
@@ -19,15 +18,6 @@ const columns: ColumnDef<NodeInfo>[] = [
       <Link to={`/nodes/${encodeURIComponent(row.original.name)}`} className="font-medium text-primary hover:underline">
         {row.original.name}
       </Link>
-    ),
-  },
-  {
-    accessorKey: "status",
-    header: ({ column }) => <SortableHeader column={column}>Status</SortableHeader>,
-    cell: ({ row }) => (
-      <Badge variant={row.original.status === 0 ? 'default' : 'secondary'}>
-        {row.original.status === 0 ? 'Online' : 'Offline'}
-      </Badge>
     ),
   },
   {

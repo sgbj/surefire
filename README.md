@@ -24,6 +24,7 @@ app.Run();
 - **Cron scheduling** — schedule jobs with cron expressions.
 - **Retries** — configurable retry policies with fixed or exponential backoff.
 - **Timeouts & concurrency** — per-job timeout and max concurrency limits.
+- **Streaming** — return `IAsyncEnumerable<T>` from jobs and pipe streams between them to build pipelines.
 - **Lifecycle callbacks** — hook into success, failure, retry, and dead letter events.
 - **OpenTelemetry** — traces and metrics out of the box.
 
@@ -32,6 +33,7 @@ app.Run();
 ```bash
 dotnet add package Surefire
 dotnet add package Surefire.Dashboard
+dotnet add package Surefire.PostgreSql
 ```
 
 ```csharp
@@ -48,7 +50,7 @@ var app = builder.Build();
 app.AddJob("Add", (int a, int b) => a + b);
 
 // Async job with DI, logging, and progress
-app.AddJob("SlowJob", async (JobContext ctx, ILogger<Program> logger, CancellationToken ct) =>
+app.AddJob("DataImport", async (JobContext ctx, ILogger<Program> logger, CancellationToken ct) =>
 {
     for (var i = 1; i <= 10; i++)
     {
@@ -56,12 +58,12 @@ app.AddJob("SlowJob", async (JobContext ctx, ILogger<Program> logger, Cancellati
         await ctx.ReportProgressAsync(i / 10.0);
         await Task.Delay(1000, ct);
     }
-}).WithDescription("A slow job that reports progress");
+}).WithDescription("Imports data and reports progress");
 
 // Scheduled job
-app.AddJob("Cleanup", async (ILogger<Program> logger) =>
+app.AddJob("GenerateReport", (ILogger<Program> logger) =>
 {
-    logger.LogInformation("Running cleanup");
+    logger.LogInformation("Generating report");
 }).WithCron("0 * * * *");
 
 // Job with retries
@@ -118,7 +120,7 @@ app.AddJob("Order", async (int orderId) => { /* ... */ })
     });
 ```
 
-`OnFailure` fires on every failure. `OnRetry` fires when a retry is about to happen. `OnDeadLetter` fires when all retries are used up.
+`OnSuccess` fires when a job completes successfully. `OnFailure` fires on every failure. `OnRetry` fires when a retry is about to happen. `OnDeadLetter` fires when all retries are used up.
 
 ## Dashboard
 

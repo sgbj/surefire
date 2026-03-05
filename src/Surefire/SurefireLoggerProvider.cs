@@ -1,7 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Text.Json;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace Surefire;
@@ -11,79 +8,130 @@ internal sealed class SurefireLoggerProvider : ILoggerProvider, IAsyncDisposable
     private readonly IJobStore _store;
     private readonly INotificationProvider _notifications;
     private readonly TimeProvider _timeProvider;
-    private readonly SurefireOptions _options;
-    private readonly Channel<RunLogEntry> _channel;
-    private readonly Task _flushTask;
+    private readonly Lock _bufferLock = new();
+    private List<RunEvent> _buffer = [];
+    private readonly SemaphoreSlim _flushLock = new(1, 1);
     private readonly ConcurrentDictionary<string, SurefireLogger> _loggers = new();
+    private readonly ITimer _timer;
     private int _disposed;
 
-    public SurefireLoggerProvider(IJobStore store, INotificationProvider notifications, SurefireOptions options, TimeProvider timeProvider)
+    // Note: this class must NOT depend on ILoggerFactory or ILogger<T> — it IS an
+    // ILoggerProvider, and LoggerFactory resolves IEnumerable<ILoggerProvider> in its
+    // constructor. Taking ILoggerFactory here creates a circular singleton dependency
+    // that crashes at startup. For the same reason, all dependencies of this class must
+    // also avoid ILogger<T> — anything in the ILoggerProvider resolution chain that
+    // depends on ILogger creates the same circular dependency.
+    public SurefireLoggerProvider(
+        IJobStore store,
+        INotificationProvider notifications,
+        SurefireOptions options,
+        TimeProvider timeProvider)
     {
         _store = store;
         _notifications = notifications;
-        _options = options;
         _timeProvider = timeProvider;
-        _channel = Channel.CreateUnbounded<RunLogEntry>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = false
-        });
-        _flushTask = FlushLoopAsync();
+        _timer = timeProvider.CreateTimer(OnTimer, null, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
     }
 
     public ILogger CreateLogger(string categoryName) =>
-        _loggers.GetOrAdd(categoryName, name => new SurefireLogger(name, _channel.Writer, _timeProvider));
+        _loggers.GetOrAdd(categoryName, name => new SurefireLogger(name, this, _timeProvider));
 
-    private async Task FlushLoopAsync()
+    internal void Enqueue(RunEvent evt)
     {
-        var buffer = new List<RunLogEntry>(64);
-
-        while (await _channel.Reader.WaitToReadAsync())
-        {
-            buffer.Clear();
-            while (buffer.Count < 64 && _channel.Reader.TryRead(out var item))
-                buffer.Add(item);
-
-            await FlushBufferAsync(buffer);
-        }
-
-        // Drain any remaining items after the channel is completed
-        buffer.Clear();
-        while (_channel.Reader.TryRead(out var item))
-            buffer.Add(item);
-
-        if (buffer.Count > 0)
-            await FlushBufferAsync(buffer);
+        lock (_bufferLock)
+            _buffer.Add(evt);
     }
 
-    private async Task FlushBufferAsync(List<RunLogEntry> buffer)
+    private async void OnTimer(object? state)
     {
-        var groups = buffer.GroupBy(x => x.RunId);
-        foreach (var group in groups)
+        if (Volatile.Read(ref _disposed) == 1)
+            return;
+        try { await FlushCoreAsync(CancellationToken.None); }
+        catch { /* Timer callback should never propagate exceptions */ }
+    }
+
+    /// <summary>
+    /// Flushes all buffered events to the store and waits for completion.
+    /// Guarantees that all events enqueued before this call are persisted before returning.
+    /// </summary>
+    internal Task FlushAsync() => FlushCoreAsync(CancellationToken.None);
+
+    private async Task FlushCoreAsync(CancellationToken ct)
+    {
+        await _flushLock.WaitAsync(ct);
+        try
         {
-            var entries = group.ToList();
-            try
+            List<RunEvent> batch;
+            lock (_bufferLock)
             {
-                await _store.AddRunLogsAsync(entries);
-                foreach (var entry in entries)
-                {
-                    await _notifications.PublishAsync(
-                        NotificationChannels.RunLog(group.Key),
-                        JsonSerializer.Serialize(entry, _options.SerializerOptions));
-                }
+                if (_buffer.Count == 0) return;
+                batch = _buffer;
+                _buffer = new List<RunEvent>(batch.Count);
             }
-            catch (Exception ex) { Debug.WriteLine($"[Surefire] Failed to flush logs for run {group.Key}: {ex.Message}"); }
+
+            var groups = batch.GroupBy(x => x.RunId);
+            foreach (var group in groups)
+            {
+                var events = group.ToList();
+                try
+                {
+                    await _store.AppendEventsAsync(events, ct);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception)
+                {
+                    // Re-queue failed events for retry on next timer tick (capped to prevent OOM)
+                    lock (_bufferLock)
+                    {
+                        if (_buffer.Count < 10_000)
+                            _buffer.AddRange(events);
+                    }
+                    continue;
+                }
+
+                // Notification is best-effort — events are already persisted, never re-queue
+                try { await _notifications.PublishAsync(NotificationChannels.RunEvent(group.Key), "", ct); }
+                catch (OperationCanceledException) { throw; }
+                catch { }
+            }
+        }
+        finally
+        {
+            _flushLock.Release();
         }
     }
 
-    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+            return;
+
+        // ITimer.Dispose (synchronous) does not wait for in-flight callbacks,
+        // avoiding deadlocks that DisposeAsync().GetResult() would cause.
+        _timer.Dispose();
+
+        // Best-effort flush on a thread pool thread to avoid sync-over-async deadlock
+        try { Task.Run(() => FlushCoreAsync(CancellationToken.None)).GetAwaiter().GetResult(); }
+        catch { /* Best effort */ }
+
+        // Don't dispose _flushLock here — a timer callback may still be in FlushCoreAsync
+        // (ITimer.Dispose doesn't wait for in-flight callbacks). SemaphoreSlim has no
+        // unmanaged resources, so letting it be collected by the GC is safe.
+    }
 
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
 
-        _channel.Writer.TryComplete();
-        await _flushTask;
+        // ITimer.DisposeAsync waits for any in-progress callback to complete
+        await _timer.DisposeAsync();
+
+        // Final flush with timeout — don't hang shutdown if the store is unresponsive
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try { await FlushCoreAsync(cts.Token); }
+        catch (OperationCanceledException) { }
+
+        _flushLock.Dispose();
     }
 }

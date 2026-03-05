@@ -4,7 +4,6 @@ import { type ColumnDef, type PaginationState } from '@tanstack/react-table';
 import { api, JobStatusLabels, type JobRun } from '@/lib/api';
 import { StatusBadge } from '@/components/status-badge';
 import { DataTable } from '@/components/data-table';
-import { SortableHeader } from '@/components/sortable-header';
 import { formatDate, formatDuration } from '@/lib/format';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -35,7 +34,7 @@ const columns: ColumnDef<JobRun>[] = [
   },
   {
     accessorKey: "jobName",
-    header: ({ column }) => <SortableHeader column={column}>Job</SortableHeader>,
+    header: "Job",
     cell: ({ row }) => (
       <Link to={`/jobs/${encodeURIComponent(row.original.jobName)}`} className="text-sm text-primary hover:underline">
         {row.original.jobName}
@@ -44,12 +43,12 @@ const columns: ColumnDef<JobRun>[] = [
   },
   {
     accessorKey: "status",
-    header: ({ column }) => <SortableHeader column={column}>Status</SortableHeader>,
+    header: "Status",
     cell: ({ row }) => <StatusBadge status={row.original.status} />,
   },
   {
     accessorKey: "createdAt",
-    header: ({ column }) => <SortableHeader column={column}>Created</SortableHeader>,
+    header: "Created",
     cell: ({ row }) => <span className="text-sm">{formatDate(row.original.createdAt)}</span>,
   },
   {
@@ -82,11 +81,6 @@ export function RunsPage() {
 
   const debouncedJobName = useDebouncedValue(jobNameInput, 300);
 
-  const createdAfter = useMemo(() => {
-    const preset = DATE_PRESETS.find(p => p.value === datePreset);
-    return preset?.getAfter();
-  }, [datePreset]);
-
   // Reset to page 1 when debounced filter changes
   const prevJobName = useRef(debouncedJobName);
   useEffect(() => {
@@ -96,17 +90,28 @@ export function RunsPage() {
     }
   }, [debouncedJobName]);
 
-  const queryParams = useMemo(() => ({
+  // Use datePreset (not a computed date) in the query key so the cache key is stable.
+  // Compute the actual createdAfter date inside queryFn so each refetch uses a fresh timestamp.
+  const queryKey = useMemo(() => ({
     jobName: debouncedJobName || undefined,
     status: statusFilter !== 'all' ? Number(statusFilter) : undefined,
-    createdAfter,
+    datePreset,
     skip: pagination.pageIndex * pagination.pageSize,
     take: pagination.pageSize,
-  }), [debouncedJobName, statusFilter, createdAfter, pagination]);
+  }), [debouncedJobName, statusFilter, datePreset, pagination]);
 
   const { data, isError } = useQuery({
-    queryKey: ['runs', queryParams],
-    queryFn: () => api.getRuns(queryParams),
+    queryKey: ['runs', queryKey],
+    queryFn: () => {
+      const preset = DATE_PRESETS.find(p => p.value === datePreset);
+      return api.getRuns({
+        jobName: queryKey.jobName,
+        status: queryKey.status,
+        createdAfter: preset?.getAfter(),
+        skip: queryKey.skip,
+        take: queryKey.take,
+      });
+    },
     refetchInterval: 5000,
     placeholderData: keepPreviousData,
   });

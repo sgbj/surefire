@@ -7,21 +7,42 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
     private readonly ConcurrentDictionary<string, JobDefinition> _jobs = new();
     private readonly ConcurrentDictionary<string, JobRun> _runs = new();
     private readonly ConcurrentDictionary<string, NodeInfo> _nodes = new();
-    private readonly ConcurrentDictionary<string, List<RunLogEntry>> _logs = new();
-    private readonly Lock _logLock = new();
+    private readonly List<RunEvent> _events = [];
+    private readonly Lock _eventLock = new();
     private readonly Lock _claimLock = new();
     private readonly Lock _deduplicationLock = new();
     private readonly HashSet<string> _deduplicationIds = new();
+    private long _eventIdCounter;
 
     public Task MigrateAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     public Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
-        _jobs.AddOrUpdate(job.Name, job, (_, existing) =>
-        {
-            job.IsEnabled = existing.IsEnabled;
-            return job;
-        });
+        _jobs.AddOrUpdate(job.Name,
+            // Add: defensive copy so the caller can't mutate the stored object
+            _ => new JobDefinition
+            {
+                Name = job.Name,
+                Description = job.Description,
+                Tags = [.. job.Tags],
+                CronExpression = job.CronExpression,
+                Timeout = job.Timeout,
+                MaxConcurrency = job.MaxConcurrency,
+                RetryPolicy = job.RetryPolicy,
+                IsEnabled = job.IsEnabled
+            },
+            // Update: preserve the stored IsEnabled state (user may have toggled it via dashboard)
+            (_, existing) => new JobDefinition
+            {
+                Name = job.Name,
+                Description = job.Description,
+                Tags = [.. job.Tags],
+                CronExpression = job.CronExpression,
+                Timeout = job.Timeout,
+                MaxConcurrency = job.MaxConcurrency,
+                RetryPolicy = job.RetryPolicy,
+                IsEnabled = existing.IsEnabled
+            });
         return Task.CompletedTask;
     }
 
@@ -53,18 +74,30 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
 
     public Task SetJobEnabledAsync(string name, bool enabled, CancellationToken cancellationToken = default)
     {
-        if (_jobs.TryGetValue(name, out var job))
-            job.IsEnabled = enabled;
+        _jobs.AddOrUpdate(name,
+            _ => throw new KeyNotFoundException($"Job '{name}' not found"),
+            (_, existing) => new JobDefinition
+            {
+                Name = existing.Name,
+                Description = existing.Description,
+                Tags = [.. existing.Tags],
+                CronExpression = existing.CronExpression,
+                Timeout = existing.Timeout,
+                MaxConcurrency = existing.MaxConcurrency,
+                RetryPolicy = existing.RetryPolicy,
+                IsEnabled = enabled
+            });
         return Task.CompletedTask;
     }
 
     public Task CreateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
-        _runs[run.Id] = run;
-        if (run.DeduplicationId is not null)
+        lock (_deduplicationLock)
         {
-            lock (_deduplicationLock)
-                _deduplicationIds.Add(run.DeduplicationId);
+            if (run.DeduplicationId is not null && !_deduplicationIds.Add(run.DeduplicationId))
+                throw new InvalidOperationException($"Duplicate deduplication ID '{run.DeduplicationId}'");
+
+            _runs[run.Id] = run;
         }
         return Task.CompletedTask;
     }
@@ -103,8 +136,11 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
         if (filter.ParentRunId is not null)
             query = query.Where(r => r.ParentRunId == filter.ParentRunId);
 
-        if (filter.OriginalRunId is not null)
-            query = query.Where(r => r.OriginalRunId == filter.OriginalRunId);
+        if (filter.RetryOfRunId is not null)
+            query = query.Where(r => r.RetryOfRunId == filter.RetryOfRunId);
+
+        if (filter.RerunOfRunId is not null)
+            query = query.Where(r => r.RerunOfRunId == filter.RerunOfRunId);
 
         if (filter.CreatedAfter is not null)
             query = query.Where(r => r.CreatedAt >= filter.CreatedAfter);
@@ -116,9 +152,8 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
 
         var ordered = filter.OrderBy switch
         {
-            "CreatedAt" => all.OrderByDescending(r => r.CreatedAt),
-            "StartedAt" => all.OrderByDescending(r => r.StartedAt),
-            "CompletedAt" => all.OrderByDescending(r => r.CompletedAt),
+            RunOrderBy.StartedAt => all.OrderByDescending(r => r.StartedAt),
+            RunOrderBy.CompletedAt => all.OrderByDescending(r => r.CompletedAt),
             _ => all.OrderByDescending(r => r.CreatedAt)
         };
 
@@ -132,17 +167,35 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
         return Task.CompletedTask;
     }
 
-    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> registeredJobNames, CancellationToken cancellationToken = default)
+    public Task<bool> TryUpdateRunStatusAsync(JobRun run, JobStatus expectedStatus, CancellationToken cancellationToken = default)
     {
         lock (_claimLock)
         {
-            foreach (var kvp in _runs)
+            if (!_runs.TryGetValue(run.Id, out var existing) || existing.Status != expectedStatus)
+                return Task.FromResult(false);
+
+            // Apply the update (run may be a different object than existing)
+            existing.Status = run.Status;
+            existing.Error = run.Error;
+            existing.CompletedAt = run.CompletedAt;
+            existing.CancelledAt = run.CancelledAt;
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> registeredJobNames, CancellationToken cancellationToken = default)
+    {
+        var jobNameSet = registeredJobNames as IReadOnlySet<string> ?? new HashSet<string>(registeredJobNames);
+        lock (_claimLock)
+        {
+            // Order by NotBefore then CreatedAt for FIFO semantics
+            foreach (var kvp in _runs.OrderBy(kvp => kvp.Value.NotBefore).ThenBy(kvp => kvp.Value.CreatedAt))
             {
                 var run = kvp.Value;
                 if (run.Status != JobStatus.Pending)
                     continue;
 
-                if (!registeredJobNames.Contains(run.JobName))
+                if (!jobNameSet.Contains(run.JobName))
                     continue;
 
                 if (run.NotBefore > timeProvider.GetUtcNow())
@@ -155,8 +208,11 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
                         continue;
                 }
 
+                var now = timeProvider.GetUtcNow();
                 run.Status = JobStatus.Running;
                 run.NodeName = nodeName;
+                run.StartedAt = now;
+                run.LastHeartbeatAt = now;
                 return Task.FromResult<JobRun?>(run);
             }
         }
@@ -196,31 +252,62 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
     public Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<NodeInfo>>(_nodes.Values.ToList());
 
-    public Task AddRunLogsAsync(IReadOnlyList<RunLogEntry> entries, CancellationToken cancellationToken = default)
+    // -- Run Events --
+
+    public Task AppendEventAsync(RunEvent evt, CancellationToken cancellationToken = default)
     {
-        lock (_logLock)
+        lock (_eventLock)
         {
-            foreach (var group in entries.GroupBy(e => e.RunId))
+            evt.Id = ++_eventIdCounter;
+            _events.Add(evt);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
+    {
+        lock (_eventLock)
+        {
+            foreach (var evt in events)
             {
-                if (!_logs.TryGetValue(group.Key, out var list))
-                {
-                    list = [];
-                    _logs[group.Key] = list;
-                }
-                list.AddRange(group);
+                evt.Id = ++_eventIdCounter;
+                _events.Add(evt);
             }
         }
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<RunLogEntry>> GetRunLogsAsync(string runId, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null, CancellationToken cancellationToken = default)
     {
-        lock (_logLock)
+        lock (_eventLock)
         {
-            if (_logs.TryGetValue(runId, out var list))
-                return Task.FromResult<IReadOnlyList<RunLogEntry>>(list.ToList());
+            var query = _events.Where(e => e.RunId == runId && e.Id > sinceId);
+            if (types is { Length: > 0 })
+                query = query.Where(e => types.Contains(e.EventType));
+            return Task.FromResult<IReadOnlyList<RunEvent>>(query.ToList());
         }
-        return Task.FromResult<IReadOnlyList<RunLogEntry>>([]);
+    }
+
+    // -- Heartbeat & Stale Runs --
+
+    public Task HeartbeatRunsAsync(IReadOnlyCollection<string> runIds, CancellationToken cancellationToken = default)
+    {
+        var now = timeProvider.GetUtcNow();
+        foreach (var runId in runIds)
+        {
+            if (_runs.TryGetValue(runId, out var run) && run.Status == JobStatus.Running)
+                run.LastHeartbeatAt = now;
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<JobRun>> GetStaleRunsAsync(TimeSpan threshold, CancellationToken cancellationToken = default)
+    {
+        var cutoff = timeProvider.GetUtcNow() - threshold;
+        var stale = _runs.Values
+            .Where(r => r.Status == JobStatus.Running && (r.LastHeartbeatAt is null || r.LastHeartbeatAt < cutoff))
+            .ToList();
+        return Task.FromResult<IReadOnlyList<JobRun>>(stale);
     }
 
     public Task<DashboardStats> GetDashboardStatsAsync(DateTimeOffset? since = null, int bucketMinutes = 60, CancellationToken cancellationToken = default)
@@ -253,7 +340,7 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
 
     private List<TimelineBucket> BuildTimeline(List<JobRun> runs, DateTimeOffset? since, int bucketMinutes)
     {
-        if (since is null)
+        if (since is null || bucketMinutes <= 0)
             return [];
 
         var now = timeProvider.GetUtcNow();
@@ -298,19 +385,30 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
     public Task<int> PurgeRunsAsync(DateTimeOffset completedBefore, CancellationToken cancellationToken = default)
     {
         var purged = 0;
-        foreach (var kvp in _runs)
+        // Snapshot keys to avoid iterating while mutating
+        var keys = _runs.Keys.ToArray();
+        foreach (var key in keys)
         {
-            var run = kvp.Value;
-            var shouldPurge = (run.Status.IsTerminal && run.CompletedAt is not null && run.CompletedAt < completedBefore)
-                || (run.Status == JobStatus.Pending && run.CreatedAt < completedBefore);
-            if (shouldPurge)
+            // Hold _claimLock to prevent racing with ClaimRunAsync which transitions
+            // Pending → Running. Without this lock, purge could read Status == Pending,
+            // then ClaimRunAsync claims the run, then purge removes it.
+            lock (_claimLock)
             {
-                if (_runs.TryRemove(kvp.Key, out _))
+                // Re-read current value under lock (not a stale enumerator snapshot)
+                if (!_runs.TryGetValue(key, out var run))
+                    continue;
+
+                var shouldPurge = (run.Status.IsTerminal && run.CompletedAt is not null && run.CompletedAt < completedBefore)
+                    || (run.Status == JobStatus.Pending && run.CreatedAt < completedBefore);
+                if (!shouldPurge) continue;
+
+                if (_runs.TryRemove(key, out _))
                 {
-                    _logs.TryRemove(kvp.Key, out _);
-                    if (run.DeduplicationId is not null)
+                    lock (_eventLock)
+                        _events.RemoveAll(e => e.RunId == key);
+                    lock (_deduplicationLock)
                     {
-                        lock (_deduplicationLock)
+                        if (run.DeduplicationId is not null)
                             _deduplicationIds.Remove(run.DeduplicationId);
                     }
                     purged++;

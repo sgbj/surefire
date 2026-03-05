@@ -8,6 +8,7 @@ description: Get up and running with Surefire in minutes.
 ```bash
 dotnet add package Surefire
 dotnet add package Surefire.Dashboard
+dotnet add package Surefire.PostgreSql    # optional
 ```
 
 ## Quick start
@@ -44,7 +45,7 @@ app.AddJob("Import", async (ILogger<Program> logger, CancellationToken ct) =>
 });
 
 // Progress reporting (0.0 to 1.0)
-app.AddJob("SlowJob", async (JobContext ctx, CancellationToken ct) =>
+app.AddJob("DataImport", async (JobContext ctx, CancellationToken ct) =>
 {
     for (var i = 1; i <= 10; i++)
     {
@@ -122,15 +123,82 @@ app.AddJob("Workflow", async (IJobClient client, CancellationToken ct) =>
 });
 ```
 
+## Streaming
+
+Jobs can return `IAsyncEnumerable<T>` to stream results incrementally. Other jobs can accept `IAsyncEnumerable<T>` parameters to consume those streams as items are produced.
+
+A job that yields results over time:
+
+```csharp
+app.AddJob("FetchProducts", async (CancellationToken ct) =>
+{
+    return Fetch();
+
+    async IAsyncEnumerable<string> Fetch()
+    {
+        await foreach (var line in ReadCsvLinesAsync(ct))
+        {
+            yield return line;
+        }
+    }
+});
+```
+
+A job that consumes a stream and transforms it into a new one:
+
+```csharp
+app.AddJob("ConvertProducts", async (IAsyncEnumerable<string> lines, ILogger<Program> logger, CancellationToken ct) =>
+{
+    return Convert();
+
+    async IAsyncEnumerable<Product> Convert()
+    {
+        await foreach (var line in lines)
+        {
+            var parts = line.Split(',');
+            var product = new Product(parts[0], parts[1], decimal.Parse(parts[2]));
+            logger.LogInformation("Converted: {Product}", product);
+            yield return product;
+        }
+    }
+});
+```
+
+Chain them with `RunAsync` to build a pipeline:
+
+```csharp
+app.AddJob("ProcessProducts", async (IJobClient client, CancellationToken ct) =>
+{
+    var lines = await client.RunAsync<IAsyncEnumerable<string>>("FetchProducts", ct);
+    var products = await client.RunAsync<IAsyncEnumerable<Product>>("ConvertProducts", new { lines }, ct);
+
+    var count = 0;
+
+    await foreach (var product in products)
+    {
+        count++;
+    }
+
+    return $"Processed {count} products";
+});
+```
+
+Each stage runs as its own job with independent logging, retries, and progress tracking. Data streams between them, so `FetchProducts` doesn't need to finish before `ConvertProducts` starts processing.
+
 ## Lifecycle callbacks
 
 You can hook into job lifecycle events — per job or globally.
 
-`OnFailure` fires on every failure. `OnRetry` fires when a retry is about to happen. `OnDeadLetter` fires when all retries are exhausted.
+`OnSuccess` fires when a job completes successfully. `OnFailure` fires on every failure. `OnRetry` fires when a retry is about to happen. `OnDeadLetter` fires when all retries are exhausted.
 
 ```csharp
 app.AddJob("Order", async (int orderId) => { /* ... */ })
     .WithRetry(3)
+    .OnSuccess((JobContext ctx, ILogger<Program> logger) =>
+    {
+        logger.LogInformation("Job {Name} run {RunId} completed on attempt {Attempt}",
+            ctx.JobName, ctx.RunId, ctx.Attempt);
+    })
     .OnFailure((JobContext ctx, ILogger<Program> logger) =>
     {
         logger.LogWarning("Attempt {Attempt} failed: {Error}",
@@ -162,7 +230,7 @@ Pass options to `AddSurefire` to customize behavior:
 builder.Services.AddSurefire(options =>
 {
     options.NodeName = "worker-1";
-    options.PollingInterval = TimeSpan.FromSeconds(1);
+    options.PollingInterval = TimeSpan.FromSeconds(5);
     options.ShutdownTimeout = TimeSpan.FromSeconds(30);
     options.RetentionPeriod = TimeSpan.FromDays(14);
 });
@@ -175,7 +243,22 @@ builder.Services.AddSurefire(options =>
 | `HeartbeatInterval` | 30s | How often to send heartbeats |
 | `StaleNodeThreshold` | 2min | When to consider a node dead |
 | `RetentionPeriod` | 7 days | How long to keep completed runs (`null` = forever) |
+| `RetentionCheckInterval` | 5min | How often to check for expired runs to purge |
 | `ShutdownTimeout` | 15s | Grace period for running jobs on shutdown |
+| `AutoMigrate` | `true` | Automatically create/update the store schema on startup |
+
+## PostgreSQL
+
+By default Surefire uses an in-memory store. For persistent, multi-node deployments, use the PostgreSQL provider:
+
+```csharp
+builder.Services.AddSurefire(options =>
+{
+    options.UsePostgreSql("Host=localhost;Database=myapp");
+});
+```
+
+This sets up both the job store and the notification provider (LISTEN/NOTIFY). The schema defaults to `surefire` and is created automatically when `AutoMigrate` is enabled.
 
 ## Dashboard
 
@@ -185,4 +268,4 @@ app.MapSurefireDashboard("/");      // at the root
 app.MapSurefireDashboard("/admin"); // at /admin
 ```
 
-The dashboard is embedded in the NuGet package — no npm or extra files needed. See the [Dashboard guide](/guides/dashboard/) for details.
+The dashboard is embedded in the NuGet package — no npm or extra files needed. See the [Dashboard guide](/surefire/guides/dashboard/) for details.

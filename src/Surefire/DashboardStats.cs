@@ -8,6 +8,6 @@ public sealed class DashboardStats
     public double SuccessRate { get; set; }
     public int NodeCount { get; set; }
     public IReadOnlyList<JobRun> RecentRuns { get; set; } = [];
-    public Dictionary<string, int> RunsByStatus { get; set; } = new();
+    public IReadOnlyDictionary<string, int> RunsByStatus { get; set; } = new Dictionary<string, int>();
     public IReadOnlyList<TimelineBucket> Timeline { get; set; } = [];
 }

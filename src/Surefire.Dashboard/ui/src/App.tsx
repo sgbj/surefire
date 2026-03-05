@@ -28,7 +28,7 @@ export default function App() {
               <Route path="runs" element={<RunsPage />} />
               <Route path="runs/:id" element={<RunDetailPage />} />
               <Route path="nodes" element={<NodesPage />} />
-              <Route path="nodes/:id" element={<NodeDetailPage />} />
+              <Route path="nodes/:name" element={<NodeDetailPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

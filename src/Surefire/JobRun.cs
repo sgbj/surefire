@@ -18,7 +18,9 @@ public sealed class JobRun
     public string? TraceId { get; set; }
     public string? SpanId { get; set; }
     public string? ParentRunId { get; set; }
-    public string? OriginalRunId { get; set; }
+    public string? RetryOfRunId { get; set; }
+    public string? RerunOfRunId { get; set; }
     public DateTimeOffset NotBefore { get; set; }
     public string? DeduplicationId { get; set; }
+    public DateTimeOffset? LastHeartbeatAt { get; set; }
 }

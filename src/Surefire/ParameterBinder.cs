@@ -5,9 +5,15 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
 
+internal sealed class BindingResult
+{
+    public required Func<IServiceProvider, JobContext, string?, Task<object?>> Handler { get; init; }
+    public bool HasReturnValue { get; init; }
+}
+
 internal static class ParameterBinder
 {
-    public static (Func<IServiceProvider, JobContext, string?, Task<object?>> Handler, bool HasReturnValue) Compile(Delegate handler, JsonSerializerOptions serializerOptions)
+    public static BindingResult Compile(Delegate handler, JsonSerializerOptions serializerOptions)
     {
         var method = handler.Method;
         var parameters = method.GetParameters();
@@ -69,7 +75,11 @@ internal static class ParameterBinder
             return result;
         });
 
-        return (compiled, hasReturnValue);
+        return new BindingResult
+        {
+            Handler = compiled,
+            HasReturnValue = hasReturnValue
+        };
     }
 
     public static Func<IServiceProvider, JobContext, Task> CompileCallback(Delegate callback)
@@ -130,9 +140,43 @@ internal static class ParameterBinder
         if (isService.IsService(type))
             return sp.GetRequiredService(type);
 
-        if (argsJson is { ValueKind: JsonValueKind.Object } json && serializerOptions is not null)
+        // IAsyncEnumerable<T> parameter: try JSON array first, then create event-based enumerator
+        if (StreamingHelper.IsAsyncEnumerable(type) && serializerOptions is not null)
         {
-            foreach (var prop in json.EnumerateObject())
+            var itemType = type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>)
+                ? type.GetGenericArguments()[0]
+                : type.GetInterfaces().First(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>)).GetGenericArguments()[0];
+
+            // Check if there's a matching JSON property with an array value
+            if (argsJson is { ValueKind: JsonValueKind.Object } json)
+            {
+                foreach (var prop in json.EnumerateObject())
+                {
+                    if (string.Equals(prop.Name, param.Name, StringComparison.OrdinalIgnoreCase)
+                        && prop.Value.ValueKind == JsonValueKind.Array)
+                    {
+                        // Deserialize as List<T> then wrap as IAsyncEnumerable<T>
+                        var listType = typeof(List<>).MakeGenericType(itemType);
+                        var list = prop.Value.Deserialize(listType, serializerOptions)!;
+                        var toAsync = typeof(StreamingHelper)
+                            .GetMethod(nameof(StreamingHelper.ToAsyncEnumerable), BindingFlags.Static | BindingFlags.NonPublic)!
+                            .MakeGenericMethod(itemType);
+                        return toAsync.Invoke(null, [list]);
+                    }
+                }
+            }
+
+            // No JSON property — create event-based input enumerator.
+            // For retries/reruns, read from the source run's events and copy them to this run (copy-on-read).
+            var sourceRunId = ctx.Run.RerunOfRunId ?? ctx.Run.RetryOfRunId;
+            var enumerableType = typeof(RunEventInputEnumerable<>).MakeGenericType(itemType);
+            return Activator.CreateInstance(enumerableType,
+                ctx.RunId, sourceRunId, param.Name!, ctx.Store, ctx.Notifications, ctx.CancellationToken, serializerOptions);
+        }
+
+        if (argsJson is { ValueKind: JsonValueKind.Object } jsonObj && serializerOptions is not null)
+        {
+            foreach (var prop in jsonObj.EnumerateObject())
             {
                 if (string.Equals(prop.Name, param.Name, StringComparison.OrdinalIgnoreCase))
                 {

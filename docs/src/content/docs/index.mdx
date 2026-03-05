@@ -27,6 +27,9 @@ import { Card, CardGrid, Code } from '@astrojs/starlight/components';
   <Card title="Dashboard" icon="laptop">
     Ships with a real-time dashboard. Live log streaming, progress bars, job management, and node monitoring.
   </Card>
+  <Card title="Streaming" icon="seti:pipeline">
+    Jobs can return `IAsyncEnumerable&lt;T&gt;` and consume streams from other jobs. Build pipelines where data flows between stages as it's produced.
+  </Card>
   <Card title="Batteries included" icon="puzzle">
     Retries with backoff, cron scheduling, timeouts, concurrency limits, lifecycle callbacks, and OpenTelemetry traces out of the box.
   </Card>
@@ -45,15 +48,15 @@ var app = builder.Build();
 
 app.AddJob("Add", (int a, int b) => a + b);
 
-app.AddJob("SlowJob", async (JobContext jobContext, ILogger<Program> logger, CancellationToken ct) =>
+app.AddJob("DataImport", async (JobContext ctx, ILogger<Program> logger, CancellationToken ct) =>
 {
     for (var i = 1; i <= 10; i++)
     {
-        logger.LogInformation("Step {i}/10", i);
-        await jobContext.ReportProgressAsync(i / 10.0);
+        logger.LogInformation("Step {Step}/10", i);
+        await ctx.ReportProgressAsync(i / 10.0);
         await Task.Delay(1000, ct);
     }
-}).WithDescription("A slow job that reports progress")
+}).WithDescription("Imports data and reports progress")
   .WithCron("* * * * *");
 
 app.MapSurefireDashboard();

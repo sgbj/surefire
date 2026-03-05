@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Text.Json;
 using Cronos;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -11,22 +10,25 @@ internal sealed class SurefireScheduler(
     INotificationProvider notifications,
     JobExecutor executor,
     JobRegistry registry,
+    RunRecovery recovery,
     TimeProvider timeProvider,
     SurefireOptions options,
     ILogger<SurefireScheduler> logger) : BackgroundService
 {
     private readonly ConcurrentDictionary<string, Task> _executingTasks = new();
+    private readonly ConcurrentDictionary<string, (string Expression, CronExpression Parsed)> _cronCache = new();
     private IAsyncDisposable? _runCreatedSub;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var nodeName = options.NodeName;
 
-        using var wakeup = new SemaphoreSlim(0);
+        // maxCount: 1 prevents unbounded accumulation when many notifications arrive in quick succession
+        using var wakeup = new SemaphoreSlim(0, 1);
 
         _runCreatedSub = await notifications.SubscribeAsync(
             NotificationChannels.RunCreated,
-            _ => { wakeup.Release(); return Task.CompletedTask; },
+            _ => { try { wakeup.Release(); } catch (SemaphoreFullException) { } return Task.CompletedTask; },
             stoppingToken);
 
         var heartbeatInterval = options.HeartbeatInterval;
@@ -34,6 +36,7 @@ internal sealed class SurefireScheduler(
         var retentionCheckInterval = options.RetentionCheckInterval;
         var lastHeartbeat = timeProvider.GetUtcNow();
         var lastRetentionCheck = timeProvider.GetUtcNow();
+        var lastCronCheck = timeProvider.GetUtcNow();
 
         logger.LogInformation("Surefire scheduler started on node {NodeName}", nodeName);
 
@@ -43,7 +46,8 @@ internal sealed class SurefireScheduler(
             {
                 try
                 {
-                    await EnqueueCronJobsAsync(stoppingToken);
+                    await EnqueueCronJobsAsync(lastCronCheck, stoppingToken);
+                    lastCronCheck = timeProvider.GetUtcNow();
                     await ClaimAndExecuteAsync(nodeName, stoppingToken);
 
                     var now = timeProvider.GetUtcNow();
@@ -51,7 +55,20 @@ internal sealed class SurefireScheduler(
                     if (now - lastHeartbeat > heartbeatInterval)
                     {
                         await store.HeartbeatAsync(nodeName, registry.GetJobNames(), stoppingToken);
+
+                        // Heartbeat all currently executing runs
+                        var runIds = _executingTasks.Keys.ToList();
+                        if (runIds.Count > 0)
+                            await store.HeartbeatRunsAsync(runIds, stoppingToken);
+
+                        // Re-sync job definitions so deleted/stale entries are restored
+                        await SyncJobsAsync(stoppingToken);
+
+                        // Detect and recover stale runs
+                        await RecoverStaleRunsAsync(stoppingToken);
+
                         await PruneStaleNodesAsync(nodeName, stoppingToken);
+                        await RemoveOrphanedJobsAsync(stoppingToken);
                         lastHeartbeat = now;
                     }
 
@@ -73,54 +90,46 @@ internal sealed class SurefireScheduler(
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "Error in scheduler loop");
-                    try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
+                    try { await Task.Delay(TimeSpan.FromSeconds(5), timeProvider, stoppingToken); }
                     catch (OperationCanceledException) { break; }
                 }
             }
         }
         finally
         {
-            if (_runCreatedSub is not null)
-                await _runCreatedSub.DisposeAsync();
+            var sub = Interlocked.Exchange(ref _runCreatedSub, null);
+            if (sub is not null)
+                await sub.DisposeAsync();
 
             if (!_executingTasks.IsEmpty)
             {
+                // Capture a consistent snapshot of tasks before waiting
+                var snapshot = _executingTasks.ToArray();
+
                 logger.LogInformation("Waiting for {Count} executing tasks to complete (timeout: {Timeout}s)...",
-                    _executingTasks.Count, options.ShutdownTimeout.TotalSeconds);
+                    snapshot.Length, options.ShutdownTimeout.TotalSeconds);
 
-                var allDone = Task.WhenAll(_executingTasks.Values);
-                if (await Task.WhenAny(allDone, Task.Delay(options.ShutdownTimeout)) != allDone)
+                var allDone = Task.WhenAll(snapshot.Select(kvp => kvp.Value));
+                var completed = await Task.WhenAny(allDone, Task.Delay(options.ShutdownTimeout, timeProvider));
+
+                if (completed == allDone)
                 {
-                    logger.LogWarning("{Count} tasks did not complete within shutdown timeout, marking as cancelled", _executingTasks.Count);
-                    var now = timeProvider.GetUtcNow();
-                    foreach (var runId in _executingTasks.Keys)
-                    {
-                        try
-                        {
-                            var run = await store.GetRunAsync(runId);
-                            if (run is { Status.IsTerminal: false })
-                            {
-                                run.Status = JobStatus.Cancelled;
-                                run.CancelledAt ??= now;
-                                run.CompletedAt ??= now;
-                                run.Error = "Cancelled due to application shutdown";
-                                await store.UpdateRunAsync(run);
+                    // All tasks finished within timeout. Observe faulted tasks.
+                    try { await allDone; }
+                    catch { /* Individual task failures are already handled by ExecuteRunAsync */ }
+                }
+                else
+                {
+                    // Timeout expired. Observe faults without blocking shutdown.
+                    _ = allDone.ContinueWith(
+                        static t => { _ = t.Exception; },
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted,
+                        TaskScheduler.Default);
 
-                                try
-                                {
-                                    var payload = JsonSerializer.Serialize(
-                                        new { run.Status, run.Result, run.Error, WillRetry = false },
-                                        options.SerializerOptions);
-                                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), payload);
-                                }
-                                catch { /* Best-effort during shutdown */ }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogError(ex, "Failed to mark run {RunId} as cancelled during shutdown", runId);
-                        }
-                    }
+                    var incomplete = snapshot.Where(kvp => !kvp.Value.IsCompleted).Select(kvp => kvp.Key).ToList();
+                    logger.LogWarning("{Count} tasks did not complete within shutdown timeout — will be recovered on next startup via stale-run detection",
+                        incomplete.Count);
                 }
             }
         }
@@ -128,39 +137,62 @@ internal sealed class SurefireScheduler(
         logger.LogInformation("Surefire scheduler stopped");
     }
 
-    private async Task EnqueueCronJobsAsync(CancellationToken ct)
+    private async Task EnqueueCronJobsAsync(DateTimeOffset since, CancellationToken ct)
     {
         var registeredNames = registry.GetJobNames();
-        var jobs = await store.GetJobsAsync(cancellationToken: ct);
+        var jobs = await store.GetJobsAsync(new JobFilter { IsEnabled = true }, ct);
         var now = timeProvider.GetUtcNow();
 
         foreach (var job in jobs)
         {
             if (!registeredNames.Contains(job.Name)) continue;
             if (job.CronExpression is null) continue;
-            if (!job.IsEnabled) continue;
 
-            var cron = CronExpression.Parse(job.CronExpression);
-            var nextOccurrence = cron.GetNextOccurrence(now.AddMinutes(-1).UtcDateTime, true);
-
-            if (nextOccurrence is null) continue;
-
-            var scheduledAt = new DateTimeOffset(nextOccurrence.Value, TimeSpan.Zero);
-            if (scheduledAt > now) continue;
-
-            var run = new JobRun
+            (string Expression, CronExpression Parsed) cached;
+            try
             {
-                Id = Guid.CreateVersion7().ToString("N"),
-                JobName = job.Name,
-                CreatedAt = now,
-                NotBefore = now,
-                DeduplicationId = $"{job.Name}:{scheduledAt:O}"
-            };
-
-            if (await store.TryCreateRunAsync(run, ct))
+                cached = _cronCache.AddOrUpdate(
+                    job.Name,
+                    _ => (job.CronExpression, CronExpression.Parse(job.CronExpression)),
+                    (_, existing) => existing.Expression == job.CronExpression
+                        ? existing
+                        : (job.CronExpression, CronExpression.Parse(job.CronExpression)));
+            }
+            catch (CronFormatException ex)
             {
-                await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, ct);
-                logger.LogDebug("Enqueued cron job {JobName}", job.Name);
+                logger.LogWarning(ex, "Skipping job {JobName}: invalid cron expression '{Expression}'",
+                    job.Name, job.CronExpression);
+                _cronCache.TryRemove(job.Name, out _);
+                continue;
+            }
+
+            // Enumerate all occurrences in the [since, now] window to catch up after delays.
+            // Deduplication via TryCreateRunAsync prevents double-fire regardless.
+            var occurrence = cached.Parsed.GetNextOccurrence(since.UtcDateTime, false);
+            var catchUpLimit = 10; // Cap to prevent flooding after extended outages
+
+            while (occurrence is not null && catchUpLimit > 0)
+            {
+                var scheduledAt = new DateTimeOffset(occurrence.Value, TimeSpan.Zero);
+                if (scheduledAt > now) break;
+
+                var run = new JobRun
+                {
+                    Id = Guid.CreateVersion7().ToString("N"),
+                    JobName = job.Name,
+                    CreatedAt = now,
+                    NotBefore = now,
+                    DeduplicationId = $"{job.Name}:{scheduledAt:O}"
+                };
+
+                if (await store.TryCreateRunAsync(run, ct))
+                {
+                    await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, ct);
+                    logger.LogDebug("Enqueued cron job {JobName}", job.Name);
+                }
+
+                occurrence = cached.Parsed.GetNextOccurrence(occurrence.Value, false);
+                catchUpLimit--;
             }
         }
     }
@@ -197,6 +229,48 @@ internal sealed class SurefireScheduler(
         }
     }
 
+    private async Task RecoverStaleRunsAsync(CancellationToken ct)
+    {
+        var staleRuns = await store.GetStaleRunsAsync(options.StaleNodeThreshold, ct);
+        if (staleRuns.Count == 0) return;
+
+        foreach (var run in staleRuns)
+        {
+            // Don't recover runs we're currently executing
+            if (_executingTasks.ContainsKey(run.Id)) continue;
+
+            if (await recovery.TryRecoverRunAsync(run, $"Run heartbeat stale (node: {run.NodeName})", ct))
+                logger.LogInformation("Recovered stale run {RunId} for job {JobName}", run.Id, run.JobName);
+        }
+    }
+
+    private async Task SyncJobsAsync(CancellationToken ct)
+    {
+        foreach (var name in registry.GetJobNames())
+        {
+            var job = registry.Get(name);
+            if (job is not null)
+                await store.UpsertJobAsync(job.Definition, ct);
+        }
+    }
+
+    private async Task RemoveOrphanedJobsAsync(CancellationToken ct)
+    {
+        var allJobs = await store.GetJobsAsync(cancellationToken: ct);
+        var allNodes = await store.GetNodesAsync(ct);
+        var coveredJobs = new HashSet<string>(
+            allNodes.SelectMany(n => n.RegisteredJobNames));
+
+        foreach (var job in allJobs)
+        {
+            if (!coveredJobs.Contains(job.Name))
+            {
+                await store.RemoveJobAsync(job.Name, ct);
+                logger.LogInformation("Removed orphaned job {JobName} — no active nodes handle it", job.Name);
+            }
+        }
+    }
+
     private async Task PruneStaleNodesAsync(string currentNodeName, CancellationToken ct)
     {
         var staleThreshold = timeProvider.GetUtcNow() - options.StaleNodeThreshold;
@@ -207,55 +281,27 @@ internal sealed class SurefireScheduler(
 
         foreach (var node in staleNodes)
         {
+            // Re-check the node's heartbeat before acting — it may have come back online
+            // between our initial query and now (TOCTOU protection).
+            var freshNode = await store.GetNodeAsync(node.Name, ct);
+            if (freshNode is null || freshNode.LastHeartbeatAt >= staleThreshold)
+                continue;
+
             // Step 1 — Recover orphaned runs
             var orphanedRuns = await store.GetRunsAsync(new RunFilter { NodeName = node.Name, Status = JobStatus.Running, Take = 1000 }, ct);
-            var now = timeProvider.GetUtcNow();
+
+            if (orphanedRuns.TotalCount > orphanedRuns.Items.Count)
+                logger.LogWarning("Node {NodeName} has {Total} orphaned runs, processing first {Count}",
+                    node.Name, orphanedRuns.TotalCount, orphanedRuns.Items.Count);
 
             foreach (var run in orphanedRuns.Items)
             {
-                var jobDef = await store.GetJobAsync(run.JobName, ct);
-                var retryPolicy = jobDef?.RetryPolicy ?? new RetryPolicy();
-                var canRetry = run.Attempt < retryPolicy.MaxAttempts;
-
-                run.Status = canRetry ? JobStatus.Failed
-                    : retryPolicy.MaxAttempts > 1 ? JobStatus.DeadLetter
-                    : JobStatus.Failed;
-                run.Error = $"Node '{node.Name}' went offline";
-                run.CompletedAt = now;
-                await store.UpdateRunAsync(run, ct);
-
-                // Notify subscribers on this run's channel (SSE log streams, etc.)
-                var completionPayload = System.Text.Json.JsonSerializer.Serialize(
-                    new { run.Status, run.Result, run.Error, WillRetry = canRetry },
-                    options.SerializerOptions);
-                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), completionPayload, ct);
-
-                if (canRetry)
-                {
-                    var retryDelay = retryPolicy.GetDelay(run.Attempt);
-                    var retryRun = new JobRun
-                    {
-                        Id = Guid.CreateVersion7().ToString("N"),
-                        JobName = run.JobName,
-                        Arguments = run.Arguments,
-                        CreatedAt = now,
-                        NotBefore = now + retryDelay,
-                        Attempt = run.Attempt + 1,
-                        OriginalRunId = run.OriginalRunId ?? run.Id
-                    };
-                    await store.CreateRunAsync(retryRun, ct);
-                    await notifications.PublishAsync(NotificationChannels.RunCreated, retryRun.Id, ct);
-                    logger.LogInformation("Created retry {Attempt} for orphaned run {RunId} on stale node {NodeName}",
-                        retryRun.Attempt, run.Id, node.Name);
-                }
-                else if (run.OriginalRunId is not null)
-                {
-                    // Also notify the original run's channel for RunAsync waiters
-                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.OriginalRunId), completionPayload, ct);
-                }
+                if (await recovery.TryRecoverRunAsync(run, $"Node '{node.Name}' went offline", ct))
+                    logger.LogInformation("Recovered orphaned run {RunId} from stale node {NodeName}", run.Id, node.Name);
             }
 
-            // Step 2 — Clean up orphaned jobs
+            // Step 2 — Remove orphaned jobs (no active node handles them).
+            // Safe because SyncJobsAsync re-creates them when a capable node starts.
             var remainingNodes = await store.GetNodesAsync(ct);
             var coveredJobs = new HashSet<string>(
                 remainingNodes
@@ -267,7 +313,7 @@ internal sealed class SurefireScheduler(
                 if (!coveredJobs.Contains(jobName))
                 {
                     await store.RemoveJobAsync(jobName, ct);
-                    logger.LogInformation("Removed orphaned job {JobName} — no remaining nodes handle it", jobName);
+                    logger.LogInformation("Removed orphaned job {JobName} — no active nodes handle it", jobName);
                 }
             }
 

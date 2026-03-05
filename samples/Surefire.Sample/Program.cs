@@ -1,9 +1,13 @@
 using Surefire;
 using Surefire.Dashboard;
+using Surefire.PostgreSql;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSurefire();
+builder.Services.AddSurefire(options =>
+{
+    options.UsePostgreSql("Host=localhost;Database=surefire;Username=postgres;Password=postgres");
+});
 
 var app = builder.Build();
 
@@ -20,55 +24,124 @@ app.AddJob("AddRandom", async (IJobClient client, ILogger<Program> logger, Cance
     })
     .WithDescription("Calls Add with two random numbers");
 
-app.AddJob("SlowJob", async (JobContext jobContext, ILogger<Program> logger, CancellationToken ct, int count = 100) =>
+app.AddJob("DataImport", async (JobContext ctx, ILogger<Program> logger, CancellationToken ct, int count = 100) =>
     {
-        logger.LogInformation("Starting slow job with count {Count}", count);
+        logger.LogInformation("Starting data import with count {Count}", count);
 
         for (var i = 1; i <= count && !ct.IsCancellationRequested; i++)
         {
             var percent = (double)i / count;
-            
+
             logger.LogInformation("Progress: {Percent}%", Math.Round(percent * 100));
-            
-            await jobContext.ReportProgressAsync(percent);
+
+            await ctx.ReportProgressAsync(percent);
             await Task.Delay(1000, ct);
         }
 
-        logger.LogInformation("Finished slow job");
+        logger.LogInformation("Finished data import");
     })
-    .WithDescription("A slow job that reports progress");
+    .WithDescription("Imports data and reports progress")
+    .WithMaxConcurrency(2);
 
-app.AddJob("EveryThirdTime", (JobContext jobContext) =>
+app.AddJob("EveryThirdTime", (JobContext ctx) =>
     {
-        if (jobContext.Attempt < 3)
+        if (ctx.Attempt < 3)
         {
             throw new InvalidOperationException("Only succeeds on the third attempt");
         }
     })
     .WithRetry(3)
-    .OnSuccess((JobContext jobContext, ILogger<Program> logger) =>
+    .OnSuccess((JobContext ctx, ILogger<Program> logger) =>
     {
-        logger.LogInformation("Job {Name} succeeded on attempt {Attempt}", jobContext.JobName, jobContext.Attempt);
+        logger.LogInformation("Job {Name} succeeded on attempt {Attempt}", ctx.JobName, ctx.Attempt);
     })
-    .OnFailure((JobContext jobContext, ILogger<Program> logger) =>
+    .OnFailure((JobContext ctx, ILogger<Program> logger) =>
     {
-        logger.LogWarning("Job {Name} failed on attempt {Attempt}", jobContext.JobName, jobContext.Attempt);
+        logger.LogWarning("Job {Name} failed on attempt {Attempt}", ctx.JobName, ctx.Attempt);
     });
 
-app.AddJob("TriggerSlowJob", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+app.AddJob("ScheduledImport", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {
-        var count = Random.Shared.Next(1, 4);
-        
-        logger.LogInformation("Triggering {Count} jobs", count);
+        var count = Random.Shared.Next(1, 5);
+
+        logger.LogInformation("Triggering {Count} data imports", count);
 
         for (var i = 0; i < count; i++)
         {
-            await client.TriggerAsync("SlowJob", new { count = Random.Shared.Next(5, 15) }, cancellationToken: ct);
+            await client.TriggerAsync("DataImport", new { count = Random.Shared.Next(5, 15) }, cancellationToken: ct);
         }
     })
     .WithCron("* * * * *")
-    .WithDescription("Triggers a random number of SlowJob every minute");
+    .WithDescription("Triggers a random number of DataImport jobs every minute");
+
+app.AddJob("FetchProducts", async (int count, CancellationToken ct) =>
+    {
+        return FetchProducts();
+
+        async IAsyncEnumerable<string> FetchProducts()
+        {
+            string[] products =
+            [
+                "Widget,Electronics,29.99",
+                "Gadget,Electronics,49.99",
+                "Sprocket,Hardware,9.99",
+                "Flanges,Hardware,14.99",
+                "Doohickey,Toys,4.99",
+                "Thingamajig,Toys,7.99",
+                "Whatchamacallit,Kitchen,19.99",
+                "Gizmo,Electronics,34.99",
+            ];
+
+            for (var i = 0; i < count && i < products.Length; i++)
+            {
+                yield return products[i];
+                await Task.Delay(500, ct);
+            }
+        }
+    })
+    .WithDescription("Streams raw product CSV strings");
+
+app.AddJob("ConvertProducts", async (IAsyncEnumerable<string> products, ILogger<Program> logger, CancellationToken ct) =>
+    {
+        return ConvertProducts();
+
+        async IAsyncEnumerable<Product> ConvertProducts()
+        {
+            await foreach (var line in products)
+            {
+                var parts = line.Split(',');
+                var product = new Product(parts[0], parts[1], decimal.Parse(parts[2]));
+
+                logger.LogInformation("Converted: {Product}", product);
+
+                yield return product;
+            }
+        }
+    })
+    .WithDescription("Converts CSV strings into Product records");
+
+app.AddJob("ProcessProducts", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+    {
+        var csv = await client.RunAsync<IAsyncEnumerable<string>>("FetchProducts", new { count = 5 }, ct);
+        var products = await client.RunAsync<IAsyncEnumerable<Product>>("ConvertProducts", new { products = csv }, ct);
+
+        var total = 0m;
+        var count = 0;
+
+        await foreach (var product in products)
+        {
+            total += product.Price;
+            count++;
+        }
+
+        logger.LogInformation("Processed {Count} products totalling {Total}", count, total);
+
+        return new { count, total };
+    })
+    .WithDescription("FetchProducts > ConvertProducts > Summary");
 
 app.MapSurefireDashboard("/");
 
 app.Run();
+
+record Product(string Name, string Category, decimal Price);

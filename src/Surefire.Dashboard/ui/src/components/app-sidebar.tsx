@@ -85,7 +85,7 @@ export function AppSidebar({ theme, onCycleTheme, ...props }: AppSidebarProps) {
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="ghost" size="icon" className="size-8" asChild>
-              <a href="https://batary.dev" target="_blank" rel="noopener noreferrer">
+              <a href="https://batary.dev/surefire" target="_blank" rel="noopener noreferrer">
                 <BookOpen className="size-4 opacity-60" />
                 <span className="sr-only">Docs</span>
               </a>
