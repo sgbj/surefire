@@ -28,7 +28,9 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
                 CronExpression = job.CronExpression,
                 Timeout = job.Timeout,
                 MaxConcurrency = job.MaxConcurrency,
+                Priority = job.Priority,
                 RetryPolicy = job.RetryPolicy,
+                IsContinuous = job.IsContinuous,
                 IsEnabled = job.IsEnabled
             },
             // Update: preserve the stored IsEnabled state (user may have toggled it via dashboard)
@@ -40,7 +42,9 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
                 CronExpression = job.CronExpression,
                 Timeout = job.Timeout,
                 MaxConcurrency = job.MaxConcurrency,
+                Priority = job.Priority,
                 RetryPolicy = job.RetryPolicy,
+                IsContinuous = job.IsContinuous,
                 IsEnabled = existing.IsEnabled
             });
         return Task.CompletedTask;
@@ -84,7 +88,9 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
                 CronExpression = existing.CronExpression,
                 Timeout = existing.Timeout,
                 MaxConcurrency = existing.MaxConcurrency,
+                Priority = existing.Priority,
                 RetryPolicy = existing.RetryPolicy,
+                IsContinuous = existing.IsContinuous,
                 IsEnabled = enabled
             });
         return Task.CompletedTask;
@@ -125,7 +131,9 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
         var query = _runs.Values.AsEnumerable();
 
         if (filter.JobName is not null)
-            query = query.Where(r => r.JobName.Contains(filter.JobName, StringComparison.OrdinalIgnoreCase));
+            query = filter.ExactJobName
+                ? query.Where(r => r.JobName == filter.JobName)
+                : query.Where(r => r.JobName.Contains(filter.JobName, StringComparison.OrdinalIgnoreCase));
 
         if (filter.Status is not null)
             query = query.Where(r => r.Status == filter.Status);
@@ -188,8 +196,8 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
         var jobNameSet = registeredJobNames as IReadOnlySet<string> ?? new HashSet<string>(registeredJobNames);
         lock (_claimLock)
         {
-            // Order by NotBefore then CreatedAt for FIFO semantics
-            foreach (var kvp in _runs.OrderBy(kvp => kvp.Value.NotBefore).ThenBy(kvp => kvp.Value.CreatedAt))
+            // Order by Priority (descending), NotBefore, CreatedAt for priority-aware FIFO
+            foreach (var kvp in _runs.OrderByDescending(kvp => kvp.Value.Priority).ThenBy(kvp => kvp.Value.NotBefore).ThenBy(kvp => kvp.Value.CreatedAt))
             {
                 var run = kvp.Value;
                 if (run.Status != JobStatus.Pending)
@@ -308,6 +316,39 @@ internal sealed class InMemoryJobStore(TimeProvider timeProvider) : IJobStore, I
             .Where(r => r.Status == JobStatus.Running && (r.LastHeartbeatAt is null || r.LastHeartbeatAt < cutoff))
             .ToList();
         return Task.FromResult<IReadOnlyList<JobRun>>(stale);
+    }
+
+    public Task<IReadOnlyList<JobRun>> GetRunTraceAsync(string runId, int limit = 200, CancellationToken cancellationToken = default)
+    {
+        // Walk up to find root
+        var currentId = runId;
+        while (currentId is not null && _runs.TryGetValue(currentId, out var current) && current.ParentRunId is not null)
+        {
+            if (!_runs.ContainsKey(current.ParentRunId))
+                break; // Parent was purged
+            currentId = current.ParentRunId;
+        }
+
+        // BFS down from root
+        var result = new List<JobRun>();
+        var queue = new Queue<string>();
+        queue.Enqueue(currentId!);
+
+        while (queue.Count > 0 && result.Count < limit)
+        {
+            var id = queue.Dequeue();
+            if (!_runs.TryGetValue(id, out var run)) continue;
+            result.Add(run);
+
+            foreach (var child in _runs.Values.Where(r => r.ParentRunId == id))
+                queue.Enqueue(child.Id);
+        }
+
+        result.Sort((a, b) => a.CreatedAt.CompareTo(b.CreatedAt));
+        if (result.Count > limit)
+            result.RemoveRange(limit, result.Count - limit);
+
+        return Task.FromResult<IReadOnlyList<JobRun>>(result);
     }
 
     public Task<DashboardStats> GetDashboardStatsAsync(DateTimeOffset? since = null, int bucketMinutes = 60, CancellationToken cancellationToken = default)

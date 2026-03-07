@@ -85,7 +85,7 @@ export function DataTable<TData, TValue>({
   data,
   toolbar,
   showColumnVisibility = false,
-  defaultPageSize = 20,
+  defaultPageSize = 15,
   ...rest
 }: DataTableProps<TData, TValue>) {
   const isServer = rest.manualPagination === true
@@ -162,7 +162,7 @@ export function DataTable<TData, TValue>({
           )}
         </div>
       )}
-      <div className="rounded-md border">
+      <div className="rounded-lg border overflow-hidden">
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -254,7 +254,7 @@ export function DataTable<TData, TValue>({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper" align="end">
-                {[20, 50, 100].map((size) => (
+                {[15, 25, 50, 100].map((size) => (
                   <SelectItem key={size} value={size.toString()}>
                     {size}
                   </SelectItem>

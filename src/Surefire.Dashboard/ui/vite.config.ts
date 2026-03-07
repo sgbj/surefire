@@ -1,23 +1,23 @@
-import path from "path"
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
+import path from "path";
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig(({ command }) => ({
   plugins: [react(), tailwindcss()],
-  base: command === 'build' ? './' : '/surefire/',
+  base: command === "build" ? "./" : "/surefire/",
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
   },
   build: {
-    outDir: '../wwwroot',
+    outDir: "../wwwroot",
     emptyOutDir: true,
   },
   server: {
     proxy: {
-      '/surefire/api': 'http://localhost:5000',
+      "/surefire/api": "http://localhost:5000",
     },
   },
-}))
+}));

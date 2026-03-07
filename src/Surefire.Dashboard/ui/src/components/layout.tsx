@@ -1,5 +1,6 @@
-import { Outlet } from "react-router"
+import { Outlet, Link } from "react-router"
 import { useState, useEffect, useCallback } from "react"
+import { Flame } from "lucide-react"
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
 import { CommandPalette } from "@/components/command-palette"
@@ -52,11 +53,15 @@ export function Layout() {
   return (
     <SidebarProvider>
       <AppSidebar theme={theme} onCycleTheme={cycleTheme} />
-      <SidebarInset className="min-w-0 overflow-x-hidden">
-        <header className="sticky top-0 z-40 flex h-12 items-center gap-2 border-b bg-background px-4 md:hidden">
+      <SidebarInset className="min-w-0">
+        <header className="sticky top-0 z-40 flex h-12 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
           <SidebarTrigger />
+          <Link to="/" className="flex items-center gap-1.5">
+            <Flame className="size-5 text-primary fill-primary" />
+            <span className="text-sm font-semibold tracking-tight">Surefire</span>
+          </Link>
         </header>
-        <div className="flex-1 overflow-auto p-4 lg:p-6">
+        <div className="p-4 md:p-6 lg:p-8 overflow-x-clip">
           <Outlet />
         </div>
       </SidebarInset>

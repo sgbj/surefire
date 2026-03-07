@@ -14,4 +14,13 @@ internal static class SurefireActivitySource
         activity?.SetTag("surefire.node.name", nodeName);
         return activity;
     }
+
+    public static Activity? StartJobExecution(string jobName, string runId, string nodeName, ActivityContext parentContext)
+    {
+        var activity = Source.StartActivity("job.execute", ActivityKind.Internal, parentContext);
+        activity?.SetTag("surefire.job.name", jobName);
+        activity?.SetTag("surefire.run.id", runId);
+        activity?.SetTag("surefire.node.name", nodeName);
+        return activity;
+    }
 }

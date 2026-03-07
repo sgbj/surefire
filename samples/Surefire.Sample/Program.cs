@@ -6,7 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSurefire(options =>
 {
-    options.UsePostgreSql("Host=localhost;Database=surefire;Username=postgres;Password=postgres");
+    options.UsePostgreSql(builder.Configuration.GetConnectionString("Surefire")!);
 });
 
 var app = builder.Build();
@@ -82,11 +82,11 @@ app.AddJob("FetchProducts", async (int count, CancellationToken ct) =>
         {
             string[] products =
             [
-                "Widget,Electronics,29.99",
-                "Gadget,Electronics,49.99",
-                "Sprocket,Hardware,9.99",
-                "Flanges,Hardware,14.99",
-                "Doohickey,Toys,4.99",
+                "Widget,Electronics,69.99",
+                "Gadget,Electronics,129.99",
+                "Sprocket,Hardware,42.00",
+                "Flanges,Hardware,88.72",
+                "Doohickey,Toys,89.99",
                 "Thingamajig,Toys,7.99",
                 "Whatchamacallit,Kitchen,19.99",
                 "Gizmo,Electronics,34.99",
@@ -95,7 +95,7 @@ app.AddJob("FetchProducts", async (int count, CancellationToken ct) =>
             for (var i = 0; i < count && i < products.Length; i++)
             {
                 yield return products[i];
-                await Task.Delay(500, ct);
+                await Task.Delay(1000, ct);
             }
         }
     })
@@ -138,9 +138,31 @@ app.AddJob("ProcessProducts", async (IJobClient client, ILogger<Program> logger,
 
         return new { count, total };
     })
-    .WithDescription("FetchProducts > ConvertProducts > Summary");
+    .WithDescription("Processes products by streaming data between jobs")
+    .WithTags("streaming");
 
-app.MapSurefireDashboard("/");
+app.AddJob("AlwaysRunning", async (ILogger<Program> logger, CancellationToken ct) =>
+    {
+        for (var i = 1; i <= 10; i++)
+        {
+            logger.LogDebug("Starting iteration {Iteration}", i);
+            await Task.Delay(TimeSpan.FromMinutes(1), ct);
+        }
+    })
+    .AsContinuous();
+
+app.AddJob("Fibonacci", async (IJobClient client, CancellationToken ct, int n = 5) =>
+    {
+        if (n <= 1)
+        {
+            return n;
+        }
+
+        return await client.RunAsync<int>("Fibonacci", new { n = n - 1 }, ct) +
+               await client.RunAsync<int>("Fibonacci", new { n = n - 2 }, ct);
+    });
+
+app.MapSurefireDashboard();
 
 app.Run();
 

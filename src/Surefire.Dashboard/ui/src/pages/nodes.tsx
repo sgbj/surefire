@@ -8,14 +8,14 @@ import { Input } from '@/components/ui/input';
 import { formatRelative } from '@/lib/format';
 import { Link } from 'react-router';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { CircleAlert } from 'lucide-react';
+import { CircleAlert, Search } from 'lucide-react';
 
 const columns: ColumnDef<NodeInfo>[] = [
   {
     accessorKey: "name",
     header: ({ column }) => <SortableHeader column={column}>Name</SortableHeader>,
     cell: ({ row }) => (
-      <Link to={`/nodes/${encodeURIComponent(row.original.name)}`} className="font-medium text-primary hover:underline">
+      <Link to={`/nodes/${encodeURIComponent(row.original.name)}`} className="font-medium text-primary hover:underline truncate max-w-[200px] inline-block" title={row.original.name}>
         {row.original.name}
       </Link>
     ),
@@ -48,19 +48,22 @@ export function NodesPage() {
   }, [nodes, filter]);
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-2xl font-bold tracking-tight">Nodes</h2>
+    <div className="space-y-6">
+      <h2 className="text-xl font-semibold tracking-tight">Nodes</h2>
       {isError && <Alert variant="destructive"><CircleAlert /><AlertDescription>Failed to load nodes</AlertDescription></Alert>}
       <DataTable
         columns={columns}
         data={filtered}
         toolbar={
-          <Input
-            placeholder="Filter nodes..."
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="max-w-sm"
-          />
+          <div className="relative max-w-sm">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+            <Input
+              placeholder="Filter..."
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="pl-8"
+            />
+          </div>
         }
       />
     </div>

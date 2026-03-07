@@ -21,7 +21,7 @@ export function NavMain({
   const location = useLocation()
 
   return (
-    <SidebarGroup>
+    <SidebarGroup className="px-3 py-2.5">
       <SidebarGroupContent>
         <SidebarMenu>
           {items.map((item) => {
@@ -30,10 +30,10 @@ export function NavMain({
               : location.pathname.startsWith(item.url)
 
             return (
-              <SidebarMenuItem key={item.title}>
+              <SidebarMenuItem key={item.title} className={active ? "before:absolute before:-left-1.5 before:top-1/2 before:-translate-y-1/2 before:h-6 before:w-[3px] before:bg-primary before:rounded-full" : ""}>
                 <SidebarMenuButton asChild isActive={active} tooltip={item.title}>
                   <Link to={item.url}>
-                    <item.icon className="opacity-60" />
+                    <item.icon className={active ? "opacity-80" : "opacity-60"} />
                     <span>{item.title}</span>
                   </Link>
                 </SidebarMenuButton>

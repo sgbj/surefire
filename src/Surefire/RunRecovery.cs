@@ -62,6 +62,7 @@ internal sealed class RunRecovery(
                 CreatedAt = retryNow,
                 NotBefore = retryNow + retryDelay,
                 Attempt = run.Attempt + 1,
+                Priority = run.Priority,
                 RetryOfRunId = run.RetryOfRunId ?? run.Id
             };
             await store.CreateRunAsync(retryRun, ct);

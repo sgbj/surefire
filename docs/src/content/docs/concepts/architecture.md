@@ -24,7 +24,7 @@ Surefire has a few moving parts:
 
 Each pending run is claimed atomically — the store updates the status to `Running` and assigns the node in a single operation. This prevents double execution even with multiple nodes polling at the same time.
 
-The claim also respects `NotBefore` (for scheduled runs) and `MaxConcurrency` (if the job limits how many can run at once).
+The claim also respects `Priority` (higher priority runs are claimed first), `NotBefore` (for scheduled runs), and `MaxConcurrency` (if the job limits how many can run at once).
 
 ## Retries
 

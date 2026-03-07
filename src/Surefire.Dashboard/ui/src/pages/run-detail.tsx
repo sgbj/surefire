@@ -13,6 +13,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -24,14 +25,21 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { formatDate, formatLogTime } from "@/lib/format";
-import { Spinner } from "@/components/ui/spinner";
+import { formatDate, formatDuration, formatLogTime } from "@/lib/format";
 import { useLiveDuration } from "@/hooks/use-live-duration";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Ban, CircleAlert, RotateCcw } from "lucide-react";
+import { DtDd } from "@/components/dt-dd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { DtDd } from "@/components/dt-dd";
+import { TraceView } from "@/components/trace-view";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 function formatJsonDisplay(json: string): string {
   try {
@@ -54,20 +62,28 @@ export function RunDetailPage() {
     },
   });
   const isActive = run?.status === 0 || run?.status === 1;
-  const { data: childRuns } = useQuery({
-    queryKey: ["runs", "children", id],
-    queryFn: () => api.getRuns({ parentRunId: id! }),
-    refetchInterval: isActive ? 5000 : false,
-  });
   const { data: retryRuns } = useQuery({
     queryKey: ["runs", "retries", id],
     queryFn: () => api.getRuns({ retryOfRunId: id! }),
     refetchInterval: isActive ? 5000 : false,
   });
+  const { data: childRuns } = useQuery({
+    queryKey: ["runs", "children", id],
+    queryFn: () => api.getRuns({ parentRunId: id! }),
+    refetchInterval: isActive ? 5000 : false,
+  });
+  const { data: traceRuns } = useQuery({
+    queryKey: ["run-trace", id],
+    queryFn: () => api.getRunTrace(id!),
+    refetchInterval: isActive ? 5000 : false,
+  });
   const [logs, setLogs] = useState<RunLogEntry[]>([]);
+  const [logFilter, setLogFilter] = useState<number | null>(null);
   const [sseProgress, setSseProgress] = useState<number | null>(null);
   const [outputItems, setOutputItems] = useState<unknown[]>([]);
-  const [inputItems, setInputItems] = useState<{ param: string; value: unknown }[]>([]);
+  const [inputItems, setInputItems] = useState<
+    { param: string; value: unknown }[]
+  >([]);
   const logViewportRef = useRef<HTMLElement | null>(null);
   const logWrapperRef = useRef<HTMLDivElement>(null);
   const outputWrapperRef = useRef<HTMLDivElement>(null);
@@ -81,6 +97,7 @@ export function RunDetailPage() {
     mutationFn: () => api.cancelRun(id!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["run", id] });
+      queryClient.invalidateQueries({ queryKey: ["run-trace", id] });
       toast.success("Run cancelled");
     },
     onError: () => toast.error("Failed to cancel run"),
@@ -98,6 +115,7 @@ export function RunDetailPage() {
   useEffect(() => {
     if (!id) return;
     setLogs([]);
+    setLogFilter(null);
     setSseProgress(null);
     setOutputItems([]);
     setInputItems([]);
@@ -124,16 +142,27 @@ export function RunDetailPage() {
       try {
         const item = JSON.parse(e.data);
         setOutputItems((prev) => [...prev, item]);
-      } catch { /* ignore malformed */ }
+      } catch {
+        /* ignore malformed */
+      }
     });
-    es.addEventListener("outputComplete", () => { /* stream ended */ });
+    es.addEventListener("outputComplete", () => {
+      /* stream ended */
+    });
     es.addEventListener("input", (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
-        setInputItems((prev) => [...prev, { param: data.param, value: data.value }]);
-      } catch { /* ignore */ }
+        setInputItems((prev) => [
+          ...prev,
+          { param: data.param, value: data.value },
+        ]);
+      } catch {
+        /* ignore */
+      }
     });
-    es.addEventListener("inputComplete", () => { /* no special display action */ });
+    es.addEventListener("inputComplete", () => {
+      /* no special display action */
+    });
     es.addEventListener("status", () => {
       queryClient.invalidateQueries({ queryKey: ["run", id] });
     });
@@ -141,7 +170,7 @@ export function RunDetailPage() {
       doneReceived = true;
       es.close();
       queryClient.invalidateQueries({ queryKey: ["run", id] });
-      queryClient.invalidateQueries({ queryKey: ["runs", "children", id] });
+      queryClient.invalidateQueries({ queryKey: ["run-trace", id] });
       queryClient.invalidateQueries({ queryKey: ["runs", "retries", id] });
     });
     es.onerror = () => {
@@ -176,10 +205,11 @@ export function RunDetailPage() {
   const handleOutputScroll = useCallback((e: Event) => {
     if (programmaticOutputScroll.current) return;
     const el = e.target as HTMLElement;
-    isOutputAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    isOutputAtBottom.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 30;
   }, []);
 
-  const hasRun = !!run;
+  const hasLogs = logs.length > 0;
   useEffect(() => {
     const viewport = logWrapperRef.current?.querySelector<HTMLElement>(
       '[data-slot="scroll-area-viewport"]',
@@ -188,7 +218,13 @@ export function RunDetailPage() {
     logViewportRef.current = viewport;
     viewport.addEventListener("scroll", handleLogScroll, { passive: true });
     return () => viewport.removeEventListener("scroll", handleLogScroll);
-  }, [hasRun, handleLogScroll]);
+  }, [hasLogs, handleLogScroll]);
+
+  const filteredLogs = useMemo(
+    () =>
+      logFilter === null ? logs : logs.filter((l) => l.level >= logFilter),
+    [logs, logFilter],
+  );
 
   const hasOutputItems = outputItems.length > 0;
   useEffect(() => {
@@ -210,7 +246,7 @@ export function RunDetailPage() {
         programmaticScroll.current = false;
       });
     }
-  }, [logs]);
+  }, [filteredLogs]);
 
   useEffect(() => {
     const viewport = outputViewportRef.current;
@@ -238,12 +274,9 @@ export function RunDetailPage() {
     return [...retryRuns.items].sort((a, b) => a.attempt - b.attempt);
   }, [retryRuns]);
 
-  const sortedChildRuns = useMemo(() => {
+  const sortedChildren = useMemo(() => {
     if (!childRuns?.items.length) return [];
-    return [...childRuns.items].sort(
-      (a, b) =>
-        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
+    return [...childRuns.items].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }, [childRuns]);
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
@@ -258,17 +291,31 @@ export function RunDetailPage() {
     );
   if (!run)
     return (
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <Spinner className="size-4" />
-        Loading...
+      <div className="space-y-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-7 w-56" />
+            <Skeleton className="h-5 w-20" />
+          </div>
+          <Skeleton className="h-8 w-20" />
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i}>
+              <Skeleton className="h-3 w-16 mb-1.5" />
+              <Skeleton className="h-4 w-24" />
+            </div>
+          ))}
+        </div>
+        <Skeleton className="h-48 w-full" />
       </div>
     );
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
-          <h2 className="text-2xl font-bold tracking-tight truncate">
+          <h2 className="text-xl font-semibold tracking-tight truncate">
             Run {run.id}
           </h2>
           <StatusBadge status={run.status} />
@@ -335,10 +382,16 @@ export function RunDetailPage() {
 
       {run.status === 1 && (
         <div className="flex items-center gap-3">
-          <Progress
-            value={progress > 0 ? progress * 100 : null}
-            className="h-1.5"
-          />
+          <div className="relative flex-1">
+            <Progress
+              value={progress > 0 ? progress * 100 : null}
+              className="h-1"
+            />
+            <Progress
+              value={progress > 0 ? progress * 100 : null}
+              className="absolute inset-0 h-1 blur-sm opacity-25"
+            />
+          </div>
           {progress > 0 && (
             <span className="text-xs text-muted-foreground tabular-nums shrink-0">
               {Math.round(progress * 100)}%
@@ -351,33 +404,35 @@ export function RunDetailPage() {
         <DtDd label="Job">
           <Link
             to={`/jobs/${encodeURIComponent(run.jobName)}`}
-            className="text-primary hover:underline"
+            className="text-primary hover:underline truncate max-w-[200px] inline-block"
+            title={run.jobName}
           >
             {run.jobName}
           </Link>
         </DtDd>
-        <DtDd label="Duration">
-          <span className="tabular-nums">{duration}</span>
-        </DtDd>
+        {run.startedAt && (
+          <DtDd label="Duration">
+            <span className="tabular-nums">{duration}</span>
+          </DtDd>
+        )}
         {run.attempt > 1 && <DtDd label="Attempt">{run.attempt}</DtDd>}
-        <DtDd label="Node">
-          {run.nodeName ? (
+        {run.nodeName && (
+          <DtDd label="Node">
             <Link
               to={`/nodes/${encodeURIComponent(run.nodeName)}`}
-              className="text-primary hover:underline"
+              className="text-primary hover:underline truncate max-w-[160px] inline-block"
+              title={run.nodeName}
             >
               {run.nodeName}
             </Link>
-          ) : (
-            "-"
-          )}
-        </DtDd>
+          </DtDd>
+        )}
         <DtDd label="Created">{formatDate(run.createdAt)}</DtDd>
         {run.notBefore && run.notBefore !== run.createdAt && (
           <DtDd label="Not before">{formatDate(run.notBefore)}</DtDd>
         )}
-        <DtDd label="Started">{formatDate(run.startedAt)}</DtDd>
-        <DtDd label="Completed">{formatDate(run.completedAt)}</DtDd>
+        {run.startedAt && <DtDd label="Started">{formatDate(run.startedAt)}</DtDd>}
+        {run.completedAt && <DtDd label="Completed">{formatDate(run.completedAt)}</DtDd>}
         {run.cancelledAt && (
           <DtDd label="Cancelled">{formatDate(run.cancelledAt)}</DtDd>
         )}
@@ -385,7 +440,8 @@ export function RunDetailPage() {
           <DtDd label="Retry of">
             <Link
               to={`/runs/${run.retryOfRunId}`}
-              className="text-primary hover:underline"
+              className="text-primary hover:underline truncate max-w-[140px] inline-block"
+              title={run.retryOfRunId}
             >
               {run.retryOfRunId}
             </Link>
@@ -395,7 +451,8 @@ export function RunDetailPage() {
           <DtDd label="Rerun of">
             <Link
               to={`/runs/${run.rerunOfRunId}`}
-              className="text-primary hover:underline"
+              className="text-primary hover:underline truncate max-w-[140px] inline-block"
+              title={run.rerunOfRunId}
             >
               {run.rerunOfRunId}
             </Link>
@@ -405,7 +462,8 @@ export function RunDetailPage() {
           <DtDd label="Triggered by">
             <Link
               to={`/runs/${run.parentRunId}`}
-              className="text-primary hover:underline"
+              className="text-primary hover:underline truncate max-w-[140px] inline-block"
+              title={run.parentRunId}
             >
               {run.parentRunId}
             </Link>
@@ -414,173 +472,232 @@ export function RunDetailPage() {
       </dl>
 
       {run.arguments && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">Arguments</h3>
-          <pre className="text-xs bg-muted/30 p-2 rounded whitespace-pre-wrap break-all font-mono">
-            {formatJsonDisplay(run.arguments)}
-          </pre>
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Arguments</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.arguments)}
+            </pre>
+          </ScrollArea>
         </div>
       )}
 
       {run.result && outputItems.length === 0 && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">Result</h3>
-          <pre className="text-xs bg-muted/30 p-2 rounded whitespace-pre-wrap break-all font-mono">
-            {formatJsonDisplay(run.result)}
-          </pre>
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Result</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.result)}
+            </pre>
+          </ScrollArea>
         </div>
       )}
 
       {run.error && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">Error</h3>
-          <pre className="text-xs bg-muted/30 p-2 rounded overflow-x-auto font-mono">
-            {run.error}
-          </pre>
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Error</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {run.error}
+            </pre>
+          </ScrollArea>
+        </div>
+      )}
+
+      {traceRuns && traceRuns.length > 1 && (
+        <TraceView runs={traceRuns} currentRunId={id!} />
+      )}
+
+      {sortedChildren.length > 0 && (
+        <div className="max-h-[26rem] overflow-auto rounded-md border">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Triggered runs ({sortedChildren.length})</span>
+            </div>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="pl-4">ID</TableHead>
+                    <TableHead>Job</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Started</TableHead>
+                    <TableHead>Duration</TableHead>
+                    <TableHead>Node</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedChildren.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className="pl-4">
+                        <Link
+                          to={`/runs/${r.id}`}
+                          className="text-primary hover:underline truncate max-w-[140px] inline-block"
+                          title={r.id}
+                        >
+                          {r.id}
+                        </Link>
+                      </TableCell>
+                      <TableCell>
+                        <Link to={`/jobs/${encodeURIComponent(r.jobName)}`} className="text-primary hover:underline truncate max-w-[200px] inline-block" title={r.jobName}>
+                          {r.jobName}
+                        </Link>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={r.status} />
+                      </TableCell>
+                      <TableCell>
+                        {r.startedAt ? formatDate(r.startedAt) : '-'}
+                      </TableCell>
+                      <TableCell>
+                        {formatDuration(r.startedAt, r.completedAt)}
+                      </TableCell>
+                      <TableCell>
+                        {r.nodeName ? (
+                          <Link
+                            to={`/nodes/${encodeURIComponent(r.nodeName)}`}
+                            className="text-primary hover:underline truncate max-w-[160px] inline-block"
+                            title={r.nodeName}
+                          >
+                            {r.nodeName}
+                          </Link>
+                        ) : '-'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
         </div>
       )}
 
       {sortedRetries.length > 0 && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">
-            Retries ({sortedRetries.length})
-          </h3>
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="pl-4">ID</TableHead>
-                  <TableHead>Attempt</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Started</TableHead>
-                  <TableHead>Node</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sortedRetries.map((r) => (
-                  <TableRow key={r.id}>
-                    <TableCell className="pl-4">
-                      <Link
-                        to={`/runs/${r.id}`}
-                        className="text-sm text-primary hover:underline"
-                      >
-                        {r.id}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm">{r.attempt}</span>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={r.status} />
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm">{formatDate(r.startedAt)}</span>
-                    </TableCell>
-                    <TableCell>
-                      {r.nodeName ? (
+        <div className="max-h-[26rem] overflow-auto rounded-md border">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Retries ({sortedRetries.length})</span>
+            </div>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="pl-4">ID</TableHead>
+                    <TableHead>Attempt</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Started</TableHead>
+                    <TableHead>Node</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedRetries.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className="pl-4">
                         <Link
-                          to={`/nodes/${encodeURIComponent(r.nodeName)}`}
-                          className="text-sm text-primary hover:underline"
+                          to={`/runs/${r.id}`}
+                          className="text-primary hover:underline truncate max-w-[140px] inline-block"
+                          title={r.id}
                         >
-                          {r.nodeName}
+                          {r.id}
                         </Link>
-                      ) : (
-                        <span className="text-sm">-</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </div>
-      )}
-
-      {sortedChildRuns.length > 0 && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">
-            Triggered runs ({sortedChildRuns.length})
-          </h3>
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="pl-4">ID</TableHead>
-                  <TableHead>Job</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sortedChildRuns.map((child) => (
-                  <TableRow key={child.id}>
-                    <TableCell className="pl-4">
-                      <Link
-                        to={`/runs/${child.id}`}
-                        className="text-sm text-primary hover:underline"
-                      >
-                        {child.id}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <Link
-                        to={`/jobs/${encodeURIComponent(child.jobName)}`}
-                        className="text-sm text-primary hover:underline"
-                      >
-                        {child.jobName}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={child.status} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+                      </TableCell>
+                      <TableCell>
+                        {r.attempt}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={r.status} />
+                      </TableCell>
+                      <TableCell>
+                        {formatDate(r.startedAt)}
+                      </TableCell>
+                      <TableCell>
+                        {r.nodeName ? (
+                          <Link
+                            to={`/nodes/${encodeURIComponent(r.nodeName)}`}
+                            className="text-primary hover:underline truncate max-w-[160px] inline-block"
+                            title={r.nodeName}
+                          >
+                            {r.nodeName}
+                          </Link>
+                        ) : null}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
         </div>
       )}
 
       {inputItems.length > 0 && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">{inputHeader}</h3>
-          <ScrollArea className="h-[26rem] rounded-md bg-muted/30 p-2 font-mono text-xs">
-            {inputItems.map((item, i) => (
-              <div key={i} className="py-0.5">
-                <span className="text-muted-foreground">{item.param}:</span>{" "}
-                {typeof item.value === "object"
-                  ? JSON.stringify(item.value)
-                  : String(item.value)}
-              </div>
-            ))}
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30 font-mono text-[13px]">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground font-sans">{inputHeader}</span>
+            </div>
+            <div className="p-2">
+              {inputItems.map((item, i) => (
+                <div key={i} className="py-0.5 break-all">
+                  <span className="text-muted-foreground">{item.param}:</span>{" "}
+                  {JSON.stringify(item.value)}
+                </div>
+              ))}
+            </div>
           </ScrollArea>
         </div>
       )}
 
       {outputItems.length > 0 && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">
-            Output stream ({outputItems.length} items)
-          </h3>
-          <div ref={outputWrapperRef}>
-            <ScrollArea className="h-[26rem] rounded-md bg-muted/30 p-2 font-mono text-xs">
+        <div ref={outputWrapperRef} className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30 font-mono text-[13px]">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground font-sans">
+                Output stream ({outputItems.length} items)
+              </span>
+            </div>
+            <div className="p-2">
               {outputItems.map((item, i) => (
-                <div key={i} className="py-0.5">
-                  {typeof item === "object" ? JSON.stringify(item) : String(item)}
+                <div key={i} className="py-0.5 break-all">
+                  {JSON.stringify(item)}
                 </div>
               ))}
-            </ScrollArea>
-          </div>
+            </div>
+          </ScrollArea>
         </div>
       )}
 
       {logs.length > 0 && (
-        <div>
-          <h3 className="text-sm text-muted-foreground mb-1">
-            Logs ({logs.length})
-          </h3>
-          <div ref={logWrapperRef}>
-            <ScrollArea className="h-[26rem] rounded-md bg-muted/30 p-2 font-mono text-xs">
-              {logs.map((log, i) => (
+        <div ref={logWrapperRef} className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30 font-mono text-[13px]">
+            <div className="sticky top-0 z-10 flex items-center gap-3 h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground font-sans">
+                Logs (
+                {logFilter !== null
+                  ? `${filteredLogs.length} / ${logs.length}`
+                  : logs.length}
+                )
+              </span>
+              <Select
+                value={logFilter === null ? "all" : String(logFilter)}
+                onValueChange={(v) =>
+                  setLogFilter(v === "all" ? null : Number(v))
+                }
+              >
+                <SelectTrigger className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground font-sans gap-0.5 [&_svg]:size-3">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="0">Trace</SelectItem>
+                  <SelectItem value="1">Debug</SelectItem>
+                  <SelectItem value="2">Info</SelectItem>
+                  <SelectItem value="3">Warning</SelectItem>
+                  <SelectItem value="4">Error</SelectItem>
+                  <SelectItem value="5">Critical</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="p-2">
+              {filteredLogs.map((log, i) => (
                 <div key={i} className="py-0.5">
                   <span className="text-muted-foreground tabular-nums">
                     {formatLogTime(log.timestamp)}
@@ -591,8 +708,8 @@ export function RunDetailPage() {
                   <span>{log.message}</span>
                 </div>
               ))}
-            </ScrollArea>
-          </div>
+            </div>
+          </ScrollArea>
         </div>
       )}
     </div>

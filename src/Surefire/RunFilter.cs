@@ -10,6 +10,7 @@ public enum RunOrderBy
 public sealed class RunFilter
 {
     public string? JobName { get; set; }
+    public bool ExactJobName { get; set; }
     public JobStatus? Status { get; set; }
     public string? NodeName { get; set; }
     public string? ParentRunId { get; set; }

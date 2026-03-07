@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -30,7 +31,23 @@ internal sealed class JobExecutor(
             return;
         }
 
-        using var activity = SurefireActivitySource.StartJobExecution(run.JobName, run.Id, run.NodeName ?? "unknown");
+        // Look up parent trace context for distributed tracing
+        Activity? parentActivity = null;
+        if (run.ParentRunId is not null)
+        {
+            var parentRun = await store.GetRunAsync(run.ParentRunId, shutdownToken);
+            if (parentRun?.TraceId is not null && parentRun.SpanId is not null)
+            {
+                var parentContext = new ActivityContext(
+                    ActivityTraceId.CreateFromString(parentRun.TraceId),
+                    ActivitySpanId.CreateFromString(parentRun.SpanId),
+                    ActivityTraceFlags.Recorded);
+                parentActivity = SurefireActivitySource.StartJobExecution(
+                    run.JobName, run.Id, run.NodeName ?? "unknown", parentContext);
+            }
+        }
+        using var activity = parentActivity
+            ?? SurefireActivitySource.StartJobExecution(run.JobName, run.Id, run.NodeName ?? "unknown");
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
 
         var hasTimeout = false;
@@ -72,7 +89,8 @@ internal sealed class JobExecutor(
             };
 
             JobContext.Current.Value = ctx;
-            SurefireMetrics.ActiveRuns.Add(1);
+            var tags = new TagList { { "surefire.job.name", run.JobName } };
+            SurefireMetrics.ActiveRuns.Add(1, tags);
 
             var now = timeProvider.GetUtcNow();
             run.StartedAt = now;
@@ -113,14 +131,17 @@ internal sealed class JobExecutor(
                 await store.UpdateRunAsync(run);
                 await AppendStatusEventAsync(run);
 
-                SurefireMetrics.JobsExecuted.Add(1);
-                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds);
+                SurefireMetrics.JobsExecuted.Add(1, tags);
+                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds, tags);
 
                 ctx.Result = run.Result is not null
                     ? JsonSerializer.Deserialize<object>(run.Result, options.SerializerOptions)
                     : null;
                 await InvokeCallbacksAsync(options.OnSuccessCallbacks, sp, ctx, "OnSuccess", run.JobName);
                 await InvokeCallbacksAsync(registered.OnSuccessCallbacks, sp, ctx, "OnSuccess", run.JobName);
+
+                if (registered.Definition.IsContinuous)
+                    await ScheduleContinuousRestartAsync(run, registered);
             }
             catch (OperationCanceledException) when (Volatile.Read(ref userCancelled) == 1)
             {
@@ -129,6 +150,7 @@ internal sealed class JobExecutor(
                 run.CompletedAt = timeProvider.GetUtcNow();
                 await store.UpdateRunAsync(run);
                 await AppendStatusEventAsync(run);
+                SurefireMetrics.JobsCancelled.Add(1, tags);
             }
             catch (ChildRunCancelledException)
             {
@@ -138,16 +160,17 @@ internal sealed class JobExecutor(
                 run.CompletedAt = timeProvider.GetUtcNow();
                 await store.UpdateRunAsync(run);
                 await AppendStatusEventAsync(run);
+                SurefireMetrics.JobsCancelled.Add(1, tags);
             }
             catch (OperationCanceledException) when (hasTimeout && !shutdownToken.IsCancellationRequested)
             {
                 // Timeout (not shutdown): mark as Failed with retry opportunity
                 var elapsed = Stopwatch.GetElapsedTime(start);
-                SurefireMetrics.JobsFailed.Add(1);
-                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds);
+                SurefireMetrics.JobsFailed.Add(1, tags);
+                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds, tags);
 
                 ctx.Exception = new TimeoutException("Job timed out");
-                await HandleFailureWithRetryAsync(run, "Job timed out", registered, sp, ctx);
+                await HandleFailureWithRetryAsync(run, "Job timed out", registered, sp, ctx, tags);
 
                 activity?.SetStatus(ActivityStatusCode.Error, "Job timed out");
             }
@@ -155,26 +178,26 @@ internal sealed class JobExecutor(
             {
                 // Shutdown: mark as Failed with retry opportunity
                 var elapsed = Stopwatch.GetElapsedTime(start);
-                SurefireMetrics.JobsFailed.Add(1);
-                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds);
+                SurefireMetrics.JobsFailed.Add(1, tags);
+                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds, tags);
 
                 ctx.Exception = new OperationCanceledException("Application shutdown");
-                await HandleFailureWithRetryAsync(run, "Application shutdown", registered, sp, ctx);
+                await HandleFailureWithRetryAsync(run, "Application shutdown", registered, sp, ctx, tags);
             }
             catch (Exception ex)
             {
                 var elapsed = Stopwatch.GetElapsedTime(start);
-                SurefireMetrics.JobsFailed.Add(1);
-                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds);
+                SurefireMetrics.JobsFailed.Add(1, tags);
+                SurefireMetrics.JobDuration.Record(elapsed.TotalMilliseconds, tags);
 
                 ctx.Exception = ex;
-                await HandleFailureWithRetryAsync(run, ex.ToString(), registered, sp, ctx);
+                await HandleFailureWithRetryAsync(run, ex.ToString(), registered, sp, ctx, tags);
 
                 activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             }
             finally
             {
-                SurefireMetrics.ActiveRuns.Add(-1);
+                SurefireMetrics.ActiveRuns.Add(-1, tags);
                 JobContext.Current.Value = null;
                 try
                 {
@@ -212,7 +235,7 @@ internal sealed class JobExecutor(
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), "");
     }
 
-    private async Task HandleFailureWithRetryAsync(JobRun run, string error, RegisteredJob registered, IServiceProvider sp, JobContext ctx)
+    private async Task HandleFailureWithRetryAsync(JobRun run, string error, RegisteredJob registered, IServiceProvider sp, JobContext ctx, TagList tags = default)
     {
         await InvokeCallbacksAsync(options.OnFailureCallbacks, sp, ctx, "OnFailure", run.JobName);
         await InvokeCallbacksAsync(registered.OnFailureCallbacks, sp, ctx, "OnFailure", run.JobName);
@@ -235,10 +258,12 @@ internal sealed class JobExecutor(
                 Attempt = run.Attempt + 1,
                 CreatedAt = now,
                 NotBefore = now + delay,
+                Priority = run.Priority,
                 RetryOfRunId = run.RetryOfRunId ?? run.Id
             };
             await store.CreateRunAsync(retryRun);
             await notifications.PublishAsync(NotificationChannels.RunCreated, retryRun.Id);
+            SurefireMetrics.JobsRetried.Add(1, tags);
 
             run.Status = JobStatus.Failed;
             run.Error = error;
@@ -256,9 +281,13 @@ internal sealed class JobExecutor(
 
         if (run.Status == JobStatus.DeadLetter)
         {
+            SurefireMetrics.JobsDeadLettered.Add(1, tags);
             await InvokeCallbacksAsync(options.OnDeadLetterCallbacks, sp, ctx, "OnDeadLetter", run.JobName);
             await InvokeCallbacksAsync(registered.OnDeadLetterCallbacks, sp, ctx, "OnDeadLetter", run.JobName);
         }
+
+        if (registered.Definition.IsContinuous)
+            await ScheduleContinuousRestartAsync(run, registered);
     }
 
     private async Task EnumerateOutputAsync(JobRun run, object result, CancellationToken ct)
@@ -310,6 +339,34 @@ internal sealed class JobExecutor(
         };
         await store.AppendEventAsync(evt);
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), "");
+    }
+
+    private async Task ScheduleContinuousRestartAsync(JobRun run, RegisteredJob registered)
+    {
+        var jobDef = await store.GetJobAsync(run.JobName);
+        if (jobDef?.IsEnabled == false) return;
+
+        var desired = registered.Definition.MaxConcurrency ?? 1;
+        var pending = await store.GetRunsAsync(
+            new RunFilter { JobName = run.JobName, ExactJobName = true, Status = JobStatus.Pending, Take = desired });
+        if (pending.Items.Count >= desired) return;
+
+        var now = timeProvider.GetUtcNow();
+        var delay = run.Status == JobStatus.Completed
+            ? TimeSpan.Zero
+            : registered.Definition.RetryPolicy.InitialDelay;
+
+        var restartRun = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = run.JobName,
+            CreatedAt = now,
+            NotBefore = now + delay,
+            Priority = run.Priority,
+        };
+        await store.CreateRunAsync(restartRun);
+        await notifications.PublishAsync(NotificationChannels.RunCreated, restartRun.Id);
+        logger.LogDebug("Scheduled continuous restart for job {JobName}", run.JobName);
     }
 
     private async Task InvokeCallbacksAsync(

@@ -26,7 +26,9 @@ internal sealed class PostgreSqlJobStore(
                 cron_expression TEXT,
                 timeout INTERVAL,
                 max_concurrency INT,
+                priority INT NOT NULL DEFAULT 0,
                 retry_policy JSONB,
+                is_continuous BOOLEAN NOT NULL DEFAULT FALSE,
                 is_enabled BOOLEAN NOT NULL DEFAULT TRUE
             );
 
@@ -50,11 +52,12 @@ internal sealed class PostgreSqlJobStore(
                 retry_of_run_id TEXT,
                 rerun_of_run_id TEXT,
                 not_before TIMESTAMPTZ NOT NULL,
+                priority INT NOT NULL DEFAULT 0,
                 deduplication_id TEXT,
                 last_heartbeat_at TIMESTAMPTZ
             );
 
-            CREATE INDEX IF NOT EXISTS ix_runs_status_not_before ON {Schema}.runs (status, not_before);
+            CREATE INDEX IF NOT EXISTS ix_runs_claim ON {Schema}.runs (priority DESC, not_before, created_at) WHERE status = 0;
             CREATE INDEX IF NOT EXISTS ix_runs_job_name_status ON {Schema}.runs (job_name, status);
             CREATE INDEX IF NOT EXISTS ix_runs_created_at ON {Schema}.runs (created_at DESC);
             CREATE INDEX IF NOT EXISTS ix_runs_retry_of_run_id ON {Schema}.runs (retry_of_run_id);
@@ -90,12 +93,6 @@ internal sealed class PostgreSqlJobStore(
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
-
-        // Migration: add last_heartbeat_at column if missing (for existing databases)
-        var addColSql = $"ALTER TABLE {Schema}.runs ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;";
-        await using var addColCmd = new NpgsqlCommand(addColSql, conn);
-        await addColCmd.ExecuteNonQueryAsync(cancellationToken);
-
     }
 
     // -- Jobs --
@@ -103,15 +100,17 @@ internal sealed class PostgreSqlJobStore(
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
         var sql = $"""
-            INSERT INTO {Schema}.jobs (name, description, tags, cron_expression, timeout, max_concurrency, retry_policy, is_enabled)
-            VALUES (@name, @description, @tags, @cron_expression, @timeout, @max_concurrency, @retry_policy, @is_enabled)
+            INSERT INTO {Schema}.jobs (name, description, tags, cron_expression, timeout, max_concurrency, priority, retry_policy, is_continuous, is_enabled)
+            VALUES (@name, @description, @tags, @cron_expression, @timeout, @max_concurrency, @priority, @retry_policy, @is_continuous, @is_enabled)
             ON CONFLICT (name) DO UPDATE SET
                 description = EXCLUDED.description,
                 tags = EXCLUDED.tags,
                 cron_expression = EXCLUDED.cron_expression,
                 timeout = EXCLUDED.timeout,
                 max_concurrency = EXCLUDED.max_concurrency,
-                retry_policy = EXCLUDED.retry_policy
+                priority = EXCLUDED.priority,
+                retry_policy = EXCLUDED.retry_policy,
+                is_continuous = EXCLUDED.is_continuous
             """;
 
         await using var cmd = _dataSource.CreateCommand(sql);
@@ -121,7 +120,9 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.Add(NullableText("cron_expression", job.CronExpression));
         cmd.Parameters.Add(NullableInterval("timeout", job.Timeout));
         cmd.Parameters.Add(NullableInt("max_concurrency", job.MaxConcurrency));
+        cmd.Parameters.Add(new NpgsqlParameter<int>("priority", job.Priority));
         cmd.Parameters.Add(new NpgsqlParameter("retry_policy", NpgsqlDbType.Jsonb) { Value = JsonSerializer.Serialize(job.RetryPolicy, JsonOptions) });
+        cmd.Parameters.Add(new NpgsqlParameter<bool>("is_continuous", job.IsContinuous));
         cmd.Parameters.Add(new NpgsqlParameter<bool>("is_enabled", job.IsEnabled));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -199,8 +200,8 @@ internal sealed class PostgreSqlJobStore(
         }
 
         var sql = $"""
-            INSERT INTO {Schema}.runs (id, job_name, status, arguments, result, error, progress, created_at, started_at, completed_at, cancelled_at, node_name, attempt, trace_id, span_id, parent_run_id, retry_of_run_id, rerun_of_run_id, not_before, deduplication_id, last_heartbeat_at)
-            VALUES (@id, @job_name, @status, @arguments, @result, @error, @progress, @created_at, @started_at, @completed_at, @cancelled_at, @node_name, @attempt, @trace_id, @span_id, @parent_run_id, @retry_of_run_id, @rerun_of_run_id, @not_before, @deduplication_id, @last_heartbeat_at)
+            INSERT INTO {Schema}.runs (id, job_name, status, arguments, result, error, progress, created_at, started_at, completed_at, cancelled_at, node_name, attempt, trace_id, span_id, parent_run_id, retry_of_run_id, rerun_of_run_id, not_before, priority, deduplication_id, last_heartbeat_at)
+            VALUES (@id, @job_name, @status, @arguments, @result, @error, @progress, @created_at, @started_at, @completed_at, @cancelled_at, @node_name, @attempt, @trace_id, @span_id, @parent_run_id, @retry_of_run_id, @rerun_of_run_id, @not_before, @priority, @deduplication_id, @last_heartbeat_at)
             ON CONFLICT (deduplication_id) WHERE deduplication_id IS NOT NULL DO NOTHING
             """;
 
@@ -226,8 +227,16 @@ internal sealed class PostgreSqlJobStore(
 
         if (filter.JobName is not null)
         {
-            where += " AND job_name ILIKE @job_name ESCAPE '\\'";
-            cmd.Parameters.Add(new NpgsqlParameter<string>("job_name", $"%{EscapeLike(filter.JobName)}%"));
+            if (filter.ExactJobName)
+            {
+                where += " AND job_name = @job_name";
+                cmd.Parameters.Add(new NpgsqlParameter<string>("job_name", filter.JobName));
+            }
+            else
+            {
+                where += " AND job_name ILIKE @job_name ESCAPE '\\'";
+                cmd.Parameters.Add(new NpgsqlParameter<string>("job_name", $"%{EscapeLike(filter.JobName)}%"));
+            }
         }
         if (filter.Status is not null)
         {
@@ -323,6 +332,7 @@ internal sealed class PostgreSqlJobStore(
                 retry_of_run_id = @retry_of_run_id,
                 rerun_of_run_id = @rerun_of_run_id,
                 not_before = @not_before,
+                priority = @priority,
                 deduplication_id = @deduplication_id,
                 last_heartbeat_at = @last_heartbeat_at
             WHERE id = @id
@@ -392,7 +402,7 @@ internal sealed class PostgreSqlJobStore(
                       OR (SELECT COUNT(*) FROM {Schema}.runs r2 WHERE r2.job_name = r.job_name AND r2.status = 1)
                          < (SELECT j.max_concurrency FROM {Schema}.jobs j WHERE j.name = r.job_name)
                   )
-                ORDER BY r.not_before, r.created_at
+                ORDER BY r.priority DESC, r.not_before, r.created_at
                 LIMIT 1
                 FOR UPDATE OF r SKIP LOCKED
             )
@@ -577,6 +587,40 @@ internal sealed class PostgreSqlJobStore(
         return runs;
     }
 
+    // -- Trace --
+
+    public async Task<IReadOnlyList<JobRun>> GetRunTraceAsync(string runId, int limit = 200, CancellationToken cancellationToken = default)
+    {
+        var sql = $"""
+            WITH RECURSIVE ancestors AS (
+                SELECT r.* FROM {Schema}.runs r WHERE r.id = @id
+                UNION ALL
+                SELECT p.* FROM {Schema}.runs p JOIN ancestors a ON a.parent_run_id = p.id
+            ),
+            root AS (
+                SELECT a.id FROM ancestors a
+                WHERE NOT EXISTS (SELECT 1 FROM ancestors b WHERE b.id = a.parent_run_id)
+                LIMIT 1
+            ),
+            descendants AS (
+                SELECT r.* FROM {Schema}.runs r JOIN root ON r.id = root.id
+                UNION ALL
+                SELECT c.* FROM {Schema}.runs c JOIN descendants d ON c.parent_run_id = d.id
+            )
+            SELECT * FROM descendants ORDER BY created_at LIMIT @limit
+            """;
+
+        await using var cmd = _dataSource.CreateCommand(sql);
+        cmd.Parameters.Add(new NpgsqlParameter<string>("id", runId));
+        cmd.Parameters.Add(new NpgsqlParameter<int>("limit", limit));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        var runs = new List<JobRun>();
+        while (await reader.ReadAsync(cancellationToken))
+            runs.Add(ReadRun(reader));
+        return runs;
+    }
+
     // -- Dashboard Stats --
 
     public async Task<DashboardStats> GetDashboardStatsAsync(DateTimeOffset? since = null, int bucketMinutes = 60, CancellationToken cancellationToken = default)
@@ -742,8 +786,8 @@ internal sealed class PostgreSqlJobStore(
     private async Task InsertRunAsync(JobRun run, CancellationToken cancellationToken)
     {
         var sql = $"""
-            INSERT INTO {Schema}.runs (id, job_name, status, arguments, result, error, progress, created_at, started_at, completed_at, cancelled_at, node_name, attempt, trace_id, span_id, parent_run_id, retry_of_run_id, rerun_of_run_id, not_before, deduplication_id, last_heartbeat_at)
-            VALUES (@id, @job_name, @status, @arguments, @result, @error, @progress, @created_at, @started_at, @completed_at, @cancelled_at, @node_name, @attempt, @trace_id, @span_id, @parent_run_id, @retry_of_run_id, @rerun_of_run_id, @not_before, @deduplication_id, @last_heartbeat_at)
+            INSERT INTO {Schema}.runs (id, job_name, status, arguments, result, error, progress, created_at, started_at, completed_at, cancelled_at, node_name, attempt, trace_id, span_id, parent_run_id, retry_of_run_id, rerun_of_run_id, not_before, priority, deduplication_id, last_heartbeat_at)
+            VALUES (@id, @job_name, @status, @arguments, @result, @error, @progress, @created_at, @started_at, @completed_at, @cancelled_at, @node_name, @attempt, @trace_id, @span_id, @parent_run_id, @retry_of_run_id, @rerun_of_run_id, @not_before, @priority, @deduplication_id, @last_heartbeat_at)
             """;
 
         await using var cmd = _dataSource.CreateCommand(sql);
@@ -772,6 +816,7 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.Add(NullableText("retry_of_run_id", run.RetryOfRunId));
         cmd.Parameters.Add(NullableText("rerun_of_run_id", run.RerunOfRunId));
         cmd.Parameters.Add(new NpgsqlParameter<DateTimeOffset>("not_before", run.NotBefore));
+        cmd.Parameters.Add(new NpgsqlParameter<int>("priority", run.Priority));
         cmd.Parameters.Add(NullableText("deduplication_id", run.DeduplicationId));
         cmd.Parameters.Add(NullableTimestampTz("last_heartbeat_at", run.LastHeartbeatAt));
     }
@@ -802,9 +847,11 @@ internal sealed class PostgreSqlJobStore(
             CronExpression = reader.IsDBNull(reader.GetOrdinal("cron_expression")) ? null : reader.GetString(reader.GetOrdinal("cron_expression")),
             Timeout = reader.IsDBNull(reader.GetOrdinal("timeout")) ? null : reader.GetFieldValue<TimeSpan>(reader.GetOrdinal("timeout")),
             MaxConcurrency = reader.IsDBNull(reader.GetOrdinal("max_concurrency")) ? null : reader.GetInt32(reader.GetOrdinal("max_concurrency")),
+            Priority = reader.GetInt32(reader.GetOrdinal("priority")),
             RetryPolicy = retryPolicyJson is not null
                 ? JsonSerializer.Deserialize<RetryPolicy>(retryPolicyJson, JsonOptions) ?? new RetryPolicy()
                 : new RetryPolicy(),
+            IsContinuous = reader.GetBoolean(reader.GetOrdinal("is_continuous")),
             IsEnabled = reader.GetBoolean(reader.GetOrdinal("is_enabled"))
         };
     }
@@ -832,6 +879,7 @@ internal sealed class PostgreSqlJobStore(
             RetryOfRunId = reader.IsDBNull(reader.GetOrdinal("retry_of_run_id")) ? null : reader.GetString(reader.GetOrdinal("retry_of_run_id")),
             RerunOfRunId = reader.IsDBNull(reader.GetOrdinal("rerun_of_run_id")) ? null : reader.GetString(reader.GetOrdinal("rerun_of_run_id")),
             NotBefore = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("not_before")),
+            Priority = reader.GetInt32(reader.GetOrdinal("priority")),
             DeduplicationId = reader.IsDBNull(reader.GetOrdinal("deduplication_id")) ? null : reader.GetString(reader.GetOrdinal("deduplication_id")),
             LastHeartbeatAt = reader.IsDBNull(reader.GetOrdinal("last_heartbeat_at")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("last_heartbeat_at"))
         };

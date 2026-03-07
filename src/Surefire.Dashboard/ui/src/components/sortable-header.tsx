@@ -12,7 +12,7 @@ export function SortableHeader<TData>({ column, children }: SortableHeaderProps<
     <Button
       variant="ghost"
       onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-      className="-ml-4"
+      className="-ml-4 text-xs font-medium uppercase tracking-wider text-muted-foreground"
     >
       {children}
       <ArrowUpDown className="ml-1 h-3.5 w-3.5 opacity-40" />

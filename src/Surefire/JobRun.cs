@@ -21,6 +21,7 @@ public sealed class JobRun
     public string? RetryOfRunId { get; set; }
     public string? RerunOfRunId { get; set; }
     public DateTimeOffset NotBefore { get; set; }
+    public int Priority { get; set; }
     public string? DeduplicationId { get; set; }
     public DateTimeOffset? LastHeartbeatAt { get; set; }
 }

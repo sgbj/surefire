@@ -8,14 +8,14 @@ import { SortableHeader } from '@/components/sortable-header';
 import { Input } from '@/components/ui/input';
 import { Link } from 'react-router';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { CircleAlert } from 'lucide-react';
+import { CircleAlert, Search } from 'lucide-react';
 
 const columns: ColumnDef<JobDefinition>[] = [
   {
     accessorKey: "name",
     header: ({ column }) => <SortableHeader column={column}>Name</SortableHeader>,
     cell: ({ row }) => (
-      <Link to={`/jobs/${encodeURIComponent(row.original.name)}`} className="font-medium text-primary hover:underline">
+      <Link to={`/jobs/${encodeURIComponent(row.original.name)}`} className="font-medium text-primary hover:underline truncate max-w-[200px] inline-block" title={row.original.name}>
         {row.original.name}
       </Link>
     ),
@@ -23,12 +23,12 @@ const columns: ColumnDef<JobDefinition>[] = [
   {
     accessorKey: "description",
     header: "Description",
-    cell: ({ row }) => <span className="text-muted-foreground">{row.original.description ?? '-'}</span>,
+    cell: ({ row }) => <span className="text-muted-foreground">{row.original.description}</span>,
   },
   {
     accessorKey: "cronExpression",
-    header: "Cron",
-    cell: ({ row }) => <span className="text-sm">{row.original.cronExpression ?? '-'}</span>,
+    header: "Schedule",
+    cell: ({ row }) => <span className="text-sm">{row.original.isContinuous ? 'Continuous' : row.original.cronExpression ?? 'Manual'}</span>,
   },
   {
     accessorKey: "isEnabled",
@@ -64,19 +64,22 @@ export function JobsPage() {
   }, [jobs, filter]);
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-2xl font-bold tracking-tight">Jobs</h2>
+    <div className="space-y-6">
+      <h2 className="text-xl font-semibold tracking-tight">Jobs</h2>
       {isError && <Alert variant="destructive"><CircleAlert /><AlertDescription>Failed to load jobs</AlertDescription></Alert>}
       <DataTable
         columns={columns}
         data={filtered}
         toolbar={
-          <Input
-            placeholder="Filter jobs..."
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="max-w-sm"
-          />
+          <div className="relative max-w-sm">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+            <Input
+              placeholder="Filter..."
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="pl-8"
+            />
+          </div>
         }
       />
     </div>

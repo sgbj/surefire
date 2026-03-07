@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Link } from 'react-router';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { CircleAlert } from 'lucide-react';
+import { CircleAlert, Search } from 'lucide-react';
 
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -27,7 +27,7 @@ const columns: ColumnDef<JobRun>[] = [
     accessorKey: "id",
     header: "ID",
     cell: ({ row }) => (
-      <Link to={`/runs/${row.original.id}`} className="text-sm text-primary hover:underline">
+      <Link to={`/runs/${row.original.id}`} className="text-sm text-primary hover:underline truncate max-w-[140px] inline-block" title={row.original.id}>
         {row.original.id}
       </Link>
     ),
@@ -36,7 +36,7 @@ const columns: ColumnDef<JobRun>[] = [
     accessorKey: "jobName",
     header: "Job",
     cell: ({ row }) => (
-      <Link to={`/jobs/${encodeURIComponent(row.original.jobName)}`} className="text-sm text-primary hover:underline">
+      <Link to={`/jobs/${encodeURIComponent(row.original.jobName)}`} className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block" title={row.original.jobName}>
         {row.original.jobName}
       </Link>
     ),
@@ -60,8 +60,8 @@ const columns: ColumnDef<JobRun>[] = [
     accessorKey: "nodeName",
     header: "Node",
     cell: ({ row }) => row.original.nodeName
-      ? <Link to={`/nodes/${encodeURIComponent(row.original.nodeName)}`} className="text-sm text-primary hover:underline">{row.original.nodeName}</Link>
-      : <span className="text-sm">-</span>,
+      ? <Link to={`/nodes/${encodeURIComponent(row.original.nodeName)}`} className="text-sm text-primary hover:underline truncate max-w-[160px] inline-block" title={row.original.nodeName}>{row.original.nodeName}</Link>
+      : null,
   },
 ];
 
@@ -74,7 +74,7 @@ const DATE_PRESETS: { label: string; value: string; getAfter: () => string | und
 ];
 
 export function RunsPage() {
-  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 20 });
+  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 15 });
   const [jobNameInput, setJobNameInput] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [datePreset, setDatePreset] = useState('all');
@@ -122,8 +122,8 @@ export function RunsPage() {
   const resetPage = () => setPagination(prev => ({ ...prev, pageIndex: 0 }));
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-2xl font-bold tracking-tight">Runs</h2>
+    <div className="space-y-6">
+      <h2 className="text-xl font-semibold tracking-tight">Runs</h2>
       {isError && <Alert variant="destructive"><CircleAlert /><AlertDescription>Failed to load runs</AlertDescription></Alert>}
       <DataTable
         columns={columns}
@@ -134,15 +134,18 @@ export function RunsPage() {
         totalCount={totalCount}
         pagination={pagination}
         onPaginationChange={setPagination}
-        defaultPageSize={20}
+        defaultPageSize={15}
         toolbar={
           <>
-            <Input
-              placeholder="Filter by job name..."
-              value={jobNameInput}
-              onChange={(e) => setJobNameInput(e.target.value)}
-              className="max-w-[200px]"
-            />
+            <div className="relative max-w-[200px]">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+              <Input
+                placeholder="Filter..."
+                value={jobNameInput}
+                onChange={(e) => setJobNameInput(e.target.value)}
+                className="pl-8"
+              />
+            </div>
             <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); resetPage(); }}>
               <SelectTrigger size="sm" className="w-[140px]">
                 <SelectValue />

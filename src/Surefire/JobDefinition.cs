@@ -8,6 +8,8 @@ public sealed class JobDefinition
     public string? CronExpression { get; set; }
     public TimeSpan? Timeout { get; set; }
     public int? MaxConcurrency { get; set; }
+    public int Priority { get; set; }
     public RetryPolicy RetryPolicy { get; set; } = new();
+    public bool IsContinuous { get; set; }
     public bool IsEnabled { get; set; } = true;
 }

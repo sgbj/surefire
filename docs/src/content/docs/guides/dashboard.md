@@ -27,7 +27,7 @@ Lists all registered jobs with their name, description, cron schedule, enabled/d
 Click into a job to:
 
 - **Enable or disable** it (disabling stops cron scheduling).
-- **Trigger a run** with optional JSON arguments and a scheduled start time.
+- **Trigger a run** with optional JSON arguments, a scheduled start time, and priority.
 - See the job's **run history** with pagination.
 
 ![Job details](../../../assets/dashboard-job-details.png)

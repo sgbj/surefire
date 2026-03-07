@@ -79,6 +79,7 @@ app.AddJob("Cleanup", async () => { /* ... */ })
     .WithTags("maintenance")
     .WithTimeout(TimeSpan.FromMinutes(5))
     .WithMaxConcurrency(1)              // Only one at a time
+    .WithPriority(5)                    // Higher = claimed first (default 0)
     .WithRetry(3);                      // Up to 3 attempts
 ```
 
@@ -95,6 +96,49 @@ app.AddJob("Flaky", async () => { /* ... */ })
     });
 ```
 
+## Continuous jobs
+
+A continuous job auto-restarts whenever it completes or fails (after retries). Use cases include queue consumers, stream processors, and background pollers.
+
+```csharp
+app.AddJob("QueueConsumer", async (CancellationToken ct) =>
+{
+    while (!ct.IsCancellationRequested)
+    {
+        var msg = await queue.DequeueAsync(ct);
+        await ProcessAsync(msg, ct);
+    }
+})
+.AsContinuous();
+```
+
+By default, continuous jobs have `MaxConcurrency` of 1 — only one instance runs across the cluster. Override this to run parallel workers:
+
+```csharp
+// 3 parallel workers
+app.AddJob("QueueConsumer", async (CancellationToken ct) =>
+{
+    while (!ct.IsCancellationRequested)
+    {
+        var msg = await queue.DequeueAsync(ct);
+        await ProcessAsync(msg, ct);
+    }
+})
+.AsContinuous()
+.WithMaxConcurrency(3);
+```
+
+| Scenario | Behavior |
+|---|---|
+| Job completes successfully | Restarts immediately |
+| Job fails, retries remaining | Normal retry behavior |
+| Job fails, retries exhausted | Restarts after cooldown delay |
+| Job cancelled by user | No restart |
+| Job disabled via dashboard | No restart |
+| Job re-enabled via dashboard | New run created on next heartbeat |
+
+If both `.WithCron()` and `.AsContinuous()` are set, continuous takes precedence — cron scheduling is skipped.
+
 ## Triggering jobs
 
 Use `IJobClient` to trigger jobs from code. You can inject it anywhere — in other jobs, controllers, background services, etc.
@@ -107,10 +151,16 @@ await client.TriggerAsync("Cleanup");
 await client.TriggerAsync("Add", new { a = 1, b = 2 });
 
 // Schedule for later
-await client.TriggerAsync("Report", notBefore: DateTimeOffset.UtcNow.AddHours(1));
+await client.TriggerAsync("Report", null, new RunOptions { NotBefore = DateTimeOffset.UtcNow.AddHours(1) });
+
+// With priority (higher = claimed first)
+await client.TriggerAsync("Urgent", null, new RunOptions { Priority = 10 });
 
 // Run and wait for the result
 var sum = await client.RunAsync<int>("Add", new { a = 1, b = 2 });
+
+// Run and wait (no result)
+await client.RunAsync("Cleanup");
 ```
 
 Jobs can call other jobs too:
@@ -245,7 +295,19 @@ builder.Services.AddSurefire(options =>
 | `RetentionPeriod` | 7 days | How long to keep completed runs (`null` = forever) |
 | `RetentionCheckInterval` | 5min | How often to check for expired runs to purge |
 | `ShutdownTimeout` | 15s | Grace period for running jobs on shutdown |
+| `MaxNodeConcurrency` | `null` | Max concurrent jobs on this node (`null` = unlimited) |
 | `AutoMigrate` | `true` | Automatically create/update the store schema on startup |
+
+## Health check
+
+Surefire ships with an ASP.NET Core health check that verifies store connectivity:
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddSurefire();
+
+app.MapHealthChecks("/health");
+```
 
 ## PostgreSQL
 

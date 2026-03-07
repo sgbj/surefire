@@ -36,6 +36,19 @@ public sealed class JobBuilder
         return this;
     }
 
+    public JobBuilder AsContinuous()
+    {
+        _registeredJob.Definition.IsContinuous = true;
+        _registeredJob.Definition.MaxConcurrency ??= 1;
+        return this;
+    }
+
+    public JobBuilder WithPriority(int priority)
+    {
+        _registeredJob.Definition.Priority = priority;
+        return this;
+    }
+
     public JobBuilder WithRetry(int maxAttempts)
     {
         _registeredJob.Definition.RetryPolicy = new RetryPolicy { MaxAttempts = maxAttempts };

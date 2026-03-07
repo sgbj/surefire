@@ -20,6 +20,7 @@ public sealed class SurefireOptions
     public TimeSpan RetentionCheckInterval { get; set; } = TimeSpan.FromMinutes(5);
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(15);
     public JsonSerializerOptions SerializerOptions { get; set; } = new(JsonSerializerOptions.Web);
+    public int? MaxNodeConcurrency { get; set; }
     public bool AutoMigrate { get; set; } = true;
 
     public SurefireOptions OnSuccess(Delegate callback)

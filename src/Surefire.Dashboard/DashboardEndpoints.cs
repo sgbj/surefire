@@ -61,7 +61,7 @@ public static class DashboardEndpoints
         api.MapPost("/jobs/{name}/trigger", async (string name, HttpRequest request, IJobClient client, CancellationToken ct) =>
         {
             object? args = null;
-            DateTimeOffset? notBefore = null;
+            RunOptions? runOptions = null;
 
             if (request.ContentLength is > 0 || (request.ContentLength is null && request.ContentType?.Contains("application/json") == true))
             {
@@ -74,7 +74,13 @@ public static class DashboardEndpoints
                     {
                         if (!DateTimeOffset.TryParse(nbElement.GetString()!, out var parsed))
                             return Results.BadRequest(new { Error = "Invalid 'notBefore' date format" });
-                        notBefore = parsed;
+                        runOptions ??= new RunOptions();
+                        runOptions.NotBefore = parsed;
+                    }
+                    if (doc.RootElement.TryGetProperty("priority", out var prElement) && prElement.ValueKind == JsonValueKind.Number)
+                    {
+                        runOptions ??= new RunOptions();
+                        runOptions.Priority = prElement.GetInt32();
                     }
                 }
                 catch (JsonException)
@@ -83,7 +89,9 @@ public static class DashboardEndpoints
                 }
             }
 
-            var runId = await client.TriggerAsync(name, args, notBefore, ct);
+            var runId = runOptions is not null
+                ? await client.TriggerAsync(name, args, runOptions, ct)
+                : await client.TriggerAsync(name, args, ct);
             return Results.Ok(new { RunId = runId });
         });
 
@@ -109,6 +117,13 @@ public static class DashboardEndpoints
         {
             var run = await store.GetRunAsync(id, ct);
             return run is null ? Results.NotFound() : Results.Ok(run);
+        });
+
+        api.MapGet("/runs/{id}/trace", async (string id, IJobStore store, CancellationToken ct) =>
+        {
+            var run = await store.GetRunAsync(id, ct);
+            if (run is null) return Results.NotFound();
+            return Results.Ok(await store.GetRunTraceAsync(id, 200, ct));
         });
 
         api.MapPost("/runs/{id}/cancel", async (string id, IJobClient client, CancellationToken ct) =>

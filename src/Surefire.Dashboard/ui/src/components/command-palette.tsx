@@ -46,25 +46,25 @@ export function CommandPalette() {
   };
 
   return (
-    <CommandDialog open={open} onOpenChange={setOpen} title="Command Palette" description="Navigate or search">
-      <CommandInput placeholder="Search jobs, nodes..." value={search} onValueChange={setSearch} />
-      <CommandList>
+    <CommandDialog open={open} onOpenChange={setOpen} title="Command Palette" description="Navigate or search" className="bg-background/80 backdrop-blur-xl border-border/50 shadow-2xl">
+      <CommandInput placeholder="Search..." value={search} onValueChange={setSearch} />
+      <CommandList className="max-h-[340px]">
         <CommandEmpty>No results found.</CommandEmpty>
         <CommandGroup heading="Navigation">
           <CommandItem onSelect={() => go('/')}>
-            <House className="h-4 w-4" />
+            <House className="size-4 opacity-60" />
             Dashboard
           </CommandItem>
           <CommandItem onSelect={() => go('/jobs')}>
-            <Workflow className="h-4 w-4" />
+            <Workflow className="size-4 opacity-60" />
             Jobs
           </CommandItem>
           <CommandItem onSelect={() => go('/runs')}>
-            <Play className="h-4 w-4" />
+            <Play className="size-4 opacity-60" />
             Runs
           </CommandItem>
           <CommandItem onSelect={() => go('/nodes')}>
-            <Server className="h-4 w-4" />
+            <Server className="size-4 opacity-60" />
             Nodes
           </CommandItem>
         </CommandGroup>
@@ -74,9 +74,9 @@ export function CommandPalette() {
             <CommandGroup heading="Jobs">
               {jobs.map(job => (
                 <CommandItem key={job.name} onSelect={() => go(`/jobs/${encodeURIComponent(job.name)}`)}>
-                  <Workflow className="h-4 w-4" />
-                  <span>{job.name}</span>
-                  {job.cronExpression && <span className="ml-auto text-xs text-muted-foreground">{job.cronExpression}</span>}
+                  <Workflow className="size-4 opacity-60" />
+                  <span className="truncate">{job.name}</span>
+                  <span className="ml-auto text-xs text-muted-foreground/70">{job.isContinuous ? 'Continuous' : job.cronExpression ?? 'Manual'}</span>
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -88,8 +88,9 @@ export function CommandPalette() {
             <CommandGroup heading="Nodes">
               {nodes.map(node => (
                 <CommandItem key={node.name} onSelect={() => go(`/nodes/${encodeURIComponent(node.name)}`)}>
-                  <Server className="h-4 w-4" />
-                  <span>{node.name}</span>
+                  <Server className="size-4 opacity-60" />
+                  <span className="truncate">{node.name}</span>
+                  <span className="ml-auto text-xs text-muted-foreground/70 tabular-nums">{node.runningCount} running</span>
                 </CommandItem>
               ))}
             </CommandGroup>

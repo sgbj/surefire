@@ -64,6 +64,9 @@ internal sealed class SurefireScheduler(
                         // Re-sync job definitions so deleted/stale entries are restored
                         await SyncJobsAsync(stoppingToken);
 
+                        // Ensure continuous jobs have active runs
+                        await EnsureContinuousJobsAsync(stoppingToken);
+
                         // Detect and recover stale runs
                         await RecoverStaleRunsAsync(stoppingToken);
 
@@ -147,6 +150,7 @@ internal sealed class SurefireScheduler(
         {
             if (!registeredNames.Contains(job.Name)) continue;
             if (job.CronExpression is null) continue;
+            if (registry.Get(job.Name)?.Definition.IsContinuous == true) continue;
 
             (string Expression, CronExpression Parsed) cached;
             try
@@ -182,6 +186,7 @@ internal sealed class SurefireScheduler(
                     JobName = job.Name,
                     CreatedAt = now,
                     NotBefore = now,
+                    Priority = job.Priority,
                     DeduplicationId = $"{job.Name}:{scheduledAt:O}"
                 };
 
@@ -202,6 +207,9 @@ internal sealed class SurefireScheduler(
         var jobNames = registry.GetJobNames();
         while (!ct.IsCancellationRequested)
         {
+            if (options.MaxNodeConcurrency is { } max && _executingTasks.Count >= max)
+                break;
+
             var run = await store.ClaimRunAsync(nodeName, jobNames, ct);
             if (run is null) break;
 
@@ -251,6 +259,46 @@ internal sealed class SurefireScheduler(
             var job = registry.Get(name);
             if (job is not null)
                 await store.UpsertJobAsync(job.Definition, ct);
+        }
+    }
+
+    private async Task EnsureContinuousJobsAsync(CancellationToken ct)
+    {
+        foreach (var name in registry.GetJobNames())
+        {
+            var job = registry.Get(name);
+            if (job?.Definition.IsContinuous != true) continue;
+
+            var jobDef = await store.GetJobAsync(name, ct);
+            if (jobDef?.IsEnabled == false) continue;
+
+            var desired = job.Definition.MaxConcurrency ?? 1;
+
+            var pendingRuns = await store.GetRunsAsync(
+                new RunFilter { JobName = name, ExactJobName = true, Status = JobStatus.Pending, Take = desired }, ct);
+            var runningRuns = await store.GetRunsAsync(
+                new RunFilter { JobName = name, ExactJobName = true, Status = JobStatus.Running, Take = desired }, ct);
+            var activeCount = pendingRuns.Items.Count + runningRuns.Items.Count;
+
+            var needed = desired - activeCount;
+            if (needed <= 0) continue;
+
+            var now = timeProvider.GetUtcNow();
+            for (var i = 0; i < needed; i++)
+            {
+                var run = new JobRun
+                {
+                    Id = Guid.CreateVersion7().ToString("N"),
+                    JobName = name,
+                    CreatedAt = now,
+                    NotBefore = now,
+                    Priority = job.Definition.Priority,
+                };
+                await store.CreateRunAsync(run, ct);
+                await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, ct);
+            }
+
+            logger.LogInformation("Created {Count} seed run(s) for continuous job {JobName}", needed, name);
         }
     }
 

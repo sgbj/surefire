@@ -41,6 +41,7 @@ export interface JobDefinition {
   timeout?: string;
   maxConcurrency: number | null;
   retryPolicy: RetryPolicy;
+  isContinuous: boolean;
   isEnabled: boolean;
 }
 
@@ -103,12 +104,12 @@ export const JobStatusLabels: Record<number, string> = {
 };
 
 export const JobStatusColors: Record<number, string> = {
-  0: 'bg-amber-100/80 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
-  1: 'bg-sky-100/80 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300',
-  2: 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
-  3: 'bg-rose-100/80 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
-  4: 'bg-slate-100/80 text-slate-600 dark:bg-slate-800/30 dark:text-slate-400',
-  5: 'bg-violet-100/80 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
+  0: 'bg-status-pending/15 text-status-pending',
+  1: 'bg-status-running/15 text-status-running',
+  2: 'bg-status-completed/15 text-status-completed',
+  3: 'bg-status-failed/15 text-status-failed',
+  4: 'bg-status-cancelled/15 text-status-cancelled',
+  5: 'bg-status-dead-letter/15 text-status-dead-letter',
 };
 
 export const LogLevelLabels: Record<number, string> = {
@@ -154,6 +155,7 @@ export const api = {
   cancelRun: (id: string) => fetchApi<void>(`/runs/${id}/cancel`, { method: 'POST' }),
   rerunRun: (id: string) => fetchApi<{ runId: string }>(`/runs/${id}/rerun`, { method: 'POST' }),
   getRunLogs: (id: string) => fetchApi<RunLogEntry[]>(`/runs/${id}/logs`),
+  getRunTrace: (id: string) => fetchApi<JobRun[]>(`/runs/${id}/trace`),
   updateJob: (name: string, patch: { isEnabled?: boolean }) =>
     fetchApi<JobDefinition>(`/jobs/${encodeURIComponent(name)}`, {
       method: 'PATCH',

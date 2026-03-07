@@ -7,7 +7,7 @@ import { api, type JobRun } from '@/lib/api';
 import { DataTable } from '@/components/data-table';
 import { StatusBadge } from '@/components/status-badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Spinner } from '@/components/ui/spinner';
+import { Skeleton } from '@/components/ui/skeleton';
 import { formatDate, formatRelative } from '@/lib/format';
 import { DtDd } from '@/components/dt-dd';
 
@@ -16,7 +16,7 @@ const runColumns: ColumnDef<JobRun>[] = [
     accessorKey: "id",
     header: "ID",
     cell: ({ row }) => (
-      <Link to={`/runs/${row.original.id}`} className="text-sm text-primary hover:underline">
+      <Link to={`/runs/${row.original.id}`} className="text-sm text-primary hover:underline truncate max-w-[140px] inline-block" title={row.original.id}>
         {row.original.id}
       </Link>
     ),
@@ -25,7 +25,7 @@ const runColumns: ColumnDef<JobRun>[] = [
     accessorKey: "jobName",
     header: "Job",
     cell: ({ row }) => (
-      <Link to={`/jobs/${encodeURIComponent(row.original.jobName)}`} className="text-sm text-primary hover:underline">
+      <Link to={`/jobs/${encodeURIComponent(row.original.jobName)}`} className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block" title={row.original.jobName}>
         {row.original.jobName}
       </Link>
     ),
@@ -50,7 +50,7 @@ export function NodeDetailPage() {
     refetchInterval: (query) => query.state.error ? false : 10000,
   });
 
-  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 20 });
+  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 15 });
 
   const runsQueryParams = useMemo(() => ({
     nodeName: name!,
@@ -67,11 +67,24 @@ export function NodeDetailPage() {
 
   if (isError) return <Alert variant="destructive"><CircleAlert /><AlertDescription>Failed to load node</AlertDescription></Alert>;
 
-  if (!node) return <div className="flex items-center gap-2 text-muted-foreground"><Spinner className="size-4" />Loading...</div>;
+  if (!node) return (
+    <div className="space-y-6">
+      <Skeleton className="h-7 w-48" />
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i}>
+            <Skeleton className="h-3 w-16 mb-1.5" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+        ))}
+      </div>
+      <Skeleton className="h-64 w-full" />
+    </div>
+  );
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-2xl font-bold tracking-tight truncate">{node.name}</h2>
+    <div className="space-y-6">
+      <h2 className="text-xl font-semibold tracking-tight truncate">{node.name}</h2>
 
       <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
         <DtDd label="Started">{formatDate(node.startedAt)}</DtDd>
@@ -82,10 +95,10 @@ export function NodeDetailPage() {
       {node.registeredJobNames.length > 0 && (
         <div>
           <h3 className="text-lg font-semibold mb-2">Jobs</h3>
-          <ul className="text-sm space-y-1">
+          <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1 text-sm">
             {node.registeredJobNames.map(jobName => (
-              <li key={jobName}>
-                <Link to={`/jobs/${encodeURIComponent(jobName)}`} className="text-primary hover:underline">{jobName}</Link>
+              <li key={jobName} className="truncate">
+                <Link to={`/jobs/${encodeURIComponent(jobName)}`} className="text-primary hover:underline" title={jobName}>{jobName}</Link>
               </li>
             ))}
           </ul>
@@ -102,7 +115,7 @@ export function NodeDetailPage() {
           totalCount={runs?.totalCount ?? 0}
           pagination={pagination}
           onPaginationChange={setPagination}
-          defaultPageSize={20}
+          defaultPageSize={15}
         />
       </div>
     </div>

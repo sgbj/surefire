@@ -7,11 +7,11 @@ import { toast } from 'sonner';
 import { api, type JobRun } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
 import { DataTable } from '@/components/data-table';
 import { StatusBadge } from '@/components/status-badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Spinner } from '@/components/ui/spinner';
 import { formatDate, formatDuration, formatTimeSpan } from '@/lib/format';
 import { DtDd } from '@/components/dt-dd';
 
@@ -20,7 +20,7 @@ const runColumns: ColumnDef<JobRun>[] = [
     accessorKey: "id",
     header: "ID",
     cell: ({ row }) => (
-      <Link to={`/runs/${row.original.id}`} className="text-sm text-primary hover:underline">
+      <Link to={`/runs/${row.original.id}`} className="text-sm text-primary hover:underline truncate max-w-[140px] inline-block" title={row.original.id}>
         {row.original.id}
       </Link>
     ),
@@ -53,7 +53,7 @@ export function JobDetailPage() {
   const [argsText, setArgsText] = useState('');
   const [notBeforeText, setNotBeforeText] = useState('');
 
-  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 20 });
+  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 15 });
 
   const { data: job, isError } = useQuery({
     queryKey: ['job', name],
@@ -98,7 +98,26 @@ export function JobDetailPage() {
 
   if (isError) return <Alert variant="destructive"><CircleAlert /><AlertDescription>Failed to load job</AlertDescription></Alert>;
 
-  if (!job) return <div className="flex items-center gap-2 text-muted-foreground"><Spinner className="size-4" />Loading...</div>;
+  if (!job) return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <Skeleton className="h-7 w-48" />
+        <div className="flex gap-2">
+          <Skeleton className="h-9 w-24" />
+          <Skeleton className="h-9 w-16" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i}>
+            <Skeleton className="h-3 w-16 mb-1.5" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+        ))}
+      </div>
+      <Skeleton className="h-64 w-full" />
+    </div>
+  );
 
   const handleRun = () => {
     let parsedArgs: unknown = undefined;
@@ -117,11 +136,11 @@ export function JobDetailPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
-            <h2 className="text-2xl font-bold tracking-tight truncate">{job.name}</h2>
+            <h2 className="text-xl font-semibold tracking-tight truncate">{job.name}</h2>
             {!job.isEnabled && <Badge variant="outline" className="text-muted-foreground shrink-0">Disabled</Badge>}
           </div>
           <div className="flex items-center gap-2">
@@ -177,19 +196,19 @@ export function JobDetailPage() {
       </div>
 
       <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-        <DtDd label="Schedule">{job.cronExpression ?? 'Manual'}</DtDd>
-        <DtDd label="Max concurrency">{job.maxConcurrency ?? '-'}</DtDd>
-        <DtDd label="Retries">
-          {job.retryPolicy.maxAttempts > 1
-            ? `${job.retryPolicy.maxAttempts} attempts, ${job.retryPolicy.backoffType === 1 ? 'exponential' : 'fixed'} ${formatTimeSpan(job.retryPolicy.initialDelay)}–${formatTimeSpan(job.retryPolicy.maxDelay)}`
-            : '-'}
-        </DtDd>
-        <DtDd label="Timeout">{formatTimeSpan(job.timeout)}</DtDd>
-        <DtDd label="Tags">
-          {job.tags.length > 0
-            ? <div className="flex flex-wrap gap-1">{job.tags.map(t => <Badge key={t} variant="secondary">{t}</Badge>)}</div>
-            : <span className="text-muted-foreground">-</span>}
-        </DtDd>
+        <DtDd label="Schedule">{job.isContinuous ? 'Continuous' : job.cronExpression ?? 'Manual'}</DtDd>
+        {job.maxConcurrency != null && <DtDd label="Max concurrency">{job.maxConcurrency}</DtDd>}
+        {job.retryPolicy.maxAttempts > 1 && (
+          <DtDd label="Retries">
+            {`${job.retryPolicy.maxAttempts} attempts, ${job.retryPolicy.backoffType === 1 ? 'exponential' : 'fixed'} ${formatTimeSpan(job.retryPolicy.initialDelay)}–${formatTimeSpan(job.retryPolicy.maxDelay)}`}
+          </DtDd>
+        )}
+        {job.timeout && <DtDd label="Timeout">{formatTimeSpan(job.timeout)}</DtDd>}
+        {job.tags.length > 0 && (
+          <DtDd label="Tags">
+            <div className="flex flex-wrap gap-1">{job.tags.map(t => <Badge key={t} variant="secondary">{t}</Badge>)}</div>
+          </DtDd>
+        )}
       </dl>
 
       <div>
@@ -202,7 +221,7 @@ export function JobDetailPage() {
           totalCount={runs?.totalCount ?? 0}
           pagination={pagination}
           onPaginationChange={setPagination}
-          defaultPageSize={20}
+          defaultPageSize={15}
         />
       </div>
     </div>

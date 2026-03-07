@@ -6,17 +6,18 @@ using System.Threading.Channels;
 
 namespace Surefire;
 
-internal sealed class JobClient(IJobStore store, INotificationProvider notifications, SurefireOptions options, TimeProvider timeProvider) : IJobClient
+internal sealed class JobClient(IJobStore store, INotificationProvider notifications, JobRegistry registry, SurefireOptions options, TimeProvider timeProvider) : IJobClient
 {
     public Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default)
         => store.GetRunAsync(runId, cancellationToken);
 
-    public async Task<string> TriggerAsync(string jobName, object? args = null, DateTimeOffset? notBefore = null, CancellationToken cancellationToken = default)
+    public Task<string> TriggerAsync(string jobName, object? args = null, CancellationToken cancellationToken = default)
+        => TriggerAsync(jobName, args, null!, cancellationToken);
+
+    public async Task<string> TriggerAsync(string jobName, object? args, RunOptions options, CancellationToken cancellationToken = default)
     {
         var (argsJson, streamingArgs) = ExtractStreamingArgs(args);
-        var run = CreateRun(jobName, argsJson);
-        if (notBefore is not null)
-            run.NotBefore = notBefore.Value;
+        var run = CreateRun(jobName, argsJson, options: options);
         await store.CreateRunAsync(run, cancellationToken);
         await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
 
@@ -58,12 +59,72 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
                 await store.AppendEventAsync(evt, cancellationToken);
                 await notifications.PublishAsync(NotificationChannels.RunEvent(runId), "", cancellationToken);
                 await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), "", cancellationToken);
+                await CancelDescendantsAsync(runId, cancellationToken);
                 return;
             }
             // CAS failed: run was claimed between our read and CAS — fall through to Running path
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCancel(runId), "", cancellationToken);
+        await CancelDescendantsAsync(runId, cancellationToken);
+    }
+
+    private async Task CancelDescendantsAsync(string rootRunId, CancellationToken cancellationToken)
+    {
+        var queue = new Queue<string>();
+        queue.Enqueue(rootRunId);
+
+        while (queue.Count > 0)
+        {
+            var parentId = queue.Dequeue();
+            var children = await store.GetRunsAsync(
+                new RunFilter { ParentRunId = parentId, Take = 500 }, cancellationToken);
+
+            foreach (var child in children.Items)
+            {
+                // Always enqueue to find grandchildren — even terminal children may have
+                // non-terminal grandchildren (e.g., child B completed but triggered C via TriggerAsync)
+                queue.Enqueue(child.Id);
+
+                if (child.Status.IsTerminal) continue;
+
+                var now = timeProvider.GetUtcNow();
+                if (child.Status == JobStatus.Pending)
+                {
+                    var update = new JobRun
+                    {
+                        Id = child.Id, JobName = child.JobName,
+                        Status = JobStatus.Cancelled, CompletedAt = now, CancelledAt = now
+                    };
+                    if (await store.TryUpdateRunStatusAsync(update, JobStatus.Pending, cancellationToken))
+                    {
+                        var payload = JsonSerializer.Serialize(
+                            new { status = (int)JobStatus.Cancelled }, options.SerializerOptions);
+                        var evt = new RunEvent
+                        {
+                            RunId = child.Id, EventType = RunEventType.Status,
+                            Payload = payload, CreatedAt = now
+                        };
+                        await store.AppendEventAsync(evt, cancellationToken);
+                        await notifications.PublishAsync(
+                            NotificationChannels.RunEvent(child.Id), "", cancellationToken);
+                        await notifications.PublishAsync(
+                            NotificationChannels.RunCompleted(child.Id), "", cancellationToken);
+                    }
+                    else
+                    {
+                        // CAS failed: child was claimed (Pending→Running) between read and CAS.
+                        await notifications.PublishAsync(
+                            NotificationChannels.RunCancel(child.Id), "", cancellationToken);
+                    }
+                }
+                else // Running
+                {
+                    await notifications.PublishAsync(
+                        NotificationChannels.RunCancel(child.Id), "", cancellationToken);
+                }
+            }
+        }
     }
 
     public async Task<string> RerunAsync(string runId, CancellationToken cancellationToken = default)
@@ -79,6 +140,7 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
             Arguments = run.Arguments,
             CreatedAt = now,
             NotBefore = now,
+            Priority = run.Priority,
             ParentRunId = JobContext.Current.Value?.RunId,
             RerunOfRunId = run.RerunOfRunId ?? run.RetryOfRunId ?? run.Id
         };
@@ -87,11 +149,14 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
         return newRun.Id;
     }
 
-    public async Task<TResult> RunAsync<TResult>(string jobName, object? args = null, CancellationToken cancellationToken = default)
+    public Task<TResult> RunAsync<TResult>(string jobName, object? args = null, CancellationToken cancellationToken = default)
+        => RunAsync<TResult>(jobName, args, null!, cancellationToken);
+
+    public async Task<TResult> RunAsync<TResult>(string jobName, object? args, RunOptions runOptions, CancellationToken cancellationToken = default)
     {
         var (argsJson, streamingArgs) = ExtractStreamingArgs(args);
         var runId = Guid.CreateVersion7().ToString("N");
-        var run = CreateRun(jobName, argsJson, runId);
+        var run = CreateRun(jobName, argsJson, runId, runOptions);
         await store.CreateRunAsync(run, cancellationToken);
         await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
 
@@ -149,6 +214,12 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
             catch { /* best-effort */ }
         }
     }
+
+    public async Task RunAsync(string jobName, object? args = null, CancellationToken cancellationToken = default)
+        => await RunAsync<object?>(jobName, args, null!, cancellationToken);
+
+    public async Task RunAsync(string jobName, object? args, RunOptions options, CancellationToken cancellationToken = default)
+        => await RunAsync<object?>(jobName, args, options, cancellationToken);
 
     /// <summary>
     /// Creates an IAsyncEnumerable that watches a run's output events and auto-follows retries.
@@ -329,6 +400,10 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
         if (args is null)
             return (null, null);
 
+        // JSON types from System.Text.Json are not POCOs — serialize directly
+        if (args is JsonElement or JsonDocument or JsonNode)
+            return (JsonSerializer.Serialize(args, options.SerializerOptions), null);
+
         var properties = args.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
         List<(string name, object enumerable, Type itemType)>? streaming = null;
         JsonObject? jsonObj = null;
@@ -470,16 +545,18 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
         }
     }
 
-    private JobRun CreateRun(string jobName, string? argsJson, string? id = null)
+    private JobRun CreateRun(string jobName, string? argsJson, string? id = null, RunOptions? options = null)
     {
         var now = timeProvider.GetUtcNow();
+        var jobDef = registry.Get(jobName)?.Definition;
         return new JobRun
         {
             Id = id ?? Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
             Arguments = argsJson,
             CreatedAt = now,
-            NotBefore = now,
+            NotBefore = options?.NotBefore ?? now,
+            Priority = options?.Priority ?? jobDef?.Priority ?? 0,
             ParentRunId = JobContext.Current.Value?.RunId
         };
     }
