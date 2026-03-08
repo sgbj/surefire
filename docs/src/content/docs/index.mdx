@@ -9,6 +9,10 @@ hero:
     - text: Get started
       link: /surefire/getting-started/
       icon: right-arrow
+    - text: GitHub
+      link: https://github.com/sgbj/surefire
+      icon: github
+      variant: minimal
 ---
 
 import { Card, CardGrid, Code } from '@astrojs/starlight/components';
@@ -19,19 +23,20 @@ import { Card, CardGrid, Code } from '@astrojs/starlight/components';
 
 <CardGrid>
   <Card title="Minimal API style" icon="rocket">
-    Register jobs with delegates, just like you'd register endpoints. Parameters come from DI, arguments, or the job context.
+    Define jobs with delegates — same pattern as mapping endpoints. Parameters resolve from DI automatically.
   </Card>
   <Card title="Distributed" icon="random">
-    Run multiple nodes. Surefire makes sure each job runs exactly once — no double execution.
+    Run multiple nodes. Every job executes exactly once — no double runs, no coordination code.
   </Card>
-  <Card title="Dashboard" icon="laptop">
-    Ships with a real-time dashboard. Live log streaming, progress bars, job management, and node monitoring.
+  <Card title="Real-time dashboard" icon="laptop">
+    Built-in UI with live log streaming, progress tracking, job management, and node monitoring.
   </Card>
-  <Card title="Streaming" icon="seti:pipeline">
-    Jobs can return `IAsyncEnumerable&lt;T&gt;` and consume streams from other jobs. Build pipelines where data flows between stages as it's produced.
+  <Card title="Streaming pipelines" icon="seti:pipeline">
+
+    Return `IAsyncEnumerable<T>` from jobs and pipe data between stages as it's produced.
   </Card>
   <Card title="Batteries included" icon="puzzle">
-    Retries with backoff, cron scheduling, timeouts, concurrency limits, lifecycle callbacks, and OpenTelemetry traces out of the box.
+    Retries, cron scheduling, timeouts, concurrency limits, lifecycle hooks, and OpenTelemetry — all built in.
   </Card>
 </CardGrid>
 

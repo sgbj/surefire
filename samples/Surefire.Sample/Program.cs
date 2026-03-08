@@ -74,7 +74,7 @@ app.AddJob("ScheduledImport", async (IJobClient client, ILogger<Program> logger,
     .WithCron("* * * * *")
     .WithDescription("Triggers a random number of DataImport jobs every minute");
 
-app.AddJob("FetchProducts", async (int count, CancellationToken ct) =>
+app.AddJob("FetchProducts", async (CancellationToken ct) =>
     {
         return FetchProducts();
 
@@ -86,13 +86,10 @@ app.AddJob("FetchProducts", async (int count, CancellationToken ct) =>
                 "Gadget,Electronics,129.99",
                 "Sprocket,Hardware,42.00",
                 "Flanges,Hardware,88.72",
-                "Doohickey,Toys,89.99",
-                "Thingamajig,Toys,7.99",
-                "Whatchamacallit,Kitchen,19.99",
-                "Gizmo,Electronics,34.99",
+                "Doohickey,Toys,89.99"
             ];
 
-            for (var i = 0; i < count && i < products.Length; i++)
+            for (var i = 0; i < products.Length; i++)
             {
                 yield return products[i];
                 await Task.Delay(1000, ct);
@@ -101,13 +98,13 @@ app.AddJob("FetchProducts", async (int count, CancellationToken ct) =>
     })
     .WithDescription("Streams raw product CSV strings");
 
-app.AddJob("ConvertProducts", async (IAsyncEnumerable<string> products, ILogger<Program> logger, CancellationToken ct) =>
+app.AddJob("ConvertProducts", async (IAsyncEnumerable<string> lines, ILogger<Program> logger, CancellationToken ct) =>
     {
         return ConvertProducts();
 
         async IAsyncEnumerable<Product> ConvertProducts()
         {
-            await foreach (var line in products)
+            await foreach (var line in lines)
             {
                 var parts = line.Split(',');
                 var product = new Product(parts[0], parts[1], decimal.Parse(parts[2]));
@@ -122,8 +119,8 @@ app.AddJob("ConvertProducts", async (IAsyncEnumerable<string> products, ILogger<
 
 app.AddJob("ProcessProducts", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {
-        var csv = await client.RunAsync<IAsyncEnumerable<string>>("FetchProducts", new { count = 5 }, ct);
-        var products = await client.RunAsync<IAsyncEnumerable<Product>>("ConvertProducts", new { products = csv }, ct);
+        var lines = await client.RunAsync<IAsyncEnumerable<string>>("FetchProducts", cancellationToken: ct);
+        var products = await client.RunAsync<IAsyncEnumerable<Product>>("ConvertProducts", new { lines }, ct);
 
         var total = 0m;
         var count = 0;
@@ -145,7 +142,7 @@ app.AddJob("AlwaysRunning", async (ILogger<Program> logger, CancellationToken ct
     {
         for (var i = 1; i <= 10; i++)
         {
-            logger.LogDebug("Starting iteration {Iteration}", i);
+            logger.LogInformation("Starting iteration {Iteration}", i);
             await Task.Delay(TimeSpan.FromMinutes(1), ct);
         }
     })

@@ -58,6 +58,7 @@ interface DataTableBaseProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
   data: TData[]
   toolbar?: React.ReactNode
+  header?: React.ReactNode
   showColumnVisibility?: boolean
   defaultPageSize?: number
 }
@@ -84,6 +85,7 @@ export function DataTable<TData, TValue>({
   columns,
   data,
   toolbar,
+  header,
   showColumnVisibility = false,
   defaultPageSize = 15,
   ...rest
@@ -163,6 +165,11 @@ export function DataTable<TData, TValue>({
         </div>
       )}
       <div className="rounded-lg border overflow-hidden">
+        {header && (
+          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+            {header}
+          </div>
+        )}
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (

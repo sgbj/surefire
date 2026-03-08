@@ -77,53 +77,60 @@ internal sealed class JobClient(IJobStore store, INotificationProvider notificat
         while (queue.Count > 0)
         {
             var parentId = queue.Dequeue();
-            var children = await store.GetRunsAsync(
-                new RunFilter { ParentRunId = parentId, Take = 500 }, cancellationToken);
-
-            foreach (var child in children.Items)
+            var skip = 0;
+            const int batchSize = 500;
+            PagedResult<JobRun> children;
+            do
             {
-                // Always enqueue to find grandchildren — even terminal children may have
-                // non-terminal grandchildren (e.g., child B completed but triggered C via TriggerAsync)
-                queue.Enqueue(child.Id);
+                children = await store.GetRunsAsync(
+                    new RunFilter { ParentRunId = parentId, Skip = skip, Take = batchSize }, cancellationToken);
+                skip += batchSize;
 
-                if (child.Status.IsTerminal) continue;
-
-                var now = timeProvider.GetUtcNow();
-                if (child.Status == JobStatus.Pending)
+                foreach (var child in children.Items)
                 {
-                    var update = new JobRun
+                    // Always enqueue to find grandchildren — even terminal children may have
+                    // non-terminal grandchildren (e.g., child B completed but triggered C via TriggerAsync)
+                    queue.Enqueue(child.Id);
+
+                    if (child.Status.IsTerminal) continue;
+
+                    var now = timeProvider.GetUtcNow();
+                    if (child.Status == JobStatus.Pending)
                     {
-                        Id = child.Id, JobName = child.JobName,
-                        Status = JobStatus.Cancelled, CompletedAt = now, CancelledAt = now
-                    };
-                    if (await store.TryUpdateRunStatusAsync(update, JobStatus.Pending, cancellationToken))
-                    {
-                        var payload = JsonSerializer.Serialize(
-                            new { status = (int)JobStatus.Cancelled }, options.SerializerOptions);
-                        var evt = new RunEvent
+                        var update = new JobRun
                         {
-                            RunId = child.Id, EventType = RunEventType.Status,
-                            Payload = payload, CreatedAt = now
+                            Id = child.Id, JobName = child.JobName,
+                            Status = JobStatus.Cancelled, CompletedAt = now, CancelledAt = now
                         };
-                        await store.AppendEventAsync(evt, cancellationToken);
-                        await notifications.PublishAsync(
-                            NotificationChannels.RunEvent(child.Id), "", cancellationToken);
-                        await notifications.PublishAsync(
-                            NotificationChannels.RunCompleted(child.Id), "", cancellationToken);
+                        if (await store.TryUpdateRunStatusAsync(update, JobStatus.Pending, cancellationToken))
+                        {
+                            var payload = JsonSerializer.Serialize(
+                                new { status = (int)JobStatus.Cancelled }, options.SerializerOptions);
+                            var evt = new RunEvent
+                            {
+                                RunId = child.Id, EventType = RunEventType.Status,
+                                Payload = payload, CreatedAt = now
+                            };
+                            await store.AppendEventAsync(evt, cancellationToken);
+                            await notifications.PublishAsync(
+                                NotificationChannels.RunEvent(child.Id), "", cancellationToken);
+                            await notifications.PublishAsync(
+                                NotificationChannels.RunCompleted(child.Id), "", cancellationToken);
+                        }
+                        else
+                        {
+                            // CAS failed: child was claimed (Pending→Running) between read and CAS.
+                            await notifications.PublishAsync(
+                                NotificationChannels.RunCancel(child.Id), "", cancellationToken);
+                        }
                     }
-                    else
+                    else // Running
                     {
-                        // CAS failed: child was claimed (Pending→Running) between read and CAS.
                         await notifications.PublishAsync(
                             NotificationChannels.RunCancel(child.Id), "", cancellationToken);
                     }
                 }
-                else // Running
-                {
-                    await notifications.PublishAsync(
-                        NotificationChannels.RunCancel(child.Id), "", cancellationToken);
-                }
-            }
+            } while (children.Items.Count == batchSize);
         }
     }
 

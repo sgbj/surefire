@@ -16,6 +16,8 @@ app.MapSurefireDashboard();
 app.Run();
 ```
 
+![Surefire dashboard](docs/src/assets/dashboard.png)
+
 ## Features
 
 - **Minimal API style** — register jobs with delegates. Parameters are resolved from DI automatically.

@@ -112,6 +112,7 @@ export function TraceView({
   }, [runs]);
 
   const currentRef = useRef<HTMLAnchorElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const hasScrolled = useRef(false);
 
   // Only scroll once on mount or when navigating to a different run
@@ -121,7 +122,11 @@ export function TraceView({
 
   useEffect(() => {
     if (currentRef.current && !hasScrolled.current) {
-      currentRef.current.scrollIntoView({ block: "center" });
+      // Only scroll if the container actually overflows
+      const viewport = containerRef.current?.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
+      if (viewport && viewport.scrollHeight > viewport.clientHeight) {
+        currentRef.current.scrollIntoView({ block: "center" });
+      }
       hasScrolled.current = true;
     }
   }, [flatNodes]);
@@ -131,7 +136,7 @@ export function TraceView({
   const pct = (ms: number) => (ms / timeRange) * 100 * SCALE;
 
   return (
-    <div className="flex max-h-[26rem]">
+    <div ref={containerRef} className="flex max-h-[26rem]">
       <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
         <div className="grid grid-cols-[auto_1fr]">
           {/* Time axis header */}

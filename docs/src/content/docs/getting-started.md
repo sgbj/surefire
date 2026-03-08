@@ -219,7 +219,7 @@ Chain them with `RunAsync` to build a pipeline:
 ```csharp
 app.AddJob("ProcessProducts", async (IJobClient client, CancellationToken ct) =>
 {
-    var lines = await client.RunAsync<IAsyncEnumerable<string>>("FetchProducts", ct);
+    var lines = await client.RunAsync<IAsyncEnumerable<string>>("FetchProducts", cancellationToken: ct);
     var products = await client.RunAsync<IAsyncEnumerable<Product>>("ConvertProducts", new { lines }, ct);
 
     var count = 0;

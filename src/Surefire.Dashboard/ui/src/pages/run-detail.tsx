@@ -119,6 +119,8 @@ export function RunDetailPage() {
     setSseProgress(null);
     setOutputItems([]);
     setInputItems([]);
+    isAtBottom.current = true;
+    isOutputAtBottom.current = true;
     let stale = false;
     let doneReceived = false;
     const es = api.streamRun(id);

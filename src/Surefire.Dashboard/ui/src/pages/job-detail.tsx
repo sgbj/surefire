@@ -166,8 +166,9 @@ export function JobDetailPage() {
                 </DialogHeader>
                 <div className="space-y-4 py-4">
                   <div>
-                    <label className="text-sm font-medium">Arguments (JSON)</label>
+                    <label htmlFor="trigger-args" className="text-sm font-medium">Arguments (JSON)</label>
                     <textarea
+                      id="trigger-args"
                       className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm font-mono min-h-[100px] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
                       placeholder='{"key": "value"}'
                       value={argsText}
@@ -175,8 +176,9 @@ export function JobDetailPage() {
                     />
                   </div>
                   <div>
-                    <label className="text-sm font-medium">Run at (optional)</label>
+                    <label htmlFor="trigger-not-before" className="text-sm font-medium">Run at (optional)</label>
                     <input
+                      id="trigger-not-before"
                       type="datetime-local"
                       className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
                       value={notBeforeText}
@@ -211,19 +213,17 @@ export function JobDetailPage() {
         )}
       </dl>
 
-      <div>
-        <h3 className="text-lg font-semibold mb-2">Runs</h3>
-        <DataTable
-          columns={runColumns}
-          data={runs?.items ?? []}
-          manualPagination
-          pageCount={Math.ceil((runs?.totalCount ?? 0) / pagination.pageSize)}
-          totalCount={runs?.totalCount ?? 0}
-          pagination={pagination}
-          onPaginationChange={setPagination}
-          defaultPageSize={15}
-        />
-      </div>
+      <DataTable
+        columns={runColumns}
+        data={runs?.items ?? []}
+        manualPagination
+        pageCount={Math.ceil((runs?.totalCount ?? 0) / pagination.pageSize)}
+        totalCount={runs?.totalCount ?? 0}
+        pagination={pagination}
+        onPaginationChange={setPagination}
+        defaultPageSize={15}
+        header={<span className="text-sm text-muted-foreground">Runs ({runs?.totalCount ?? 0})</span>}
+      />
     </div>
   );
 }

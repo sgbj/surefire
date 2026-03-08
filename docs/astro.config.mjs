@@ -31,6 +31,7 @@ export default defineConfig({
 					label: 'Guides',
 					items: [
 						{ label: 'Dashboard', slug: 'guides/dashboard' },
+					{ label: 'Metrics & OpenTelemetry', slug: 'guides/metrics' },
 					],
 				},
 			],

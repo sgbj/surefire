@@ -93,9 +93,11 @@ export function NodeDetailPage() {
       </dl>
 
       {node.registeredJobNames.length > 0 && (
-        <div>
-          <h3 className="text-lg font-semibold mb-2">Jobs</h3>
-          <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1 text-sm">
+        <div className="rounded-lg border overflow-hidden">
+          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+            <span className="text-sm text-muted-foreground">Jobs ({node.registeredJobNames.length})</span>
+          </div>
+          <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1 text-sm p-3 bg-muted/30">
             {node.registeredJobNames.map(jobName => (
               <li key={jobName} className="truncate">
                 <Link to={`/jobs/${encodeURIComponent(jobName)}`} className="text-primary hover:underline" title={jobName}>{jobName}</Link>
@@ -105,19 +107,17 @@ export function NodeDetailPage() {
         </div>
       )}
 
-      <div>
-        <h3 className="text-lg font-semibold mb-2">Runs</h3>
-        <DataTable
-          columns={runColumns}
-          data={runs?.items ?? []}
-          manualPagination
-          pageCount={Math.ceil((runs?.totalCount ?? 0) / pagination.pageSize)}
-          totalCount={runs?.totalCount ?? 0}
-          pagination={pagination}
-          onPaginationChange={setPagination}
-          defaultPageSize={15}
-        />
-      </div>
+      <DataTable
+        columns={runColumns}
+        data={runs?.items ?? []}
+        manualPagination
+        pageCount={Math.ceil((runs?.totalCount ?? 0) / pagination.pageSize)}
+        totalCount={runs?.totalCount ?? 0}
+        pagination={pagination}
+        onPaginationChange={setPagination}
+        defaultPageSize={15}
+        header={<span className="text-sm text-muted-foreground">Runs ({runs?.totalCount ?? 0})</span>}
+      />
     </div>
   );
 }

@@ -165,7 +165,7 @@ export function DashboardPage() {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground px-6 pb-4">No runs yet</p>
+            <p className="text-sm text-muted-foreground px-6 py-4">No runs yet</p>
           )}
         </CardContent>
       </Card>
