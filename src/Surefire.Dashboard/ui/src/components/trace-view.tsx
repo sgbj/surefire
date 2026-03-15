@@ -17,6 +17,7 @@ const barColors: Record<number, string> = {
   3: "bg-rose-400 dark:bg-rose-500",
   4: "bg-slate-400 dark:bg-slate-500",
   5: "bg-violet-400 dark:bg-violet-500",
+  6: "bg-gray-400 dark:bg-gray-500",
 };
 
 function buildTree(runs: JobRun[]): TreeNode[] {
@@ -137,10 +138,10 @@ export function TraceView({
 
   return (
     <div ref={containerRef} className="flex max-h-[26rem]">
-      <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
+      <ScrollArea className="flex-1 min-h-0 rounded-md border">
         <div className="grid grid-cols-[auto_1fr]">
           {/* Time axis header */}
-          <div className="col-span-2 grid grid-cols-subgrid items-stretch sticky top-0 z-10 h-10 border-b bg-background/80 backdrop-blur-sm px-2">
+          <div className="col-span-2 grid grid-cols-subgrid items-stretch sticky top-0 z-10 h-10 border-b bg-muted/30 backdrop-blur-sm px-2">
             <span className="text-sm text-muted-foreground pr-3 self-center">Trace</span>
             <div className="relative overflow-visible">
                 {ticks.map((t, i) => (

@@ -10,6 +10,7 @@ import { RunsPage } from '@/pages/runs';
 import { RunDetailPage } from '@/pages/run-detail';
 import { NodesPage } from '@/pages/nodes';
 import { NodeDetailPage } from '@/pages/node-detail';
+import { QueuesPage } from '@/pages/queues';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -27,6 +28,7 @@ export default function App() {
               <Route path="jobs/:name" element={<JobDetailPage />} />
               <Route path="runs" element={<RunsPage />} />
               <Route path="runs/:id" element={<RunDetailPage />} />
+              <Route path="queues" element={<QueuesPage />} />
               <Route path="nodes" element={<NodesPage />} />
               <Route path="nodes/:name" element={<NodeDetailPage />} />
             </Route>

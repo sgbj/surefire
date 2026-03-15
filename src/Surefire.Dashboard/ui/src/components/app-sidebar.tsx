@@ -1,4 +1,4 @@
-import { Flame, House, Workflow, Play, Server, Search, Moon, Sun, Monitor, BookOpen, Github } from "lucide-react"
+import { House, Workflow, Play, Server, Layers, Search, Moon, Sun, Monitor, BookOpen, Github } from "lucide-react"
 import { Link } from "react-router"
 
 import { NavMain } from "@/components/nav-main"
@@ -20,15 +20,17 @@ const navItems = [
   { title: "Dashboard", url: "/", icon: House },
   { title: "Jobs", url: "/jobs", icon: Workflow },
   { title: "Runs", url: "/runs", icon: Play },
+  { title: "Queues", url: "/queues", icon: Layers },
   { title: "Nodes", url: "/nodes", icon: Server },
 ]
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   theme: Theme
   onCycleTheme: () => void
+  onOpenSearch: () => void
 }
 
-export function AppSidebar({ theme, onCycleTheme, ...props }: AppSidebarProps) {
+export function AppSidebar({ theme, onCycleTheme, onOpenSearch, ...props }: AppSidebarProps) {
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor
   const themeLabel = theme === "system" ? "System" : theme === "dark" ? "Dark" : "Light"
 
@@ -43,7 +45,7 @@ export function AppSidebar({ theme, onCycleTheme, ...props }: AppSidebarProps) {
               className="data-[slot=sidebar-menu-button]:!p-1.5 data-[slot=sidebar-menu-button]:!h-10"
             >
               <Link to="/">
-                <Flame className="!size-6 text-primary fill-primary" />
+                <img src={`${import.meta.env.BASE_URL}surefire.svg`} alt="" className="!size-6" />
                 <span className="text-base font-semibold tracking-tight">Surefire</span>
               </Link>
             </SidebarMenuButton>
@@ -60,7 +62,7 @@ export function AppSidebar({ theme, onCycleTheme, ...props }: AppSidebarProps) {
               variant="ghost"
               size="icon"
               className="size-8"
-              onClick={() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }))}
+              onClick={onOpenSearch}
             >
               <Search className="size-4 opacity-60" />
               <span className="sr-only">Search</span>

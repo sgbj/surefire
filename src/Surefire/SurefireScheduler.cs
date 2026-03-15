@@ -10,6 +10,7 @@ internal sealed class SurefireScheduler(
     INotificationProvider notifications,
     JobExecutor executor,
     JobRegistry registry,
+    PlanEngine planEngine,
     RunRecovery recovery,
     TimeProvider timeProvider,
     SurefireOptions options,
@@ -22,6 +23,10 @@ internal sealed class SurefireScheduler(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var nodeName = options.NodeName;
+
+        var queueNames = options.Queues.Count > 0
+            ? (IReadOnlyCollection<string>)options.Queues.Select(q => q.Name).ToList()
+            : (IReadOnlyCollection<string>)["default"];
 
         // maxCount: 1 prevents unbounded accumulation when many notifications arrive in quick succession
         using var wakeup = new SemaphoreSlim(0, 1);
@@ -38,6 +43,20 @@ internal sealed class SurefireScheduler(
         var lastRetentionCheck = timeProvider.GetUtcNow();
         var lastCronCheck = timeProvider.GetUtcNow();
 
+        // Register this node
+        var node = new NodeInfo
+        {
+            Name = nodeName,
+            StartedAt = timeProvider.GetUtcNow(),
+            LastHeartbeatAt = timeProvider.GetUtcNow(),
+            RegisteredJobNames = registry.GetJobNames().ToList(),
+            RegisteredQueueNames = queueNames.ToList()
+        };
+        await store.RegisterNodeAsync(node, stoppingToken);
+
+        // Sync queues and rate limits on startup
+        await SyncQueuesAndRateLimitsAsync(stoppingToken);
+
         logger.LogInformation("Surefire scheduler started on node {NodeName}", nodeName);
 
         try
@@ -46,15 +65,16 @@ internal sealed class SurefireScheduler(
             {
                 try
                 {
+                    await ActivateAdHocPlansAsync(stoppingToken);
                     await EnqueueCronJobsAsync(lastCronCheck, stoppingToken);
                     lastCronCheck = timeProvider.GetUtcNow();
-                    await ClaimAndExecuteAsync(nodeName, stoppingToken);
+                    await ClaimAndExecuteAsync(nodeName, queueNames, stoppingToken);
 
                     var now = timeProvider.GetUtcNow();
 
                     if (now - lastHeartbeat > heartbeatInterval)
                     {
-                        await store.HeartbeatAsync(nodeName, registry.GetJobNames(), stoppingToken);
+                        await store.HeartbeatAsync(nodeName, registry.GetJobNames(), queueNames, stoppingToken);
 
                         // Heartbeat all currently executing runs
                         var runIds = _executingTasks.Keys.ToList();
@@ -64,11 +84,22 @@ internal sealed class SurefireScheduler(
                         // Re-sync job definitions so deleted/stale entries are restored
                         await SyncJobsAsync(stoppingToken);
 
+                        // Sync queues and rate limits
+                        await SyncQueuesAndRateLimitsAsync(stoppingToken);
+
                         // Ensure continuous jobs have active runs
                         await EnsureContinuousJobsAsync(stoppingToken);
 
                         // Detect and recover stale runs
                         await RecoverStaleRunsAsync(stoppingToken);
+
+                        // Reconcile active plans
+                        await planEngine.ReconcileActivePlansAsync(stoppingToken);
+
+                        // Cancel expired runs
+                        var expired = await store.CancelExpiredRunsAsync(stoppingToken);
+                        if (expired > 0)
+                            logger.LogDebug("Cancelled {Count} expired runs", expired);
 
                         await PruneStaleNodesAsync(nodeName, stoppingToken);
                         await RemoveOrphanedJobsAsync(stoppingToken);
@@ -140,10 +171,54 @@ internal sealed class SurefireScheduler(
         logger.LogInformation("Surefire scheduler stopped");
     }
 
+    private async Task ActivateAdHocPlansAsync(CancellationToken ct)
+    {
+        // Ad-hoc plans (created via TriggerAsync(PlanBuilder)) have dynamic job names
+        // like "_plan_{runId}" that aren't registered in the registry and have no
+        // JobDefinition in the store. ClaimRunAsync can't find them (INNER JOIN on jobs
+        // filters them out), so we handle them here.
+        //
+        // Registered plans go through ClaimRunAsync like any other run — same gates
+        // (queue pause, rate limits, max concurrency, etc.) apply uniformly.
+
+        var pendingRuns = await store.GetRunsAsync(new RunFilter
+        {
+            Status = JobStatus.Pending,
+            Take = 100
+        }, ct);
+
+        var registeredNames = registry.GetJobNames();
+
+        foreach (var run in pendingRuns.Items)
+        {
+            if (run.PlanGraph is null) continue;
+            if (registeredNames.Contains(run.JobName)) continue; // Handled by ClaimRunAsync
+            if (run.NotBefore > timeProvider.GetUtcNow()) continue;
+            if (run.NotAfter is not null && run.NotAfter <= timeProvider.GetUtcNow()) continue;
+
+            // Transition Pending -> Running via CAS
+            run.Status = JobStatus.Running;
+            run.StartedAt = timeProvider.GetUtcNow();
+            run.NodeName = options.NodeName;
+            run.LastHeartbeatAt = timeProvider.GetUtcNow();
+            if (!await store.TryUpdateRunStatusAsync(run, JobStatus.Pending, ct))
+                continue; // Another node claimed it
+
+            try
+            {
+                await planEngine.AdvancePlanAsync(run.Id, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to activate ad-hoc plan run {RunId}", run.Id);
+            }
+        }
+    }
+
     private async Task EnqueueCronJobsAsync(DateTimeOffset since, CancellationToken ct)
     {
         var registeredNames = registry.GetJobNames();
-        var jobs = await store.GetJobsAsync(new JobFilter { IsEnabled = true }, ct);
+        var jobs = await store.GetJobsAsync(new JobListFilter { IsEnabled = true }, ct);
         var now = timeProvider.GetUtcNow();
 
         foreach (var job in jobs)
@@ -187,7 +262,8 @@ internal sealed class SurefireScheduler(
                     CreatedAt = now,
                     NotBefore = now,
                     Priority = job.Priority,
-                    DeduplicationId = $"{job.Name}:{scheduledAt:O}"
+                    DeduplicationId = $"{job.Name}:{scheduledAt:O}",
+                    PlanGraph = job.IsPlan ? job.PlanGraph : null
                 };
 
                 if (await store.TryCreateRunAsync(run, ct))
@@ -202,7 +278,7 @@ internal sealed class SurefireScheduler(
         }
     }
 
-    private async Task ClaimAndExecuteAsync(string nodeName, CancellationToken ct)
+    private async Task ClaimAndExecuteAsync(string nodeName, IReadOnlyCollection<string> queueNames, CancellationToken ct)
     {
         var jobNames = registry.GetJobNames();
         while (!ct.IsCancellationRequested)
@@ -210,8 +286,23 @@ internal sealed class SurefireScheduler(
             if (options.MaxNodeConcurrency is { } max && _executingTasks.Count >= max)
                 break;
 
-            var run = await store.ClaimRunAsync(nodeName, jobNames, ct);
+            var run = await store.ClaimRunAsync(nodeName, jobNames, queueNames, ct);
             if (run is null) break;
+
+            // Plan orchestrator runs are already Running after claim — advance the plan
+            // to create step runs. No executor needed, no _executingTasks tracking.
+            if (run.PlanGraph is not null)
+            {
+                try
+                {
+                    await planEngine.AdvancePlanAsync(run.Id, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to activate plan run {RunId}", run.Id);
+                }
+                continue;
+            }
 
             var runId = run.Id;
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -239,7 +330,7 @@ internal sealed class SurefireScheduler(
 
     private async Task RecoverStaleRunsAsync(CancellationToken ct)
     {
-        var staleRuns = await store.GetStaleRunsAsync(options.StaleNodeThreshold, ct);
+        var staleRuns = await store.GetInactiveRunsAsync(options.InactiveThreshold, ct);
         if (staleRuns.Count == 0) return;
 
         foreach (var run in staleRuns)
@@ -259,6 +350,19 @@ internal sealed class SurefireScheduler(
             var job = registry.Get(name);
             if (job is not null)
                 await store.UpsertJobAsync(job.Definition, ct);
+        }
+    }
+
+    private async Task SyncQueuesAndRateLimitsAsync(CancellationToken ct)
+    {
+        foreach (var queue in options.Queues)
+        {
+            await store.UpsertQueueAsync(queue, ct);
+        }
+
+        foreach (var rateLimit in options.RateLimits)
+        {
+            await store.UpsertRateLimitAsync(rateLimit, ct);
         }
     }
 
@@ -294,8 +398,10 @@ internal sealed class SurefireScheduler(
                     NotBefore = now,
                     Priority = job.Definition.Priority,
                 };
-                await store.CreateRunAsync(run, ct);
-                await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, ct);
+                if (await store.TryCreateContinuousRunAsync(run, ct))
+                {
+                    await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, ct);
+                }
             }
 
             logger.LogInformation("Created {Count} seed run(s) for continuous job {JobName}", needed, name);
@@ -321,7 +427,7 @@ internal sealed class SurefireScheduler(
 
     private async Task PruneStaleNodesAsync(string currentNodeName, CancellationToken ct)
     {
-        var staleThreshold = timeProvider.GetUtcNow() - options.StaleNodeThreshold;
+        var staleThreshold = timeProvider.GetUtcNow() - options.InactiveThreshold;
         var nodes = await store.GetNodesAsync(ct);
 
         var staleNodes = nodes.Where(n => n.Name != currentNodeName && n.LastHeartbeatAt < staleThreshold).ToList();

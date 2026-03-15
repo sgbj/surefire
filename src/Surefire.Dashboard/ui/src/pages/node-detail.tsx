@@ -71,14 +71,14 @@ export function NodeDetailPage() {
     <div className="space-y-6">
       <Skeleton className="h-7 w-48" />
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-        {Array.from({ length: 3 }).map((_, i) => (
+        {Array.from({ length: 4 }).map((_, i) => (
           <div key={i}>
             <Skeleton className="h-3 w-16 mb-1.5" />
             <Skeleton className="h-4 w-24" />
           </div>
         ))}
       </div>
-      <Skeleton className="h-64 w-full" />
+      <Skeleton className="h-64 w-full rounded-lg" />
     </div>
   );
 
@@ -90,14 +90,15 @@ export function NodeDetailPage() {
         <DtDd label="Started">{formatDate(node.startedAt)}</DtDd>
         <DtDd label="Last heartbeat">{formatRelative(node.lastHeartbeatAt)}</DtDd>
         <DtDd label="Running jobs">{node.runningCount}</DtDd>
+        <DtDd label="Queues">{node.registeredQueueNames.join(', ')}</DtDd>
       </dl>
 
       {node.registeredJobNames.length > 0 && (
         <div className="rounded-lg border overflow-hidden">
-          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
             <span className="text-sm text-muted-foreground">Jobs ({node.registeredJobNames.length})</span>
           </div>
-          <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1 text-sm p-3 bg-muted/30">
+          <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1 text-sm p-3">
             {node.registeredJobNames.map(jobName => (
               <li key={jobName} className="truncate">
                 <Link to={`/jobs/${encodeURIComponent(jobName)}`} className="text-primary hover:underline" title={jobName}>{jobName}</Link>

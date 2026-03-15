@@ -3,33 +3,33 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Surefire.PostgreSql;
 
-public static class SurefireOptionsExtensions
+public static class SurefireBuilderExtensions
 {
-    public static SurefireOptions UsePostgreSql(this SurefireOptions options, string connectionString, Action<PostgreSqlOptions>? configure = null)
+    public static SurefireBuilder UsePostgreSql(this SurefireBuilder builder, string connectionString, Action<PostgreSqlOptions>? configure = null)
     {
         var pgOptions = new PostgreSqlOptions { ConnectionString = connectionString };
         configure?.Invoke(pgOptions);
-        options.Services.TryAddSingleton(_ => pgOptions);
-        options.Services.AddSingleton<IJobStore, PostgreSqlJobStore>();
-        options.Services.AddSingleton<INotificationProvider, PostgreSqlNotificationProvider>();
-        return options;
+        builder.Services.Replace(ServiceDescriptor.Singleton(_ => pgOptions));
+        builder.Services.Replace(ServiceDescriptor.Singleton<IJobStore, PostgreSqlJobStore>());
+        builder.Services.Replace(ServiceDescriptor.Singleton<INotificationProvider, PostgreSqlNotificationProvider>());
+        return builder;
     }
 
-    public static SurefireOptions UsePostgreSqlStore(this SurefireOptions options, string connectionString, Action<PostgreSqlOptions>? configure = null)
+    public static SurefireBuilder UsePostgreSqlStore(this SurefireBuilder builder, string connectionString, Action<PostgreSqlOptions>? configure = null)
     {
         var pgOptions = new PostgreSqlOptions { ConnectionString = connectionString };
         configure?.Invoke(pgOptions);
-        options.Services.TryAddSingleton(_ => pgOptions);
-        options.Services.AddSingleton<IJobStore, PostgreSqlJobStore>();
-        return options;
+        builder.Services.Replace(ServiceDescriptor.Singleton(_ => pgOptions));
+        builder.Services.Replace(ServiceDescriptor.Singleton<IJobStore, PostgreSqlJobStore>());
+        return builder;
     }
 
-    public static SurefireOptions UsePostgreSqlNotifications(this SurefireOptions options, string connectionString, Action<PostgreSqlOptions>? configure = null)
+    public static SurefireBuilder UsePostgreSqlNotifications(this SurefireBuilder builder, string connectionString, Action<PostgreSqlOptions>? configure = null)
     {
         var pgOptions = new PostgreSqlOptions { ConnectionString = connectionString };
         configure?.Invoke(pgOptions);
-        options.Services.TryAddSingleton(_ => pgOptions);
-        options.Services.AddSingleton<INotificationProvider, PostgreSqlNotificationProvider>();
-        return options;
+        builder.Services.Replace(ServiceDescriptor.Singleton(_ => pgOptions));
+        builder.Services.Replace(ServiceDescriptor.Singleton<INotificationProvider, PostgreSqlNotificationProvider>());
+        return builder;
     }
 }

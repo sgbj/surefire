@@ -25,6 +25,10 @@ public sealed partial class PostgreSqlOptions : IAsyncDisposable
     /// Gets the shared NpgsqlDataSource for this connection string.
     /// Lazily created on first access; shared by the job store and notification provider.
     /// </summary>
+    /// <summary>
+    /// Gets the shared NpgsqlDataSource for this connection string.
+    /// Lazily created on first access; shared by the job store and notification provider.
+    /// </summary>
     internal NpgsqlDataSource DataSource =>
         LazyInitializer.EnsureInitialized(ref _dataSource, () => NpgsqlDataSource.Create(ConnectionString));
 

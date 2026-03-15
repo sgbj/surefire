@@ -19,6 +19,7 @@ const chartConfig = {
   running: { label: 'Running', color: 'var(--status-running)' },
   cancelled: { label: 'Cancelled', color: 'var(--status-cancelled)' },
   deadLetter: { label: 'Dead letter', color: 'var(--status-dead-letter)' },
+  skipped: { label: 'Skipped', color: 'var(--status-skipped)' },
 } satisfies ChartConfig;
 
 const PERIODS: Record<string, { hours: number; bucketMinutes: number }> = {
@@ -49,11 +50,7 @@ export function DashboardPage() {
   });
 
   return (
-    <div className="relative space-y-6">
-      <div className="absolute left-1/2 -translate-x-1/2 w-screen -top-8 h-[400px] pointer-events-none" aria-hidden="true">
-        <div className="absolute inset-0 animate-glow-drift will-change-transform" style={{ background: 'radial-gradient(ellipse 60% 60% at 30% 20%, oklch(from var(--primary) l c h / 0.06), transparent)' }} />
-        <div className="absolute inset-0 animate-glow-drift will-change-transform [animation-delay:-5s] [animation-direction:reverse]" style={{ background: 'radial-gradient(ellipse 50% 55% at 70% 30%, oklch(from var(--ring) l c h / 0.04), transparent)' }} />
-      </div>
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold tracking-tight">Dashboard</h2>
         <Tabs value={period} onValueChange={setPeriod}>
@@ -72,27 +69,41 @@ export function DashboardPage() {
         <>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             {Array.from({ length: 4 }).map((_, i) => (
-              <Card key={i} className="gap-2 py-5">
-                <CardHeader><Skeleton className="h-4 w-24" /></CardHeader>
-                <CardContent><Skeleton className="h-7 w-16" /></CardContent>
+              <Card key={i} className="gap-3 py-5">
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <Skeleton className="size-4 rounded" />
+                    <Skeleton className="h-4 w-20" />
+                  </div>
+                </CardHeader>
+                <CardContent><Skeleton className="h-8 w-16" /></CardContent>
               </Card>
             ))}
           </div>
-          <Card>
-            <CardHeader><Skeleton className="h-5 w-32" /></CardHeader>
-            <CardContent><Skeleton className="h-[300px] w-full" /></CardContent>
-          </Card>
-          <Card className="gap-0 pb-0">
-            <CardHeader className="pb-3"><Skeleton className="h-5 w-28" /></CardHeader>
-            <CardContent className="px-0">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="flex items-center justify-between px-6 py-3 border-t">
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-5 w-20" />
-                </div>
-              ))}
-            </CardContent>
-          </Card>
+          <div className="space-y-6">
+            <Card className="pt-0 gap-0">
+              <CardHeader className="border-b py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm">
+                <Skeleton className="h-4 w-28" />
+              </CardHeader>
+              <CardContent className="pt-4 h-[300px]" />
+            </Card>
+            <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
+              <CardHeader className="py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent className="px-0">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="flex items-center justify-between gap-4 px-6 py-2.5 border-t">
+                    <Skeleton className="h-4 w-32" />
+                    <div className="flex items-center gap-3 shrink-0">
+                      <Skeleton className="h-5 w-[4.5rem] rounded-full" />
+                      <Skeleton className="h-3 w-14" />
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
         </>
       )}
 
@@ -106,11 +117,19 @@ export function DashboardPage() {
 
       <div className="space-y-6">
       <Card className="pt-0 gap-0">
-        <CardHeader className="border-b py-3! gap-0! grid-rows-none! rounded-t-xl bg-background/80 backdrop-blur-sm"><CardTitle className="text-sm font-medium">Runs over time</CardTitle></CardHeader>
+        <CardHeader className="border-b py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm"><CardTitle className="text-sm font-medium">Runs over time</CardTitle></CardHeader>
         <CardContent className="pt-4 px-0">
           {stats.timeline.length > 0 ? (
             <ChartContainer config={chartConfig} className="aspect-auto h-[300px] w-full">
               <AreaChart data={stats.timeline} margin={{ left: 0, right: 0 }}>
+                <defs>
+                  {Object.entries(chartConfig).map(([key, { color }]) => (
+                    <linearGradient key={key} id={`gradient-${key}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={color} stopOpacity={0.6} />
+                      <stop offset="100%" stopColor={color} stopOpacity={0.02} />
+                    </linearGradient>
+                  ))}
+                </defs>
                 <XAxis
                   dataKey="timestamp"
                   tickLine={false}
@@ -131,12 +150,13 @@ export function DashboardPage() {
                   labelFormatter={(v) => formatBucketLabel(v, period)}
                 />
                 <ChartLegend content={<ChartLegendContent className="flex-wrap" />} />
-                <Area type="monotone" dataKey="completed" stackId="1" stroke="var(--color-completed)" fill="var(--color-completed)" fillOpacity={0.25} />
-                <Area type="monotone" dataKey="failed" stackId="1" stroke="var(--color-failed)" fill="var(--color-failed)" fillOpacity={0.25} />
-                <Area type="monotone" dataKey="pending" stackId="1" stroke="var(--color-pending)" fill="var(--color-pending)" fillOpacity={0.25} />
-                <Area type="monotone" dataKey="running" stackId="1" stroke="var(--color-running)" fill="var(--color-running)" fillOpacity={0.25} />
-                <Area type="monotone" dataKey="cancelled" stackId="1" stroke="var(--color-cancelled)" fill="var(--color-cancelled)" fillOpacity={0.25} />
-                <Area type="monotone" dataKey="deadLetter" stackId="1" stroke="var(--color-deadLetter)" fill="var(--color-deadLetter)" fillOpacity={0.25} />
+                <Area type="monotone" dataKey="completed" stackId="1" stroke="var(--color-completed)" fill="url(#gradient-completed)" />
+                <Area type="monotone" dataKey="failed" stackId="1" stroke="var(--color-failed)" fill="url(#gradient-failed)" />
+                <Area type="monotone" dataKey="pending" stackId="1" stroke="var(--color-pending)" fill="url(#gradient-pending)" />
+                <Area type="monotone" dataKey="running" stackId="1" stroke="var(--color-running)" fill="url(#gradient-running)" />
+                <Area type="monotone" dataKey="cancelled" stackId="1" stroke="var(--color-cancelled)" fill="url(#gradient-cancelled)" />
+                <Area type="monotone" dataKey="deadLetter" stackId="1" stroke="var(--color-deadLetter)" fill="url(#gradient-deadLetter)" />
+                <Area type="monotone" dataKey="skipped" stackId="1" stroke="var(--color-skipped)" fill="url(#gradient-skipped)" />
               </AreaChart>
             </ChartContainer>
           ) : (
@@ -145,8 +165,8 @@ export function DashboardPage() {
         </CardContent>
       </Card>
 
-      <Card className="pt-0 gap-0 pb-0">
-        <CardHeader className="py-3! gap-0! grid-rows-none! rounded-t-xl bg-background/80 backdrop-blur-sm"><CardTitle className="text-sm font-medium">Recent runs</CardTitle></CardHeader>
+      <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
+        <CardHeader className="py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm"><CardTitle className="text-sm font-medium">Recent runs</CardTitle></CardHeader>
         <CardContent className="px-0">
           {stats.recentRuns.length > 0 ? (
             <div>
@@ -177,7 +197,7 @@ export function DashboardPage() {
 
 function StatCard({ title, value, icon: Icon }: { title: string; value: string | number; icon: LucideIcon }) {
   return (
-    <Card className="gap-3 py-5 border-t-2 border-t-primary/10">
+    <Card className="gap-3 py-5">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
           <Icon className="size-4" />

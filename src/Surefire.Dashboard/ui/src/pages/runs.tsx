@@ -137,10 +137,10 @@ export function RunsPage() {
         defaultPageSize={15}
         toolbar={
           <>
-            <div className="relative max-w-[200px]">
+            <div className="relative max-w-sm">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
               <Input
-                placeholder="Filter..."
+                placeholder="Search..."
                 value={jobNameInput}
                 onChange={(e) => setJobNameInput(e.target.value)}
                 className="pl-8"

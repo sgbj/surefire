@@ -4,9 +4,9 @@ using Surefire.PostgreSql;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSurefire(options =>
+builder.Services.AddSurefire(surefire =>
 {
-    options.UsePostgreSql(builder.Configuration.GetConnectionString("Surefire")!);
+    surefire.UsePostgreSql(builder.Configuration.GetConnectionString("Surefire")!);
 });
 
 var app = builder.Build();
@@ -146,7 +146,7 @@ app.AddJob("AlwaysRunning", async (ILogger<Program> logger, CancellationToken ct
             await Task.Delay(TimeSpan.FromMinutes(1), ct);
         }
     })
-    .AsContinuous();
+    .Continuous();
 
 app.AddJob("Fibonacci", async (IJobClient client, CancellationToken ct, int n = 5) =>
     {
@@ -159,8 +159,184 @@ app.AddJob("Fibonacci", async (IJobClient client, CancellationToken ct, int n = 
                await client.RunAsync<int>("Fibonacci", new { n = n - 2 }, ct);
     });
 
+// === Plan Examples ===
+
+// Shared internal helpers used across multiple plans
+app.AddJob("GetOrders", (string region) =>
+    new[] { new Order(1, region, 99.99m), new Order(2, region, 149.50m), new Order(3, region, 29.99m) }).Internal();
+
+app.AddJob("ValidateOrders", (Order[] orders) =>
+    orders.Where(o => o.Total > 0).Select(o => new ValidatedOrder(o.Id, o.Region, o.Total, true)).ToArray()).Internal();
+
+app.AddJob("GenerateSummary", (ValidatedOrder[] validated) =>
+    new OrderSummary(validated.Length, validated.Sum(o => o.Total))).Internal();
+
+app.AddJob("ProcessOrder", (Order order, ILogger<Program> logger) =>
+    {
+        logger.LogInformation("Processing order {OrderId} in {Region} for {Total}", order.Id, order.Region, order.Total);
+        return new OrderResult(order.Id, $"Processed-{order.Id}");
+    }).Internal();
+
+// Registered plan — sequential pipeline
+app.AddPlan("OrderPipeline", (PlanBuilder plan, Step<string?> region) =>
+{
+    // Default input: coalesce null to "US" via engine-native LINQ
+    var region1 = region.Select(r => r ?? "US");
+
+    var orders = plan.Run<Order[]>("GetOrders", new { region = region1 });
+    var validated = plan.Run<ValidatedOrder[]>("ValidateOrders", new { orders });
+    return plan.Run<OrderSummary>("GenerateSummary", new { validated });
+});
+
+// Registered plan — fan-out with ForEach
+app.AddJob("ProcessAllOrders_SendConfirmation", (Order order, OrderResult result, ILogger<Program> logger) =>
+    {
+        logger.LogInformation("Sending confirmation for order {OrderId}: {TrackingId}", order.Id, result.TrackingId);
+    }).Internal();
+
+app.AddPlan("ProcessAllOrders", (PlanBuilder plan, Step<string> region) =>
+{
+    var orders = plan.Run<Order[]>("GetOrders", new { region });
+    var results = orders.ForEach((p, order) =>
+    {
+        var result = p.Run<OrderResult>("ProcessOrder", new { order });
+        p.Run("ProcessAllOrders_SendConfirmation", new { order, result });
+        return result;
+    });
+    return results;
+});
+
+// Ad-hoc plan example (inside a job)
+app.AddJob("RunAdHocPlan", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+    {
+        var plan = new PlanBuilder();
+
+        var a = plan.Run<int>("Add", new { a = 10, b = 20 }).WithName("first-add");
+        var b = plan.Run<int>("Add", new { a = 30, b = 40 }).WithName("second-add");
+        var both = plan.WhenAll(a, b);
+
+        var sumOfSums = await client.RunAsync(plan, ct);
+
+        var firstResult = await client.GetStepRunAsync(sumOfSums, "first-add", ct);
+        var secondResult = await client.GetStepRunAsync(sumOfSums, "second-add", ct);
+
+        logger.LogInformation("First: {First}, Second: {Second}",
+            firstResult?.Result, secondResult?.Result);
+    })
+    .WithDescription("Demonstrates ad-hoc plans with WhenAll");
+
+// === V2 Plan Features ===
+
+// Plan with Switch branching — template-based, only winning branch runs
+app.AddJob("ShippingPipeline_ClassifyRegion", (string region) => region switch
+{
+    "US" or "CA" => "domestic",
+    "UK" or "DE" or "FR" => "europe",
+    _ => "international"
+}).Internal();
+
+app.AddJob("ShippingPipeline_ApplyDomesticShipping", (Order[] orders) =>
+    orders.Select(o => new ShippedOrder(o.Id, o.Region, o.Total, 5.99m)).ToArray()).Internal();
+
+app.AddJob("ShippingPipeline_ApplyEuropeShipping", (Order[] orders) =>
+    orders.Select(o => new ShippedOrder(o.Id, o.Region, o.Total, 14.99m)).ToArray()).Internal();
+
+app.AddJob("ShippingPipeline_ApplyInternationalShipping", (Order[] orders) =>
+    orders.Select(o => new ShippedOrder(o.Id, o.Region, o.Total, 29.99m)).ToArray()).Internal();
+
+app.AddPlan("ShippingPipeline", (PlanBuilder plan, Step<string> region) =>
+{
+    var orders = plan.Run<Order[]>("GetOrders", new { region });
+    var classification = plan.Run<string>("ShippingPipeline_ClassifyRegion", new { region });
+
+    return plan.Switch<ShippedOrder[]>(classification)
+        .Case("domestic", p => p.Run<ShippedOrder[]>("ShippingPipeline_ApplyDomesticShipping", new { orders }))
+        .Case("europe", p => p.Run<ShippedOrder[]>("ShippingPipeline_ApplyEuropeShipping", new { orders }))
+        .Default(p => p.Run<ShippedOrder[]>("ShippingPipeline_ApplyInternationalShipping", new { orders }));
+});
+
+// Plan with LINQ operators
+app.AddPlan("OrderAnalytics", (PlanBuilder plan, Step<string> region) =>
+{
+    var orders = plan.Run<Order[]>("GetOrders", new { region });
+
+    // Engine-native LINQ — no jobs needed for filtering/projection
+    var highValue = orders.Where(o => o.Total > 50);
+    var count = highValue.Count();
+    var sorted = orders.OrderByDescending(o => o.Total);
+    var topOrder = sorted.First();
+    var topTotal = topOrder.Select(o => o.Total);
+
+    return topTotal;
+});
+
+// Plan with Optional step and fallback
+app.AddJob("ResilientPipeline_FallbackProcessor", (Order[] orders, ILogger<Program> logger) =>
+{
+    logger.LogWarning("Using fallback processor for {Count} orders", orders.Length);
+    return orders.Select(o => new OrderResult(o.Id, $"FALLBACK-{o.Id}")).ToArray();
+}).Internal();
+
+app.AddPlan("ResilientPipeline", (PlanBuilder plan, Step<string> region) =>
+{
+    var orders = plan.Run<Order[]>("GetOrders", new { region });
+
+    // ProcessOrder may fail — use a fallback
+    var results = orders.ForEach((p, order) =>
+    {
+        return p.Run<OrderResult>("ProcessOrder", new { order })
+            .WithFallback("ResilientPipeline_FallbackProcessor");
+    });
+
+    // Optional validation — failure doesn't block the pipeline
+    var validated = plan.Run<ValidatedOrder[]>("ValidateOrders", new { orders }).Optional();
+
+    return results;
+});
+
+// Plan with If/Else branching — template-based, only winning branch runs
+app.AddJob("ComposedPipeline_IsLargeOrder", (int count) => count > 100).Internal();
+
+app.AddPlan("ComposedPipeline", (PlanBuilder plan, Step<string> region) =>
+{
+    var orders = plan.Run<Order[]>("GetOrders", new { region });
+    var orderCount = orders.Select(o => o.Length);
+
+    var isLarge = plan.Run<bool>("ComposedPipeline_IsLargeOrder", new { count = orderCount });
+
+    plan.If(isLarge, p => { p.Run<OrderResult[]>("ProcessAllOrders", new { region }); })
+        .Else(p => { p.Run<OrderSummary>("GenerateSummary",
+            new { validated = p.Run<ValidatedOrder[]>("ValidateOrders", new { orders }) }); });
+
+    return orders;
+});
+
+// Plan with WaitForSignal
+app.AddPlan("ApprovalWorkflow", (PlanBuilder plan, Step<string> region) =>
+{
+    var orders = plan.Run<Order[]>("GetOrders", new { region });
+    var summary = plan.Run<OrderSummary>("GenerateSummary",
+        new { validated = plan.Run<ValidatedOrder[]>("ValidateOrders", new { orders }) });
+
+    // Wait for human approval before processing
+    var approval = plan.WaitForSignal<bool>("manager-approval");
+
+    // Process orders only after approval (approval step must complete first)
+    var results = orders.ForEach((p, order) =>
+    {
+        return p.Run<OrderResult>("ProcessOrder", new { order }).DependsOn(approval);
+    });
+
+    return results;
+});
+
 app.MapSurefireDashboard();
 
 app.Run();
 
 record Product(string Name, string Category, decimal Price);
+record Order(int Id, string Region, decimal Total);
+record ValidatedOrder(int Id, string Region, decimal Total, bool IsValid);
+record OrderSummary(int Count, decimal Total);
+record OrderResult(int OrderId, string TrackingId);
+record ShippedOrder(int OrderId, string Region, decimal OrderTotal, decimal ShippingCost);

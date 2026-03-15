@@ -7,7 +7,7 @@ hero:
   tagline: Distributed job scheduling for .NET with minimal API ergonomics.
   actions:
     - text: Get started
-      link: /surefire/getting-started/
+      link: /surefire/getting-started/installation/
       icon: right-arrow
     - text: GitHub
       link: https://github.com/sgbj/surefire
@@ -35,8 +35,11 @@ import { Card, CardGrid, Code } from '@astrojs/starlight/components';
 
     Return `IAsyncEnumerable<T>` from jobs and pipe data between stages as it's produced.
   </Card>
+  <Card title="Plans" icon="list-format">
+    Compose jobs into multi-step execution graphs with conditional branching, fan-out, streaming, and automatic data passing.
+  </Card>
   <Card title="Batteries included" icon="puzzle">
-    Retries, cron scheduling, timeouts, concurrency limits, lifecycle hooks, and OpenTelemetry — all built in.
+    Retries, cron scheduling, queues, rate limiting, concurrency limits, lifecycle hooks, and OpenTelemetry.
   </Card>
 </CardGrid>
 

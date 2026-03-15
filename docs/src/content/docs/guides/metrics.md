@@ -1,5 +1,5 @@
 ---
-title: Metrics & OpenTelemetry
+title: Metrics and tracing
 description: Export Surefire metrics and traces using OpenTelemetry.
 ---
 

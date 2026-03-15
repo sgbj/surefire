@@ -30,7 +30,7 @@ export function NavMain({
               : location.pathname.startsWith(item.url)
 
             return (
-              <SidebarMenuItem key={item.title} className={active ? "before:absolute before:-left-1.5 before:top-1/2 before:-translate-y-1/2 before:h-6 before:w-[3px] before:bg-primary before:rounded-full" : ""}>
+              <SidebarMenuItem key={item.title} className={active ? "before:absolute before:-left-1.5 before:top-1/2 before:-translate-y-1/2 before:h-5 before:w-[3px] before:bg-primary before:rounded-full" : ""}>
                 <SidebarMenuButton asChild isActive={active} tooltip={item.title}>
                   <Link to={item.url}>
                     <item.icon className={active ? "opacity-80" : "opacity-60"} />

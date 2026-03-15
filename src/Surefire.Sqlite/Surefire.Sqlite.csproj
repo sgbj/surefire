@@ -3,6 +3,9 @@
     <RootNamespace>Surefire.Sqlite</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Surefire\Surefire.csproj" />
   </ItemGroup>
 </Project>

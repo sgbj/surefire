@@ -12,6 +12,19 @@ app.MapSurefireDashboard("/admin");   // custom prefix
 
 The dashboard is embedded in the `Surefire.Dashboard` package — no extra files or build steps.
 
+## Authorization
+
+The dashboard endpoints have no authorization by default. In production, you should restrict access:
+
+```csharp
+app.MapSurefireDashboard()
+    .RequireAuthorization("AdminPolicy");
+```
+
+`MapSurefireDashboard` returns an `IEndpointConventionBuilder`, so you can chain any ASP.NET Core endpoint convention including `RequireAuthorization`, `RequireCors`, or custom metadata.
+
+Without authorization, anyone who can reach the dashboard can view job arguments, trigger jobs, cancel runs, and manage queues.
+
 ## Home
 
 The home page gives you a quick overview:
@@ -64,9 +77,13 @@ Click into a node to see what jobs it handles and its recent run history.
 
 ![Node detail](../../../assets/node-detail.png)
 
+## Queues
+
+Lists all queues with their pending run count, concurrency limits, and paused status. You can pause and resume queues from this page. See the [queues concept page](/surefire/concepts/queues/) for more on how queues work.
+
 ## Command palette
 
-Press <kbd>Ctrl+K</kbd> (or <kbd>⌘K</kbd> on Mac) to open the command palette. Search for jobs, runs, or nodes and jump straight to them.
+Press <kbd>/</kbd> or <kbd>Ctrl+K</kbd> (<kbd>⌘K</kbd> on Mac) to open the command palette. Search for jobs, runs, or nodes and jump straight to them.
 
 ![Command palette](../../../assets/command-palette.png)
 
@@ -75,18 +92,22 @@ Press <kbd>Ctrl+K</kbd> (or <kbd>⌘K</kbd> on Mac) to open the command palette.
 The dashboard also exposes a REST API at `{prefix}/api/`:
 
 ```
-GET  /api/stats                        # dashboard statistics
-GET  /api/jobs                         # list all jobs
-GET  /api/jobs/{name}                  # get a single job
-PATCH /api/jobs/{name}                 # update a job (enable/disable)
-POST /api/jobs/{name}/trigger          # trigger a new run
-GET  /api/runs?jobName=X&take=20       # list runs with filters
-GET  /api/runs/{id}                    # get a single run
-GET  /api/runs/{id}/logs               # get parsed log events
-GET  /api/runs/{id}/stream             # live logs & progress (SSE)
-GET  /api/runs/{id}/trace              # get the trace for a run
-POST /api/runs/{id}/cancel             # cancel a running job
-POST /api/runs/{id}/rerun              # re-run a completed run
-GET  /api/nodes                        # list all nodes
-GET  /api/nodes/{name}                 # get a single node
+GET   /api/stats                                    # dashboard statistics
+GET   /api/jobs                                     # list all jobs
+GET   /api/jobs/{name}                              # get a single job
+GET   /api/jobs/{name}/stats                        # get job-level stats
+PATCH /api/jobs/{name}                              # update a job (enable/disable)
+POST  /api/jobs/{name}/trigger                      # trigger a new run
+GET   /api/runs?jobName=X&take=20                   # list runs with filters
+GET   /api/runs/{id}                                # get a single run
+GET   /api/runs/{id}/logs                           # get parsed log events
+GET   /api/runs/{id}/stream                         # live logs & progress (SSE)
+GET   /api/runs/{id}/trace                          # get the trace tree for a run
+POST  /api/runs/{id}/cancel                         # cancel a running job
+POST  /api/runs/{id}/rerun                          # re-run a completed run
+GET   /api/queues                                   # list all queues
+PATCH /api/queues/{name}                            # update a queue (pause/resume)
+POST  /api/plans/{planRunId}/signals/{signalName}   # deliver a signal to a plan
+GET   /api/nodes                                    # list all nodes
+GET   /api/nodes/{name}                             # get a single node
 ```

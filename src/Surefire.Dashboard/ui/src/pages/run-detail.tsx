@@ -28,11 +28,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { formatDate, formatDuration, formatLogTime } from "@/lib/format";
 import { useLiveDuration } from "@/hooks/use-live-duration";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Ban, CircleAlert, RotateCcw } from "lucide-react";
 import { DtDd } from "@/components/dt-dd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { TraceView } from "@/components/trace-view";
+import { PlanGraphView } from "@/components/plan-graph-view";
+import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
 import {
   Select,
   SelectContent,
@@ -77,6 +80,20 @@ export function RunDetailPage() {
     queryFn: () => api.getRunTrace(id!),
     refetchInterval: isActive ? 5000 : false,
   });
+  const isPlan = !!run?.planGraph;
+  const isStepRun = !!run?.planRunId && !isPlan;
+  const planRunId = isPlan ? id : run?.planRunId;
+  const { data: parentPlanRun } = useQuery({
+    queryKey: ["run", run?.planRunId],
+    queryFn: () => api.getRun(run!.planRunId!),
+    enabled: isStepRun,
+  });
+  const { data: planStepRuns } = useQuery({
+    queryKey: ["runs", "plan-steps", planRunId],
+    queryFn: () => api.getAllRuns({ planRunId: planRunId! }),
+    enabled: !!planRunId,
+    refetchInterval: isActive || (isStepRun && (parentPlanRun?.status === 0 || parentPlanRun?.status === 1)) ? 5000 : false,
+  });
   const [logs, setLogs] = useState<RunLogEntry[]>([]);
   const [logFilter, setLogFilter] = useState<number | null>(null);
   const [sseProgress, setSseProgress] = useState<number | null>(null);
@@ -84,20 +101,20 @@ export function RunDetailPage() {
   const [inputItems, setInputItems] = useState<
     { param: string; value: unknown }[]
   >([]);
-  const logViewportRef = useRef<HTMLElement | null>(null);
-  const logWrapperRef = useRef<HTMLDivElement>(null);
-  const outputWrapperRef = useRef<HTMLDivElement>(null);
-  const outputViewportRef = useRef<HTMLElement | null>(null);
-  const isAtBottom = useRef(true);
-  const isOutputAtBottom = useRef(true);
-  const programmaticScroll = useRef(false);
-  const programmaticOutputScroll = useRef(false);
+  const filteredLogs = useMemo(
+    () =>
+      logFilter === null ? logs : logs.filter((l) => l.level >= logFilter),
+    [logs, logFilter],
+  );
+  const logScrollRef = useStickToBottom([filteredLogs]);
+  const outputScrollRef = useStickToBottom([outputItems]);
 
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(id!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["run", id] });
       queryClient.invalidateQueries({ queryKey: ["run-trace", id] });
+      queryClient.invalidateQueries({ queryKey: ["runs", "plan-steps", id] });
       toast.success("Run cancelled");
     },
     onError: () => toast.error("Failed to cancel run"),
@@ -119,8 +136,6 @@ export function RunDetailPage() {
     setSseProgress(null);
     setOutputItems([]);
     setInputItems([]);
-    isAtBottom.current = true;
-    isOutputAtBottom.current = true;
     let stale = false;
     let doneReceived = false;
     const es = api.streamRun(id);
@@ -198,69 +213,6 @@ export function RunDetailPage() {
     };
   }, [id, queryClient]);
 
-  const handleLogScroll = useCallback((e: Event) => {
-    if (programmaticScroll.current) return;
-    const el = e.target as HTMLElement;
-    isAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  }, []);
-
-  const handleOutputScroll = useCallback((e: Event) => {
-    if (programmaticOutputScroll.current) return;
-    const el = e.target as HTMLElement;
-    isOutputAtBottom.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  }, []);
-
-  const hasLogs = logs.length > 0;
-  useEffect(() => {
-    const viewport = logWrapperRef.current?.querySelector<HTMLElement>(
-      '[data-slot="scroll-area-viewport"]',
-    );
-    if (!viewport) return;
-    logViewportRef.current = viewport;
-    viewport.addEventListener("scroll", handleLogScroll, { passive: true });
-    return () => viewport.removeEventListener("scroll", handleLogScroll);
-  }, [hasLogs, handleLogScroll]);
-
-  const filteredLogs = useMemo(
-    () =>
-      logFilter === null ? logs : logs.filter((l) => l.level >= logFilter),
-    [logs, logFilter],
-  );
-
-  const hasOutputItems = outputItems.length > 0;
-  useEffect(() => {
-    const viewport = outputWrapperRef.current?.querySelector<HTMLElement>(
-      '[data-slot="scroll-area-viewport"]',
-    );
-    if (!viewport) return;
-    outputViewportRef.current = viewport;
-    viewport.addEventListener("scroll", handleOutputScroll, { passive: true });
-    return () => viewport.removeEventListener("scroll", handleOutputScroll);
-  }, [hasOutputItems, handleOutputScroll]);
-
-  useEffect(() => {
-    const viewport = logViewportRef.current;
-    if (isAtBottom.current && viewport) {
-      programmaticScroll.current = true;
-      viewport.scrollTop = viewport.scrollHeight;
-      requestAnimationFrame(() => {
-        programmaticScroll.current = false;
-      });
-    }
-  }, [filteredLogs]);
-
-  useEffect(() => {
-    const viewport = outputViewportRef.current;
-    if (isOutputAtBottom.current && viewport) {
-      programmaticOutputScroll.current = true;
-      viewport.scrollTop = viewport.scrollHeight;
-      requestAnimationFrame(() => {
-        programmaticOutputScroll.current = false;
-      });
-    }
-  }, [outputItems]);
-
   const inputHeader = useMemo(() => {
     if (inputItems.length === 0) return "";
     const counts = new Map<string, number>();
@@ -276,10 +228,11 @@ export function RunDetailPage() {
     return [...retryRuns.items].sort((a, b) => a.attempt - b.attempt);
   }, [retryRuns]);
 
-  const sortedChildren = useMemo(() => {
-    if (!childRuns?.items.length) return [];
-    return [...childRuns.items].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-  }, [childRuns]);
+  const sortedStepRuns = useMemo(() => {
+    const items = isPlan ? planStepRuns?.items : childRuns?.items;
+    if (!items?.length) return [];
+    return [...items].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  }, [isPlan, planStepRuns, childRuns]);
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
   const progress = sseProgress ?? run?.progress ?? 0;
@@ -295,21 +248,23 @@ export function RunDetailPage() {
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <Skeleton className="h-7 w-56" />
-            <Skeleton className="h-5 w-20" />
+            <Skeleton className="h-5 w-[4.5rem] rounded-full" />
           </div>
-          <Skeleton className="h-8 w-20" />
+          <div className="flex gap-2 shrink-0">
+            <Skeleton className="h-8 w-20" />
+          </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-          {Array.from({ length: 4 }).map((_, i) => (
+          {Array.from({ length: 6 }).map((_, i) => (
             <div key={i}>
               <Skeleton className="h-3 w-16 mb-1.5" />
               <Skeleton className="h-4 w-24" />
             </div>
           ))}
         </div>
-        <Skeleton className="h-48 w-full" />
+        <Skeleton className="h-48 w-full rounded-lg" />
       </div>
     );
 
@@ -321,6 +276,7 @@ export function RunDetailPage() {
             Run {run.id}
           </h2>
           <StatusBadge status={run.status} />
+          {isPlan && <Badge variant="secondary" className="shrink-0">Plan</Badge>}
         </div>
         <div className="flex gap-2 shrink-0">
           {isActive && (
@@ -471,60 +427,43 @@ export function RunDetailPage() {
             </Link>
           </DtDd>
         )}
+        {run.planRunId && !isPlan && (
+          <DtDd label="Plan run">
+            <Link
+              to={`/runs/${run.planRunId}`}
+              className="text-primary hover:underline truncate max-w-[140px] inline-block"
+              title={run.planRunId}
+            >
+              {run.planRunId}
+            </Link>
+          </DtDd>
+        )}
+        {run.planStepName && !isPlan && (
+          <DtDd label="Plan step">{run.planStepName}</DtDd>
+        )}
       </dl>
 
-      {run.arguments && (
-        <div className="flex max-h-[26rem]">
-          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Arguments</span>
-            </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {formatJsonDisplay(run.arguments)}
-            </pre>
-          </ScrollArea>
-        </div>
+      {isPlan && run?.planGraph && (
+        <PlanGraphView planGraph={run.planGraph} stepRuns={planStepRuns?.items ?? []} planRunId={id} />
       )}
 
-      {run.result && outputItems.length === 0 && (
-        <div className="flex max-h-[26rem]">
-          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Result</span>
-            </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {formatJsonDisplay(run.result)}
-            </pre>
-          </ScrollArea>
-        </div>
+      {isStepRun && parentPlanRun?.planGraph && (
+        <PlanGraphView planGraph={parentPlanRun.planGraph} stepRuns={planStepRuns?.items ?? []} highlightStepId={run.planStepId ?? undefined} planRunId={run.planRunId ?? undefined} />
       )}
 
-      {run.error && (
-        <div className="flex max-h-[26rem]">
-          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Error</span>
-            </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {run.error}
-            </pre>
-          </ScrollArea>
-        </div>
-      )}
-
-      {traceRuns && traceRuns.length > 1 && (
-        <TraceView runs={traceRuns} currentRunId={id!} />
-      )}
-
-      {sortedChildren.length > 0 && (
-        <div className="max-h-[26rem] overflow-auto rounded-md border">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Triggered runs ({sortedChildren.length})</span>
+      {sortedStepRuns.length > 0 && (
+        <div className="max-h-[32rem] overflow-auto rounded-md border">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">{isPlan ? 'Steps' : 'Triggered runs'} ({sortedStepRuns.length})</span>
             </div>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="pl-4">ID</TableHead>
+                    {isPlan ? (
+                      <TableHead className="pl-4">Step</TableHead>
+                    ) : (
+                      <TableHead className="pl-4">ID</TableHead>
+                    )}
                     <TableHead>Job</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Started</TableHead>
@@ -533,19 +472,19 @@ export function RunDetailPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {sortedChildren.map((r) => (
+                  {sortedStepRuns.map((r) => (
                     <TableRow key={r.id}>
                       <TableCell className="pl-4">
                         <Link
                           to={`/runs/${r.id}`}
-                          className="text-primary hover:underline truncate max-w-[140px] inline-block"
-                          title={r.id}
+                          className="text-primary hover:underline truncate max-w-[200px] inline-block"
+                          title={isPlan ? (r.planStepName ?? r.id) : r.id}
                         >
-                          {r.id}
+                          {isPlan ? (r.planStepName ?? r.id) : r.id}
                         </Link>
                       </TableCell>
                       <TableCell>
-                        <Link to={`/jobs/${encodeURIComponent(r.jobName)}`} className="text-primary hover:underline truncate max-w-[200px] inline-block" title={r.jobName}>
+                        <Link to={`/jobs/${encodeURIComponent(r.jobName)}`} className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block" title={r.jobName}>
                           {r.jobName}
                         </Link>
                       </TableCell>
@@ -562,7 +501,7 @@ export function RunDetailPage() {
                         {r.nodeName ? (
                           <Link
                             to={`/nodes/${encodeURIComponent(r.nodeName)}`}
-                            className="text-primary hover:underline truncate max-w-[160px] inline-block"
+                            className="text-sm text-primary hover:underline truncate max-w-[160px] inline-block"
                             title={r.nodeName}
                           >
                             {r.nodeName}
@@ -576,9 +515,52 @@ export function RunDetailPage() {
         </div>
       )}
 
+      {run.error && (
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border border-destructive/15">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b border-destructive/10 bg-destructive/[0.03] backdrop-blur-sm">
+              <span className="text-sm text-destructive/90">Error</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {run.error}
+            </pre>
+          </ScrollArea>
+        </div>
+      )}
+
+      {run.arguments && (
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Arguments</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.arguments)}
+            </pre>
+          </ScrollArea>
+        </div>
+      )}
+
+      {run.result && outputItems.length === 0 && (
+        <div className="flex max-h-[26rem]">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Result</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.result)}
+            </pre>
+          </ScrollArea>
+        </div>
+      )}
+
+      {traceRuns && traceRuns.length > 1 && !isPlan && (
+        <TraceView runs={traceRuns} currentRunId={id!} />
+      )}
+
       {sortedRetries.length > 0 && (
         <div className="max-h-[26rem] overflow-auto rounded-md border">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Retries ({sortedRetries.length})</span>
             </div>
               <Table>
@@ -632,8 +614,8 @@ export function RunDetailPage() {
 
       {inputItems.length > 0 && (
         <div className="flex max-h-[26rem]">
-          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30 font-mono text-[13px]">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+          <ScrollArea className="flex-1 min-h-0 rounded-md border font-mono text-[13px]">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">{inputHeader}</span>
             </div>
             <div className="p-2">
@@ -649,9 +631,9 @@ export function RunDetailPage() {
       )}
 
       {outputItems.length > 0 && (
-        <div ref={outputWrapperRef} className="flex max-h-[26rem]">
-          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30 font-mono text-[13px]">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+        <div className="flex max-h-[26rem]">
+          <div ref={outputScrollRef} className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Output stream ({outputItems.length} items)
               </span>
@@ -663,14 +645,14 @@ export function RunDetailPage() {
                 </div>
               ))}
             </div>
-          </ScrollArea>
+          </div>
         </div>
       )}
 
       {logs.length > 0 && (
-        <div ref={logWrapperRef} className="flex max-h-[26rem]">
-          <ScrollArea className="flex-1 min-h-0 rounded-md border bg-muted/30 font-mono text-[13px]">
-            <div className="sticky top-0 z-10 flex items-center gap-3 h-10 px-2 border-b bg-background/80 backdrop-blur-sm">
+        <div className="flex max-h-[26rem]">
+          <div ref={logScrollRef} className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center gap-3 h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Logs (
                 {logFilter !== null
@@ -711,7 +693,7 @@ export function RunDetailPage() {
                 </div>
               ))}
             </div>
-          </ScrollArea>
+          </div>
         </div>
       )}
     </div>

@@ -1,9 +1,8 @@
 import { Outlet, Link } from "react-router"
 import { useState, useEffect, useCallback } from "react"
-import { Flame } from "lucide-react"
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
-import { CommandPalette } from "@/components/command-palette"
+import { CommandPalette, useCommandPalette } from "@/components/command-palette"
 
 type Theme = "system" | "light" | "dark"
 
@@ -14,10 +13,8 @@ function resolveTheme(theme: Theme): boolean {
 
 export function Layout() {
   const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof window !== "undefined") {
-      const stored = localStorage.getItem("theme")
-      if (stored === "light" || stored === "dark") return stored
-    }
+    const stored = localStorage.getItem("theme")
+    if (stored === "light" || stored === "dark") return stored
     return "system"
   })
 
@@ -50,14 +47,16 @@ export function Layout() {
     })
   }
 
+  const commandPalette = useCommandPalette()
+
   return (
     <SidebarProvider>
-      <AppSidebar theme={theme} onCycleTheme={cycleTheme} />
+      <AppSidebar theme={theme} onCycleTheme={cycleTheme} onOpenSearch={commandPalette.toggle} />
       <SidebarInset className="min-w-0">
         <header className="sticky top-0 z-40 flex h-12 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
           <SidebarTrigger />
           <Link to="/" className="flex items-center gap-1.5">
-            <Flame className="size-5 text-primary fill-primary" />
+            <img src={`${import.meta.env.BASE_URL}surefire.svg`} alt="" className="size-5" />
             <span className="text-sm font-semibold tracking-tight">Surefire</span>
           </Link>
         </header>
@@ -65,7 +64,7 @@ export function Layout() {
           <Outlet />
         </div>
       </SidebarInset>
-      <CommandPalette />
+      <CommandPalette open={commandPalette.open} setOpen={commandPalette.setOpen} />
     </SidebarProvider>
   )
 }

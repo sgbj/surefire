@@ -20,6 +20,7 @@ export interface TimelineBucket {
   running: number;
   cancelled: number;
   deadLetter: number;
+  skipped: number;
 }
 
 export interface DashboardStats {
@@ -33,16 +34,52 @@ export interface DashboardStats {
   timeline: TimelineBucket[];
 }
 
-export interface JobDefinition {
+export interface JobResponse {
   name: string;
   description?: string;
   tags: string[];
   cronExpression?: string;
+  timeZoneId?: string;
   timeout?: string;
   maxConcurrency: number | null;
+  priority: number;
   retryPolicy: RetryPolicy;
   isContinuous: boolean;
   isEnabled: boolean;
+  queue?: string;
+  rateLimitName?: string;
+  lastHeartbeatAt?: string;
+  isActive: boolean;
+  nextRunAt?: string;
+  isPlan: boolean;
+  planGraph?: string;
+  argumentsSchema?: JsonSchema;
+}
+
+export interface JsonSchema {
+  type?: string;
+  properties?: Record<string, JsonSchemaProperty>;
+  required?: string[];
+  additionalProperties?: boolean;
+}
+
+export interface JsonSchemaProperty {
+  type?: string | string[];
+  format?: string;
+  enum?: unknown[];
+  default?: unknown;
+  description?: string;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  items?: JsonSchemaProperty;
+  properties?: Record<string, JsonSchemaProperty>;
+  required?: string[];
+  oneOf?: JsonSchemaProperty[];
+  anyOf?: JsonSchemaProperty[];
+  $ref?: string;
 }
 
 export interface RetryPolicy {
@@ -72,14 +109,40 @@ export interface JobRun {
   retryOfRunId?: string;
   rerunOfRunId?: string;
   notBefore?: string;
+  planRunId?: string;
+  planStepId?: string;
+  planStepName?: string;
+  planGraph?: string;
 }
 
-export interface NodeInfo {
+export interface NodeResponse {
   name: string;
   startedAt: string;
   lastHeartbeatAt: string;
   runningCount: number;
   registeredJobNames: string[];
+  registeredQueueNames: string[];
+  isActive: boolean;
+}
+
+export interface QueueResponse {
+  name: string;
+  priority: number;
+  maxConcurrency: number | null;
+  isPaused: boolean;
+  rateLimitName: string | null;
+  pendingCount: number;
+  runningCount: number;
+  processingNodes: string[];
+}
+
+export interface JobStats {
+  totalRuns: number;
+  succeededRuns: number;
+  failedRuns: number;
+  successRate: number;
+  avgDuration?: string;
+  lastRunAt?: string;
 }
 
 export interface PagedResult<T> {
@@ -101,6 +164,7 @@ export const JobStatusLabels: Record<number, string> = {
   3: 'Failed',
   4: 'Cancelled',
   5: 'Dead letter',
+  6: 'Skipped',
 };
 
 export const JobStatusColors: Record<number, string> = {
@@ -110,6 +174,7 @@ export const JobStatusColors: Record<number, string> = {
   3: 'bg-status-failed/15 text-status-failed',
   4: 'bg-status-cancelled/15 text-status-cancelled',
   5: 'bg-status-dead-letter/15 text-status-dead-letter',
+  6: 'bg-status-skipped/15 text-status-skipped',
 };
 
 export const LogLevelLabels: Record<number, string> = {
@@ -121,6 +186,22 @@ export const LogLevelLabels: Record<number, string> = {
   5: 'Critical',
 };
 
+export interface RunsQueryParams {
+  jobName?: string;
+  exactJobName?: boolean;
+  status?: number;
+  nodeName?: string;
+  parentRunId?: string;
+  retryOfRunId?: string;
+  rerunOfRunId?: string;
+  planRunId?: string;
+  planStepName?: string;
+  skip?: number;
+  take?: number;
+  createdAfter?: string;
+  createdBefore?: string;
+}
+
 export const api = {
   getStats: (params?: { since?: string; bucketMinutes?: number }) => {
     const search = new URLSearchParams();
@@ -129,21 +210,32 @@ export const api = {
     const qs = search.toString();
     return fetchApi<DashboardStats>(`/stats${qs ? `?${qs}` : ''}`);
   },
-  getJobs: () => fetchApi<JobDefinition[]>('/jobs'),
-  getJob: (name: string) => fetchApi<JobDefinition>(`/jobs/${encodeURIComponent(name)}`),
-  triggerJob: (name: string, opts?: { args?: unknown; notBefore?: string }) =>
+  getJobs: (params?: { includeInactive?: boolean; includeInternal?: boolean }) => {
+    const search = new URLSearchParams();
+    if (params?.includeInactive) search.set('includeInactive', 'true');
+    if (params?.includeInternal) search.set('includeInternal', 'true');
+    const qs = search.toString();
+    return fetchApi<JobResponse[]>(`/jobs${qs ? `?${qs}` : ''}`);
+  },
+  getJob: (name: string) => fetchApi<JobResponse>(`/jobs/${encodeURIComponent(name)}`),
+  getJobStats: (name: string) => fetchApi<JobStats>(`/jobs/${encodeURIComponent(name)}/stats`),
+  triggerJob: (name: string, opts?: { args?: unknown; notBefore?: string; notAfter?: string; priority?: number; deduplicationId?: string }) =>
     fetchApi<{ runId: string }>(`/jobs/${encodeURIComponent(name)}/trigger`, {
       method: 'POST',
-      ...(opts ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) } : {}),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts ?? {}),
     }),
-  getRuns: (params?: { jobName?: string; status?: number; nodeName?: string; parentRunId?: string; retryOfRunId?: string; rerunOfRunId?: string; skip?: number; take?: number; createdAfter?: string; createdBefore?: string }) => {
+  getRuns: (params?: RunsQueryParams) => {
     const search = new URLSearchParams();
     if (params?.jobName) search.set('jobName', params.jobName);
+    if (params?.exactJobName) search.set('exactJobName', 'true');
     if (params?.status !== undefined) search.set('status', params.status.toString());
     if (params?.nodeName) search.set('nodeName', params.nodeName);
     if (params?.parentRunId) search.set('parentRunId', params.parentRunId);
     if (params?.retryOfRunId) search.set('retryOfRunId', params.retryOfRunId);
     if (params?.rerunOfRunId) search.set('rerunOfRunId', params.rerunOfRunId);
+    if (params?.planRunId) search.set('planRunId', params.planRunId);
+    if (params?.planStepName) search.set('planStepName', params.planStepName);
     if (params?.skip != null) search.set('skip', params.skip.toString());
     if (params?.take != null) search.set('take', params.take.toString());
     if (params?.createdAfter) search.set('createdAfter', params.createdAfter);
@@ -151,19 +243,44 @@ export const api = {
     const qs = search.toString();
     return fetchApi<PagedResult<JobRun>>(`/runs${qs ? `?${qs}` : ''}`);
   },
+  getAllRuns: async (params?: RunsQueryParams) => {
+    const all: JobRun[] = [];
+    const pageSize = 500;
+    let skip = 0;
+    let total = 0;
+    do {
+      const page = await api.getRuns({ ...params, skip, take: pageSize });
+      all.push(...page.items);
+      total = page.totalCount;
+      skip += pageSize;
+    } while (all.length < total);
+    return { items: all, totalCount: total } as PagedResult<JobRun>;
+  },
   getRun: (id: string) => fetchApi<JobRun>(`/runs/${id}`),
   cancelRun: (id: string) => fetchApi<void>(`/runs/${id}/cancel`, { method: 'POST' }),
   rerunRun: (id: string) => fetchApi<{ runId: string }>(`/runs/${id}/rerun`, { method: 'POST' }),
   getRunLogs: (id: string) => fetchApi<RunLogEntry[]>(`/runs/${id}/logs`),
   getRunTrace: (id: string) => fetchApi<JobRun[]>(`/runs/${id}/trace`),
   updateJob: (name: string, patch: { isEnabled?: boolean }) =>
-    fetchApi<JobDefinition>(`/jobs/${encodeURIComponent(name)}`, {
+    fetchApi<JobResponse>(`/jobs/${encodeURIComponent(name)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }),
-  getNodes: () => fetchApi<NodeInfo[]>('/nodes'),
-  getNode: (name: string) => fetchApi<NodeInfo>(`/nodes/${encodeURIComponent(name)}`),
+  getQueues: () => fetchApi<QueueResponse[]>('/queues'),
+  updateQueue: (name: string, patch: { isPaused?: boolean }) =>
+    fetchApi<QueueResponse>(`/queues/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+  getNodes: (params?: { includeInactive?: boolean }) => {
+    const search = new URLSearchParams();
+    if (params?.includeInactive) search.set('includeInactive', 'true');
+    const qs = search.toString();
+    return fetchApi<NodeResponse[]>(`/nodes${qs ? `?${qs}` : ''}`);
+  },
+  getNode: (name: string) => fetchApi<NodeResponse>(`/nodes/${encodeURIComponent(name)}`),
   streamRun: (id: string) => {
     return new EventSource(`${BASE}/runs/${id}/stream`);
   },

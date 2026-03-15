@@ -1,20 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandSeparator } from '@/components/ui/command';
-import { House, Workflow, Play, Server } from 'lucide-react';
+import { House, Workflow, Play, Server, Layers } from 'lucide-react';
 import { api } from '@/lib/api';
 
-export function CommandPalette() {
+export function useCommandPalette() {
   const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
+  const toggle = useCallback(() => setOpen(prev => !prev), []);
+  return { open, setOpen, toggle };
+}
+
+export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (open: boolean) => void }) {
   const navigate = useNavigate();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
-        setOpen(prev => !prev);
+        setOpen(!open);
       }
       if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const tag = (e.target as HTMLElement)?.tagName;
@@ -25,7 +29,7 @@ export function CommandPalette() {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, []);
+  }, [open, setOpen]);
 
   const { data: jobs } = useQuery({
     queryKey: ['jobs'],
@@ -41,13 +45,12 @@ export function CommandPalette() {
 
   const go = (path: string) => {
     setOpen(false);
-    setSearch('');
     navigate(path);
   };
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen} title="Command Palette" description="Navigate or search" className="bg-background/80 backdrop-blur-xl border-border/50 shadow-2xl">
-      <CommandInput placeholder="Search..." value={search} onValueChange={setSearch} />
+      <CommandInput placeholder="Search..." />
       <CommandList className="max-h-[340px]">
         <CommandEmpty>No results found.</CommandEmpty>
         <CommandGroup heading="Navigation">
@@ -62,6 +65,10 @@ export function CommandPalette() {
           <CommandItem onSelect={() => go('/runs')}>
             <Play className="size-4 opacity-60" />
             Runs
+          </CommandItem>
+          <CommandItem onSelect={() => go('/queues')}>
+            <Layers className="size-4 opacity-60" />
+            Queues
           </CommandItem>
           <CommandItem onSelect={() => go('/nodes')}>
             <Server className="size-4 opacity-60" />

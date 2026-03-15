@@ -10,6 +10,7 @@ internal sealed class JobExecutor(
     IJobStore store,
     INotificationProvider notifications,
     JobRegistry registry,
+    PlanEngine planEngine,
     IServiceProvider rootProvider,
     SurefireOptions options,
     TimeProvider timeProvider,
@@ -82,6 +83,7 @@ internal sealed class JobExecutor(
                 JobName = run.JobName,
                 CancellationToken = cts.Token,
                 Attempt = run.Attempt,
+                PlanRunId = run.PlanRunId,
                 Store = store,
                 Notifications = notifications,
                 Run = run,
@@ -104,7 +106,32 @@ internal sealed class JobExecutor(
 
             try
             {
-                var result = await registered.CompiledHandler(sp, ctx, run.Arguments);
+                // Build filter pipeline
+                var filterTypes = options.FilterTypes.Concat(registered.FilterTypes).ToList();
+                object? result;
+                if (filterTypes.Count > 0)
+                {
+                    JobFilterDelegate pipeline = async (context) =>
+                    {
+                        var handlerResult = await registered.CompiledHandler(sp, ctx, run.Arguments);
+                        ctx.Result = handlerResult;
+                    };
+
+                    // Wrap in reverse order so filters execute in declaration order
+                    for (var i = filterTypes.Count - 1; i >= 0; i--)
+                    {
+                        var filter = (IJobFilter)sp.GetRequiredService(filterTypes[i]);
+                        var next = pipeline;
+                        pipeline = (context) => filter.InvokeAsync(context, next);
+                    }
+
+                    await pipeline(ctx);
+                    result = ctx.Result;
+                }
+                else
+                {
+                    result = await registered.CompiledHandler(sp, ctx, run.Arguments);
+                }
 
                 if (result is not null && StreamingHelper.IsAsyncEnumerable(result.GetType()))
                 {
@@ -205,6 +232,18 @@ internal sealed class JobExecutor(
                     catch (Exception ex) { logger.LogWarning(ex, "Failed to flush logs for run {RunId}", run.Id); }
 
                     await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), "");
+
+                    if (run.PlanRunId is not null)
+                    {
+                        try
+                        {
+                            await planEngine.AdvancePlanAsync(run.PlanRunId, CancellationToken.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogWarning(ex, "Failed to advance plan {PlanRunId} after step {RunId}", run.PlanRunId, run.Id);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -250,17 +289,7 @@ internal sealed class JobExecutor(
             var now = timeProvider.GetUtcNow();
 
             // Create retry run first so retryRunId is available for the status event
-            var retryRun = new JobRun
-            {
-                Id = Guid.CreateVersion7().ToString("N"),
-                JobName = run.JobName,
-                Arguments = run.Arguments,
-                Attempt = run.Attempt + 1,
-                CreatedAt = now,
-                NotBefore = now + delay,
-                Priority = run.Priority,
-                RetryOfRunId = run.RetryOfRunId ?? run.Id
-            };
+            var retryRun = JobRun.CreateRetry(run, delay, now);
             await store.CreateRunAsync(retryRun);
             await notifications.PublishAsync(NotificationChannels.RunCreated, retryRun.Id);
             SurefireMetrics.JobsRetried.Add(1, tags);

@@ -7,12 +7,13 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Surefire;
+using Surefire.Dashboard;
 
 namespace Surefire.Dashboard;
 
 public static class DashboardEndpoints
 {
-    public static IEndpointRouteBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints, string prefix = "/surefire")
+    public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints, string prefix = "/surefire")
     {
         var group = endpoints.MapGroup(prefix);
         var api = group.MapGroup("api");
@@ -20,73 +21,62 @@ public static class DashboardEndpoints
         api.MapGet("/stats", async (DateTimeOffset? since, int? bucketMinutes, IJobStore store, CancellationToken ct) =>
             Results.Ok(await store.GetDashboardStatsAsync(since, bucketMinutes ?? 60, ct)));
 
-        api.MapGet("/jobs", async (string? name, string? tag, bool? isEnabled, IJobStore store, CancellationToken ct) =>
+        api.MapGet("/jobs", async (string? name, string? tag, bool? isEnabled, bool? includeInactive, bool? includeInternal, IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
         {
-            var filter = (name is not null || tag is not null || isEnabled is not null)
-                ? new JobFilter { Name = name, Tag = tag, IsEnabled = isEnabled }
-                : null;
-            return Results.Ok(await store.GetJobsAsync(filter, ct));
+            var now = timeProvider.GetUtcNow();
+            var cutoff = now - surefireOpts.InactiveThreshold;
+            var filter = new JobListFilter { Name = name, Tag = tag, IsEnabled = isEnabled, IncludeInternal = includeInternal };
+            if (includeInactive != true)
+                filter.HeartbeatAfter = cutoff;
+            var jobs = await store.GetJobsAsync(filter, ct);
+            return Results.Ok(jobs.Select(j => JobResponse.From(j, cutoff, now)).ToList());
         });
 
-        api.MapGet("/jobs/{name}", async (string name, IJobStore store, CancellationToken ct) =>
+        api.MapGet("/jobs/{name}", async (string name, IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
         {
             var job = await store.GetJobAsync(name, ct);
             if (job is null) return Results.NotFound();
-            return Results.Ok(job);
+            var now = timeProvider.GetUtcNow();
+            var cutoff = now - surefireOpts.InactiveThreshold;
+            return Results.Ok(JobResponse.From(job, cutoff, now));
         });
 
-        api.MapPatch("/jobs/{name}", async (string name, HttpRequest request, IJobStore store, CancellationToken ct) =>
+        api.MapPatch("/jobs/{name}", async (string name, UpdateJobRequest request, IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
         {
             var job = await store.GetJobAsync(name, ct);
             if (job is null) return Results.NotFound();
 
-            JsonDocument doc;
-            try { doc = await JsonDocument.ParseAsync(request.Body, cancellationToken: ct); }
-            catch (JsonException) { return Results.BadRequest(new { Error = "Invalid JSON in request body" }); }
-
-            using (doc)
-            {
-                try
-                {
-                    if (doc.RootElement.TryGetProperty("isEnabled", out var prop))
-                        await store.SetJobEnabledAsync(name, prop.GetBoolean(), ct);
-                }
-                catch (InvalidOperationException) { return Results.BadRequest(new { Error = "Invalid value for 'isEnabled'" }); }
-            }
+            if (request.IsEnabled is not null)
+                await store.SetJobEnabledAsync(name, request.IsEnabled.Value, ct);
 
             job = await store.GetJobAsync(name, ct);
-            return job is null ? Results.NotFound() : Results.Ok(job);
+            if (job is null) return Results.NotFound();
+            var now = timeProvider.GetUtcNow();
+            var cutoff = now - surefireOpts.InactiveThreshold;
+            return Results.Ok(JobResponse.From(job, cutoff, now));
         });
 
-        api.MapPost("/jobs/{name}/trigger", async (string name, HttpRequest request, IJobClient client, CancellationToken ct) =>
+        api.MapGet("/jobs/{name}/stats", async (string name, IJobStore store, CancellationToken ct) =>
         {
-            object? args = null;
+            var job = await store.GetJobAsync(name, ct);
+            if (job is null) return Results.NotFound();
+            return Results.Ok(await store.GetJobStatsAsync(name, ct));
+        });
+
+        api.MapPost("/jobs/{name}/trigger", async (string name, TriggerJobRequest? request, IJobClient client, CancellationToken ct) =>
+        {
+            object? args = request?.Args;
             RunOptions? runOptions = null;
 
-            if (request.ContentLength is > 0 || (request.ContentLength is null && request.ContentType?.Contains("application/json") == true))
+            if (request?.NotBefore is not null || request?.NotAfter is not null || request?.Priority is not null || request?.DeduplicationId is not null)
             {
-                try
+                runOptions = new RunOptions
                 {
-                    using var doc = await JsonDocument.ParseAsync(request.Body, cancellationToken: ct);
-                    if (doc.RootElement.TryGetProperty("args", out var argsElement))
-                        args = argsElement.Clone();
-                    if (doc.RootElement.TryGetProperty("notBefore", out var nbElement) && nbElement.ValueKind == JsonValueKind.String)
-                    {
-                        if (!DateTimeOffset.TryParse(nbElement.GetString()!, out var parsed))
-                            return Results.BadRequest(new { Error = "Invalid 'notBefore' date format" });
-                        runOptions ??= new RunOptions();
-                        runOptions.NotBefore = parsed;
-                    }
-                    if (doc.RootElement.TryGetProperty("priority", out var prElement) && prElement.ValueKind == JsonValueKind.Number)
-                    {
-                        runOptions ??= new RunOptions();
-                        runOptions.Priority = prElement.GetInt32();
-                    }
-                }
-                catch (JsonException)
-                {
-                    return Results.BadRequest(new { Error = "Invalid JSON in request body" });
-                }
+                    NotBefore = request.NotBefore,
+                    NotAfter = request.NotAfter,
+                    Priority = request.Priority,
+                    DeduplicationId = request.DeduplicationId
+                };
             }
 
             var runId = runOptions is not null
@@ -95,16 +85,19 @@ public static class DashboardEndpoints
             return Results.Ok(new { RunId = runId });
         });
 
-        api.MapGet("/runs", async (string? jobName, JobStatus? status, string? nodeName, string? parentRunId, string? retryOfRunId, string? rerunOfRunId, int? skip, int? take, DateTimeOffset? createdAfter, DateTimeOffset? createdBefore, IJobStore store, CancellationToken ct) =>
+        api.MapGet("/runs", async (string? jobName, bool? exactJobName, JobStatus? status, string? nodeName, string? parentRunId, string? retryOfRunId, string? rerunOfRunId, string? planRunId, string? planStepName, int? skip, int? take, DateTimeOffset? createdAfter, DateTimeOffset? createdBefore, IJobStore store, CancellationToken ct) =>
         {
             var filter = new RunFilter
             {
                 JobName = jobName,
+                ExactJobName = exactJobName ?? false,
                 Status = status,
                 NodeName = nodeName,
                 ParentRunId = parentRunId,
                 RetryOfRunId = retryOfRunId,
                 RerunOfRunId = rerunOfRunId,
+                PlanRunId = planRunId,
+                PlanStepName = planStepName,
                 Skip = Math.Max(skip ?? 0, 0),
                 Take = Math.Clamp(take ?? 50, 1, 500),
                 CreatedAfter = createdAfter,
@@ -119,11 +112,11 @@ public static class DashboardEndpoints
             return run is null ? Results.NotFound() : Results.Ok(run);
         });
 
-        api.MapGet("/runs/{id}/trace", async (string id, IJobStore store, CancellationToken ct) =>
+        api.MapGet("/runs/{id}/trace", async (string id, int? limit, IJobStore store, CancellationToken ct) =>
         {
             var run = await store.GetRunAsync(id, ct);
             if (run is null) return Results.NotFound();
-            return Results.Ok(await store.GetRunTraceAsync(id, 200, ct));
+            return Results.Ok(await store.GetRunTraceAsync(id, Math.Clamp(limit ?? 500, 1, 5000), ct));
         });
 
         api.MapPost("/runs/{id}/cancel", async (string id, IJobClient client, CancellationToken ct) =>
@@ -143,26 +136,31 @@ public static class DashboardEndpoints
             return Results.Ok(new { RunId = newRunId });
         });
 
+        api.MapPost("/plans/{planRunId}/signals/{signalName}", async (string planRunId, string signalName, HttpRequest request, IJobClient client, SurefireOptions surefireOpts, CancellationToken ct) =>
+        {
+            try
+            {
+                object? payload = null;
+                if (request.ContentLength > 0)
+                {
+                    payload = await JsonSerializer.DeserializeAsync<JsonElement>(request.Body, surefireOpts.SerializerOptions, ct);
+                }
+                await client.SendSignalAsync(planRunId, signalName, payload, ct);
+                return Results.NoContent();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Error = ex.Message });
+            }
+        });
+
         api.MapGet("/runs/{id}/logs", async (string id, IJobStore store, CancellationToken ct) =>
         {
             var events = await store.GetEventsAsync(id, types: [RunEventType.Log], cancellationToken: ct);
-            var logs = new List<object>();
-            foreach (var e in events)
-            {
-                try
-                {
-                    using var doc = JsonDocument.Parse(e.Payload);
-                    var root = doc.RootElement;
-                    logs.Add(new
-                    {
-                        timestamp = root.GetProperty("timestamp").GetString(),
-                        level = root.GetProperty("level").GetInt32(),
-                        message = root.GetProperty("message").GetString(),
-                        category = root.TryGetProperty("category", out var cat) ? cat.GetString() : null
-                    });
-                }
-                catch (JsonException) { /* skip malformed log events */ }
-            }
+            var logs = events
+                .Where(e => e.Payload is not null)
+                .Select(e => JsonSerializer.Deserialize<JsonElement>(e.Payload))
+                .ToList();
             return Results.Ok(logs);
         });
 
@@ -262,13 +260,83 @@ public static class DashboardEndpoints
             catch (IOException) { } // Client disconnected mid-write
         });
 
-        api.MapGet("/nodes", async (IJobStore store, CancellationToken ct) =>
-            Results.Ok(await store.GetNodesAsync(ct)));
+        api.MapGet("/queues", async (IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
+        {
+            var queues = await store.GetQueuesAsync(ct);
+            var queueStats = await store.GetQueueStatsAsync(ct);
+            var nodes = await store.GetNodesAsync(ct);
+            var activeCutoff = timeProvider.GetUtcNow() - surefireOpts.InactiveThreshold;
 
-        api.MapGet("/nodes/{name}", async (string name, IJobStore store, CancellationToken ct) =>
+            // Map active nodes to queues
+            var nodesByQueue = new Dictionary<string, List<string>>();
+            foreach (var node in nodes.Where(n => n.LastHeartbeatAt >= activeCutoff))
+            {
+                foreach (var queueName in node.RegisteredQueueNames)
+                {
+                    if (!nodesByQueue.TryGetValue(queueName, out var list))
+                        nodesByQueue[queueName] = list = [];
+                    list.Add(node.Name);
+                }
+            }
+
+            // Merge explicit queue definitions with implicit ones (like "default")
+            var allQueueNames = new HashSet<string>(queues.Select(q => q.Name));
+            foreach (var key in queueStats.Keys) allQueueNames.Add(key);
+            foreach (var key in nodesByQueue.Keys) allQueueNames.Add(key);
+
+            var result = allQueueNames.Select(name =>
+            {
+                var def = queues.FirstOrDefault(q => q.Name == name);
+                queueStats.TryGetValue(name, out var stats);
+                return new QueueResponse
+                {
+                    Name = name,
+                    Priority = def?.Priority ?? 0,
+                    MaxConcurrency = def?.MaxConcurrency,
+                    IsPaused = def?.IsPaused ?? false,
+                    RateLimitName = def?.RateLimitName,
+                    PendingCount = stats?.PendingCount ?? 0,
+                    RunningCount = stats?.RunningCount ?? 0,
+                    ProcessingNodes = nodesByQueue.GetValueOrDefault(name, [])
+                };
+            }).OrderByDescending(q => q.Priority).ThenBy(q => q.Name).ToList();
+
+            return Results.Ok(result);
+        });
+
+        api.MapPatch("/queues/{name}", async (string name, UpdateQueueRequest request, IJobStore store, CancellationToken ct) =>
+        {
+            var queue = await store.GetQueueAsync(name, ct);
+
+            // Implicit queues (e.g. "default") aren't in the store — materialize them so we can update properties.
+            if (queue is null)
+            {
+                queue = new QueueDefinition { Name = name };
+                await store.UpsertQueueAsync(queue, ct);
+            }
+
+            if (request.IsPaused is not null)
+                await store.SetQueuePausedAsync(name, request.IsPaused.Value, ct);
+
+            queue = await store.GetQueueAsync(name, ct);
+            return queue is null ? Results.NotFound() : Results.Ok(queue);
+        });
+
+        api.MapGet("/nodes", async (bool? includeInactive, IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
+        {
+            var cutoff = timeProvider.GetUtcNow() - surefireOpts.InactiveThreshold;
+            var nodes = await store.GetNodesAsync(ct);
+            if (includeInactive is not true)
+                nodes = nodes.Where(n => n.LastHeartbeatAt >= cutoff).ToList();
+            return Results.Ok(nodes.Select(n => NodeResponse.From(n, cutoff)).ToList());
+        });
+
+        api.MapGet("/nodes/{name}", async (string name, IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
         {
             var node = await store.GetNodeAsync(name, ct);
-            return node is null ? Results.NotFound() : Results.Ok(node);
+            if (node is null) return Results.NotFound();
+            var cutoff = timeProvider.GetUtcNow() - surefireOpts.InactiveThreshold;
+            return Results.Ok(NodeResponse.From(node, cutoff));
         });
 
         var assembly = typeof(DashboardEndpoints).Assembly;
@@ -318,7 +386,7 @@ public static class DashboardEndpoints
             await stream.CopyToAsync(context.Response.Body);
         });
 
-        return endpoints;
+        return group;
     }
 
     private static async Task WriteEventAsync(HttpResponse response, RunEvent evt, CancellationToken ct)
