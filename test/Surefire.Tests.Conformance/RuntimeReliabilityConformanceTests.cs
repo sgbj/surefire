@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Conformance;
 
@@ -31,7 +32,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         await harness.StartAsync();
 
-        var page = await PollUntilAsync(
+        var page = await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -80,9 +81,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         await harness.Store.CreateRunsAsync([stale]);
 
-        var recovered = await PollUntilAsync(
+        var recovered = await TestWait.PollUntilAsync(
             () => harness.Store.GetRunAsync(stale.Id),
-            run => run is { } && run.Status == JobStatus.Completed,
+            run => run.Status == JobStatus.Completed,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
             "Timed out waiting for stale running run to be recovered and completed.");
@@ -125,9 +126,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         await harness.Store.CreateRunsAsync([stale]);
 
-        var recovered = await PollUntilAsync(
+        var recovered = await TestWait.PollUntilAsync(
             () => harness.Store.GetRunAsync(stale.Id),
-            run => run is { } && run.Status == JobStatus.DeadLetter,
+            run => run.Status == JobStatus.DeadLetter,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
             "Timed out waiting for stale running run to dead-letter when retries are exhausted.");
@@ -160,7 +161,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         await harness.StartAsync();
 
-        await PollUntilAsync(
+        await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -175,7 +176,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         await harness.Client.TriggerAsync(jobName);
         await harness.Client.TriggerAsync(jobName);
 
-        await PollUntilAsync(
+        await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -189,7 +190,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         await harness.Permits.Writer.WriteAsync(true);
 
-        var settled = await PollUntilAsync(
+        var settled = await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -223,104 +224,6 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         var client = provider.GetRequiredService<IJobClient>();
 
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
-        return new(provider, host, Store, client, harnessPermits, hostedServices);
-    }
-
-    private static async Task<T> PollUntilAsync<T>(Func<Task<T>> probe, Func<T, bool> condition,
-        TimeSpan timeout, TimeSpan interval, string timeoutMessage)
-    {
-        var deadline = DateTimeOffset.UtcNow + timeout;
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            var value = await probe();
-            if (condition(value))
-            {
-                return value;
-            }
-
-            await Task.Delay(interval);
-        }
-
-        throw new TimeoutException(timeoutMessage);
-    }
-
-    private sealed class TestHost(IServiceProvider services) : IHost
-    {
-        public IServiceProvider Services { get; } = services;
-
-        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public void Dispose()
-        {
-            if (Services is IDisposable disposable)
-            {
-                disposable.Dispose();
-            }
-        }
-    }
-
-    private sealed class RuntimeHarness(
-        ServiceProvider provider,
-        IHost host,
-        IJobStore store,
-        IJobClient client,
-        Channel<bool> permits,
-        IReadOnlyList<IHostedService> hostedServices) : IAsyncDisposable
-    {
-        public ServiceProvider Provider { get; } = provider;
-        public IHost Host { get; } = host;
-        public IJobStore Store { get; } = store;
-        public IJobClient Client { get; } = client;
-        public Channel<bool> Permits { get; } = permits;
-
-        public async ValueTask DisposeAsync()
-        {
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                await service.StopAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppedAsync(CancellationToken.None);
-                }
-            }
-        }
-
-        public async Task StartAsync()
-        {
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices)
-            {
-                await service.StartAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartedAsync(CancellationToken.None);
-                }
-            }
-        }
+        return new(provider, host, Store, client, harnessPermits, hostedServices, disposeProvider: false);
     }
 }

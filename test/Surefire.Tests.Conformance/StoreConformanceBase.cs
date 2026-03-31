@@ -16,7 +16,8 @@ public abstract class StoreConformanceBase : IAsyncLifetime
     protected static JobRun CreateRun(string? jobName = null, JobStatus status = JobStatus.Pending,
         string? id = null)
     {
-        // Truncate to milliseconds for cross-store compatibility (Redis uses millisecond precision)
+        // Truncate to milliseconds for cross-store compatibility (Redis uses millisecond precision).
+        // Backdate NotBefore slightly to avoid DB/app clock skew causing spurious immediate-claim misses in CI.
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         return new()
         {
@@ -24,7 +25,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
             JobName = jobName ?? "TestJob",
             Status = status,
             CreatedAt = now,
-            NotBefore = now
+            NotBefore = now.AddSeconds(-1)
         };
     }
 

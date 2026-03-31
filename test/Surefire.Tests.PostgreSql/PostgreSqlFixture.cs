@@ -13,11 +13,19 @@ public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
 
     private PostgreSqlOptions? _options;
     private PostgreSqlJobStore? _store;
+    private string _connectionString = null!;
 
     public async Task InitializeAsync()
     {
         await _container.StartAsync();
-        _options = new(_container.GetConnectionString());
+        var csb = new NpgsqlConnectionStringBuilder(_container.GetConnectionString())
+        {
+            // Keep pool below server max to queue excess callers instead of failing with "too many clients".
+            MaxPoolSize = 50
+        };
+        _connectionString = csb.ConnectionString;
+
+        _options = new(_connectionString);
         _store = new(_options, TimeProvider.System);
         await _store.MigrateAsync();
     }
@@ -37,7 +45,7 @@ public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
 
     public async Task CleanAsync()
     {
-        await using var conn = new NpgsqlConnection(_container.GetConnectionString());
+        await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync();
         await StoreFixtureCleanup.ExecuteDeleteAllAsync(conn, StoreFixtureCleanup.DefaultDeleteAllScript);
     }

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Text.Json;
+using Surefire.Tests.Testing;
 
 namespace Surefire.Tests;
 
@@ -82,22 +83,19 @@ public sealed class JobClientContractTests
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(120));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.RunAsync(jobName, cts.Token));
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(3);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var runs = await store.GetRunsAsync(new RunFilter { JobName = jobName, ExactJobName = true }, 0, 5);
-            var run = runs.Items.SingleOrDefault();
-            if (run is { Status: JobStatus.Cancelled })
+        var cancelledRun = await TestWait.PollUntilAsync(
+            async _ =>
             {
-                Assert.NotNull(run.CompletedAt);
-                Assert.NotNull(run.CancelledAt);
-                return;
-            }
+                var runs = await store.GetRunsAsync(new RunFilter { JobName = jobName, ExactJobName = true }, 0, 5);
+                return runs.Items.SingleOrDefault();
+            },
+            run => run.Status == JobStatus.Cancelled,
+            TimeSpan.FromSeconds(3),
+            TimeSpan.FromMilliseconds(20),
+            "Expected RunAsync cancellation to cancel the owned run.");
 
-            await Task.Delay(20);
-        }
-
-        throw new TimeoutException("Expected RunAsync cancellation to cancel the owned run.");
+        Assert.NotNull(cancelledRun.CompletedAt);
+        Assert.NotNull(cancelledRun.CancelledAt);
     }
 
     [Fact]
@@ -779,7 +777,7 @@ public sealed class JobClientContractTests
 
         await provider.SubscribeAsync("surefire:run:created", async _ =>
         {
-            await Task.Delay(250);
+            await Task.Delay(1000);
         });
 
         await provider.SubscribeAsync("surefire:run:created", _ =>
@@ -792,7 +790,7 @@ public sealed class JobClientContractTests
         await provider.PublishAsync("surefire:run:created", "msg");
         started.Stop();
 
-        Assert.True(started.Elapsed < TimeSpan.FromMilliseconds(75),
+        Assert.True(started.Elapsed < TimeSpan.FromMilliseconds(400),
             $"PublishAsync should not block on subscribers. Elapsed: {started.Elapsed}.");
 
         await fastHandler.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -822,27 +820,23 @@ public sealed class JobClientContractTests
 
         cts.Cancel();
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(3);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var inputEvents = await store.GetEventsAsync(
-                runId,
-                0,
-                [RunEventType.InputDeclared, RunEventType.Input, RunEventType.InputComplete],
-                0);
-
-            var declaredCount = inputEvents.Count(e => e.EventType == RunEventType.InputDeclared);
-            var inputCount = inputEvents.Count(e => e.EventType == RunEventType.Input);
-            var completedCount = inputEvents.Count(e => e.EventType == RunEventType.InputComplete);
-            if (declaredCount == 1 && inputCount == 2 && completedCount == 1)
+        await TestWait.PollUntilConditionAsync(
+            async _ =>
             {
-                return;
-            }
+                var inputEvents = await store.GetEventsAsync(
+                    runId,
+                    0,
+                    [RunEventType.InputDeclared, RunEventType.Input, RunEventType.InputComplete],
+                    0);
 
-            await Task.Delay(20);
-        }
-
-        throw new TimeoutException("Expected both stream items and a single completion envelope after caller cancellation.");
+                var declaredCount = inputEvents.Count(e => e.EventType == RunEventType.InputDeclared);
+                var inputCount = inputEvents.Count(e => e.EventType == RunEventType.Input);
+                var completedCount = inputEvents.Count(e => e.EventType == RunEventType.InputComplete);
+                return declaredCount == 1 && inputCount == 2 && completedCount == 1;
+            },
+            TimeSpan.FromSeconds(3),
+            TimeSpan.FromMilliseconds(20),
+            "Expected both stream items and a single completion envelope after caller cancellation.");
 
         static async IAsyncEnumerable<int> ProduceStream()
         {

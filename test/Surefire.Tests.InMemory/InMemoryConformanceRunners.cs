@@ -2,73 +2,53 @@ using Surefire.Tests.Conformance;
 
 namespace Surefire.Tests.InMemory;
 
-[CollectionDefinition("InMemory")]
-public class InMemoryCollection : ICollectionFixture<InMemoryFixture>;
-
-[Collection("InMemory")]
 public sealed class InMemoryJobTests(InMemoryFixture fixture)
-    : FixtureBackedJobConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedJobConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryRunCrudTests(InMemoryFixture fixture)
-    : FixtureBackedRunCrudConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedRunCrudConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryTransitionTests(InMemoryFixture fixture)
-    : FixtureBackedTransitionConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedTransitionConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryCancelTests(InMemoryFixture fixture)
-    : FixtureBackedCancelConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedCancelConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryClaimTests(InMemoryFixture fixture)
-    : FixtureBackedClaimConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedClaimConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryBatchTests(InMemoryFixture fixture)
-    : FixtureBackedBatchConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedBatchConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryEventTests(InMemoryFixture fixture)
-    : FixtureBackedEventConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedEventConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryNodeTests(InMemoryFixture fixture)
-    : FixtureBackedNodeConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedNodeConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryQueueTests(InMemoryFixture fixture)
-    : FixtureBackedQueueConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedQueueConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryRateLimitTests(InMemoryFixture fixture)
-    : FixtureBackedRateLimitConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedRateLimitConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryMaintenanceTests(InMemoryFixture fixture)
-    : FixtureBackedMaintenanceConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedMaintenanceConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryPurgeTests(InMemoryFixture fixture)
-    : FixtureBackedPurgeConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedPurgeConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryStatsTests(InMemoryFixture fixture)
-    : FixtureBackedStatsConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedStatsConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemorySchemaTests(InMemoryFixture fixture)
-    : FixtureBackedSchemaConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedSchemaConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryStoreFixTests(InMemoryFixture fixture)
-    : FixtureBackedStoreFixConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedStoreFixConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryQueueStatsParityTests(InMemoryFixture fixture)
-    : FixtureBackedQueueStatsParityConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedQueueStatsParityConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-[Collection("InMemory")]
 public sealed class InMemoryRuntimeReliabilityTests(InMemoryFixture fixture)
-    : FixtureBackedRuntimeReliabilityConformanceTests<InMemoryFixture>(fixture);
+    : FixtureBackedRuntimeReliabilityConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <ItemGroup>
         <ProjectReference Include="..\..\src\Surefire\Surefire.csproj"/>
+        <ProjectReference Include="..\Surefire.Tests.Conformance\Surefire.Tests.Conformance.csproj"/>
     </ItemGroup>
     <ItemGroup>
         <PackageReference Include="Microsoft.NET.Test.Sdk"/>

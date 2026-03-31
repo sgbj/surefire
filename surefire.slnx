@@ -9,6 +9,8 @@
     </Folder>
     <Folder Name="/test/">
         <Project Path="test/Surefire.Tests.Conformance/Surefire.Tests.Conformance.csproj"/>
+        <Project Path="test/Surefire.Tests/Surefire.Tests.csproj"/>
+        <Project Path="test/Surefire.Tests.Dashboard/Surefire.Tests.Dashboard.csproj"/>
         <Project Path="test/Surefire.Tests.InMemory/Surefire.Tests.InMemory.csproj"/>
         <Project Path="test/Surefire.Tests.Integration/Surefire.Tests.Integration.csproj"/>
         <Project Path="test/Surefire.Tests.PostgreSql/Surefire.Tests.PostgreSql.csproj"/>

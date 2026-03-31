@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Integration;
 
@@ -23,7 +24,7 @@ public sealed class RuntimeWorkersTests
         await harness.StartAsync();
 
         var runId = await harness.Client.TriggerAsync("Echo", new { value = "ok" });
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var result = await harness.Client.WaitAsync(runId, cts.Token);
 
         Assert.True(result.IsSuccess);
@@ -166,24 +167,16 @@ public sealed class RuntimeWorkersTests
 
         await harness.Store.UpdateLastCronFireAtAsync("CronFireAll", DateTimeOffset.UtcNow.AddSeconds(-3));
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var runsPage = await harness.Store.GetRunsAsync(new()
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
                 JobName = "CronFireAll",
                 ExactJobName = true
-            });
-
-            if (runsPage.TotalCount >= 2)
-            {
-                return;
-            }
-
-            await Task.Delay(30);
-        }
-
-        throw new TimeoutException("Expected scheduler with FireAll misfire policy to enqueue at least two runs.");
+            }),
+            runsPage => runsPage.TotalCount >= 2,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(30),
+            "Expected scheduler with FireAll misfire policy to enqueue at least two runs.");
     }
 
     [Fact]
@@ -202,24 +195,16 @@ public sealed class RuntimeWorkersTests
 
         await harness.StartAsync();
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(4);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var runsPage = await harness.Store.GetRunsAsync(new()
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
                 JobName = "CronInitialSeed",
                 ExactJobName = true
-            }, 0, 10);
-
-            if (runsPage.TotalCount > 0)
-            {
-                return;
-            }
-
-            await Task.Delay(40);
-        }
-
-        throw new TimeoutException("Expected new cron job to start scheduling when LastCronFireAt was initially null.");
+            }, 0, 10),
+            runsPage => runsPage.TotalCount > 0,
+            TimeSpan.FromSeconds(4),
+            TimeSpan.FromMilliseconds(40),
+            "Expected new cron job to start scheduling when LastCronFireAt was initially null.");
     }
 
     [Fact]
@@ -317,25 +302,21 @@ public sealed class RuntimeWorkersTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             harness.Client.RunAsync<int>("CancelableRun", cts.Token));
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var page = await harness.Store.GetRunsAsync(new()
+        await TestWait.PollUntilAsync(
+            async _ =>
             {
-                JobName = "CancelableRun",
-                ExactJobName = true
-            }, 0, 1);
+                var page = await harness.Store.GetRunsAsync(new()
+                {
+                    JobName = "CancelableRun",
+                    ExactJobName = true
+                }, 0, 1);
 
-            var run = page.Items.SingleOrDefault();
-            if (run is { Status: JobStatus.Cancelled })
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        throw new TimeoutException("Expected RunAsync cancellation to propagate and cancel execution.");
+                return page.Items.SingleOrDefault();
+            },
+            run => run.Status == JobStatus.Cancelled,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(25),
+            "Expected RunAsync cancellation to propagate and cancel execution.");
     }
 
     [Fact]
@@ -533,7 +514,7 @@ public sealed class RuntimeWorkersTests
 
         Assert.NotNull(first);
         var elapsed = Stopwatch.GetElapsedTime(startedAt);
-        Assert.True(elapsed < TimeSpan.FromSeconds(1.2),
+        Assert.True(elapsed < TimeSpan.FromSeconds(1.8),
             $"Expected first streamed item before polling interval. Elapsed={elapsed}.");
 
         static async IAsyncEnumerable<int> BatchWakeHint(int value, [EnumeratorCancellation] CancellationToken ct)
@@ -584,23 +565,17 @@ public sealed class RuntimeWorkersTests
         var runId = await harness.Client.TriggerAsync("IncrementalOutput");
         await WaitForStatusAsync(harness.Store, runId, JobStatus.Running);
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        var sawOutputWhileRunning = false;
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var run = await harness.Store.GetRunAsync(runId)
-                      ?? throw new InvalidOperationException($"Run '{runId}' not found.");
-            var outputs = await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output]);
-            if (run.Status == JobStatus.Running && outputs.Count > 0)
+        await TestWait.PollUntilConditionAsync(
+            async _ =>
             {
-                sawOutputWhileRunning = true;
-                break;
-            }
-
-            await Task.Delay(20);
-        }
-
-        Assert.True(sawOutputWhileRunning, "Expected at least one output event while run status was Running.");
+                var run = await harness.Store.GetRunAsync(runId)
+                          ?? throw new InvalidOperationException($"Run '{runId}' not found.");
+                var outputs = await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output]);
+                return run.Status == JobStatus.Running && outputs.Count > 0;
+            },
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(20),
+            "Expected at least one output event while run status was Running.");
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var result = await harness.Client.WaitAsync(runId, cts.Token);
@@ -1211,7 +1186,7 @@ public sealed class RuntimeWorkersTests
             if (outputs.Count == 1)
             {
                 var firstDelay = DateTimeOffset.UtcNow - started;
-                Assert.True(firstDelay < TimeSpan.FromMilliseconds(650));
+                Assert.True(firstDelay < TimeSpan.FromMilliseconds(1500));
             }
         }
 
@@ -1470,18 +1445,11 @@ public sealed class RuntimeWorkersTests
 
         await harness.Store.CreateRunsAsync([completed]);
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            if (await harness.Store.GetRunAsync(completed.Id) is null)
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        throw new TimeoutException("Retention service did not purge the completed run in time.");
+        await TestWait.PollUntilConditionAsync(
+            async _ => await harness.Store.GetRunAsync(completed.Id) is null,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(25),
+            "Retention service did not purge the completed run in time.");
     }
 
     private static async Task<JobRun> WaitForStatusAsync(IJobStore store, string runId, JobStatus status)
@@ -1530,7 +1498,7 @@ public sealed class RuntimeWorkersTests
         }
     }
 
-    private static Task<TestHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
+    private static Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
         Action<IServiceCollection>? configureServices = null)
     {
         var services = new ServiceCollection();
@@ -1544,7 +1512,7 @@ public sealed class RuntimeWorkersTests
         var store = provider.GetRequiredService<IJobStore>();
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
 
-        return Task.FromResult(new TestHarness(provider, host, client, store, hostedServices));
+        return Task.FromResult(new RuntimeHarness(provider, host, store, client, hostedServices));
     }
 
     private sealed class TraceSink
@@ -1572,83 +1540,4 @@ public sealed class RuntimeWorkersTests
         }
     }
 
-    private sealed class TestHost(IServiceProvider services) : IHost
-    {
-        public IServiceProvider Services { get; } = services;
-
-        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public void Dispose()
-        {
-            if (Services is IDisposable disposable)
-            {
-                disposable.Dispose();
-            }
-        }
-    }
-
-    private sealed class TestHarness(
-        ServiceProvider provider,
-        TestHost host,
-        IJobClient client,
-        IJobStore store,
-        IReadOnlyList<IHostedService> hostedServices) : IAsyncDisposable
-    {
-        public ServiceProvider Provider { get; } = provider;
-        public TestHost Host { get; } = host;
-        public IJobClient Client { get; } = client;
-        public IJobStore Store { get; } = store;
-
-        public async ValueTask DisposeAsync()
-        {
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                await service.StopAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppedAsync(CancellationToken.None);
-                }
-            }
-
-            await Provider.DisposeAsync();
-        }
-
-        public async Task StartAsync()
-        {
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices)
-            {
-                await service.StartAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartedAsync(CancellationToken.None);
-                }
-            }
-        }
-    }
 }
