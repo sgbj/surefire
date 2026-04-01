@@ -172,10 +172,27 @@ public sealed class JobBuilder
     ///     Sets the misfire policy for this job's cron schedule.
     /// </summary>
     /// <param name="policy">The misfire policy.</param>
+    /// <param name="fireAllLimit">
+    ///     Optional per-tick limit for missed fires when <paramref name="policy"/> is
+    ///     <see cref="Surefire.MisfirePolicy.FireAll"/>. Null means unlimited.
+    /// </param>
     /// <returns>This builder for chaining.</returns>
-    public JobBuilder WithMisfirePolicy(MisfirePolicy policy)
+    public JobBuilder WithMisfirePolicy(MisfirePolicy policy, int? fireAllLimit = null)
     {
+        if (fireAllLimit is { } limit && limit < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(fireAllLimit),
+                "fireAllLimit must be greater than zero when specified.");
+        }
+
+        if (policy != MisfirePolicy.FireAll && fireAllLimit is not null)
+        {
+            throw new ArgumentException("fireAllLimit can only be set when policy is FireAll.",
+                nameof(fireAllLimit));
+        }
+
         Definition.MisfirePolicy = policy;
+        Definition.FireAllLimit = policy == MisfirePolicy.FireAll ? fireAllLimit : null;
         return this;
     }
 

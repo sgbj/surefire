@@ -51,6 +51,7 @@ internal sealed class SqliteJobStore(
                                                          rate_limit_name TEXT,
                                                          is_enabled INTEGER NOT NULL DEFAULT 1,
                                                          misfire_policy INTEGER NOT NULL DEFAULT 0,
+                                                         fire_all_limit INTEGER,
                                                          arguments_schema TEXT,
                                                          last_heartbeat_at TEXT,
                                                          last_cron_fire_at TEXT
@@ -154,12 +155,12 @@ internal sealed class SqliteJobStore(
                                                       name, description, tags, cron_expression, time_zone_id,
                                                       timeout_ms, max_concurrency, priority, retry_policy,
                                                       is_continuous, queue, rate_limit_name, is_enabled,
-                                                      misfire_policy, arguments_schema, last_heartbeat_at
+                                                      misfire_policy, fire_all_limit, arguments_schema, last_heartbeat_at
                                                   ) VALUES (
                                                       @name, @description, @tags, @cron_expression, @time_zone_id,
                                                       @timeout_ms, @max_concurrency, @priority, @retry_policy,
                                                       @is_continuous, @queue, @rate_limit_name, @is_enabled,
-                                                      @misfire_policy, @arguments_schema, @last_heartbeat_at
+                                                      @misfire_policy, @fire_all_limit, @arguments_schema, @last_heartbeat_at
                                                   )
                                                   ON CONFLICT (name) DO UPDATE SET
                                                       description = excluded.description,
@@ -174,6 +175,7 @@ internal sealed class SqliteJobStore(
                                                       queue = excluded.queue,
                                                       rate_limit_name = excluded.rate_limit_name,
                                                       misfire_policy = excluded.misfire_policy,
+                                                      fire_all_limit = excluded.fire_all_limit,
                                                       arguments_schema = excluded.arguments_schema,
                                                       last_heartbeat_at = @last_heartbeat_at
                                                   """);
@@ -618,21 +620,6 @@ internal sealed class SqliteJobStore(
             return null;
         }
 
-        await AcquireRateLimitAsync(conn,
-            "SELECT rate_limit_name FROM surefire_jobs WHERE name = @name",
-            [new("@name", jobName)], now, tx, cancellationToken);
-
-        await AcquireRateLimitAsync(conn,
-            """
-            SELECT q.rate_limit_name
-            FROM surefire_jobs j
-            LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
-            WHERE j.name = @name
-                AND q.rate_limit_name IS NOT NULL
-                AND q.rate_limit_name != COALESCE(j.rate_limit_name, '')
-            """,
-            [new("@name", jobName)], now, tx, cancellationToken);
-
         await using (var updateCmd = CreateCommand(conn, """
                                                          UPDATE surefire_runs
                                                          SET status = 1, node_name = @nn, started_at = @now,
@@ -650,6 +637,21 @@ internal sealed class SqliteJobStore(
             }
         }
 
+        await AcquireRateLimitAsync(conn,
+            "SELECT rate_limit_name FROM surefire_jobs WHERE name = @name",
+            [new("@name", jobName)], now, tx, cancellationToken);
+
+        await AcquireRateLimitAsync(conn,
+            """
+            SELECT q.rate_limit_name
+            FROM surefire_jobs j
+            LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
+            WHERE j.name = @name
+                AND q.rate_limit_name IS NOT NULL
+                AND q.rate_limit_name != COALESCE(j.rate_limit_name, '')
+            """,
+            [new("@name", jobName)], now, tx, cancellationToken);
+
         JobRun? result;
         await using (var readCmd = CreateCommand(conn, """
                                                        SELECT * FROM surefire_runs WHERE id = @id
@@ -664,7 +666,7 @@ internal sealed class SqliteJobStore(
         return result;
     }
 
-    public async Task<BatchCounters> IncrementBatchCounterAsync(
+    public async Task<BatchCounters?> TryIncrementBatchCounterAsync(
         string batchRunId, bool isFailed, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
@@ -698,12 +700,12 @@ internal sealed class SqliteJobStore(
 
         if (!await fallbackReader.ReadAsync(cancellationToken))
         {
-            throw new InvalidOperationException($"Run '{batchRunId}' not found.");
+            return null;
         }
 
         if (fallbackReader.IsDBNull(0))
         {
-            throw new InvalidOperationException($"Run '{batchRunId}' is not a batch coordinator.");
+            return null;
         }
 
         return new(
@@ -1518,6 +1520,8 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@is_enabled", job.IsEnabled ? 1 : 0);
         cmd.Parameters.AddWithValue("@misfire_policy", (int)job.MisfirePolicy);
+        cmd.Parameters.AddWithValue("@fire_all_limit",
+            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@last_heartbeat_at", FormatTimestamp(timeProvider.GetUtcNow()));
     }
@@ -1601,6 +1605,9 @@ internal sealed class SqliteJobStore(
         RateLimitName = GetNullableString(reader, "rate_limit_name"),
         IsEnabled = reader.GetInt32(reader.GetOrdinal("is_enabled")) != 0,
         MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy")),
+        FireAllLimit = reader.IsDBNull(reader.GetOrdinal("fire_all_limit"))
+            ? null
+            : reader.GetInt32(reader.GetOrdinal("fire_all_limit")),
         ArgumentsSchema = GetNullableString(reader, "arguments_schema"),
         LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at"),
         LastCronFireAt = GetNullableTimestamp(reader, "last_cron_fire_at")

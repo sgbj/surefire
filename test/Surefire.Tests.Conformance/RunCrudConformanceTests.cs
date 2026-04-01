@@ -508,6 +508,47 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task GetRuns_Pagination_WithCombinedFilters_PreservesTotalCount()
+    {
+        var jobName = $"PagedFiltered_{Guid.CreateVersion7():N}";
+
+        var pendingRuns = Enumerable.Range(0, 9)
+            .Select(i =>
+            {
+                var run = CreateRun(jobName, JobStatus.Pending);
+                run.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(i);
+                run.NotBefore = run.CreatedAt;
+                return run;
+            })
+            .ToList();
+
+        var nonMatching = Enumerable.Range(0, 3)
+            .Select(_ => CreateRun(jobName, JobStatus.Running))
+            .ToList();
+
+        await Store.CreateRunsAsync([..pendingRuns, ..nonMatching]);
+
+        var filter = new RunFilter
+        {
+            JobName = jobName,
+            ExactJobName = true,
+            Status = JobStatus.Pending
+        };
+
+        var page1 = await Store.GetRunsAsync(filter, 0, 4);
+        var page2 = await Store.GetRunsAsync(filter, 4, 4);
+
+        Assert.Equal(9, page1.TotalCount);
+        Assert.Equal(9, page2.TotalCount);
+        Assert.Equal(4, page1.Items.Count);
+        Assert.Equal(4, page2.Items.Count);
+
+        var page1Ids = page1.Items.Select(r => r.Id).ToHashSet();
+        var page2Ids = page2.Items.Select(r => r.Id).ToHashSet();
+        Assert.Empty(page1Ids.Intersect(page2Ids));
+    }
+
+    [Fact]
     public async Task GetRuns_NegativeSkip_ThrowsArgumentOutOfRange()
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>

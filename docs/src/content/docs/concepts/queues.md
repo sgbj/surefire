@@ -43,7 +43,7 @@ Jobs also have their own priority, which is used as a tiebreaker within a queue.
 
 ## Concurrency
 
-Set `WithMaxConcurrency` on a queue to limit how many runs from that queue can execute at the same time across the entire cluster:
+Set `MaxConcurrency` on a queue to limit how many runs from that queue can execute at the same time across the entire cluster:
 
 ```csharp
 options.AddQueue("emails", queue =>

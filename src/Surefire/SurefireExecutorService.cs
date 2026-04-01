@@ -121,6 +121,16 @@ internal sealed partial class SurefireExecutorService(
             {
                 if (await TryTransitionToDeadLetterAsync(run, "No handler registered for this job.", stoppingToken))
                 {
+                    await AppendFailureEventAsync(
+                        run,
+                        RunFailureEnvelope.FromMessage(
+                            run.Attempt,
+                            timeProvider.GetUtcNow(),
+                            "Executor",
+                            "NoHandlerRegistered",
+                            "No handler registered for this job.",
+                            typeof(InvalidOperationException).FullName),
+                        stoppingToken);
                     instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
                     await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
                     await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
@@ -166,8 +176,20 @@ internal sealed partial class SurefireExecutorService(
                     stoppingToken);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
+            if (stoppingToken.IsCancellationRequested)
+            {
+                await HandleRunFailureAsync(
+                    run,
+                    new ShutdownInterruptedException(ex),
+                    stoppingToken);
+                return;
+            }
+
+            using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
+            var bestEffortToken = bestEffortCts.Token;
+
             var cancelledAt = timeProvider.GetUtcNow();
             var cancelled = RunStatusTransition.ToCancelled(
                 JobStatus.Running,
@@ -183,36 +205,70 @@ internal sealed partial class SurefireExecutorService(
                 run.StartedAt,
                 cancelledAt);
 
-            if (await store.TryTransitionRunAsync(cancelled, CancellationToken.None))
+            if (await store.TryTransitionRunAsync(cancelled, bestEffortToken))
             {
                 instrumentation.RecordRunCancelled(run.StartedAt, cancelledAt);
                 await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
-                    CancellationToken.None);
-                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, CancellationToken.None);
+                    bestEffortToken);
+                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, bestEffortToken);
             }
         }
         catch (Exception ex)
         {
-            await AppendAttemptFailureEventAsync(run, ex, CancellationToken.None);
+            await HandleRunFailureAsync(run, ex, stoppingToken);
+        }
+        finally
+        {
+            _runCancellation.TryRemove(run.Id, out _);
+            runCts.Cancel();
+            await monitorTask;
+        }
+    }
 
-            if (registry.TryGet(run.JobName, out var job))
+    private async Task HandleRunFailureAsync(JobRun run, Exception ex, CancellationToken stoppingToken)
+    {
+        using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
+        var bestEffortToken = bestEffortCts.Token;
+        var isShutdownInterruption = ex is ShutdownInterruptedException;
+
+        await AppendFailureEventAsync(
+            run,
+            RunFailureEnvelope.FromException(
+                run.Attempt,
+                timeProvider.GetUtcNow(),
+                ex,
+                "Executor",
+                GetFailureCode(ex)),
+            bestEffortToken);
+
+        if (registry.TryGet(run.JobName, out var job))
+        {
+            var canRetry = run.Attempt <= job.Definition.RetryPolicy.MaxRetries;
+            var attemptError = BuildDeadLetterError(ex);
+            if (canRetry)
             {
-                var canRetry = run.Attempt <= job.Definition.RetryPolicy.MaxRetries;
-                var attemptError = BuildDeadLetterError(ex);
-                if (canRetry)
-                {
-                    var notBefore = timeProvider.GetUtcNow() + job.Definition.RetryPolicy.GetDelay(run.Attempt + 1);
-                    var retrying = RunStatusTransition.RunningToRetrying(
-                        run.Id,
-                        run.Attempt,
-                        notBefore,
-                        run.NodeName,
-                        run.Progress,
-                        attemptError,
-                        run.Result,
-                        timeProvider.GetUtcNow());
+                var notBefore = timeProvider.GetUtcNow() + job.Definition.RetryPolicy.GetDelay(run.Attempt + 1);
+                var retrying = RunStatusTransition.RunningToRetrying(
+                    run.Id,
+                    run.Attempt,
+                    notBefore,
+                    run.NodeName,
+                    run.Progress,
+                    attemptError,
+                    run.Result,
+                    timeProvider.GetUtcNow());
 
-                    if (await store.TryTransitionRunAsync(retrying, CancellationToken.None))
+                if (await store.TryTransitionRunAsync(retrying, bestEffortToken))
+                {
+                    if (isShutdownInterruption)
+                    {
+                        Log.AttemptInterruptedByShutdownRetrying(
+                            logger,
+                            run.Attempt,
+                            notBefore,
+                            job.Definition.RetryPolicy.MaxRetries);
+                    }
+                    else
                     {
                         logger.LogWarning(
                             ex,
@@ -220,96 +276,96 @@ internal sealed partial class SurefireExecutorService(
                             run.Attempt,
                             notBefore,
                             job.Definition.RetryPolicy.MaxRetries);
+                    }
 
-                        if (ex is not OperationCanceledException)
+                    if (ex is not OperationCanceledException)
+                    {
+                        await using var retryScope = scopeFactory.CreateAsyncScope();
+                        var retryContext = new JobContext
                         {
-                            await using var retryScope = scopeFactory.CreateAsyncScope();
-                            var retryContext = new JobContext
-                            {
-                                RunId = run.Id,
-                                RootRunId = run.RootRunId ?? run.Id,
-                                JobName = run.JobName,
-                                Attempt = run.Attempt,
-                                BatchRunId = run.ParentRunId,
-                                CancellationToken = CancellationToken.None,
-                                Store = store,
-                                Notifications = notifications,
-                                TimeProvider = timeProvider,
-                                NodeName = run.NodeName ?? options.NodeName,
-                                Exception = ex
-                            };
+                            RunId = run.Id,
+                            RootRunId = run.RootRunId ?? run.Id,
+                            JobName = run.JobName,
+                            Attempt = run.Attempt,
+                            BatchRunId = run.ParentRunId,
+                            CancellationToken = bestEffortToken,
+                            Store = store,
+                            Notifications = notifications,
+                            TimeProvider = timeProvider,
+                            NodeName = run.NodeName ?? options.NodeName,
+                            Exception = ex
+                        };
 
-                            await InvokeLifecycleCallbacksAsync(
-                                [.. options.OnRetryCallbacks, .. job.OnRetryCallbacks],
-                                retryContext,
-                                retryScope.ServiceProvider,
-                                CancellationToken.None);
-                        }
+                        await InvokeLifecycleCallbacksAsync(
+                            [.. options.OnRetryCallbacks, .. job.OnRetryCallbacks],
+                            retryContext,
+                            retryScope.ServiceProvider,
+                            bestEffortToken);
+                    }
 
-                        var pending = RunStatusTransition.RetryingToPending(
-                            run.Id,
-                            run.Attempt,
-                            notBefore,
-                            null,
-                            run.Progress,
-                            attemptError,
-                            run.Result);
+                    var pending = RunStatusTransition.RetryingToPending(
+                        run.Id,
+                        run.Attempt,
+                        notBefore,
+                        null,
+                        run.Progress,
+                        attemptError,
+                        run.Result);
 
-                        if (await store.TryTransitionRunAsync(pending, CancellationToken.None))
-                        {
-                            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
-                                CancellationToken.None);
-                            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id,
-                                CancellationToken.None);
-                            return;
-                        }
+                    if (await store.TryTransitionRunAsync(pending, bestEffortToken))
+                    {
+                        await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
+                            bestEffortToken);
+                        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id,
+                            bestEffortToken);
+                        return;
                     }
                 }
             }
+        }
 
-            if (registry.TryGet(run.JobName, out var deadLetterJob)
-                && ex is not OperationCanceledException)
+        if (registry.TryGet(run.JobName, out var deadLetterJob)
+            && ex is not OperationCanceledException)
+        {
+            await using var callbackScope = scopeFactory.CreateAsyncScope();
+            var callbackContext = new JobContext
             {
-                await using var callbackScope = scopeFactory.CreateAsyncScope();
-                var callbackContext = new JobContext
-                {
-                    RunId = run.Id,
-                    RootRunId = run.RootRunId ?? run.Id,
-                    JobName = run.JobName,
-                    Attempt = run.Attempt,
-                    BatchRunId = run.ParentRunId,
-                    CancellationToken = CancellationToken.None,
-                    Store = store,
-                    Notifications = notifications,
-                    TimeProvider = timeProvider,
-                    NodeName = run.NodeName ?? options.NodeName,
-                    Exception = ex
-                };
+                RunId = run.Id,
+                RootRunId = run.RootRunId ?? run.Id,
+                JobName = run.JobName,
+                Attempt = run.Attempt,
+                BatchRunId = run.ParentRunId,
+                CancellationToken = bestEffortToken,
+                Store = store,
+                Notifications = notifications,
+                TimeProvider = timeProvider,
+                NodeName = run.NodeName ?? options.NodeName,
+                Exception = ex
+            };
 
-                await InvokeLifecycleCallbacksAsync(
-                    [.. options.OnDeadLetterCallbacks, .. deadLetterJob.OnDeadLetterCallbacks],
-                    callbackContext,
-                    callbackScope.ServiceProvider,
-                    CancellationToken.None);
+            await InvokeLifecycleCallbacksAsync(
+                [.. options.OnDeadLetterCallbacks, .. deadLetterJob.OnDeadLetterCallbacks],
+                callbackContext,
+                callbackScope.ServiceProvider,
+                bestEffortToken);
+        }
+
+        if (await TryTransitionToDeadLetterAsync(run, BuildDeadLetterError(ex), bestEffortToken))
+        {
+            if (isShutdownInterruption)
+            {
+                Log.ShutdownInterruptedRunMovedToDeadLetter(logger, run.Id, run.JobName, run.Attempt);
             }
-
-            if (await TryTransitionToDeadLetterAsync(run, BuildDeadLetterError(ex), CancellationToken.None))
+            else
             {
                 logger.LogError(ex, "Run moved to dead letter after attempt {Attempt}.", run.Attempt);
-
-                instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
-                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
-                    CancellationToken.None);
-                await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, CancellationToken.None);
-                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, CancellationToken.None);
             }
-        }
-        finally
-        {
-            _runCancellation.TryRemove(run.Id, out _);
-            runCts.Cancel();
-            await monitorTask;
-            runCts.Dispose();
+
+            instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
+            await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+                bestEffortToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, bestEffortToken);
+            await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, bestEffortToken);
         }
     }
 
@@ -435,13 +491,11 @@ internal sealed partial class SurefireExecutorService(
             return;
         }
 
-        var batchRun = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (batchRun?.BatchTotal is null)
+        if (await store.TryIncrementBatchCounterAsync(batchRunId, failed, cancellationToken) is not { } counters)
         {
             return;
         }
 
-        var counters = await store.IncrementBatchCounterAsync(batchRunId, failed, cancellationToken);
         await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId ?? batchRunId,
             cancellationToken);
         if (counters.Completed + counters.Failed < counters.Total)
@@ -1110,6 +1164,16 @@ internal sealed partial class SurefireExecutorService(
     private async Task MonitorExternalRunStateAsync(string runId, CancellationTokenSource runCts,
         CancellationToken stoppingToken)
     {
+        CancellationToken runToken;
+        try
+        {
+            runToken = runCts.Token;
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
         using var wakeup = new SemaphoreSlim(0, 1);
         await using var eventSub = await notifications.SubscribeAsync(
             NotificationChannels.RunEvent(runId),
@@ -1120,21 +1184,36 @@ internal sealed partial class SurefireExecutorService(
             _ => ReleaseWakeupAsync(wakeup),
             stoppingToken);
 
-        while (!runCts.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
+        while (!runToken.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await wakeup.WaitAsync(options.PollingInterval, runCts.Token);
-                if (runCts.IsCancellationRequested)
+                await wakeup.WaitAsync(options.PollingInterval, runToken);
+                if (runToken.IsCancellationRequested)
+                {
                     return;
+                }
+
                 var current = await store.GetRunAsync(runId, stoppingToken);
                 if (current is null || current.Status.IsTerminal)
                 {
-                    runCts.Cancel();
+                    try
+                    {
+                        runCts.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Cancellation source can be disposed during teardown.
+                    }
+
                     return;
                 }
             }
             catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException)
             {
                 return;
             }
@@ -1227,17 +1306,22 @@ internal sealed partial class SurefireExecutorService(
 
     private async Task AppendAttemptFailureEventAsync(JobRun run, Exception exception,
         CancellationToken cancellationToken)
+        => await AppendFailureEventAsync(
+            run,
+            RunFailureEnvelope.FromException(
+                run.Attempt,
+                timeProvider.GetUtcNow(),
+                exception,
+                "Executor",
+                GetFailureCode(exception)),
+            cancellationToken);
+
+    private async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var payload = JsonSerializer.Serialize(new AttemptFailureEnvelope
-            {
-                Attempt = run.Attempt,
-                OccurredAt = timeProvider.GetUtcNow(),
-                ExceptionType = exception.GetType().FullName ?? exception.GetType().Name,
-                Message = exception.Message,
-                StackTrace = exception.ToString()
-            }, options.SerializerOptions);
+            var payload = JsonSerializer.Serialize(envelope, options.SerializerOptions);
 
             await store.AppendEventsAsync(
             [
@@ -1262,6 +1346,13 @@ internal sealed partial class SurefireExecutorService(
             Log.FailedToAppendAttemptFailure(logger, ex, run.Id);
         }
     }
+
+    private static string GetFailureCode(Exception exception) => exception switch
+    {
+        ShutdownInterruptedException => "ShutdownInterrupted",
+        OperationCanceledException => "OperationCanceled",
+        _ => "Exception"
+    };
 
     private static async Task InvokeCallbackAsync(Delegate callback, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
@@ -1347,6 +1438,10 @@ internal sealed partial class SurefireExecutorService(
         catch (SemaphoreFullException)
         {
         }
+        catch (ObjectDisposedException)
+        {
+            // Notification callbacks can race with monitor teardown; no wakeup is needed after disposal.
+        }
 
         return Task.CompletedTask;
     }
@@ -1354,6 +1449,18 @@ internal sealed partial class SurefireExecutorService(
     private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
     {
         await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+    }
+
+    private CancellationTokenSource CreateBestEffortWorkCts(CancellationToken stoppingToken)
+    {
+        if (stoppingToken.IsCancellationRequested)
+        {
+            return new CancellationTokenSource(options.ShutdownTimeout);
+        }
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        cts.CancelAfter(options.ShutdownTimeout);
+        return cts;
     }
 
     private async Task WaitForActiveRunsAsync()
@@ -1375,20 +1482,6 @@ internal sealed partial class SurefireExecutorService(
                 cts.Cancel();
             }
         }
-    }
-
-    private sealed class InputDeclarationEnvelope
-    {
-        public required string[] Arguments { get; init; }
-    }
-
-    private sealed class InputEnvelope
-    {
-        public required string Argument { get; init; }
-        public required long Sequence { get; init; }
-        public string? Payload { get; init; }
-        public required bool IsComplete { get; init; }
-        public string? Error { get; init; }
     }
 
     private static partial class Log
@@ -1416,6 +1509,18 @@ internal sealed partial class SurefireExecutorService(
             Message = "Post-completion housekeeping failed for run '{RunId}' (job '{JobName}').")]
         public static partial void PostCompletionHousekeepingFailed(ILogger logger, Exception exception, string runId,
             string jobName);
+
+        [LoggerMessage(EventId = 1107, Level = LogLevel.Warning,
+            Message =
+                "Attempt {Attempt} interrupted by application shutdown. Retrying at {NotBefore} (max retries: {MaxRetries}).")]
+        public static partial void AttemptInterruptedByShutdownRetrying(ILogger logger, int attempt,
+            DateTimeOffset notBefore, int maxRetries);
+
+        [LoggerMessage(EventId = 1108, Level = LogLevel.Warning,
+            Message =
+                "Run '{RunId}' (job '{JobName}') interrupted by application shutdown moved to dead letter after attempt {Attempt}.")]
+        public static partial void ShutdownInterruptedRunMovedToDeadLetter(ILogger logger, string runId,
+            string jobName, int attempt);
     }
 
     private sealed record InvocationResult(
@@ -1426,12 +1531,6 @@ internal sealed partial class SurefireExecutorService(
         public static InvocationResult Empty { get; } = new(null, null, null);
     }
 
-    private sealed class AttemptFailureEnvelope
-    {
-        public required int Attempt { get; init; }
-        public required DateTimeOffset OccurredAt { get; init; }
-        public required string ExceptionType { get; init; }
-        public required string Message { get; init; }
-        public required string StackTrace { get; init; }
-    }
+    private sealed class ShutdownInterruptedException(Exception innerException)
+        : Exception("Run interrupted because the application is shutting down.", innerException);
 }

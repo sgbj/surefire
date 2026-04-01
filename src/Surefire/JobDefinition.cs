@@ -76,6 +76,13 @@ public sealed class JobDefinition
     public MisfirePolicy MisfirePolicy { get; set; }
 
     /// <summary>
+    ///     Gets or sets the maximum number of missed occurrences to schedule on each scheduler tick
+    ///     when <see cref="MisfirePolicy"/> is <see cref="Surefire.MisfirePolicy.FireAll"/>.
+    ///     Null means unlimited.
+    /// </summary>
+    public int? FireAllLimit { get; set; }
+
+    /// <summary>
     ///     Gets or sets the JSON Schema describing the job's arguments.
     /// </summary>
     public string? ArgumentsSchema { get; set; }

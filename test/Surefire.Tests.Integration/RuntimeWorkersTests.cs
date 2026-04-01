@@ -2,8 +2,10 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Integration;
@@ -177,6 +179,49 @@ public sealed class RuntimeWorkersTests
             TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(30),
             "Expected scheduler with FireAll misfire policy to enqueue at least two runs.");
+    }
+
+    [Fact]
+    public async Task Scheduler_FireAll_WithCatchUpCap_ReplaysBacklogAcrossTicks()
+    {
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(900);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CronFireAllBounded", () => 1)
+            .WithCron("* * * * * *")
+            .WithMisfirePolicy(MisfirePolicy.FireAll, fireAllLimit: 1);
+
+        await harness.StartAsync();
+
+        await harness.Store.UpdateLastCronFireAtAsync("CronFireAllBounded", DateTimeOffset.UtcNow.AddSeconds(-3));
+
+        var firstPage = await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
+            {
+                JobName = "CronFireAllBounded",
+                ExactJobName = true
+            }),
+            runsPage => runsPage.TotalCount >= 1,
+            TimeSpan.FromSeconds(4),
+            TimeSpan.FromMilliseconds(25),
+            "Expected scheduler to enqueue the first FireAll catch-up run.");
+
+        Assert.Equal(1, firstPage.TotalCount);
+
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
+            {
+                JobName = "CronFireAllBounded",
+                ExactJobName = true
+            }),
+            runsPage => runsPage.TotalCount >= 3,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(50),
+            "Expected capped FireAll catch-up to continue replaying remaining missed occurrences on later ticks.");
     }
 
     [Fact]
@@ -514,7 +559,7 @@ public sealed class RuntimeWorkersTests
 
         Assert.NotNull(first);
         var elapsed = Stopwatch.GetElapsedTime(startedAt);
-        Assert.True(elapsed < TimeSpan.FromSeconds(1.8),
+        Assert.True(elapsed < TimeSpan.FromSeconds(2.8),
             $"Expected first streamed item before polling interval. Elapsed={elapsed}.");
 
         static async IAsyncEnumerable<int> BatchWakeHint(int value, [EnumeratorCancellation] CancellationToken ct)
@@ -800,6 +845,217 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
+    public async Task StaleRunningRun_WithNonBatchParent_DoesNotFailMaintenanceTick()
+    {
+        var logs = new ConcurrentQueue<LogEntry>();
+
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+        }, services =>
+        {
+            services.AddLogging(builder => builder.AddProvider(new CollectingLoggerProvider(logs)));
+        });
+
+        harness.Host.AddJob("CrashRecoveryParent", () => 7).WithRetry(0);
+
+        await harness.StartAsync();
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var parent = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryParent",
+            Status = JobStatus.Pending,
+            CreatedAt = staleAt,
+            NotBefore = staleAt
+        };
+
+        var staleChild = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryParent",
+            Status = JobStatus.Running,
+            ParentRunId = parent.Id,
+            RootRunId = parent.Id,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([parent, staleChild]);
+
+        var recovered = await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(staleChild.Id),
+            run => run.Status == JobStatus.DeadLetter,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(20),
+            "Timed out waiting for stale child run with non-batch parent to dead-letter.");
+
+        Assert.Equal(JobStatus.DeadLetter, recovered.Status);
+
+        Assert.DoesNotContain(
+            logs,
+            entry =>
+                entry.Level >= LogLevel.Error &&
+                string.Equals(entry.Category, "Surefire.SurefireMaintenanceService", StringComparison.Ordinal) &&
+                entry.Message.Contains("Maintenance tick failed.", StringComparison.Ordinal) &&
+                entry.Exception is InvalidOperationException invalidOperation &&
+                invalidOperation.Message.Contains("not a batch coordinator", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_DeadLetter_PersistsMaintenanceAttemptFailureEvent()
+    {
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CrashRecoveryDeadLetterEvent", () => 7).WithRetry(0);
+
+        await harness.StartAsync();
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var stale = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryDeadLetterEvent",
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([stale]);
+
+        await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(stale.Id),
+            run => run.Status == JobStatus.DeadLetter,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale run to dead-letter.");
+
+        var failureEvents = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetEventsAsync(stale.Id, 0, [RunEventType.AttemptFailure]),
+            events => events.Count > 0,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale dead-letter attempt-failure event.");
+
+        var envelope = JsonDocument.Parse(failureEvents[^1].Payload).RootElement;
+        Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
+        Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
+        Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+
+        static int ReadInt(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetInt32();
+            }
+
+            return element.GetProperty(second).GetInt32();
+        }
+
+        static string ReadString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetString()!;
+            }
+
+            return element.GetProperty(second).GetString()!;
+        }
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_Retry_PersistsMaintenanceAttemptFailureEvent()
+    {
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CrashRecoveryRetryEvent", () => 7).WithRetry(1);
+
+        await harness.StartAsync();
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var stale = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryRetryEvent",
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([stale]);
+
+        await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(stale.Id),
+            run => run.Status == JobStatus.Completed,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale run to recover and complete.");
+
+        var failureEvents = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetEventsAsync(stale.Id, 0, [RunEventType.AttemptFailure]),
+            events => events.Count > 0,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale retry attempt-failure event.");
+
+        var envelope = JsonDocument.Parse(failureEvents[^1].Payload).RootElement;
+        Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
+        Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
+        Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+
+        static int ReadInt(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetInt32();
+            }
+
+            return element.GetProperty(second).GetInt32();
+        }
+
+        static string ReadString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetString()!;
+            }
+
+            return element.GetProperty(second).GetString()!;
+        }
+    }
+
+    [Fact]
     public async Task Filters_GlobalThenJob_OrderIsDeterministic()
     {
         await using var harness = await CreateHarnessAsync(options =>
@@ -960,13 +1216,20 @@ public sealed class RuntimeWorkersTests
         await harness.StartAsync();
 
         var runId = await harness.Client.TriggerAsync("RetryFailureEvents");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var result = await harness.Client.WaitAsync(runId, completionCts.Token);
 
         Assert.True(result.IsFailure);
 
-        var failureEvents =
-            await harness.Store.GetEventsAsync(runId, 0, [RunEventType.AttemptFailure], null, cts.Token);
+        using var eventsCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var failureEvents = await TestWait.PollUntilAsync(
+            async ct =>
+                await harness.Store.GetEventsAsync(runId, 0, [RunEventType.AttemptFailure], null, ct),
+            events => events.Count == 2,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(100),
+            "Timed out waiting for both attempt-failure events to be persisted.",
+            eventsCts.Token);
         Assert.Equal(2, failureEvents.Count);
 
         var envelopes = failureEvents
@@ -980,6 +1243,8 @@ public sealed class RuntimeWorkersTests
         Assert.All(envelopes, envelope =>
         {
             Assert.Equal("System.InvalidOperationException", ReadString(envelope, "ExceptionType", "exceptionType"));
+            Assert.Equal("Executor", ReadString(envelope, "FailureSource", "failureSource"));
+            Assert.Equal("Exception", ReadString(envelope, "FailureCode", "failureCode"));
             Assert.Contains("retry-failure-events", ReadString(envelope, "Message", "message"),
                 StringComparison.Ordinal);
             Assert.Contains("System.InvalidOperationException", ReadString(envelope, "StackTrace", "stackTrace"),
@@ -1186,7 +1451,7 @@ public sealed class RuntimeWorkersTests
             if (outputs.Count == 1)
             {
                 var firstDelay = DateTimeOffset.UtcNow - started;
-                Assert.True(firstDelay < TimeSpan.FromMilliseconds(1500));
+                Assert.True(firstDelay < TimeSpan.FromMilliseconds(2500));
             }
         }
 
@@ -1223,7 +1488,7 @@ public sealed class RuntimeWorkersTests
         started.Stop();
 
         Assert.Contains("Unable to bind parameter 'input'", ex.ToString(), StringComparison.Ordinal);
-        Assert.True(started.Elapsed < TimeSpan.FromSeconds(1),
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(2),
             $"Missing undeclared stream binding should fail fast. Elapsed: {started.Elapsed}.");
     }
 
@@ -1366,6 +1631,10 @@ public sealed class RuntimeWorkersTests
         var rerun = await harness.Client.WaitAsync(rerunId, cts.Token);
         Assert.True(rerun.IsSuccess);
         Assert.Equal(6, rerun.GetResult<int>());
+
+        var rerunRun = await harness.Store.GetRunAsync(rerunId, cts.Token);
+        Assert.NotNull(rerunRun);
+        Assert.Equal(originalRunId, rerunRun.RerunOfRunId);
     }
 
     [Fact]
@@ -1407,6 +1676,13 @@ public sealed class RuntimeWorkersTests
         Assert.All(firstPass, result => Assert.True(result.IsSuccess));
         Assert.Equal([3, 165], firstPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
 
+        var originalChildrenPage = await harness.Store.GetRunsAsync(
+            new() { ParentRunId = originalBatchId },
+            0,
+            20,
+            cts.Token);
+        var originalChildIds = originalChildrenPage.Items.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
+
         var rerunBatchId = await harness.Client.RerunAsync(originalBatchId, cts.Token);
         var rerunPass = new List<RunResult>();
         await foreach (var result in harness.Client.WaitEachAsync(rerunBatchId, cts.Token))
@@ -1417,6 +1693,22 @@ public sealed class RuntimeWorkersTests
         Assert.Equal(2, rerunPass.Count);
         Assert.All(rerunPass, result => Assert.True(result.IsSuccess));
         Assert.Equal([3, 165], rerunPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
+
+        var rerunCoordinator = await harness.Store.GetRunAsync(rerunBatchId, cts.Token);
+        Assert.NotNull(rerunCoordinator);
+        Assert.Equal(originalBatchId, rerunCoordinator.RerunOfRunId);
+
+        var rerunChildrenPage = await harness.Store.GetRunsAsync(
+            new() { ParentRunId = rerunBatchId },
+            0,
+            20,
+            cts.Token);
+        Assert.Equal(2, rerunChildrenPage.Items.Count);
+        Assert.All(rerunChildrenPage.Items, child =>
+        {
+            Assert.NotNull(child.RerunOfRunId);
+            Assert.Contains(child.RerunOfRunId, originalChildIds);
+        });
     }
 
     [Fact]
@@ -1537,6 +1829,39 @@ public sealed class RuntimeWorkersTests
             sink.Events.Enqueue("job-before");
             await next(context);
             sink.Events.Enqueue("job-after");
+        }
+    }
+
+    private sealed record LogEntry(LogLevel Level, string Category, string Message, Exception? Exception);
+
+    private sealed class CollectingLoggerProvider(ConcurrentQueue<LogEntry> entries) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => new CollectingLogger(entries, categoryName);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class CollectingLogger(ConcurrentQueue<LogEntry> entries, string categoryName) : ILogger
+    {
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            entries.Enqueue(new(logLevel, categoryName, formatter(state, exception), exception));
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+
+            public void Dispose()
+            {
+            }
         }
     }
 

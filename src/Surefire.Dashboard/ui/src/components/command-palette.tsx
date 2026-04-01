@@ -47,12 +47,14 @@ export function CommandPalette({
   const { data: jobs } = useQuery({
     queryKey: ["jobs"],
     queryFn: () => api.getJobs(),
+    enabled: open,
     staleTime: 30_000,
   });
 
   const { data: nodes } = useQuery({
     queryKey: ["nodes"],
     queryFn: () => api.getNodes(),
+    enabled: open,
     staleTime: 30_000,
   });
 

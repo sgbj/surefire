@@ -17,9 +17,17 @@ public static class SurefirePostgreSqlExtensions
     /// <returns>The options for chaining.</returns>
     public static SurefireOptions UsePostgreSql(this SurefireOptions options, string connectionString)
     {
-        return options
-            .UsePostgreSqlStore(connectionString)
-            .UsePostgreSqlNotifications(connectionString);
+        ArgumentNullException.ThrowIfNull(options);
+        var providerOptions = new PostgreSqlOptions(connectionString);
+        return options.ConfigureServices(services =>
+        {
+            services.AddSingleton<IJobStore>(sp =>
+                new PostgreSqlJobStore(providerOptions, sp.GetRequiredService<TimeProvider>()));
+            services.AddSingleton<INotificationProvider>(sp =>
+                new PostgreSqlNotificationProvider(
+                    providerOptions,
+                    sp.GetRequiredService<ILogger<PostgreSqlNotificationProvider>>()));
+        });
     }
 
     /// <summary>

@@ -3,7 +3,7 @@ namespace Surefire;
 /// <summary>
 ///     Represents a worker node in the Surefire cluster.
 /// </summary>
-public sealed record NodeInfo
+public sealed class NodeInfo
 {
     /// <summary>The unique name of the node.</summary>
     public required string Name { get; set; }

@@ -193,7 +193,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         run.LastHeartbeatAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending));
 
-        var counters = await Store.IncrementBatchCounterAsync(run.Id, false);
+        var counters = await Store.TryIncrementBatchCounterAsync(run.Id, false);
         var stored = await Store.GetRunAsync(run.Id);
 
         Assert.NotNull(stored);

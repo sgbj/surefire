@@ -1,11 +1,13 @@
 using StackExchange.Redis;
+using Microsoft.Extensions.Logging;
 
 namespace Surefire.Redis;
 
 /// <summary>
 ///     Redis notification provider using pub/sub.
 /// </summary>
-internal sealed class RedisNotificationProvider(RedisOptions options) : INotificationProvider, IAsyncDisposable
+internal sealed class RedisNotificationProvider(RedisOptions options, ILogger<RedisNotificationProvider> logger)
+    : INotificationProvider, IAsyncDisposable
 {
     private ISubscriber? _subscriber;
 
@@ -24,7 +26,7 @@ internal sealed class RedisNotificationProvider(RedisOptions options) : INotific
 
         if (_subscriber is null)
         {
-            return;
+            throw new InvalidOperationException("Not initialized. Call InitializeAsync first.");
         }
 
         await _subscriber.PublishAsync(RedisChannel.Literal(channel), message ?? "");
@@ -48,9 +50,11 @@ internal sealed class RedisNotificationProvider(RedisOptions options) : INotific
                 var payload = msg.IsNullOrEmpty ? null : msg.ToString();
                 await handler(payload == "" ? null : payload);
             }
-            catch
+            catch (Exception ex)
             {
-                // Best-effort delivery
+                logger.LogWarning(ex,
+                    "Redis notification handler failed for channel '{Channel}'.",
+                    channel);
             }
         });
 

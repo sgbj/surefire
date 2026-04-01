@@ -318,16 +318,6 @@ public sealed class SurefireOptions
 
     internal void Validate()
     {
-        _ = NodeName;
-        _ = PollingInterval;
-        _ = HeartbeatInterval;
-        _ = InactiveThreshold;
-        _ = RetentionPeriod;
-        _ = RetentionCheckInterval;
-        _ = ShutdownTimeout;
-        _ = SerializerOptions;
-        _ = MaxNodeConcurrency;
-
         foreach (var queue in Queues)
         {
             ValidateQueue(queue, nameof(Queues));

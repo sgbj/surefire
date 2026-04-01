@@ -66,7 +66,13 @@ internal sealed partial class SurefireSchedulerService(
                 continue;
             }
 
-            var fireTimes = GetMissedFireTimes(cron, timeZone, job.LastCronFireAt, now);
+            var fireTimesResult = GetMissedFireTimes(
+                cron,
+                timeZone,
+                job.LastCronFireAt,
+                now,
+                job.MisfirePolicy == MisfirePolicy.FireAll ? job.FireAllLimit : null);
+            var fireTimes = fireTimesResult.FireTimes;
             if (fireTimes.Count == 0)
             {
                 continue;
@@ -83,6 +89,14 @@ internal sealed partial class SurefireSchedulerService(
                     break;
 
                 case MisfirePolicy.FireAll:
+                    if (fireTimesResult.IsTruncated)
+                    {
+                        Log.FireAllLimited(
+                            logger,
+                            job.Name,
+                            job.FireAllLimit!.Value);
+                    }
+
                     foreach (var fireTime in fireTimes)
                     {
                         await TryCreateScheduledRunAsync(job, fireTime, fireTime, cancellationToken);
@@ -166,14 +180,15 @@ internal sealed partial class SurefireSchedulerService(
         }
     }
 
-    private static IReadOnlyList<DateTimeOffset> GetMissedFireTimes(CronExpression cron,
+    private static MissedFireTimesResult GetMissedFireTimes(CronExpression cron,
         TimeZoneInfo timeZone,
         DateTimeOffset? lastCronFireAt,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        int? maxOccurrences)
     {
         if (lastCronFireAt is null)
         {
-            return [];
+            return new([], false);
         }
 
         var fireTimes = new List<DateTimeOffset>();
@@ -186,12 +201,19 @@ internal sealed partial class SurefireSchedulerService(
                 break;
             }
 
+            if (maxOccurrences is { } max && fireTimes.Count >= max)
+            {
+                return new(fireTimes, true);
+            }
+
             fireTimes.Add(next.Value);
             cursor = next.Value;
         }
 
-        return fireTimes;
+        return new(fireTimes, false);
     }
+
+    private readonly record struct MissedFireTimesResult(IReadOnlyList<DateTimeOffset> FireTimes, bool IsTruncated);
 
     private static partial class Log
     {
@@ -206,5 +228,10 @@ internal sealed partial class SurefireSchedulerService(
         [LoggerMessage(EventId = 1203, Level = LogLevel.Warning,
             Message = "Time zone '{TimeZoneId}' not found. Falling back to UTC.")]
         public static partial void TimeZoneNotFoundFallingBackToUtc(ILogger logger, string? timeZoneId);
+
+        [LoggerMessage(EventId = 1204, Level = LogLevel.Warning,
+            Message =
+                "Job '{JobName}' reached FireAllLimit={FireAllLimit}. Remaining missed fires will be scheduled on subsequent ticks.")]
+        public static partial void FireAllLimited(ILogger logger, string jobName, int fireAllLimit);
     }
 }

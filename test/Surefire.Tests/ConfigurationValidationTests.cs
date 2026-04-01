@@ -54,6 +54,7 @@ public sealed class ConfigurationValidationTests
         Assert.Throws<ArgumentOutOfRangeException>(() => job.WithMaxConcurrency(0));
         Assert.Throws<ArgumentOutOfRangeException>(() => job.WithTimeout(TimeSpan.Zero));
         Assert.Throws<ArgumentOutOfRangeException>(() => job.WithRetry(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => job.WithMisfirePolicy(MisfirePolicy.FireAll, 0));
         Assert.Throws<ArgumentException>(() => job.WithQueue(" "));
         Assert.Throws<ArgumentException>(() => job.WithRateLimit(" "));
     }

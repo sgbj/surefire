@@ -79,9 +79,9 @@ app.AddJob("Cleanup", async () => { /* ... */ })
 | `WithPriority(n)` | Higher priority runs are claimed first (default 0) |
 | `WithQueue(name)` | Assign to a named queue |
 | `WithRateLimit(name)` | Apply a named rate limit |
-| `WithRetry(n)` | Max number of attempts |
+| `WithRetry(n)` | Max number of retries (`n + 1` total attempts) |
 | `WithRetry(configure)` | Fine-grained retry policy (backoff, delays, jitter) |
-| `WithMisfirePolicy(policy)` | What to do when scheduled fires are missed |
+| `WithMisfirePolicy(policy, fireAllLimit?)` | What to do when scheduled fires are missed; for `FireAll`, optionally cap missed occurrences |
 | `Continuous()` | Auto-restart when the job completes, fails, or is cancelled |
 
 ## Lifecycle callbacks
@@ -119,5 +119,51 @@ builder.Services.AddSurefire(options =>
         logger.LogError(ctx.Exception, "Job {Name} reached dead letter", ctx.JobName);
     });
 });
+```
+
+## Batch and run APIs
+
+Use batch APIs when you want to fan out a job over many inputs:
+
+```csharp
+var batchId = await client.TriggerAllAsync("RenderInvoice", [
+    new { orderId = 101 },
+    new { orderId = 102 },
+    new { orderId = 103 }
+]);
+
+await foreach (var result in client.WaitEachAsync(batchId))
+{
+    Console.WriteLine($"{result.RunId}: {result.Status}");
+}
+```
+
+- `TriggerAllAsync` creates a coordinator run plus child runs.
+- `RunAllAsync<T>` returns all typed results (throws aggregate failure if any child fails).
+- `RunEachAsync`/`WaitEachAsync` stream child completion results one-by-one.
+- `StreamEachAsync<T>` streams per-child output events.
+
+You can also interact with a single run after trigger:
+
+```csharp
+var runId = await client.TriggerAsync("Import", new { source = "s3://..." });
+
+// Wait for terminal state
+var runResult = await client.WaitAsync(runId);
+
+// Stream typed outputs if the job emits output events
+await foreach (var item in client.WaitStreamAsync<string>(runId))
+{
+    Console.WriteLine(item);
+}
+
+// Observe run + events together
+await foreach (var observation in client.ObserveAsync(runId))
+{
+    Console.WriteLine($"{observation.Run.Status} / {observation.Event?.EventType}");
+}
+
+// Rerun the same arguments/input events
+var rerunId = await client.RerunAsync(runId);
 ```
 

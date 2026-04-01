@@ -33,6 +33,8 @@ internal sealed class RedisOptions : IAsyncDisposable
             await conn.CloseAsync();
             conn.Dispose();
         }
+
+        _semaphore.Dispose();
     }
 
     internal async Task<IConnectionMultiplexer> GetConnectionAsync()

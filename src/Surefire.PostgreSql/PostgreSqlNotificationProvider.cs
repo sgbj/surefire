@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data;
+using System.Net.Sockets;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -42,6 +43,14 @@ internal sealed class PostgreSqlNotificationProvider(
         if (_cts is { })
         {
             await _cts.CancelAsync();
+        }
+
+        try
+        {
+            _listenInterrupt?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
         }
 
         if (_listenLoop is { })
@@ -216,6 +225,11 @@ internal sealed class PostgreSqlNotificationProvider(
             }
             catch (Exception ex)
             {
+                if (IsExpectedListenInterruption(ex, cancellationToken))
+                {
+                    continue;
+                }
+
                 _reconnectAttempt++;
                 var delay = ComputeReconnectDelay(_reconnectAttempt);
                 logger.LogWarning(ex,
@@ -275,10 +289,33 @@ internal sealed class PostgreSqlNotificationProvider(
         {
             await handler(payload);
         }
+        catch (ObjectDisposedException)
+        {
+            // Handlers can legitimately outlive local synchronization primitives during teardown.
+        }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "PostgreSQL notification handler failed on channel {Channel}.", channel);
         }
+    }
+
+    private static bool IsExpectedListenInterruption(Exception ex, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return true;
+        }
+
+        return ex is NpgsqlException
+        {
+            InnerException: System.IO.IOException
+            {
+                InnerException: SocketException
+                {
+                    SocketErrorCode: SocketError.OperationAborted
+                }
+            }
+        };
     }
 
     private static TimeSpan ComputeReconnectDelay(int attempt)

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Integration;
 
@@ -184,7 +185,7 @@ public sealed class RuntimeContractPendingTests
             claimedA.StartedAt,
             claimedA.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeA));
-        await store.IncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
 
         var claimedB = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimedB);
@@ -200,7 +201,7 @@ public sealed class RuntimeContractPendingTests
             claimedB.StartedAt,
             claimedB.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeB));
-        await store.IncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
@@ -333,7 +334,7 @@ public sealed class RuntimeContractPendingTests
                 claimed.StartedAt,
                 claimed.LastHeartbeatAt);
             Assert.True(await store.TryTransitionRunAsync(complete));
-            await store.IncrementBatchCounterAsync(batchId, false);
+            await store.TryIncrementBatchCounterAsync(batchId, false);
         }
 
         var coordinator = await store.GetRunAsync(batchId);
@@ -507,8 +508,8 @@ public sealed class RuntimeContractPendingTests
 
         Assert.True(await store.TryTransitionRunAsync(completeA));
         Assert.True(await store.TryTransitionRunAsync(completeB));
-        await store.IncrementBatchCounterAsync(batchId, false);
-        await store.IncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
@@ -592,7 +593,7 @@ public sealed class RuntimeContractPendingTests
             first.StartedAt,
             first.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeFirst));
-        await store.IncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
@@ -625,7 +626,7 @@ public sealed class RuntimeContractPendingTests
                 run.StartedAt,
                 run.LastHeartbeatAt);
             Assert.True(await store.TryTransitionRunAsync(complete));
-            await store.IncrementBatchCounterAsync(batchId, false);
+            await store.TryIncrementBatchCounterAsync(batchId, false);
         }
 
         var completedIds = await waitTask;
@@ -690,7 +691,7 @@ public sealed class RuntimeContractPendingTests
                 run.StartedAt,
                 run.LastHeartbeatAt);
             Assert.True(await store.TryTransitionRunAsync(complete));
-            await store.IncrementBatchCounterAsync(batchId, false);
+            await store.TryIncrementBatchCounterAsync(batchId, false);
         }
 
         var coordinator = await store.GetRunAsync(batchId);
@@ -749,8 +750,8 @@ public sealed class RuntimeContractPendingTests
             claimedA.StartedAt,
             claimedA.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeA));
-        await store.IncrementBatchCounterAsync(batchId, false);
-        await store.IncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
@@ -780,20 +781,16 @@ public sealed class RuntimeContractPendingTests
 
     private static async Task<JobRun> WaitForRunAsync(IJobStore store, string jobName, string marker)
     {
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var page = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true });
-            var run = page.Items.FirstOrDefault(r =>
-                r.Arguments is { } args && args.Contains(marker, StringComparison.Ordinal));
-            if (run is { })
+        return await TestWait.PollUntilAsync(
+            async _ =>
             {
-                return run;
-            }
-
-            await Task.Delay(10);
-        }
-
-        throw new TimeoutException("Timed out waiting for run creation.");
+                var page = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true });
+                return page.Items.FirstOrDefault(r =>
+                    r.Arguments is { } args && args.Contains(marker, StringComparison.Ordinal));
+            },
+            _ => true,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(10),
+            "Timed out waiting for run creation.");
     }
 }

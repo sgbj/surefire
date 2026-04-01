@@ -7,7 +7,7 @@ namespace Surefire.SqlServer;
 /// <summary>
 ///     SQL Server implementation of <see cref="IJobStore" />.
 /// </summary>
-public sealed class SqlServerJobStore(string connectionString, TimeProvider timeProvider) : IJobStore
+internal sealed class SqlServerJobStore(string connectionString, TimeProvider timeProvider) : IJobStore
 {
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
@@ -60,6 +60,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                       rate_limit_name NVARCHAR(450),
                                       is_enabled BIT NOT NULL DEFAULT 1,
                                       misfire_policy INT NOT NULL DEFAULT 0,
+                                      fire_all_limit INT,
                                       arguments_schema NVARCHAR(MAX),
                                       last_heartbeat_at DATETIMEOFFSET,
                                       last_cron_fire_at DATETIMEOFFSET
@@ -216,17 +217,18 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                               queue = @queue,
                               rate_limit_name = @rate_limit_name,
                               misfire_policy = @misfire_policy,
+                              fire_all_limit = @fire_all_limit,
                               arguments_schema = @arguments_schema,
                               last_heartbeat_at = SYSUTCDATETIME()
                           WHEN NOT MATCHED THEN INSERT (
                               name, description, tags, cron_expression, time_zone_id, timeout,
                               max_concurrency, priority, retry_policy, is_continuous, queue,
-                              rate_limit_name, is_enabled, misfire_policy, arguments_schema,
+                              rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
                               last_heartbeat_at
                           ) VALUES (
                               @name, @description, @tags, @cron_expression, @time_zone_id, @timeout,
                               @max_concurrency, @priority, @retry_policy, @is_continuous, @queue,
-                              @rate_limit_name, @is_enabled, @misfire_policy, @arguments_schema,
+                              @rate_limit_name, @is_enabled, @misfire_policy, @fire_all_limit, @arguments_schema,
                               SYSUTCDATETIME()
                           );
                           """;
@@ -246,6 +248,8 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         cmd.Parameters.AddWithValue("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@is_enabled", job.IsEnabled);
         cmd.Parameters.AddWithValue("@misfire_policy", (int)job.MisfirePolicy);
+        cmd.Parameters.AddWithValue("@fire_all_limit",
+            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -706,7 +710,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         return claimed;
     }
 
-    public async Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    public async Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
         CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
@@ -745,12 +749,12 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         await using var fr = await fallback.ExecuteReaderAsync(cancellationToken);
         if (!await fr.ReadAsync(cancellationToken))
         {
-            throw new InvalidOperationException($"Run '{batchRunId}' not found.");
+            return null;
         }
 
         if (fr.IsDBNull(fr.GetOrdinal("batch_total")))
         {
-            throw new InvalidOperationException($"Run '{batchRunId}' is not a batch coordinator.");
+            return null;
         }
 
         return new(
@@ -1836,6 +1840,12 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             IsEnabled = reader.GetBoolean(reader.GetOrdinal("is_enabled")),
             MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy"))
         };
+
+        var limitCol = reader.GetOrdinal("fire_all_limit");
+        if (!reader.IsDBNull(limitCol))
+        {
+            job.FireAllLimit = reader.GetInt32(limitCol);
+        }
 
         var col = reader.GetOrdinal("description");
         if (!reader.IsDBNull(col))

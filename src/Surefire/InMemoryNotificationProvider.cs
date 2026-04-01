@@ -29,12 +29,13 @@ internal sealed class InMemoryNotificationProvider : INotificationProvider
             handlers = [.. subscribers.Values];
         }
 
-        foreach (var handler in handlers)
+        if (handlers.Length == 0)
         {
-            _ = InvokeHandlerAsync(handler, message, channel);
+            return Task.CompletedTask;
         }
 
-        return Task.CompletedTask;
+        var tasks = handlers.Select(handler => InvokeHandlerAsync(handler, message, channel));
+        return Task.WhenAll(tasks);
     }
 
     public Task<IAsyncDisposable> SubscribeAsync(string channel, Func<string?, Task> handler,

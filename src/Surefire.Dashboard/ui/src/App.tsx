@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router";
+import { BrowserRouter, Routes, Route, Link } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -33,6 +33,25 @@ export default function App() {
               <Route path="queues" element={<QueuesPage />} />
               <Route path="nodes" element={<NodesPage />} />
               <Route path="nodes/:name" element={<NodeDetailPage />} />
+              <Route
+                path="*"
+                element={
+                  <div className="space-y-3">
+                    <h2 className="text-xl font-semibold tracking-tight">
+                      Page not found
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      The requested dashboard route does not exist.
+                    </p>
+                    <Link
+                      to="/"
+                      className="text-sm font-medium text-primary hover:underline"
+                    >
+                      Go to dashboard
+                    </Link>
+                  </div>
+                }
+              />
             </Route>
           </Routes>
         </BrowserRouter>

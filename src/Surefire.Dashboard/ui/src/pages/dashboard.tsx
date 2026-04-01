@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -65,6 +65,8 @@ export function DashboardPage() {
     },
     refetchInterval: 5000,
   });
+
+  const timeline = useMemo(() => stats?.timeline ?? [], [stats?.timeline]);
 
   return (
     <div className="space-y-6">
@@ -163,15 +165,12 @@ export function DashboardPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="pt-4 px-0">
-                {stats.timeline.length > 0 ? (
+                {timeline.length > 0 ? (
                   <ChartContainer
                     config={chartConfig}
                     className="aspect-auto h-[300px] w-full"
                   >
-                    <AreaChart
-                      data={stats.timeline}
-                      margin={{ left: 0, right: 0 }}
-                    >
+                    <AreaChart data={timeline} margin={{ left: 0, right: 0 }}>
                       <defs>
                         {Object.entries(chartConfig).map(([key, { color }]) => (
                           <linearGradient

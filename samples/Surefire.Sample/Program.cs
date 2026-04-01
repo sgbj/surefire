@@ -1,10 +1,12 @@
 using System.Diagnostics;
+using System.Threading.Channels;
 using Surefire;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSurefire(options =>
 {
+    options.UsePostgreSql("Host=localhost;Database=surefire;Username=postgres;Password=postgres");
     options.AddFixedWindowLimiter("Fibonacci", 10, TimeSpan.FromSeconds(10));
     options.UseFilter<StopwatchJobFilter>();
 });
@@ -27,7 +29,7 @@ app.AddJob("DataImport", async (JobContext context, ILogger<Program> logger, Can
     {
         for (var i = 1; i <= count; i++)
         {
-            logger.LogInformation("Progress: {Percent}", $"{i / (double)count:P}");
+            logger.LogInformation("Progress: {Percent:P}", i / (double)count);
             await context.ReportProgressAsync(i / (double)count);
             await Task.Delay(1000, ct);
         }
@@ -131,6 +133,65 @@ app.AddJob("AlwaysRunning", async (ILogger<Program> logger, CancellationToken ct
     })
     .Continuous()
     .WithTags("continuous");
+
+app.AddJob("SuperJob", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+    {
+        var runs = new List<IAsyncEnumerable<long>>();
+
+        for (var i = 1; i <= 10000; i++)
+        {
+            logger.LogTrace("SuperJob Trace {I}", i);
+            logger.LogDebug("SuperJob Debug {I}", i);
+            logger.LogInformation("SuperJob Information {I}", i);
+            logger.LogWarning("SuperJob Warning {I}", i);
+            logger.LogError("SuperJob Error {I}", i);
+            logger.LogCritical("SuperJob Critical {I}", i);
+
+            runs.Add(client.StreamAsync<long>("ChildJob", ct));
+        }
+
+        return await MergeAll(runs, ct).SumAsync(ct);
+
+        //return (await client.RunAllAsync<long[]>("ChildJob2", new object?[10000], ct)).SelectMany(x => x).Sum();
+    });
+
+static IAsyncEnumerable<T> MergeAll<T>(IEnumerable<IAsyncEnumerable<T>> sources, CancellationToken ct = default)
+{
+    var channel = Channel.CreateUnbounded<T>(new UnboundedChannelOptions
+    {
+        SingleReader = true,
+        SingleWriter = false
+    });
+
+    _ = Task.Run(async () =>
+    {
+        var tasks = sources.Select(async source =>
+        {
+            await foreach (var item in source.WithCancellation(ct))
+            {
+                await channel.Writer.WriteAsync(item, ct);
+            }
+        });
+
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (Exception ex)
+        {
+            channel.Writer.Complete(ex);
+            return;
+        }
+
+        channel.Writer.Complete();
+    }, ct);
+
+    return channel.Reader.ReadAllAsync(ct);
+}
+
+app.AddJob("ChildJob", () => AsyncEnumerable.Range(0, 10).Select(_ => Random.Shared.Next(1, 100)));
+
+app.AddJob("ChildJob2", () => Enumerable.Range(0, 10).Select(_ => Random.Shared.Next(1, 100)));
 
 app.MapSurefireDashboard("/");
 

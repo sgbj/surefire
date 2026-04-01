@@ -1,4 +1,9 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useParams, useNavigate, Link } from "react-router";
 import { api, type JobRun, type RunLogEntry, LogLevelLabels } from "@/lib/api";
 import {
@@ -61,6 +66,7 @@ const EMPTY_OUTPUT_ITEMS: unknown[] = [];
 const EMPTY_INPUT_ITEMS: { param: string; value: unknown }[] = [];
 const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
 const CHILD_RUN_PAGE_SIZE = 500;
+const TRACE_PAGE_SIZE = 500;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -111,7 +117,7 @@ function parseAttemptFailureItem(raw: string): AttemptFailureItem | null {
   const parsed = JSON.parse(raw) as Record<string, unknown>;
 
   const attempt = Number(parsed.attempt ?? parsed.Attempt);
-  if (!Number.isFinite(attempt) || attempt <= 0) {
+  if (!Number.isFinite(attempt) || attempt < 0) {
     return null;
   }
 
@@ -124,6 +130,28 @@ function parseAttemptFailureItem(raw: string): AttemptFailureItem | null {
     message: (parsed.message ?? parsed.Message) as string | undefined,
     stackTrace: (parsed.stackTrace ?? parsed.StackTrace) as string | undefined,
   };
+}
+
+function pruneRunMap<T>(source: Record<string, T>, allowedRunIds: Set<string>) {
+  const entries = Object.entries(source).filter(([runId]) =>
+    allowedRunIds.has(runId),
+  );
+  return Object.fromEntries(entries) as Record<string, T>;
+}
+
+function dedupeRuns(runs: JobRun[]): JobRun[] {
+  const seen = new Set<string>();
+  const result: JobRun[] = [];
+  for (const run of runs) {
+    if (seen.has(run.id)) {
+      continue;
+    }
+
+    seen.add(run.id);
+    result.push(run);
+  }
+
+  return result;
 }
 
 export function RunDetailPage() {
@@ -140,45 +168,70 @@ export function RunDetailPage() {
     },
   });
   const isActive = run?.status === 0 || run?.status === 1;
-  const { data: childRuns } = useQuery({
-    queryKey: ["runs", "children", id],
-    queryFn: async () => {
-      const items: JobRun[] = [];
-      let totalCount = 0;
-      let skip = 0;
-      const snapshotCreatedBefore = new Date(Date.now() + 1).toISOString();
+  const [childRunsSnapshotCreatedBefore, setChildRunsSnapshotCreatedBefore] =
+    useState(() => new Date(Date.now() + 1).toISOString());
 
-      while (true) {
-        const page = await api.getRuns({
-          parentRunId: id!,
-          skip,
-          take: CHILD_RUN_PAGE_SIZE,
-          createdBefore: snapshotCreatedBefore,
-        });
+  useEffect(() => {
+    setChildRunsSnapshotCreatedBefore(new Date(Date.now() + 1).toISOString());
+  }, [id]);
 
-        totalCount = page.totalCount;
-        items.push(...page.items);
-
-        if (page.items.length === 0 || items.length >= totalCount) {
-          break;
-        }
-
-        skip += page.items.length;
-      }
-
-      return { items, totalCount };
+  const {
+    data: childRunsData,
+    hasNextPage: hasNextChildRunsPage,
+    fetchNextPage: fetchNextChildRunsPage,
+    isFetchingNextPage: isLoadingMoreChildren,
+  } = useInfiniteQuery({
+    queryKey: ["runs", "children", id, childRunsSnapshotCreatedBefore],
+    queryFn: ({ pageParam }) =>
+      api.getRuns({
+        parentRunId: id!,
+        skip: pageParam * CHILD_RUN_PAGE_SIZE,
+        take: CHILD_RUN_PAGE_SIZE,
+        createdBefore: childRunsSnapshotCreatedBefore,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, pages) => {
+      const loaded = pages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.totalCount ? pages.length : undefined;
     },
-    refetchInterval: isActive ? 5000 : false,
-  });
-  const { data: traceRuns } = useQuery({
-    queryKey: ["run-trace", id],
-    queryFn: () => api.getRunTrace(id!),
     refetchInterval: (query) => {
-      // Keep polling if any run in the trace is still active
-      const runs = query.state.data;
-      if (!runs) return 5000;
+      const pages = query.state.data?.pages;
+      if (!pages) return 5000;
+
+      const items = dedupeRuns(pages.flatMap((page) => page.items));
+      const hasActiveChild = items.some(
+        (r) => r.status === 0 || r.status === 1,
+      );
+      return isActive || hasActiveChild ? 5000 : false;
+    },
+    enabled: !!id,
+  });
+
+  const {
+    data: tracePageData,
+    hasNextPage: hasNextTracePage,
+    fetchNextPage: fetchNextTracePage,
+    isFetchingNextPage: isLoadingMoreTrace,
+  } = useInfiniteQuery({
+    queryKey: ["run-trace", id],
+    queryFn: ({ pageParam }) =>
+      api.getRunTracePage(id!, {
+        skip: pageParam * TRACE_PAGE_SIZE,
+        take: TRACE_PAGE_SIZE,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, pages) => {
+      const loaded = pages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.totalCount ? pages.length : undefined;
+    },
+    refetchInterval: (query) => {
+      const pages = query.state.data?.pages;
+      if (!pages) return 5000;
+
+      const runs = dedupeRuns(pages.flatMap((page) => page.items));
       return runs.some((r) => r.status === 0 || r.status === 1) ? 5000 : false;
     },
+    enabled: !!id,
   });
   const [logsByRun, setLogsByRun] = useState<Record<string, RunLogEntry[]>>({});
   const [logFilterByRun, setLogFilterByRun] = useState<
@@ -199,6 +252,40 @@ export function RunDetailPage() {
   const [expandedFailureRow, setExpandedFailureRow] = useState<string | null>(
     null,
   );
+
+  const allowedRunIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (runKey) {
+      ids.add(runKey);
+    }
+
+    for (const traceRun of (tracePageData?.pages ?? []).flatMap(
+      (page) => page.items,
+    )) {
+      ids.add(traceRun.id);
+    }
+
+    return ids;
+  }, [runKey, tracePageData]);
+
+  useEffect(() => {
+    setLogsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setLogFilterByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setSseProgressByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setOutputItemsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setInputItemsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setAttemptFailuresByRun((prev) => pruneRunMap(prev, allowedRunIds));
+
+    const nextSeen: Record<string, number> = {};
+    for (const runId of allowedRunIds) {
+      const seenEventId = lastSeenEventIdByRun.current[runId];
+      if (seenEventId) {
+        nextSeen[runId] = seenEventId;
+      }
+    }
+
+    lastSeenEventIdByRun.current = nextSeen;
+  }, [allowedRunIds]);
 
   const logs = logsByRun[runKey] ?? EMPTY_LOGS;
   const logFilter = logFilterByRun[runKey] ?? null;
@@ -479,7 +566,9 @@ export function RunDetailPage() {
   }, [inputItems]);
 
   const sortedStepRuns = useMemo(() => {
-    const items = childRuns?.items;
+    const items = dedupeRuns(
+      (childRunsData?.pages ?? []).flatMap((page) => page.items),
+    );
     if (!items?.length) return [];
     return [...items].sort((a, b) => {
       const createdDelta =
@@ -487,10 +576,39 @@ export function RunDetailPage() {
       if (createdDelta !== 0) return createdDelta;
       return a.id.localeCompare(b.id);
     });
-  }, [childRuns]);
+  }, [childRunsData]);
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
   const progress = sseProgress ?? run?.progress ?? 0;
+  const traceRuns = dedupeRuns(
+    (tracePageData?.pages ?? []).flatMap((page) => page.items),
+  );
+  const traceTotalCount = tracePageData?.pages[0]?.totalCount ?? 0;
+  const childTotalCount = childRunsData?.pages[0]?.totalCount ?? 0;
+  const canLoadMoreTrace = !!hasNextTracePage;
+  const canLoadMoreChildren = !!hasNextChildRunsPage;
+  const traceContainsCurrentRun = traceRuns.some(
+    (traceRun) => traceRun.id === runKey,
+  );
+
+  useEffect(() => {
+    if (
+      !runKey ||
+      traceContainsCurrentRun ||
+      !canLoadMoreTrace ||
+      isLoadingMoreTrace
+    ) {
+      return;
+    }
+
+    void fetchNextTracePage();
+  }, [
+    runKey,
+    traceContainsCurrentRun,
+    canLoadMoreTrace,
+    isLoadingMoreTrace,
+    fetchNextTracePage,
+  ]);
 
   if (isError)
     return (
@@ -689,24 +807,34 @@ export function RunDetailPage() {
         </div>
       )}
 
+      {run.result && outputItems.length === 0 && (
+        <div className="flex max-h-[26rem]">
+          <div className="flex-1 min-h-0 rounded-md border overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Result</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.result)}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {run.error && failureRows.length === 0 && (
+        <div className="rounded-md border border-destructive/20 overflow-hidden">
+          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b border-destructive/15 bg-destructive/[0.03] backdrop-blur-sm">
+            <span className="text-sm text-destructive/90">Failure reason</span>
+          </div>
+          <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+            {run.error}
+          </pre>
+        </div>
+      )}
+
       {failureRows.length > 0 && (
-        <div
-          className={`rounded-md border overflow-hidden ${
-            isDeadLetter ? "border-destructive/20" : ""
-          }`}
-        >
-          <div
-            className={`sticky top-0 z-10 flex items-center h-10 px-2 border-b backdrop-blur-sm ${
-              isDeadLetter
-                ? "border-destructive/15 bg-destructive/[0.03]"
-                : "bg-muted/30"
-            }`}
-          >
-            <span
-              className={`text-sm ${
-                isDeadLetter ? "text-destructive/90" : "text-muted-foreground"
-              }`}
-            >
+        <div className="rounded-md border border-destructive/20 overflow-hidden">
+          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b border-destructive/15 bg-destructive/[0.03] backdrop-blur-sm">
+            <span className="text-sm text-destructive/90">
               Errors ({failureRows.length})
             </span>
           </div>
@@ -790,16 +918,46 @@ export function RunDetailPage() {
         </div>
       )}
 
-      {traceRuns && traceRuns.length > 1 && (
-        <TraceView runs={traceRuns} currentRunId={id!} />
+      {traceRuns.length > 1 && (
+        <div className="max-h-[32rem] overflow-auto rounded-md border">
+          <div className="sticky top-0 z-10 flex items-center justify-between h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+            <span className="text-sm text-muted-foreground">
+              Trace ({traceRuns.length} / {traceTotalCount || traceRuns.length})
+            </span>
+            {canLoadMoreTrace && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-sm font-normal text-muted-foreground"
+                disabled={isLoadingMoreTrace}
+                onClick={() => void fetchNextTracePage()}
+              >
+                {isLoadingMoreTrace ? "Loading..." : "Load more"}
+              </Button>
+            )}
+          </div>
+          <TraceView runs={traceRuns} currentRunId={id!} />
+        </div>
       )}
 
       {sortedStepRuns.length > 0 && (
         <div className="max-h-[32rem] overflow-auto rounded-md border">
-          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+          <div className="sticky top-0 z-10 flex items-center justify-between h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
             <span className="text-sm text-muted-foreground">
-              Triggered runs ({sortedStepRuns.length})
+              Triggered runs ({sortedStepRuns.length} /{" "}
+              {childTotalCount || sortedStepRuns.length})
             </span>
+            {canLoadMoreChildren && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-sm font-normal text-muted-foreground"
+                disabled={isLoadingMoreChildren}
+                onClick={() => void fetchNextChildRunsPage()}
+              >
+                {isLoadingMoreChildren ? "Loading..." : "Load more"}
+              </Button>
+            )}
           </div>
           <Table>
             <TableHeader>
@@ -907,19 +1065,6 @@ export function RunDetailPage() {
         </div>
       )}
 
-      {run.result && outputItems.length === 0 && (
-        <div className="flex max-h-[26rem]">
-          <div className="flex-1 min-h-0 rounded-md border overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Result</span>
-            </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {formatJsonDisplay(run.result)}
-            </pre>
-          </div>
-        </div>
-      )}
-
       {logs.length > 0 && (
         <div className="flex max-h-[26rem]">
           <div
@@ -934,25 +1079,27 @@ export function RunDetailPage() {
                   : logs.length}
                 )
               </span>
-              <Select
-                value={logFilter === null ? "all" : String(logFilter)}
-                onValueChange={(v) =>
-                  setCurrentLogFilter(v === "all" ? null : Number(v))
-                }
-              >
-                <SelectTrigger className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground font-sans gap-0.5 [&_svg]:size-3">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  <SelectItem value="0">Trace</SelectItem>
-                  <SelectItem value="1">Debug</SelectItem>
-                  <SelectItem value="2">Info</SelectItem>
-                  <SelectItem value="3">Warning</SelectItem>
-                  <SelectItem value="4">Error</SelectItem>
-                  <SelectItem value="5">Critical</SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="ml-auto">
+                <Select
+                  value={logFilter === null ? "all" : String(logFilter)}
+                  onValueChange={(v) =>
+                    setCurrentLogFilter(v === "all" ? null : Number(v))
+                  }
+                >
+                  <SelectTrigger className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground font-sans gap-0.5 [&_svg]:size-3">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="0">Trace</SelectItem>
+                    <SelectItem value="1">Debug</SelectItem>
+                    <SelectItem value="2">Info</SelectItem>
+                    <SelectItem value="3">Warning</SelectItem>
+                    <SelectItem value="4">Error</SelectItem>
+                    <SelectItem value="5">Critical</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             <div className="p-2">
               {filteredLogs.map((log, i) => (

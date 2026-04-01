@@ -639,7 +639,7 @@ public sealed partial class JobClient(
 
             var rerunCoordinatorId = CreateRunId();
             var rerunCoordinator = CreateRun(run.JobName, null, new(), now, requestedPriority ?? 0,
-                rerunCoordinatorId);
+                rerunCoordinatorId, run.Id);
             rerunCoordinator.Status = JobStatus.Running;
             rerunCoordinator.Attempt = 0;
             rerunCoordinator.BatchTotal = children.Count;
@@ -654,7 +654,8 @@ public sealed partial class JobClient(
                     originalRun.Arguments,
                     new(),
                     now,
-                    requestedPriority ?? 0);
+                    requestedPriority ?? 0,
+                    rerunOfRunId: originalRun.Id);
                 child.ParentRunId = rerunCoordinatorId;
                 child.RootRunId = rerunCoordinator.RootRunId ?? rerunCoordinatorId;
                 newChildren.Add(child);
@@ -691,7 +692,8 @@ public sealed partial class JobClient(
             run.Arguments,
             new(),
             timeProvider.GetUtcNow(),
-            priority ?? 0);
+            priority ?? 0,
+            rerunOfRunId: run.Id);
 
         var clonedInputEvents = await BuildClonedRunScopedInputEventsAsync(runId, rerun.Id, cancellationToken);
 
@@ -786,7 +788,7 @@ public sealed partial class JobClient(
         };
 
     private JobRun CreateRun(string jobName, string? serializedArguments, RunOptions runOptions,
-        DateTimeOffset now, int priority, string? runId = null)
+        DateTimeOffset now, int priority, string? runId = null, string? rerunOfRunId = null)
     {
         var run = new JobRun
         {
@@ -800,6 +802,7 @@ public sealed partial class JobClient(
             Priority = priority,
             QueuePriority = 0,
             DeduplicationId = runOptions.DeduplicationId,
+            RerunOfRunId = rerunOfRunId,
             Progress = 0,
             Attempt = 0,
             TraceId = Activity.Current?.TraceId.ToString(),
@@ -841,7 +844,7 @@ public sealed partial class JobClient(
         SerializerOptions = _serializerOptions
     };
 
-    private static async Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
+    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
     {
         try
         {
@@ -851,7 +854,7 @@ public sealed partial class JobClient(
         {
         }
 
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
     private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
@@ -1324,6 +1327,17 @@ public sealed partial class JobClient(
                 Error = null
             }, CancellationToken.None);
         }
+        catch (OperationCanceledException ex)
+        {
+            await AppendInputEventAsync(runId, RunEventType.InputComplete, new()
+            {
+                Argument = stream.Argument,
+                Sequence = sequence + 1,
+                Payload = null,
+                IsComplete = true,
+                Error = ex.Message
+            }, CancellationToken.None);
+        }
         catch (Exception ex)
         {
             await AppendInputEventAsync(runId, RunEventType.InputComplete, new()
@@ -1448,17 +1462,4 @@ public sealed partial class JobClient(
 
     private sealed record StreamingArgumentSource(string Argument, IAsyncEnumerable<object?> Stream);
 
-    private sealed class InputDeclarationEnvelope
-    {
-        public required string[] Arguments { get; init; }
-    }
-
-    private sealed class InputEnvelope
-    {
-        public required string Argument { get; init; }
-        public required long Sequence { get; init; }
-        public string? Payload { get; init; }
-        public required bool IsComplete { get; init; }
-        public string? Error { get; init; }
-    }
 }

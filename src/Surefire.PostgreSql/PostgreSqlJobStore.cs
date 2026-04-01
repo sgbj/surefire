@@ -10,15 +10,16 @@ namespace Surefire.PostgreSql;
 internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider timeProvider)
     : IJobStore, IAsyncDisposable
 {
+    private static readonly TimeSpan MigrationLockRetryDelay = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MigrationLockWaitTimeout = TimeSpan.FromSeconds(30);
+
     public ValueTask DisposeAsync() => options.DisposeAsync();
 
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
 
-        await using var lockCmd = conn.CreateCommand();
-        lockCmd.CommandText = "SELECT pg_advisory_lock(hashtext('surefire_migrate'))";
-        await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+        await AcquireMigrationLockAsync(conn, cancellationToken);
 
         try
         {
@@ -29,7 +30,8 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
             await using var checkCmd = conn.CreateCommand();
             checkCmd.CommandText = "SELECT COUNT(*) FROM surefire_schema_migrations WHERE version = 1";
-            if ((long)(await checkCmd.ExecuteScalarAsync(cancellationToken))! > 0)
+            var hasVersion1 = (long)(await checkCmd.ExecuteScalarAsync(cancellationToken))! > 0;
+            if (hasVersion1)
             {
                 return;
             }
@@ -51,6 +53,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                                   rate_limit_name TEXT,
                                   is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                                   misfire_policy INT NOT NULL DEFAULT 0,
+                                  fire_all_limit INT,
                                   arguments_schema TEXT,
                                   last_heartbeat_at TIMESTAMPTZ,
                                   last_cron_fire_at TIMESTAMPTZ
@@ -171,6 +174,35 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
     }
 
+    private static async Task AcquireMigrationLockAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(MigrationLockWaitTimeout);
+
+        try
+        {
+            while (true)
+            {
+                timeoutCts.Token.ThrowIfCancellationRequested();
+
+                await using var lockCmd = connection.CreateCommand();
+                lockCmd.CommandText = "SELECT pg_try_advisory_lock(hashtext('surefire_migrate'))";
+                var acquired = (bool)(await lockCmd.ExecuteScalarAsync(timeoutCts.Token))!;
+                if (acquired)
+                {
+                    return;
+                }
+
+                await Task.Delay(MigrationLockRetryDelay, timeoutCts.Token);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Timed out waiting {MigrationLockWaitTimeout.TotalSeconds:0}s to acquire the Surefire PostgreSQL migration lock.");
+        }
+    }
+
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
@@ -179,12 +211,12 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                           INSERT INTO surefire_jobs (
                               name, description, tags, cron_expression, time_zone_id, timeout,
                               max_concurrency, priority, retry_policy, is_continuous, queue,
-                              rate_limit_name, is_enabled, misfire_policy, arguments_schema,
+                              rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
                               last_heartbeat_at
                           ) VALUES (
                               @name, @description, @tags, @cron_expression, @time_zone_id, @timeout,
                               @max_concurrency, @priority, @retry_policy::jsonb, @is_continuous, @queue,
-                              @rate_limit_name, @is_enabled, @misfire_policy, @arguments_schema,
+                              @rate_limit_name, @is_enabled, @misfire_policy, @fire_all_limit, @arguments_schema,
                               NOW()
                           )
                           ON CONFLICT (name) DO UPDATE SET
@@ -200,6 +232,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                               queue = EXCLUDED.queue,
                               rate_limit_name = EXCLUDED.rate_limit_name,
                               misfire_policy = EXCLUDED.misfire_policy,
+                              fire_all_limit = EXCLUDED.fire_all_limit,
                               arguments_schema = EXCLUDED.arguments_schema,
                               last_heartbeat_at = NOW()
                           """;
@@ -219,6 +252,8 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue("rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("is_enabled", job.IsEnabled);
         cmd.Parameters.AddWithValue("misfire_policy", (int)job.MisfirePolicy);
+        cmd.Parameters.AddWithValue("fire_all_limit",
+            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -647,7 +682,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return claimed;
     }
 
-    public async Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    public async Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
         CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
@@ -685,12 +720,12 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         await using var fr = await fallback.ExecuteReaderAsync(cancellationToken);
         if (!await fr.ReadAsync(cancellationToken))
         {
-            throw new InvalidOperationException($"Run '{batchRunId}' not found.");
+            return null;
         }
 
         if (fr.IsDBNull(fr.GetOrdinal("batch_total")))
         {
-            throw new InvalidOperationException($"Run '{batchRunId}' is not a batch coordinator.");
+            return null;
         }
 
         return new(
@@ -1021,7 +1056,9 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
         var now = timeProvider.GetUtcNow();
         var rawSince = since ?? now.AddHours(-24);
-        var sinceTime = new DateTimeOffset(rawSince.Ticks / 10 * 10, rawSince.Offset);
+        var sinceTime = new DateTimeOffset(
+            rawSince.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute,
+            rawSince.Offset);
 
         await using var statsCmd = conn.CreateCommand();
         statsCmd.CommandText = """
@@ -1094,16 +1131,28 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
         await using var bucketCmd = conn.CreateCommand();
         bucketCmd.CommandText = """
+                                WITH bucketed_runs AS (
+                                    SELECT
+                                        CASE
+                                            WHEN status = 1 THEN COALESCE(started_at, created_at)
+                                            WHEN status = 2 THEN COALESCE(completed_at, started_at, created_at)
+                                            WHEN status = 4 THEN COALESCE(cancelled_at, completed_at, created_at)
+                                            WHEN status = 5 THEN COALESCE(completed_at, started_at, created_at)
+                                            ELSE created_at
+                                        END AS bucket_time,
+                                        status
+                                    FROM surefire_runs
+                                )
                                 SELECT
-                                    date_bin(@interval::interval, created_at, @since) AS bucket_start,
+                                    date_bin(@interval::interval, bucket_time, @since) AS bucket_start,
                                     COUNT(*) FILTER (WHERE status = 0) AS pending,
                                     COUNT(*) FILTER (WHERE status = 1) AS running,
                                     COUNT(*) FILTER (WHERE status = 2) AS completed,
                                     COUNT(*) FILTER (WHERE status = 3) AS retrying,
                                     COUNT(*) FILTER (WHERE status = 4) AS cancelled,
                                     COUNT(*) FILTER (WHERE status = 5) AS dead_letter
-                                FROM surefire_runs
-                                WHERE created_at >= @since AND created_at < @now
+                                FROM bucketed_runs
+                                WHERE bucket_time >= @since AND bucket_time < @now
                                 GROUP BY bucket_start
                                 ORDER BY bucket_start
                                 """;
@@ -1713,6 +1762,12 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
             IsEnabled = reader.GetBoolean(reader.GetOrdinal("is_enabled")),
             MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy"))
         };
+
+        var limitCol = reader.GetOrdinal("fire_all_limit");
+        if (!reader.IsDBNull(limitCol))
+        {
+            job.FireAllLimit = reader.GetInt32(limitCol);
+        }
 
         var col = reader.GetOrdinal("description");
         if (!reader.IsDBNull(col))

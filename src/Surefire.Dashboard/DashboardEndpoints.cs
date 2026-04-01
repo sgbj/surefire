@@ -15,6 +15,8 @@ namespace Microsoft.AspNetCore.Builder;
 
 public static class DashboardEndpoints
 {
+    private const int DefaultRunsPageSize = 50;
+    private const int MaxRunsPageSize = 500;
     private const int TracePageSize = 500;
 
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
@@ -151,7 +153,8 @@ public static class DashboardEndpoints
                 CreatedAfter = createdAfter,
                 CreatedBefore = createdBefore
             };
-            var requestedTake = take is null ? 50 : Math.Max(take.Value, 1);
+
+            var requestedTake = Math.Clamp(take ?? DefaultRunsPageSize, 1, MaxRunsPageSize);
             var runsPage = await store.GetRunsAsync(filter, Math.Max(skip ?? 0, 0), requestedTake, ct);
             return TypedResults.Ok(new PagedResponse<RunResponse>
             {
@@ -171,8 +174,8 @@ public static class DashboardEndpoints
             });
 
         api.MapGet("/runs/{id}/trace",
-            async Task<Results<Ok<List<RunResponse>>, ProblemHttpResult>> (string id, int? limit, IJobStore store,
-                TimeProvider timeProvider, CancellationToken ct) =>
+            async Task<Results<Ok<PagedResponse<RunResponse>>, ProblemHttpResult>> (string id, int? skip, int? take,
+                IJobStore store, TimeProvider timeProvider, CancellationToken ct) =>
             {
                 var run = await store.GetRunAsync(id, ct);
                 if (run is null)
@@ -180,7 +183,8 @@ public static class DashboardEndpoints
                     return NotFoundProblem($"Run '{id}' was not found.");
                 }
 
-                var requestedLimit = limit is null ? (int?)null : Math.Max(limit.Value, 1);
+                var resolvedSkip = Math.Max(skip ?? 0, 0);
+                var resolvedTake = Math.Clamp(take ?? TracePageSize, 1, TracePageSize);
                 var snapshotCreatedBefore = timeProvider.GetUtcNow().AddTicks(1);
                 var rootRunId = run.RootRunId ?? run.Id;
                 var rootRun = run.RootRunId is null ? run : await store.GetRunAsync(rootRunId, ct);
@@ -189,52 +193,41 @@ public static class DashboardEndpoints
                     return NotFoundProblem($"Root run '{rootRunId}' was not found.");
                 }
 
-                if (requestedLimit == 1)
+                var includeRoot = resolvedSkip == 0;
+                var remainingTake = resolvedTake - (includeRoot ? 1 : 0);
+                var descendants = new List<JobRun>(Math.Max(remainingTake, 0));
+
+                var descendantsSkip = Math.Max(resolvedSkip - 1, 0);
+
+                var descendantsPage = await store.GetRunsAsync(
+                    new()
+                    {
+                        RootRunId = rootRunId,
+                        OrderBy = RunOrderBy.CreatedAt,
+                        CreatedBefore = snapshotCreatedBefore
+                    },
+                    descendantsSkip,
+                    Math.Max(remainingTake, 1),
+                    ct);
+
+                if (remainingTake > 0)
                 {
-                    return TypedResults.Ok(new List<RunResponse> { RunResponse.From(rootRun) });
+                    descendants.AddRange(descendantsPage.Items);
                 }
 
-                var descendants = new List<RunResponse>();
-                var skip = 0;
-                var remaining = requestedLimit is null ? (int?)null : requestedLimit.Value - 1;
-
-                while (remaining is null || remaining.Value > 0)
+                var responseItems = new List<RunResponse>(descendants.Count + (includeRoot ? 1 : 0));
+                if (includeRoot)
                 {
-                    var take = remaining is null ? TracePageSize : Math.Min(TracePageSize, remaining.Value);
-                    var descendantsPage = await store.GetRunsAsync(
-                        new()
-                        {
-                            RootRunId = rootRunId,
-                            OrderBy = RunOrderBy.CreatedAt,
-                            CreatedBefore = snapshotCreatedBefore
-                        },
-                        skip,
-                        take,
-                        ct);
-
-                    if (descendantsPage.Items.Count == 0)
-                    {
-                        break;
-                    }
-
-                    descendants.AddRange(descendantsPage.Items.Select(RunResponse.From));
-                    skip += descendantsPage.Items.Count;
-                    if (remaining is { })
-                    {
-                        remaining -= descendantsPage.Items.Count;
-                    }
-
-                    if (skip >= descendantsPage.TotalCount)
-                    {
-                        break;
-                    }
+                    responseItems.Add(RunResponse.From(rootRun));
                 }
 
-                var trace = new List<RunResponse>(descendants.Count + 1) { RunResponse.From(rootRun) };
-                trace.AddRange(descendants);
-                return TypedResults.Ok(trace);
+                responseItems.AddRange(descendants.Select(RunResponse.From));
+                return TypedResults.Ok(new PagedResponse<RunResponse>
+                {
+                    Items = responseItems,
+                    TotalCount = descendantsPage.TotalCount + 1
+                });
             });
-
         api.MapPost("/runs/{id}/cancel",
             async Task<Results<NoContent, ProblemHttpResult>> (string id, IJobClient client, CancellationToken ct) =>
             {

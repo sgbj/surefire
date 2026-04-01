@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace Surefire;
 
@@ -69,7 +70,12 @@ internal sealed partial class SurefireMaintenanceService(
 
         foreach (var registered in registrations)
         {
-            await EnsureContinuousSeedCapacityAsync(registered.Definition, cancellationToken);
+            await ContinuousRunSeeder.EnsureCapacityAsync(
+                store,
+                notifications,
+                timeProvider,
+                registered.Definition,
+                cancellationToken);
         }
 
         await store.CancelExpiredRunsAsync(cancellationToken);
@@ -122,6 +128,16 @@ internal sealed partial class SurefireMaintenanceService(
                         continue;
                     }
 
+                    await AppendFailureEventAsync(
+                        run,
+                        RunFailureEnvelope.FromMessage(
+                            run.Attempt,
+                            now,
+                            "Maintenance",
+                            "StaleRecovery",
+                            run.Error ?? "Run became stale and exhausted retry policy."),
+                        cancellationToken);
+
                     await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
                         cancellationToken);
                     await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
@@ -143,6 +159,16 @@ internal sealed partial class SurefireMaintenanceService(
                 {
                     continue;
                 }
+
+                await AppendFailureEventAsync(
+                    run,
+                    RunFailureEnvelope.FromMessage(
+                        run.Attempt,
+                        timeProvider.GetUtcNow(),
+                        "Maintenance",
+                        "StaleRecovery",
+                        "Run became stale and was recovered for retry."),
+                    cancellationToken);
 
                 var pending = RunStatusTransition.RetryingToPending(
                     run.Id,
@@ -185,7 +211,11 @@ internal sealed partial class SurefireMaintenanceService(
             return;
         }
 
-        var counters = await store.IncrementBatchCounterAsync(batchRunId, true, cancellationToken);
+        if (await store.TryIncrementBatchCounterAsync(batchRunId, true, cancellationToken) is not { } counters)
+        {
+            return;
+        }
+
         await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId, cancellationToken);
 
         if (counters.Completed + counters.Failed < counters.Total)
@@ -203,24 +233,73 @@ internal sealed partial class SurefireMaintenanceService(
                                    await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
 
         var now = timeProvider.GetUtcNow();
-        var transition = RunStatusTransition.RunningToDeadLetter(
-            coordinator.Id,
-            coordinator.Attempt,
-            now,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            $"Batch completed with {counters.Failed} failed run(s).",
-            null,
-            coordinatorStartedAt,
-            now);
+        var transition = counters.Failed == 0
+            ? RunStatusTransition.RunningToCompleted(
+                coordinator.Id,
+                coordinator.Attempt,
+                now,
+                coordinator.NotBefore,
+                coordinator.NodeName,
+                1,
+                null,
+                null,
+                coordinatorStartedAt,
+                now)
+            : RunStatusTransition.RunningToDeadLetter(
+                coordinator.Id,
+                coordinator.Attempt,
+                now,
+                coordinator.NotBefore,
+                coordinator.NodeName,
+                1,
+                $"Batch completed with {counters.Failed} failed run(s).",
+                null,
+                coordinatorStartedAt,
+                now);
 
         if (await store.TryTransitionRunAsync(transition, cancellationToken))
         {
+            if (counters.Failed > 0)
+            {
+                await AppendFailureEventAsync(
+                    coordinator,
+                    RunFailureEnvelope.FromMessage(
+                        coordinator.Attempt,
+                        now,
+                        "Maintenance",
+                        "BatchChildFailures",
+                        $"Batch completed with {counters.Failed} failed run(s)."),
+                    cancellationToken);
+            }
+
             await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
                 cancellationToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
                 cancellationToken);
+        }
+    }
+
+    private async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(envelope, options.SerializerOptions);
+
+        await store.AppendEventsAsync(
+        [
+            new()
+            {
+                RunId = run.Id,
+                EventType = RunEventType.AttemptFailure,
+                Payload = payload,
+                CreatedAt = envelope.OccurredAt,
+                Attempt = run.Attempt
+            }
+        ], cancellationToken);
+
+        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
+        if (run.ParentRunId is { } batchRunId)
+        {
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
         }
     }
 
@@ -265,44 +344,6 @@ internal sealed partial class SurefireMaintenanceService(
 
         return earliest;
     }
-
-    private async Task EnsureContinuousSeedCapacityAsync(JobDefinition definition, CancellationToken cancellationToken)
-    {
-        if (!definition.IsContinuous || !definition.IsEnabled)
-        {
-            return;
-        }
-
-        var desired = Math.Max(definition.MaxConcurrency ?? 1, 1);
-        for (var i = 0; i < desired; i++)
-        {
-            var now = timeProvider.GetUtcNow();
-            var run = new JobRun
-            {
-                Id = Guid.CreateVersion7().ToString("N"),
-                JobName = definition.Name,
-                Status = JobStatus.Pending,
-                CreatedAt = now,
-                NotBefore = now,
-                Priority = definition.Priority,
-                QueuePriority = 0,
-                Progress = 0,
-                Attempt = 0
-            };
-
-            var created = await store.TryCreateRunAsync(
-                run,
-                desired,
-                cancellationToken: cancellationToken);
-            if (!created)
-            {
-                break;
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
-        }
-    }
-
     private static partial class Log
     {
         [LoggerMessage(EventId = 1301, Level = LogLevel.Error, Message = "Maintenance tick failed.")]

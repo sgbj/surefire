@@ -31,7 +31,7 @@ Surefire uses a pub/sub abstraction for real-time updates. In-memory notificatio
 
 Stores keep job and run state. Every store implementation supports the same features. The in-memory store is great for development but loses everything when the process stops. For production, use one of the database-backed stores:
 
-- **In-memory** — default store with process-local persistence.
+- **In-memory** — default store with process-local storage.
 - [PostgreSQL](/surefire/storage/postgresql/) — database-backed store with `LISTEN/NOTIFY` notifications.
 - [SQL Server](/surefire/storage/sqlserver/) — database-backed store for SQL Server deployments.
 - [Redis](/surefire/storage/redis/) — Redis-backed store with Pub/Sub notifications.

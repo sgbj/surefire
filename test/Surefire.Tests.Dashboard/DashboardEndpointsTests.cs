@@ -16,7 +16,7 @@ namespace Surefire.Tests.Dashboard;
 public sealed class DashboardEndpointsTests
 {
     [Fact]
-    public async Task RunsEndpoint_DoesNotCapTakeAt500()
+    public async Task RunsEndpoint_CapsTakeAt500()
     {
         const int requestedTake = 620;
 
@@ -33,7 +33,7 @@ public sealed class DashboardEndpointsTests
             $"/surefire/api/runs?jobName=tests-runs-unbounded&exactJobName=true&skip=0&take={requestedTake}");
 
         Assert.NotNull(page);
-        Assert.Equal(requestedTake, page.Items.Count);
+        Assert.Equal(500, page.Items.Count);
         Assert.Equal(requestedTake, page.TotalCount);
     }
 
@@ -177,6 +177,55 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
+    public async Task StatsEndpoint_ReturnsSuccessRateAsRatio()
+    {
+        await using var app = await CreateAppAsync();
+
+        var store = app.Services.GetRequiredService<IJobStore>();
+        var now = DateTimeOffset.UtcNow;
+
+        await store.UpsertJobAsync(new JobDefinition
+        {
+            Name = "tests-stats-success-rate-ratio",
+            Queue = "default"
+        });
+
+        await store.CreateRunsAsync([
+            new JobRun
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = "tests-stats-success-rate-ratio",
+                Status = JobStatus.Completed,
+                CreatedAt = now,
+                NotBefore = now,
+                StartedAt = now,
+                CompletedAt = now,
+                Attempt = 1,
+                Progress = 1
+            },
+            new JobRun
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = "tests-stats-success-rate-ratio",
+                Status = JobStatus.DeadLetter,
+                CreatedAt = now,
+                NotBefore = now,
+                StartedAt = now,
+                CompletedAt = now,
+                Attempt = 1,
+                Progress = 1,
+                Error = "boom"
+            }
+        ]);
+
+        using var client = app.GetTestClient();
+        var stats = await client.GetFromJsonAsync<DashboardStatsResponse>("/surefire/api/stats");
+
+        Assert.NotNull(stats);
+        Assert.Equal(0.5, stats.SuccessRate, 5);
+    }
+
+    [Fact]
     public async Task CancelRunEndpoint_MissingRun_ReturnsNotFound()
     {
         await using var app = await CreateAppAsync();
@@ -226,15 +275,17 @@ public sealed class DashboardEndpointsTests
         var childId = children.Items[0].Id;
 
         using var client = app.GetTestClient();
-        var trace = await client.GetFromJsonAsync<List<RunResponse>>($"/surefire/api/runs/{childId}/trace");
+        var tracePage = await client.GetFromJsonAsync<PagedResponse<RunResponse>>(
+            $"/surefire/api/runs/{childId}/trace?skip=0&take=500");
 
-        Assert.NotNull(trace);
-        Assert.Contains(trace, r => r.Id == batchId);
-        Assert.Equal(4, trace.Count);
+        Assert.NotNull(tracePage);
+        Assert.Contains(tracePage.Items, r => r.Id == batchId);
+        Assert.Equal(4, tracePage.Items.Count);
+        Assert.Equal(4, tracePage.TotalCount);
     }
 
     [Fact]
-    public async Task RunTraceEndpoint_UnboundedRequest_ReturnsAllDescendantsAcrossPages()
+    public async Task RunTraceEndpoint_PaginatesDescendantsAcrossPages()
     {
         await using var app = await CreateAppAsync();
 
@@ -282,12 +333,30 @@ public sealed class DashboardEndpointsTests
         await store.CreateRunsAsync([root, ..children]);
 
         using var client = app.GetTestClient();
-        var trace = await client.GetFromJsonAsync<List<RunResponse>>($"/surefire/api/runs/{rootId}/trace");
+        var page1 = await client.GetFromJsonAsync<PagedResponse<RunResponse>>(
+            $"/surefire/api/runs/{rootId}/trace?skip=0&take=500");
+        var page2 = await client.GetFromJsonAsync<PagedResponse<RunResponse>>(
+            $"/surefire/api/runs/{rootId}/trace?skip=500&take=500");
+        var page3 = await client.GetFromJsonAsync<PagedResponse<RunResponse>>(
+            $"/surefire/api/runs/{rootId}/trace?skip=1000&take=500");
 
-        Assert.NotNull(trace);
-        Assert.Equal(childCount + 1, trace.Count);
-        Assert.Equal(rootId, trace[0].Id);
-        Assert.Equal(childCount, trace.Count(r => r.RootRunId == rootId));
+        Assert.NotNull(page1);
+        Assert.NotNull(page2);
+        Assert.NotNull(page3);
+
+        var combined = page1.Items.Concat(page2.Items).Concat(page3.Items).ToList();
+
+        Assert.Equal(childCount + 1, page1.TotalCount);
+        Assert.Equal(childCount + 1, page2.TotalCount);
+        Assert.Equal(childCount + 1, page3.TotalCount);
+        Assert.Equal(500, page1.Items.Count);
+        Assert.Equal(500, page2.Items.Count);
+        Assert.Equal(201, page3.Items.Count);
+        Assert.Equal(rootId, page1.Items[0].Id);
+
+        var distinctIds = combined.Select(r => r.Id).ToHashSet(StringComparer.Ordinal);
+        Assert.Equal(childCount + 1, distinctIds.Count);
+        Assert.Equal(childCount, combined.Count(r => r.RootRunId == rootId));
     }
 
     [Fact]

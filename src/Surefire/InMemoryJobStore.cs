@@ -47,6 +47,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 existing.Queue = job.Queue;
                 existing.RateLimitName = job.RateLimitName;
                 existing.MisfirePolicy = job.MisfirePolicy;
+                existing.FireAllLimit = job.FireAllLimit;
                 existing.ArgumentsSchema = job.ArgumentsSchema;
                 existing.LastHeartbeatAt = now;
             }
@@ -495,25 +496,25 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    public Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
         CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
             if (!_runs.TryGetValue(batchRunId, out var run))
             {
-                throw new InvalidOperationException($"Run '{batchRunId}' not found.");
+                return Task.FromResult<BatchCounters?>(null);
             }
 
             if (run.BatchTotal is null)
             {
-                throw new InvalidOperationException($"Run '{batchRunId}' is not a batch coordinator.");
+                return Task.FromResult<BatchCounters?>(null);
             }
 
             if (run.Status.IsTerminal)
             {
-                return Task.FromResult(new BatchCounters(run.BatchTotal.Value, run.BatchCompleted ?? 0,
-                    run.BatchFailed ?? 0));
+                return Task.FromResult<BatchCounters?>(new BatchCounters(run.BatchTotal.Value,
+                    run.BatchCompleted ?? 0, run.BatchFailed ?? 0));
             }
 
             if (isFailed)
@@ -529,8 +530,8 @@ internal sealed class InMemoryJobStore : IJobStore
                 ? ((run.BatchCompleted ?? 0) + (run.BatchFailed ?? 0)) / (double)run.BatchTotal.Value
                 : 1.0;
 
-            return Task.FromResult(new BatchCounters(run.BatchTotal.Value, run.BatchCompleted ?? 0,
-                run.BatchFailed ?? 0));
+            return Task.FromResult<BatchCounters?>(new BatchCounters(run.BatchTotal.Value,
+                run.BatchCompleted ?? 0, run.BatchFailed ?? 0));
         }
     }
 
@@ -779,10 +780,17 @@ internal sealed class InMemoryJobStore : IJobStore
                 {
                     RemoveFromPendingIndex(id);
                     _eventsByRunId.Remove(id);
+                    var queueName = GetQueueName(removed.JobName);
 
                     if (removed.Status == JobStatus.Pending)
                     {
-                        DecrementCount(_pendingCountByQueue, GetQueueName(removed.JobName));
+                        DecrementCount(_pendingCountByQueue, queueName);
+                    }
+
+                    if (removed.Status == JobStatus.Running)
+                    {
+                        DecrementCount(_runningCountByJob, removed.JobName);
+                        DecrementCount(_runningCountByQueue, queueName);
                     }
 
                     if (removed.DeduplicationId is { })
@@ -906,9 +914,10 @@ internal sealed class InMemoryJobStore : IJobStore
                     activeRuns++;
                 }
 
-                if (run.CreatedAt >= sinceTime && run.CreatedAt < now)
+                var bucketTimestamp = GetTimelineBucketTimestamp(run);
+                if (bucketTimestamp >= sinceTime && bucketTimestamp < now)
                 {
-                    var bucketIndex = (int)((run.CreatedAt - sinceTime).Ticks / bucketSpan.Ticks);
+                    var bucketIndex = (int)((bucketTimestamp - sinceTime).Ticks / bucketSpan.Ticks);
                     if (bucketIndex >= 0 && bucketIndex < bucketCount)
                     {
                         switch (run.Status)
@@ -969,6 +978,15 @@ internal sealed class InMemoryJobStore : IJobStore
 
         return Task.FromResult(stats);
     }
+
+    private static DateTimeOffset GetTimelineBucketTimestamp(JobRun run) => run.Status switch
+    {
+        JobStatus.Running => run.StartedAt ?? run.CreatedAt,
+        JobStatus.Completed => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
+        JobStatus.Cancelled => run.CancelledAt ?? run.CompletedAt ?? run.CreatedAt,
+        JobStatus.DeadLetter => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
+        _ => run.CreatedAt
+    };
 
     public Task<JobStats> GetJobStatsAsync(string jobName, CancellationToken cancellationToken = default)
     {
@@ -1504,6 +1522,7 @@ internal sealed class InMemoryJobStore : IJobStore
         RateLimitName = job.RateLimitName,
         IsEnabled = job.IsEnabled,
         MisfirePolicy = job.MisfirePolicy,
+        FireAllLimit = job.FireAllLimit,
         ArgumentsSchema = job.ArgumentsSchema,
         LastHeartbeatAt = job.LastHeartbeatAt,
         LastCronFireAt = job.LastCronFireAt

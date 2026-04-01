@@ -217,6 +217,11 @@ export interface PagedResult<T> {
   totalCount: number;
 }
 
+export interface TracePageParams {
+  skip?: number;
+  take?: number;
+}
+
 export interface RunLogEntry {
   timestamp: string;
   level: number;
@@ -322,15 +327,29 @@ export const api = {
     const qs = search.toString();
     return fetchApi<PagedResult<JobRun>>(`/runs${qs ? `?${qs}` : ""}`);
   },
-  getRun: (id: string) => fetchApi<JobRun>(`/runs/${id}`),
+  getRun: (id: string) => fetchApi<JobRun>(`/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) =>
-    fetchApi<void>(`/runs/${id}/cancel`, { method: "POST" }),
-  rerunRun: (id: string) =>
-    fetchApi<{ runId?: string; RunId?: string }>(`/runs/${id}/rerun`, {
+    fetchApi<void>(`/runs/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
-    }).then(normalizeRunIdResponse),
-  getRunLogs: (id: string) => fetchApi<RunLogEntry[]>(`/runs/${id}/logs`),
-  getRunTrace: (id: string) => fetchApi<JobRun[]>(`/runs/${id}/trace`),
+    }),
+  rerunRun: (id: string) =>
+    fetchApi<{ runId?: string; RunId?: string }>(
+      `/runs/${encodeURIComponent(id)}/rerun`,
+      {
+        method: "POST",
+      },
+    ).then(normalizeRunIdResponse),
+  getRunLogs: (id: string) =>
+    fetchApi<RunLogEntry[]>(`/runs/${encodeURIComponent(id)}/logs`),
+  getRunTracePage: (id: string, params?: TracePageParams) => {
+    const search = new URLSearchParams();
+    if (params?.skip != null) search.set("skip", params.skip.toString());
+    if (params?.take != null) search.set("take", params.take.toString());
+    const qs = search.toString();
+    return fetchApi<PagedResult<JobRun>>(
+      `/runs/${encodeURIComponent(id)}/trace${qs ? `?${qs}` : ""}`,
+    );
+  },
   updateJob: (name: string, patch: { isEnabled?: boolean }) =>
     fetchApi<JobResponse>(`/jobs/${encodeURIComponent(name)}`, {
       method: "PATCH",
@@ -364,6 +383,8 @@ export const api = {
     if (sinceEventId && sinceEventId > 0)
       search.set("sinceEventId", sinceEventId.toString());
     const qs = search.toString();
-    return new EventSource(`${BASE}/runs/${id}/stream${qs ? `?${qs}` : ""}`);
+    return new EventSource(
+      `${BASE}/runs/${encodeURIComponent(id)}/stream${qs ? `?${qs}` : ""}`,
+    );
   },
 };

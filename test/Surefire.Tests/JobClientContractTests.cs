@@ -729,8 +729,8 @@ public sealed class JobClientContractTests
         Assert.True(await store.TryTransitionRunAsync(completeA));
         Assert.True(await store.TryTransitionRunAsync(completeB));
 
-        await store.IncrementBatchCounterAsync(batchId, false);
-        await store.IncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchCounterAsync(batchId, false);
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
@@ -770,7 +770,7 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
-    public async Task InMemoryNotificationProvider_PublishAsync_DoesNotBlockOnSlowSubscriber()
+    public async Task InMemoryNotificationProvider_PublishAsync_WaitsForSlowSubscriber()
     {
         var provider = new InMemoryNotificationProvider();
         var fastHandler = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -790,8 +790,8 @@ public sealed class JobClientContractTests
         await provider.PublishAsync("surefire:run:created", "msg");
         started.Stop();
 
-        Assert.True(started.Elapsed < TimeSpan.FromMilliseconds(400),
-            $"PublishAsync should not block on subscribers. Elapsed: {started.Elapsed}.");
+        Assert.True(started.Elapsed >= TimeSpan.FromMilliseconds(900),
+            $"PublishAsync should await subscriber handlers. Elapsed: {started.Elapsed}.");
 
         await fastHandler.Task.WaitAsync(TimeSpan.FromSeconds(1));
     }

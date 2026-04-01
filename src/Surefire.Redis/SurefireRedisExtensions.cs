@@ -1,6 +1,7 @@
 using StackExchange.Redis;
 using Surefire;
 using Surefire.Redis;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -15,9 +16,17 @@ public static class SurefireRedisExtensions
     /// </summary>
     public static SurefireOptions UseRedis(this SurefireOptions options, string connectionString)
     {
-        return options
-            .UseRedisStore(connectionString)
-            .UseRedisNotifications(connectionString);
+        ArgumentNullException.ThrowIfNull(options);
+        var providerOptions = new RedisOptions(connectionString);
+        return options.ConfigureServices(services =>
+        {
+            services.AddSingleton<IJobStore>(sp =>
+                new RedisJobStore(providerOptions, sp.GetRequiredService<TimeProvider>()));
+            services.AddSingleton<INotificationProvider>(sp =>
+                new RedisNotificationProvider(
+                    providerOptions,
+                    sp.GetRequiredService<ILogger<RedisNotificationProvider>>()));
+        });
     }
 
     /// <summary>
@@ -26,9 +35,17 @@ public static class SurefireRedisExtensions
     /// </summary>
     public static SurefireOptions UseRedis(this SurefireOptions options, IConnectionMultiplexer multiplexer)
     {
-        return options
-            .UseRedisStore(multiplexer)
-            .UseRedisNotifications(multiplexer);
+        ArgumentNullException.ThrowIfNull(options);
+        var providerOptions = new RedisOptions(multiplexer);
+        return options.ConfigureServices(services =>
+        {
+            services.AddSingleton<IJobStore>(sp =>
+                new RedisJobStore(providerOptions, sp.GetRequiredService<TimeProvider>()));
+            services.AddSingleton<INotificationProvider>(sp =>
+                new RedisNotificationProvider(
+                    providerOptions,
+                    sp.GetRequiredService<ILogger<RedisNotificationProvider>>()));
+        });
     }
 
     /// <summary>
@@ -63,7 +80,10 @@ public static class SurefireRedisExtensions
         ArgumentNullException.ThrowIfNull(options);
         var providerOptions = new RedisOptions(connectionString);
         return options.ConfigureServices(services =>
-            services.AddSingleton<INotificationProvider>(_ => new RedisNotificationProvider(providerOptions)));
+            services.AddSingleton<INotificationProvider>(sp =>
+                new RedisNotificationProvider(
+                    providerOptions,
+                    sp.GetRequiredService<ILogger<RedisNotificationProvider>>())));
     }
 
     /// <summary>
@@ -75,6 +95,9 @@ public static class SurefireRedisExtensions
         ArgumentNullException.ThrowIfNull(options);
         var providerOptions = new RedisOptions(multiplexer);
         return options.ConfigureServices(services =>
-            services.AddSingleton<INotificationProvider>(_ => new RedisNotificationProvider(providerOptions)));
+            services.AddSingleton<INotificationProvider>(sp =>
+                new RedisNotificationProvider(
+                    providerOptions,
+                    sp.GetRequiredService<ILogger<RedisNotificationProvider>>())));
     }
 }

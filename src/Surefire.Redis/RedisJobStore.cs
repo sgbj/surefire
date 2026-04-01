@@ -14,6 +14,7 @@ namespace Surefire.Redis;
 internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvider) : IJobStore, IAsyncDisposable
 {
     private const string P = "{surefire}:";
+    private const int FilterScanChunkSize = 500;
 
     private const string CreateRunsScript = """
                                             local runs = cjson.decode(ARGV[1])
@@ -209,7 +210,8 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                       'queue', ARGV[12],
                                       'rate_limit_name', ARGV[13],
                                       'misfire_policy', ARGV[14],
-                                      'arguments_schema', ARGV[15],
+                                      'fire_all_limit', ARGV[15],
+                                      'arguments_schema', ARGV[16],
                                       'last_heartbeat_at', now,
                                       'is_enabled', is_enabled,
                                       'last_cron_fire_at', last_cron_fire_at or '')
@@ -229,7 +231,8 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                       'rate_limit_name', ARGV[13],
                                       'is_enabled', '1',
                                       'misfire_policy', ARGV[14],
-                                      'arguments_schema', ARGV[15],
+                                      'fire_all_limit', ARGV[15],
+                                      'arguments_schema', ARGV[16],
                                       'last_heartbeat_at', now,
                                       'last_cron_fire_at', '')
                                   redis.call('SADD', '{surefire}:jobs', ARGV[1])
@@ -255,6 +258,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                 job.Queue ?? "",
                 job.RateLimitName ?? "",
                 ((int)job.MisfirePolicy).ToString(),
+                job.FireAllLimit?.ToString() ?? "",
                 job.ArgumentsSchema ?? ""
             ]);
     }
@@ -406,8 +410,27 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
         else if (filter.Status is { } status)
         {
-            candidateIds = (await db.SortedSetRangeByScoreAsync($"{P}status:{(int)status}"))
-                .Select(v => (RedisValue)v.ToString()).ToArray();
+            if (NoAdditionalFiltersExceptStatus(filter))
+            {
+                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}status:{(int)status}");
+                candidateIds = await db.SortedSetRangeByScoreAsync(
+                    $"{P}status:{(int)status}",
+                    order: Order.Descending,
+                    skip: skip,
+                    take: take);
+                paginatedAtIndex = true;
+            }
+            else
+            {
+                return await GetRunsFromSortedSetWithFilterAsync(
+                    $"{P}status:{(int)status}",
+                    filter,
+                    skip,
+                    take,
+                    RunOrderBy.CreatedAt,
+                    order: Order.Descending,
+                    cancellationToken: cancellationToken);
+            }
         }
         else if (filter.IsTerminal == true)
         {
@@ -430,7 +453,14 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             }
             else
             {
-                candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:terminal");
+                return await GetRunsFromSortedSetWithFilterAsync(
+                    $"{P}runs:terminal",
+                    filter,
+                    skip,
+                    take,
+                    RunOrderBy.CreatedAt,
+                    order: Order.Descending,
+                    cancellationToken: cancellationToken);
             }
         }
         else if (filter.IsTerminal == false)
@@ -454,19 +484,53 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             }
             else
             {
-                candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:nonterminal");
+                return await GetRunsFromSortedSetWithFilterAsync(
+                    $"{P}runs:nonterminal",
+                    filter,
+                    skip,
+                    take,
+                    RunOrderBy.CreatedAt,
+                    order: Order.Descending,
+                    cancellationToken: cancellationToken);
             }
         }
         else if (filter.JobName is { } jobName && filter.ExactJobName)
         {
-            candidateIds = (await db.SortedSetRangeByScoreAsync($"{P}job_runs:{jobName}"))
-                .Select(v => (RedisValue)v.ToString()).ToArray();
+            if (NoAdditionalFiltersExceptExactJobName(filter))
+            {
+                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}job_runs:{jobName}");
+                candidateIds = await db.SortedSetRangeByScoreAsync(
+                    $"{P}job_runs:{jobName}",
+                    order: Order.Descending,
+                    skip: skip,
+                    take: take);
+                paginatedAtIndex = true;
+            }
+            else
+            {
+                return await GetRunsFromSortedSetWithFilterAsync(
+                    $"{P}job_runs:{jobName}",
+                    filter,
+                    skip,
+                    take,
+                    RunOrderBy.CreatedAt,
+                    order: Order.Descending,
+                    cancellationToken: cancellationToken);
+            }
         }
         else if (filter.OrderBy == RunOrderBy.CompletedAt && filter.CompletedAfter is { } completedAfter)
         {
-            candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:completed",
-                completedAfter.ToUnixTimeMilliseconds(), double.PositiveInfinity,
-                Exclude.Start);
+            return await GetRunsFromSortedSetWithFilterAsync(
+                $"{P}runs:completed",
+                filter,
+                skip,
+                take,
+                RunOrderBy.CompletedAt,
+                completedAfter.ToUnixTimeMilliseconds(),
+                double.PositiveInfinity,
+                Exclude.Start,
+                Order.Descending,
+                cancellationToken);
         }
         else
         {
@@ -492,8 +556,17 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             }
             else
             {
-                candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:created",
-                    minScore, maxScore, exclude);
+                return await GetRunsFromSortedSetWithFilterAsync(
+                    $"{P}runs:created",
+                    filter,
+                    skip,
+                    take,
+                    RunOrderBy.CreatedAt,
+                    minScore,
+                    maxScore,
+                    exclude,
+                    Order.Descending,
+                    cancellationToken);
             }
         }
 
@@ -533,6 +606,104 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         var totalCount = totalFromIndex ?? runs.Count;
         var page = runs.Skip(skip).Take(take).ToList();
         return new() { Items = page, TotalCount = totalCount };
+    }
+
+    private async Task<PagedResult<JobRun>> GetRunsFromSortedSetWithFilterAsync(
+        RedisKey key,
+        RunFilter filter,
+        int skip,
+        int take,
+        RunOrderBy indexOrderBy,
+        double minScore = double.NegativeInfinity,
+        double maxScore = double.PositiveInfinity,
+        Exclude exclude = Exclude.None,
+        Order order = Order.Descending,
+        CancellationToken cancellationToken = default)
+    {
+        var requiresResort = filter.OrderBy != indexOrderBy;
+        var matchedCount = 0;
+        var page = new List<JobRun>(take);
+        var allMatched = requiresResort ? new List<JobRun>() : null;
+        var offset = 0L;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var ids = await Db.SortedSetRangeByScoreAsync(
+                key,
+                minScore,
+                maxScore,
+                exclude,
+                order,
+                offset,
+                FilterScanChunkSize);
+            if (ids.Length == 0)
+            {
+                break;
+            }
+
+            offset += ids.Length;
+
+            var runs = await LoadRunsByIdsAsync(ids);
+            foreach (var run in runs)
+            {
+                if (!MatchesFilter(run, filter))
+                {
+                    continue;
+                }
+
+                if (requiresResort)
+                {
+                    allMatched!.Add(run);
+                }
+                else if (matchedCount >= skip && page.Count < take)
+                {
+                    page.Add(run);
+                }
+
+                matchedCount++;
+            }
+        }
+
+        if (!requiresResort)
+        {
+            return new() { Items = page, TotalCount = matchedCount };
+        }
+
+        var sorted = SortRuns(allMatched!, filter.OrderBy);
+        return new()
+        {
+            Items = sorted.Skip(skip).Take(take).ToList(),
+            TotalCount = sorted.Count
+        };
+    }
+
+    private async Task<List<JobRun>> LoadRunsByIdsAsync(RedisValue[] runIds)
+    {
+        if (runIds.Length == 0)
+        {
+            return [];
+        }
+
+        var batch = Db.CreateBatch();
+        var fetchTasks = runIds.Select(id => batch.StringGetAsync($"{P}run:{id}")).ToArray();
+        batch.Execute();
+        await Task.WhenAll(fetchTasks);
+
+        var runs = new List<JobRun>(fetchTasks.Length);
+        foreach (var task in fetchTasks)
+        {
+            var json = await task;
+            if (json.IsNullOrEmpty)
+            {
+                continue;
+            }
+
+            runs.Add(DeserializeRun(json!));
+        }
+
+        return runs;
     }
 
     public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
@@ -1090,19 +1261,19 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return DeserializeRun(result.ToString()!);
     }
 
-    public async Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    public async Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
         CancellationToken cancellationToken = default)
     {
         const string script = """
                               local key = '{surefire}:run:' .. ARGV[1]
                               local data = redis.call('GET', key)
                               if not data then
-                                  return redis.error_reply('Run not found: ' .. ARGV[1])
+                                  return nil
                               end
 
                               local r = cjson.decode(data)
                               if type(r.batch_total) ~= 'number' then
-                                  return redis.error_reply('Not a batch coordinator: ' .. ARGV[1])
+                                  return nil
                               end
 
                               local function num(v) return type(v) == 'number' and v or 0 end
@@ -1123,19 +1294,16 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                               return cjson.encode({r.batch_total, r.batch_completed, r.batch_failed})
                               """;
 
-        RedisResult result;
-        try
+        var result = await EvaluateScriptAsync(script,
+            [RoutingKey],
+            [
+                batchRunId,
+                isFailed ? "1" : "0"
+            ]);
+
+        if (result.IsNull)
         {
-            result = await EvaluateScriptAsync(script,
-                [RoutingKey],
-                [
-                    batchRunId,
-                    isFailed ? "1" : "0"
-                ]);
-        }
-        catch (RedisServerException ex)
-        {
-            throw new InvalidOperationException(ex.Message, ex);
+            return null;
         }
 
         var arr = JsonSerializer.Deserialize<int[]>(result.ToString()!)!;
@@ -1395,61 +1563,77 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
     {
         var now = timeProvider.GetUtcNow();
         var nowMs = now.ToUnixTimeMilliseconds();
+        var db = Db;
+        var nodeKey = $"{P}node:{nodeName}";
+        var startedAt = await db.HashGetAsync(nodeKey, "started_at");
+        var startedAtValue = startedAt.IsNullOrEmpty ? nowMs.ToString() : startedAt.ToString();
 
-        // ARGV: [1]=node_name, [2]=now_ms, [3]=running_count, [4]=job_names_json, [5]=queue_names_json, [6..]=run_ids
-        const string script = """
-                              local node_name = ARGV[1]
-                              local now_ms = tonumber(ARGV[2])
-                              local running_count = ARGV[3]
-                              local job_names_json = ARGV[4]
-                              local queue_names_json = ARGV[5]
+        await db.HashSetAsync(nodeKey,
+        [
+            new("name", nodeName),
+            new("started_at", startedAtValue),
+            new("last_heartbeat_at", nowMs.ToString()),
+            new("running_count", activeRunIds.Count.ToString()),
+            new("registered_job_names", JsonSerializer.Serialize(jobNames)),
+            new("registered_queue_names", JsonSerializer.Serialize(queueNames))
+        ]);
+        await db.SetAddAsync($"{P}nodes", nodeName);
 
-                              local node_key = '{surefire}:node:' .. node_name
-                              local started_at = redis.call('HGET', node_key, 'started_at')
-                              if not started_at then
-                                  started_at = ARGV[2]
-                              end
-
-                              redis.call('HSET', node_key,
-                                  'name', node_name,
-                                  'started_at', started_at,
-                                  'last_heartbeat_at', ARGV[2],
-                                  'running_count', running_count,
-                                  'registered_job_names', job_names_json,
-                                  'registered_queue_names', queue_names_json)
-                              redis.call('SADD', '{surefire}:nodes', node_name)
-
-                              local now_str = ARGV[2]
-                              for i = 6, #ARGV do
-                                  local run_key = '{surefire}:run:' .. ARGV[i]
-                                  local json = redis.call('GET', run_key)
-                                  if json then
-                                      local r = cjson.decode(json)
-                                      if r.status ~= 2 and r.status ~= 4 and r.status ~= 5 then
-                                          if r.node_name ~= nil and r.node_name ~= cjson.null and r.node_name == node_name then
-                                              r.last_heartbeat_at = tonumber(now_str)
-                                              redis.call('SET', run_key, cjson.encode(r))
-                                          end
-                                      end
-                                  end
-                              end
-                              return 1
-                              """;
-
-        var args = new List<RedisValue>
+        if (activeRunIds.Count == 0)
         {
-            nodeName,
-            nowMs.ToString(),
-            activeRunIds.Count.ToString(),
-            JsonSerializer.Serialize(jobNames),
-            JsonSerializer.Serialize(queueNames)
-        };
-        foreach (var runId in activeRunIds)
-        {
-            args.Add(runId);
+            return;
         }
 
-        await EvaluateScriptAsync(script, [RoutingKey], args.ToArray());
+        var distinctRunIds = activeRunIds.Distinct(StringComparer.Ordinal).ToArray();
+        var readBatch = db.CreateBatch();
+        var readTasks = distinctRunIds
+            .Select(runId => readBatch.StringGetAsync($"{P}run:{runId}"))
+            .ToArray();
+        readBatch.Execute();
+        await Task.WhenAll(readTasks);
+
+        var updates = new List<(RedisKey Key, RedisValue Value)>();
+        for (var i = 0; i < distinctRunIds.Length; i++)
+        {
+            var json = await readTasks[i];
+            if (json.IsNullOrEmpty)
+            {
+                continue;
+            }
+
+            JobRun run;
+            try
+            {
+                run = DeserializeRun(json!);
+            }
+            catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+            {
+                Trace.TraceWarning("Skipping malformed Redis run payload while heartbeating run '{0}': {1}",
+                    distinctRunIds[i],
+                    ex.Message);
+                continue;
+            }
+
+            if (run.Status.IsTerminal || !string.Equals(run.NodeName, nodeName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            run.LastHeartbeatAt = now;
+            updates.Add(($"{P}run:{distinctRunIds[i]}", SerializeRun(run)));
+        }
+
+        if (updates.Count == 0)
+        {
+            return;
+        }
+
+        var writeBatch = db.CreateBatch();
+        var writeTasks = updates
+            .Select(update => writeBatch.StringSetAsync(update.Key, update.Value))
+            .ToArray();
+        writeBatch.Execute();
+        await Task.WhenAll(writeTasks);
     }
 
     public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
@@ -2545,6 +2729,33 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
+    private static bool NoAdditionalFiltersExceptStatus(RunFilter filter) =>
+        filter.Status is { }
+        && filter.JobName is null
+        && filter.ParentRunId is null
+        && filter.RootRunId is null
+        && filter.NodeName is null
+        && filter.CompletedAfter is null
+        && filter.LastHeartbeatBefore is null
+        && filter.IsBatchCoordinator is null
+        && filter.IsTerminal is null
+        && filter.OrderBy == RunOrderBy.CreatedAt;
+
+    private static bool NoAdditionalFiltersExceptExactJobName(RunFilter filter) =>
+        filter.JobName is { }
+        && filter.ExactJobName
+        && filter.Status is null
+        && filter.ParentRunId is null
+        && filter.RootRunId is null
+        && filter.NodeName is null
+        && filter.CompletedAfter is null
+        && filter.LastHeartbeatBefore is null
+        && filter.IsBatchCoordinator is null
+        && filter.IsTerminal is null
+        && filter.CreatedAfter is null
+        && filter.CreatedBefore is null
+        && filter.OrderBy == RunOrderBy.CreatedAt;
+
     private static string SerializeRun(JobRun run) =>
         JsonSerializer.Serialize(SerializeRunAsObject(run));
 
@@ -2729,6 +2940,11 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             IsEnabled = dict.GetValueOrDefault("is_enabled") != "0",
             MisfirePolicy = (MisfirePolicy)int.Parse(dict.GetValueOrDefault("misfire_policy", "0")!)
         };
+
+        if (dict.TryGetValue("fire_all_limit", out var limit) && !string.IsNullOrEmpty(limit))
+        {
+            job.FireAllLimit = int.Parse(limit);
+        }
 
         if (dict.TryGetValue("description", out var desc) && !string.IsNullOrEmpty(desc))
         {

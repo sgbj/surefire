@@ -43,6 +43,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
             Queue = "my-queue",
             RateLimitName = "my-limit",
             MisfirePolicy = MisfirePolicy.FireAll,
+            FireAllLimit = 7,
             ArgumentsSchema = """{"type":"object"}"""
         };
         await Store.UpsertJobAsync(job);
@@ -62,9 +63,30 @@ public abstract class JobConformanceTests : StoreConformanceBase
         Assert.Equal(job.Queue, stored.Queue);
         Assert.Equal(job.RateLimitName, stored.RateLimitName);
         Assert.Equal(job.MisfirePolicy, stored.MisfirePolicy);
+        Assert.Equal(job.FireAllLimit, stored.FireAllLimit);
         Assert.Equal(job.ArgumentsSchema, stored.ArgumentsSchema);
         Assert.True(stored.IsEnabled);
         Assert.NotNull(stored.LastHeartbeatAt);
+    }
+
+    [Fact]
+    public async Task UpsertJob_ClearsFireAllLimit_WhenSetToNull()
+    {
+        var name = $"ClearFireAllLimit_{Guid.CreateVersion7():N}";
+
+        var initial = CreateJob(name);
+        initial.MisfirePolicy = MisfirePolicy.FireAll;
+        initial.FireAllLimit = 3;
+        await Store.UpsertJobAsync(initial);
+
+        var updated = CreateJob(name);
+        updated.MisfirePolicy = MisfirePolicy.FireAll;
+        updated.FireAllLimit = null;
+        await Store.UpsertJobAsync(updated);
+
+        var loaded = await Store.GetJobAsync(name);
+        Assert.NotNull(loaded);
+        Assert.Null(loaded.FireAllLimit);
     }
 
     [Fact]

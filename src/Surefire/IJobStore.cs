@@ -166,15 +166,16 @@ public interface IJobStore
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Atomically increments the batch coordinator's completion counters and returns the
-    ///     post-increment values. The increment is skipped if the coordinator is already in a
-    ///     terminal status (returns current values without modifying them).
+    ///     Attempts to atomically increment the batch coordinator's completion counters and returns the
+    ///     post-increment values. Returns <c>null</c> when the run does not exist or is not a batch
+    ///     coordinator. The increment is skipped if the coordinator is already in a terminal status
+    ///     (returns current values without modifying them).
     /// </summary>
     /// <param name="batchRunId">The batch coordinator run ID.</param>
     /// <param name="isFailed">True to increment the failed counter; false to increment the completed counter.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The post-increment batch counters.</returns>
-    Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    /// <returns>The post-increment batch counters, or null when not applicable.</returns>
+    Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
         CancellationToken cancellationToken = default);
 
     /// <summary>

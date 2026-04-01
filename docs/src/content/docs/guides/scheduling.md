@@ -40,13 +40,29 @@ app.AddJob("Cleanup", async () => { /* ... */ })
 |---|---|
 | `Skip` | Ignore all missed fires and resume from the next future occurrence. This is the default. |
 | `FireOnce` | Fire once to catch up, then resume the normal schedule. |
-| `FireAll` | Fire every missed occurrence. |
+| `FireAll` | Fire missed occurrences, optionally bounded per scheduler tick with `fireAllLimit`. |
 
 `Skip` is the right choice for most jobs. If your server was down for 3 hours and you have a minutely job, you probably don't want 180 catch-up runs.
 
 `FireOnce` is useful when the job does cumulative work (like processing everything since the last run) and you need it to run at least once after a gap.
 
-`FireAll` is for cases where every single scheduled execution matters and skipping any would cause data loss. Be aware that extended outages with high-frequency cron jobs will create a run for every missed occurrence.
+`FireAll` is for cases where every single scheduled execution matters and skipping any would cause data loss.
+
+By default, `FireAll` is unbounded for the current scheduler tick:
+
+```csharp
+app.AddJob("Cleanup", async () => { /* ... */ })
+    .WithCron("0 * * * *")
+    .WithMisfirePolicy(MisfirePolicy.FireAll);
+```
+
+If you want to pace backlog replay after outages, set `fireAllLimit` to cap how many missed fires are enqueued per tick. Remaining missed fires are replayed on subsequent ticks:
+
+```csharp
+app.AddJob("Cleanup", async () => { /* ... */ })
+    .WithCron("0 * * * *")
+    .WithMisfirePolicy(MisfirePolicy.FireAll, fireAllLimit: 50);
+```
 
 ## Continuous jobs
 

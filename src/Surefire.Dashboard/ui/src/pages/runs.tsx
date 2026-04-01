@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { type PaginationState } from "@tanstack/react-table";
 import { api, JobStatusLabels } from "@/lib/api";
@@ -15,20 +15,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { CircleAlert, Search } from "lucide-react";
 import { buildRunColumns } from "@/components/run-columns";
 import { RUN_DATE_PRESETS } from "@/lib/run-date-presets";
-
-function useDebouncedValue<T>(value: T, delay: number): T {
-  const [debounced, setDebounced] = useState(value);
-  const isFirst = useRef(true);
-  useEffect(() => {
-    if (isFirst.current) {
-      isFirst.current = false;
-      return;
-    }
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 
 const columns = buildRunColumns();
 

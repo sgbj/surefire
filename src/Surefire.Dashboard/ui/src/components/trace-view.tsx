@@ -123,7 +123,6 @@ export function TraceView({
   }, [runs, nowMs]);
 
   const currentRef = useRef<HTMLAnchorElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
   const hasScrolled = useRef(false);
 
   // Only scroll once on mount or when navigating to a different run
@@ -133,11 +132,7 @@ export function TraceView({
 
   useEffect(() => {
     if (currentRef.current && !hasScrolled.current) {
-      // Only scroll if the container actually overflows
-      const viewport = containerRef.current;
-      if (viewport && viewport.scrollHeight > viewport.clientHeight) {
-        currentRef.current.scrollIntoView({ block: "center" });
-      }
+      currentRef.current.scrollIntoView({ block: "center" });
       hasScrolled.current = true;
     }
   }, [flatNodes]);
@@ -147,16 +142,11 @@ export function TraceView({
   const pct = (ms: number) => (ms / timeRange) * 100 * SCALE;
 
   return (
-    <div
-      ref={containerRef}
-      className="w-full max-h-[26rem] min-h-0 rounded-md border overflow-y-auto"
-    >
+    <div className="w-full min-h-0">
       <div className="grid grid-cols-[auto_1fr]">
         {/* Time axis header */}
-        <div className="col-span-2 grid grid-cols-subgrid items-stretch sticky top-0 z-10 h-10 border-b bg-muted/30 backdrop-blur-sm px-2">
-          <span className="text-sm text-muted-foreground pr-3 self-center">
-            Trace
-          </span>
+        <div className="col-span-2 grid grid-cols-subgrid items-stretch sticky top-10 z-10 h-10 border-b bg-muted/30 backdrop-blur-sm px-2">
+          <span className="pr-3" />
           <div className="relative overflow-visible">
             {ticks.map((t, i) => (
               <span

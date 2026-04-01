@@ -20,7 +20,7 @@ public sealed class DashboardStatsResponse
         TotalJobs = stats.TotalJobs,
         TotalRuns = stats.TotalRuns,
         ActiveRuns = stats.ActiveRuns,
-        SuccessRate = stats.SuccessRate * 100,
+        SuccessRate = stats.SuccessRate,
         NodeCount = stats.NodeCount,
         RunsByStatus = stats.RunsByStatus,
         Timeline = stats.Timeline.Select(TimelineBucketResponse.From).ToList(),
