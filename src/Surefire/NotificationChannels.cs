@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace Surefire;
 
 /// <summary>
@@ -6,6 +9,7 @@ namespace Surefire;
 public static class NotificationChannels
 {
     private const int MaxChannelLength = 63;
+    private const string RunPrefix = "surefire:run:";
 
     /// <summary>Broadcast channel for new run creation.</summary>
     public const string RunCreated = "surefire:run:created";
@@ -66,8 +70,26 @@ public static class NotificationChannels
             throw new ArgumentException("Run ID cannot be null or whitespace.", nameof(runId));
         }
 
-        var channel = $"surefire:run:{runId}:{suffix}";
+        var channel = $"{RunPrefix}{runId}:{suffix}";
+        if (channel.Length > MaxChannelLength)
+        {
+            var compactRunId = CompactRunId(runId, suffix);
+            channel = $"{RunPrefix}{compactRunId}:{suffix}";
+        }
+
         ValidateChannel(channel);
         return channel;
+    }
+
+    private static string CompactRunId(string runId, string suffix)
+    {
+        var maxRunIdLength = MaxChannelLength - RunPrefix.Length - suffix.Length - 1;
+        if (maxRunIdLength <= 0)
+        {
+            throw new InvalidOperationException("Notification channel format does not allow run-scoped channels.");
+        }
+
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(runId))).ToLowerInvariant();
+        return digest[..Math.Min(digest.Length, maxRunIdLength)];
     }
 }

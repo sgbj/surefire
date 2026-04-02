@@ -43,11 +43,13 @@ public static class DashboardEndpoints
             {
                 var now = timeProvider.GetUtcNow();
                 var cutoff = now - surefireOpts.InactiveThreshold;
-                var filter = new JobListFilter { Name = name, Tag = tag, IsEnabled = isEnabled };
-                if (includeInactive != true)
+                var filter = new JobListFilter
                 {
-                    filter.HeartbeatAfter = cutoff;
-                }
+                    Name = name,
+                    Tag = tag,
+                    IsEnabled = isEnabled,
+                    HeartbeatAfter = includeInactive == true ? null : cutoff
+                };
 
                 var jobs = await store.GetJobsAsync(filter, ct);
                 return TypedResults.Ok(jobs.Select(j => JobResponse.From(j, cutoff, now)).ToList());

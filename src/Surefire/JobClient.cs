@@ -327,42 +327,24 @@ public sealed partial class JobClient(
     }
 
     /// <inheritdoc />
-    public async IAsyncEnumerable<RunResult> RunEachAsync(string jobName, IEnumerable<object?> argsList,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var batchId = await TriggerAllAsync(jobName, argsList, cancellationToken);
-        await using var enumerator = WaitEachAsync(batchId, cancellationToken)
-            .GetAsyncEnumerator(cancellationToken);
-
-        while (true)
-        {
-            RunResult result;
-            try
-            {
-                if (!await enumerator.MoveNextAsync())
-                {
-                    break;
-                }
-
-                result = enumerator.Current;
-            }
-
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await TryCancelOwnedRunAsync(batchId);
-                throw;
-            }
-
-            yield return result;
-        }
-    }
+    public IAsyncEnumerable<RunResult> RunEachAsync(string jobName, IEnumerable<object?> argsList,
+        CancellationToken cancellationToken = default)
+        => RunEachCoreAsync(
+            triggerBatch: ct => TriggerAllAsync(jobName, argsList, ct),
+            cancellationToken);
 
     /// <inheritdoc />
-    public async IAsyncEnumerable<RunResult> RunEachAsync(string jobName, IEnumerable<object?> argsList,
-        RunOptions options,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<RunResult> RunEachAsync(string jobName, IEnumerable<object?> argsList,
+        RunOptions options, CancellationToken cancellationToken = default)
+        => RunEachCoreAsync(
+            triggerBatch: ct => TriggerAllAsync(jobName, argsList, options, ct),
+            cancellationToken);
+
+    private async IAsyncEnumerable<RunResult> RunEachCoreAsync(
+        Func<CancellationToken, Task<string>> triggerBatch,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var batchId = await TriggerAllAsync(jobName, argsList, options, cancellationToken);
+        var batchId = await triggerBatch(cancellationToken);
         await using var enumerator = WaitEachAsync(batchId, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
 
@@ -735,7 +717,7 @@ public sealed partial class JobClient(
             cancellationToken: cancellationToken);
         if (!created)
         {
-            throw new RunConflictException($"Run creation for rerun of '{runId}' was rejected.");
+            throw new RunConflictException(runId, $"Run creation for rerun of '{runId}' was rejected.");
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCreated, rerun.Id, cancellationToken);

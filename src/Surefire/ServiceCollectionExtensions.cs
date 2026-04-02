@@ -24,12 +24,14 @@ public static class ServiceCollectionExtensions
         options.Validate();
 
         services.TryAddSingleton(TimeProvider.System);
+        services.AddMetrics();
         services.AddSingleton(options);
         services.TryAddSingleton<JobRegistry>();
         services.TryAddSingleton<ActiveRunTracker>();
         services.TryAddSingleton<SurefireInstrumentation>();
         services.TryAddSingleton<SurefireLogEventPump>();
-        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<SurefireLogEventPump>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService>(
+            sp => sp.GetRequiredService<SurefireLogEventPump>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILoggerProvider, SurefireLoggerProvider>());
         services.AddHealthChecks().AddCheck<SurefireHealthCheck>("surefire");
         services.TryAddSingleton<IJobStore, InMemoryJobStore>();

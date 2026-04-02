@@ -51,10 +51,7 @@ public sealed record RetryPolicy
 
     private TimeSpan Clamp(TimeSpan delay)
     {
-        if (delay > MaxDelay)
-        {
-            delay = MaxDelay;
-        }
+        delay = TimeSpan.FromTicks(Math.Clamp(delay.Ticks, 0, MaxDelay.Ticks));
 
         if (Jitter && delay > TimeSpan.Zero)
         {

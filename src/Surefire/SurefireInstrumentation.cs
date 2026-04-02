@@ -7,10 +7,12 @@ internal sealed class SurefireInstrumentation : IDisposable
 {
     private readonly Meter _meter;
 
-    public SurefireInstrumentation(IMeterFactory? meterFactory = null)
+    public SurefireInstrumentation(IMeterFactory meterFactory)
     {
+        ArgumentNullException.ThrowIfNull(meterFactory);
+
         ActivitySource = new("Surefire");
-        _meter = meterFactory?.Create("Surefire") ?? new Meter("Surefire");
+        _meter = meterFactory.Create("Surefire");
 
         RunsClaimed = _meter.CreateCounter<long>("surefire.runs.claimed");
         RunsCompleted = _meter.CreateCounter<long>("surefire.runs.completed");

@@ -1,6 +1,6 @@
 namespace Surefire;
 
-public static class RunTransitionRules
+internal static class RunTransitionRules
 {
     public static bool IsAllowed(JobStatus from, JobStatus to) => (from, to) switch
     {

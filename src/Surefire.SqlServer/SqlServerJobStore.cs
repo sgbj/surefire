@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
@@ -242,24 +243,24 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           );
                           """;
 
-        cmd.Parameters.AddWithValue("@name", job.Name);
-        cmd.Parameters.AddWithValue("@description", (object?)job.Description ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@tags", JsonSerializer.Serialize(job.Tags));
-        cmd.Parameters.AddWithValue("@cron_expression", (object?)job.CronExpression ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@timeout", job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value);
-        cmd.Parameters.AddWithValue("@max_concurrency",
-            job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@priority", job.Priority);
-        cmd.Parameters.AddWithValue("@retry_policy", SerializeRetryPolicy(job.RetryPolicy));
-        cmd.Parameters.AddWithValue("@is_continuous", job.IsContinuous);
-        cmd.Parameters.AddWithValue("@queue", (object?)job.Queue ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@is_enabled", job.IsEnabled);
-        cmd.Parameters.AddWithValue("@misfire_policy", (int)job.MisfirePolicy);
-        cmd.Parameters.AddWithValue("@fire_all_limit",
-            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
+        cmd.Parameters.Add(CreateParameter("@name", job.Name));
+        cmd.Parameters.Add(CreateParameter("@description", (object?)job.Description ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@tags", JsonSerializer.Serialize(job.Tags)));
+        cmd.Parameters.Add(CreateParameter("@cron_expression", (object?)job.CronExpression ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@timeout", job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@max_concurrency",
+            job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@priority", job.Priority));
+        cmd.Parameters.Add(CreateParameter("@retry_policy", SerializeRetryPolicy(job.RetryPolicy)));
+        cmd.Parameters.Add(CreateParameter("@is_continuous", job.IsContinuous));
+        cmd.Parameters.Add(CreateParameter("@queue", (object?)job.Queue ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@is_enabled", job.IsEnabled));
+        cmd.Parameters.Add(CreateParameter("@misfire_policy", (int)job.MisfirePolicy));
+        cmd.Parameters.Add(CreateParameter("@fire_all_limit",
+            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -270,7 +271,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -293,25 +294,25 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         if (filter?.Name is { } nameFilter)
         {
             sb.Append(" AND name LIKE '%' + @name + '%'");
-            cmd.Parameters.AddWithValue("@name", EscapeLike(nameFilter));
+            cmd.Parameters.Add(CreateParameter("@name", EscapeLike(nameFilter)));
         }
 
         if (filter?.Tag is { } tagFilter)
         {
             sb.Append(" AND LOWER(@tag) IN (SELECT LOWER(value) FROM OPENJSON(tags))");
-            cmd.Parameters.AddWithValue("@tag", tagFilter);
+            cmd.Parameters.Add(CreateParameter("@tag", tagFilter));
         }
 
         if (filter?.IsEnabled is { } enabledFilter)
         {
             sb.Append(" AND is_enabled = @is_enabled");
-            cmd.Parameters.AddWithValue("@is_enabled", enabledFilter);
+            cmd.Parameters.Add(CreateParameter("@is_enabled", enabledFilter));
         }
 
         if (filter?.HeartbeatAfter is { } heartbeatFilter)
         {
             sb.Append(" AND last_heartbeat_at > @heartbeat_after");
-            cmd.Parameters.AddWithValue("@heartbeat_after", heartbeatFilter);
+            cmd.Parameters.Add(CreateParameter("@heartbeat_after", heartbeatFilter));
         }
 
         sb.Append(" ORDER BY name");
@@ -333,8 +334,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE dbo.surefire_jobs SET is_enabled = @enabled WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
-        cmd.Parameters.AddWithValue("@enabled", enabled);
+        cmd.Parameters.Add(CreateParameter("@name", name));
+        cmd.Parameters.Add(CreateParameter("@enabled", enabled));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -345,8 +346,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE dbo.surefire_jobs SET last_cron_fire_at = @fire_at WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", jobName);
-        cmd.Parameters.AddWithValue("@fire_at", fireAt);
+        cmd.Parameters.Add(CreateParameter("@name", jobName));
+        cmd.Parameters.Add(CreateParameter("@fire_at", fireAt));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -367,7 +368,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT * FROM dbo.surefire_runs WHERE id = @id";
-        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.Add(CreateParameter("@id", id));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -409,8 +410,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
         cmd.CommandText =
             $"SELECT *, COUNT(*) OVER() AS total_count FROM dbo.surefire_runs {whereClause} ORDER BY {orderBy} OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY";
-        cmd.Parameters.AddWithValue("@take", take);
-        cmd.Parameters.AddWithValue("@skip", skip);
+        cmd.Parameters.Add(CreateParameter("@take", take));
+        cmd.Parameters.Add(CreateParameter("@skip", skip));
 
         var items = new List<JobRun>();
         var totalCount = 0;
@@ -444,15 +445,15 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           WHERE id = @id AND (node_name = @node_name OR (node_name IS NULL AND @node_name IS NULL)) AND status NOT IN (2, 4, 5)
                           """;
 
-        cmd.Parameters.AddWithValue("@id", run.Id);
-        cmd.Parameters.AddWithValue("@progress", run.Progress);
-        cmd.Parameters.AddWithValue("@result", (object?)run.Result ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@error", (object?)run.Error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@trace_id", (object?)run.TraceId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@span_id", (object?)run.SpanId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@last_heartbeat_at",
-            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@node_name", (object?)run.NodeName ?? DBNull.Value);
+        cmd.Parameters.Add(CreateParameter("@id", run.Id));
+        cmd.Parameters.Add(CreateParameter("@progress", run.Progress));
+        cmd.Parameters.Add(CreateParameter("@result", (object?)run.Result ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@error", (object?)run.Error ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@trace_id", (object?)run.TraceId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@span_id", (object?)run.SpanId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@last_heartbeat_at",
+            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@node_name", (object?)run.NodeName ?? DBNull.Value));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -487,23 +488,23 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               AND status NOT IN (2, 4, 5)
                           """;
 
-        cmd.Parameters.AddWithValue("@id", transition.RunId);
-        cmd.Parameters.AddWithValue("@new_status", (int)transition.NewStatus);
-        cmd.Parameters.AddWithValue("@node_name", (object?)transition.NodeName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@started_at",
-            transition.StartedAt.HasValue ? transition.StartedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@completed_at",
-            transition.CompletedAt.HasValue ? transition.CompletedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@cancelled_at",
-            transition.CancelledAt.HasValue ? transition.CancelledAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@error", (object?)transition.Error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@result", (object?)transition.Result ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@progress", transition.Progress);
-        cmd.Parameters.AddWithValue("@not_before", transition.NotBefore);
-        cmd.Parameters.AddWithValue("@last_heartbeat_at",
-            transition.LastHeartbeatAt.HasValue ? transition.LastHeartbeatAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@expected_status", (int)transition.ExpectedStatus);
-        cmd.Parameters.AddWithValue("@expected_attempt", transition.ExpectedAttempt);
+        cmd.Parameters.Add(CreateParameter("@id", transition.RunId));
+        cmd.Parameters.Add(CreateParameter("@new_status", (int)transition.NewStatus));
+        cmd.Parameters.Add(CreateParameter("@node_name", (object?)transition.NodeName ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@started_at",
+            transition.StartedAt.HasValue ? transition.StartedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@completed_at",
+            transition.CompletedAt.HasValue ? transition.CompletedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@cancelled_at",
+            transition.CancelledAt.HasValue ? transition.CancelledAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@error", (object?)transition.Error ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@result", (object?)transition.Result ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@progress", transition.Progress));
+        cmd.Parameters.Add(CreateParameter("@not_before", transition.NotBefore));
+        cmd.Parameters.Add(CreateParameter("@last_heartbeat_at",
+            transition.LastHeartbeatAt.HasValue ? transition.LastHeartbeatAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@expected_status", (int)transition.ExpectedStatus));
+        cmd.Parameters.Add(CreateParameter("@expected_attempt", transition.ExpectedAttempt));
 
         var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
         return rows > 0;
@@ -525,7 +526,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           WHERE id = @id AND status NOT IN (2, 4, 5)
                           """;
 
-        cmd.Parameters.AddWithValue("@id", runId);
+        cmd.Parameters.Add(CreateParameter("@id", runId));
 
         var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
         return rows > 0;
@@ -555,7 +556,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         for (var i = 0; i < jobNamesArr.Count; i++)
         {
             jobParams.Add($"@jn_{i}");
-            lockRlCmd.Parameters.AddWithValue($"@jn_{i}", jobNamesArr[i]);
+            lockRlCmd.Parameters.Add(CreateParameter($"@jn_{i}", jobNamesArr[i]));
         }
 
         var jobNamesIn = string.Join(", ", jobParams);
@@ -586,13 +587,13 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
         for (var i = 0; i < jobNamesArr.Count; i++)
         {
-            cmd.Parameters.AddWithValue($"@jn_{i}", jobNamesArr[i]);
+            cmd.Parameters.Add(CreateParameter($"@jn_{i}", jobNamesArr[i]));
         }
 
         for (var i = 0; i < queueNamesArr.Count; i++)
         {
             queueParams.Add($"@qn_{i}");
-            cmd.Parameters.AddWithValue($"@qn_{i}", queueNamesArr[i]);
+            cmd.Parameters.Add(CreateParameter($"@qn_{i}", queueNamesArr[i]));
         }
 
         var queueNamesIn = string.Join(", ", queueParams);
@@ -682,7 +683,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                            FROM dbo.surefire_runs INNER JOIN candidate ON dbo.surefire_runs.id = candidate.id;
                            """;
 
-        cmd.Parameters.AddWithValue("@node_name", nodeName);
+        cmd.Parameters.Add(CreateParameter("@node_name", nodeName));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         JobRun? claimed = null;
@@ -734,8 +735,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           WHERE id = @id AND status NOT IN (2, 4, 5) AND batch_total IS NOT NULL
                           """;
 
-        cmd.Parameters.AddWithValue("@id", batchRunId);
-        cmd.Parameters.AddWithValue("@is_failed", isFailed);
+        cmd.Parameters.Add(CreateParameter("@id", batchRunId));
+        cmd.Parameters.Add(CreateParameter("@is_failed", isFailed));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
@@ -753,7 +754,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                SELECT batch_total, batch_completed, batch_failed
                                FROM dbo.surefire_runs WHERE id = @id
                                """;
-        fallback.Parameters.AddWithValue("@id", batchRunId);
+        fallback.Parameters.Add(CreateParameter("@id", batchRunId));
 
         await using var fr = await fallback.ExecuteReaderAsync(cancellationToken);
         if (!await fr.ReadAsync(cancellationToken))
@@ -796,15 +797,15 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await using var cmd = conn.CreateCommand();
 
         var sb = new StringBuilder("SELECT * FROM dbo.surefire_events WHERE run_id = @run_id AND id > @since_id");
-        cmd.Parameters.AddWithValue("@run_id", runId);
-        cmd.Parameters.AddWithValue("@since_id", sinceId);
+        cmd.Parameters.Add(CreateParameter("@run_id", runId));
+        cmd.Parameters.Add(CreateParameter("@since_id", sinceId));
 
         if (types is { Length: > 0 })
         {
             var typeParams = types.Select((t, i) =>
             {
                 var name = $"@et{i}";
-                cmd.Parameters.AddWithValue(name, (short)t);
+                cmd.Parameters.Add(CreateParameter(name, (short)t));
                 return name;
             }).ToList();
             sb.Append($" AND event_type IN ({string.Join(",", typeParams)})");
@@ -813,7 +814,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         if (attempt is { })
         {
             sb.Append(" AND (attempt = @attempt OR attempt = 0)");
-            cmd.Parameters.AddWithValue("@attempt", attempt.Value);
+            cmd.Parameters.Add(CreateParameter("@attempt", attempt.Value));
         }
 
         sb.Append(" ORDER BY id");
@@ -849,10 +850,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               AND e.id > @since_event_id
                           ORDER BY e.id ASC
                           """;
-        cmd.Parameters.AddWithValue("@batch_run_id", batchRunId);
-        cmd.Parameters.AddWithValue("@event_type", (short)RunEventType.Output);
-        cmd.Parameters.AddWithValue("@since_event_id", sinceEventId);
-        cmd.Parameters.AddWithValue("@take", take);
+        cmd.Parameters.Add(CreateParameter("@batch_run_id", batchRunId));
+        cmd.Parameters.Add(CreateParameter("@event_type", (short)RunEventType.Output));
+        cmd.Parameters.Add(CreateParameter("@since_event_id", sinceEventId));
+        cmd.Parameters.Add(CreateParameter("@take", take));
 
         var results = new List<RunEvent>();
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -885,10 +886,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               WHEN NOT MATCHED THEN INSERT (name, started_at, last_heartbeat_at, running_count, registered_job_names, registered_queue_names)
                                   VALUES (@name, SYSUTCDATETIME(), SYSUTCDATETIME(), @running_count, @job_names, @queue_names);
                               """;
-        nodeCmd.Parameters.AddWithValue("@name", nodeName);
-        nodeCmd.Parameters.AddWithValue("@running_count", activeRunIds.Count);
-        nodeCmd.Parameters.AddWithValue("@job_names", JsonSerializer.Serialize(jobNames));
-        nodeCmd.Parameters.AddWithValue("@queue_names", JsonSerializer.Serialize(queueNames));
+        nodeCmd.Parameters.Add(CreateParameter("@name", nodeName));
+        nodeCmd.Parameters.Add(CreateParameter("@running_count", activeRunIds.Count));
+        nodeCmd.Parameters.Add(CreateParameter("@job_names", JsonSerializer.Serialize(jobNames)));
+        nodeCmd.Parameters.Add(CreateParameter("@queue_names", JsonSerializer.Serialize(queueNames)));
         await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
 
         if (activeRunIds.Count > 0)
@@ -905,10 +906,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                       UPDATE dbo.surefire_runs SET last_heartbeat_at = SYSUTCDATETIME()
                                       WHERE id IN ({idList}) AND node_name = @node AND status NOT IN (2, 4, 5)
                                       """;
-                runCmd.Parameters.AddWithValue("@node", nodeName);
+                runCmd.Parameters.Add(CreateParameter("@node", nodeName));
                 for (var i = 0; i < chunk.Length; i++)
                 {
-                    runCmd.Parameters.AddWithValue($"@rid_{i}", chunk[i]);
+                    runCmd.Parameters.Add(CreateParameter($"@rid_{i}", chunk[i]));
                 }
 
                 await runCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -941,7 +942,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT TOP (1) * FROM dbo.surefire_nodes WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
@@ -977,11 +978,11 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               AND r.batch_total IS NULL AND r.queue_priority != @priority;
                           """;
 
-        cmd.Parameters.AddWithValue("@name", queue.Name);
-        cmd.Parameters.AddWithValue("@priority", queue.Priority);
-        cmd.Parameters.AddWithValue("@max_concurrency",
-            queue.MaxConcurrency.HasValue ? queue.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@rate_limit_name", (object?)queue.RateLimitName ?? DBNull.Value);
+        cmd.Parameters.Add(CreateParameter("@name", queue.Name));
+        cmd.Parameters.Add(CreateParameter("@priority", queue.Priority));
+        cmd.Parameters.Add(CreateParameter("@max_concurrency",
+            queue.MaxConcurrency.HasValue ? queue.MaxConcurrency.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@rate_limit_name", (object?)queue.RateLimitName ?? DBNull.Value));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
@@ -1010,8 +1011,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE dbo.surefire_queues SET is_paused = @is_paused WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
-        cmd.Parameters.AddWithValue("@is_paused", isPaused);
+        cmd.Parameters.Add(CreateParameter("@name", name));
+        cmd.Parameters.Add(CreateParameter("@is_paused", isPaused));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1032,10 +1033,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               VALUES (@name, @type, @max_permits, @window, SYSUTCDATETIME());
                           """;
 
-        cmd.Parameters.AddWithValue("@name", rateLimit.Name);
-        cmd.Parameters.AddWithValue("@type", (int)rateLimit.Type);
-        cmd.Parameters.AddWithValue("@max_permits", rateLimit.MaxPermits);
-        cmd.Parameters.AddWithValue("@window", rateLimit.Window.Ticks);
+        cmd.Parameters.Add(CreateParameter("@name", rateLimit.Name));
+        cmd.Parameters.Add(CreateParameter("@type", (int)rateLimit.Type));
+        cmd.Parameters.Add(CreateParameter("@max_permits", rateLimit.MaxPermits));
+        cmd.Parameters.Add(CreateParameter("@window", rateLimit.Window.Ticks));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -1101,7 +1102,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                              )
                                      )
                                  """;
-            runCmd.Parameters.AddWithValue("@threshold", threshold);
+            runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
             if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
             {
                 break;
@@ -1114,7 +1115,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             runCmd.CommandText = """
                                  DELETE TOP(1000) FROM dbo.surefire_runs WHERE status IN (0, 3) AND not_before < @threshold
                                  """;
-            runCmd.Parameters.AddWithValue("@threshold", threshold);
+            runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
             if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
             {
                 break;
@@ -1127,22 +1128,22 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                              WHERE last_heartbeat_at < @threshold
                                  AND NOT EXISTS (SELECT 1 FROM dbo.surefire_runs r WHERE r.job_name = dbo.surefire_jobs.name AND r.status NOT IN (2, 4, 5))
                              """;
-        jobCmd.Parameters.AddWithValue("@threshold", threshold);
+        jobCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await jobCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await using var queueCmd = conn.CreateCommand();
         queueCmd.CommandText = "DELETE FROM dbo.surefire_queues WHERE last_heartbeat_at < @threshold";
-        queueCmd.Parameters.AddWithValue("@threshold", threshold);
+        queueCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await queueCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await using var rlCmd = conn.CreateCommand();
         rlCmd.CommandText = "DELETE FROM dbo.surefire_rate_limits WHERE last_heartbeat_at < @threshold";
-        rlCmd.Parameters.AddWithValue("@threshold", threshold);
+        rlCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await rlCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await using var nodeCmd = conn.CreateCommand();
         nodeCmd.CommandText = "DELETE FROM dbo.surefire_nodes WHERE last_heartbeat_at < @threshold";
-        nodeCmd.Parameters.AddWithValue("@threshold", threshold);
+        nodeCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1177,8 +1178,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                FROM dbo.surefire_runs
                                WHERE created_at >= @since AND created_at < @now
                                """;
-        statsCmd.Parameters.AddWithValue("@now", now);
-        statsCmd.Parameters.AddWithValue("@since", sinceTime);
+        statsCmd.Parameters.Add(CreateParameter("@now", now));
+        statsCmd.Parameters.Add(CreateParameter("@since", sinceTime));
 
         int totalJobs = 0, totalRuns = 0, activeRuns = 0, nodeCount = 0;
         var runsByStatus = new Dictionary<string, int>();
@@ -1250,9 +1251,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                 GROUP BY DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since)
                                 ORDER BY bucket_start
                                 """;
-        bucketCmd.Parameters.AddWithValue("@since", sinceTime);
-        bucketCmd.Parameters.AddWithValue("@bucket_minutes", bucketMinutes);
-        bucketCmd.Parameters.AddWithValue("@now", now);
+        bucketCmd.Parameters.Add(CreateParameter("@since", sinceTime));
+        bucketCmd.Parameters.Add(CreateParameter("@bucket_minutes", bucketMinutes));
+        bucketCmd.Parameters.Add(CreateParameter("@now", now));
 
         var bucketMap = new Dictionary<DateTimeOffset, TimelineBucket>();
         await using (var reader = await bucketCmd.ExecuteReaderAsync(cancellationToken))
@@ -1323,7 +1324,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               MAX(started_at) AS last_run_at
                           FROM dbo.surefire_runs WHERE job_name = @job_name
                           """;
-        cmd.Parameters.AddWithValue("@job_name", jobName);
+        cmd.Parameters.Add(CreateParameter("@job_name", jobName));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
@@ -1484,7 +1485,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             await using var lockCmd = conn.CreateCommand();
             lockCmd.Transaction = tx;
             lockCmd.CommandText = "SELECT 1 FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK) WHERE name = @name";
-            lockCmd.Parameters.AddWithValue("@name", run.JobName);
+            lockCmd.Parameters.Add(CreateParameter("@name", run.JobName));
             await lockCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -1499,7 +1500,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                    AND status NOT IN (2, 4, 5)
                            )
                            """);
-            cmd.Parameters.AddWithValue("@dedup_id", run.DeduplicationId);
+            cmd.Parameters.Add(CreateParameter("@dedup_id", run.DeduplicationId));
         }
 
         if (maxActiveForJob is { })
@@ -1508,7 +1509,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                            (SELECT COUNT(*) FROM dbo.surefire_runs
                             WHERE job_name = @job_name AND status NOT IN (2, 4, 5)) < @max_active
                            """);
-            cmd.Parameters.AddWithValue("@max_active", maxActiveForJob.Value);
+            cmd.Parameters.Add(CreateParameter("@max_active", maxActiveForJob.Value));
             conditions.Add("""
                            ISNULL((SELECT is_enabled FROM dbo.surefire_jobs WHERE name = @job_name), 1) = 1
                            """);
@@ -1575,8 +1576,8 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                 fireCmd.Transaction = tx;
                 fireCmd.CommandText =
                     "UPDATE dbo.surefire_jobs SET last_cron_fire_at = @last_cron_fire_at WHERE name = @job_name";
-                fireCmd.Parameters.AddWithValue("@last_cron_fire_at", fireAt);
-                fireCmd.Parameters.AddWithValue("@job_name", run.JobName);
+                fireCmd.Parameters.Add(CreateParameter("@last_cron_fire_at", fireAt));
+                fireCmd.Parameters.Add(CreateParameter("@job_name", run.JobName));
                 await fireCmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -1616,11 +1617,11 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                 }
 
                 sb.Append($"(@run_id_{i}, @event_type_{i}, @payload_{i}, @created_at_{i}, @attempt_{i})");
-                cmd.Parameters.AddWithValue($"@run_id_{i}", chunk[i].RunId);
-                cmd.Parameters.AddWithValue($"@event_type_{i}", (short)chunk[i].EventType);
-                cmd.Parameters.AddWithValue($"@payload_{i}", chunk[i].Payload);
-                cmd.Parameters.AddWithValue($"@created_at_{i}", chunk[i].CreatedAt);
-                cmd.Parameters.AddWithValue($"@attempt_{i}", chunk[i].Attempt);
+                cmd.Parameters.Add(CreateParameter($"@run_id_{i}", chunk[i].RunId));
+                cmd.Parameters.Add(CreateParameter($"@event_type_{i}", (short)chunk[i].EventType));
+                cmd.Parameters.Add(CreateParameter($"@payload_{i}", chunk[i].Payload));
+                cmd.Parameters.Add(CreateParameter($"@created_at_{i}", chunk[i].CreatedAt));
+                cmd.Parameters.Add(CreateParameter($"@attempt_{i}", chunk[i].Attempt));
             }
 
             cmd.CommandText = sb.ToString();
@@ -1633,7 +1634,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         if (filter.Status is { })
         {
             parts.Add("status = @filter_status");
-            cmd.Parameters.AddWithValue("@filter_status", (int)filter.Status.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_status", (int)filter.Status.Value));
         }
 
         if (filter.JobName is { })
@@ -1641,55 +1642,55 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             if (filter.ExactJobName)
             {
                 parts.Add("job_name = @filter_job_name");
-                cmd.Parameters.AddWithValue("@filter_job_name", filter.JobName);
+                cmd.Parameters.Add(CreateParameter("@filter_job_name", filter.JobName));
             }
             else
             {
                 parts.Add("job_name LIKE '%' + @filter_job_name + '%'");
-                cmd.Parameters.AddWithValue("@filter_job_name", EscapeLike(filter.JobName));
+                cmd.Parameters.Add(CreateParameter("@filter_job_name", EscapeLike(filter.JobName)));
             }
         }
 
         if (filter.ParentRunId is { })
         {
             parts.Add("parent_run_id = @filter_parent");
-            cmd.Parameters.AddWithValue("@filter_parent", filter.ParentRunId);
+            cmd.Parameters.Add(CreateParameter("@filter_parent", filter.ParentRunId));
         }
 
         if (filter.RootRunId is { })
         {
             parts.Add("root_run_id = @filter_root");
-            cmd.Parameters.AddWithValue("@filter_root", filter.RootRunId);
+            cmd.Parameters.Add(CreateParameter("@filter_root", filter.RootRunId));
         }
 
         if (filter.NodeName is { })
         {
             parts.Add("node_name = @filter_node");
-            cmd.Parameters.AddWithValue("@filter_node", filter.NodeName);
+            cmd.Parameters.Add(CreateParameter("@filter_node", filter.NodeName));
         }
 
         if (filter.CreatedAfter is { })
         {
             parts.Add("created_at > @filter_created_after");
-            cmd.Parameters.AddWithValue("@filter_created_after", filter.CreatedAfter.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_created_after", filter.CreatedAfter.Value));
         }
 
         if (filter.CreatedBefore is { })
         {
             parts.Add("created_at < @filter_created_before");
-            cmd.Parameters.AddWithValue("@filter_created_before", filter.CreatedBefore.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_created_before", filter.CreatedBefore.Value));
         }
 
         if (filter.CompletedAfter is { })
         {
             parts.Add("completed_at >= @filter_completed_after");
-            cmd.Parameters.AddWithValue("@filter_completed_after", filter.CompletedAfter.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_completed_after", filter.CompletedAfter.Value));
         }
 
         if (filter.LastHeartbeatBefore is { })
         {
             parts.Add("last_heartbeat_at < @filter_hb_before");
-            cmd.Parameters.AddWithValue("@filter_hb_before", filter.LastHeartbeatBefore.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_hb_before", filter.LastHeartbeatBefore.Value));
         }
 
         if (filter.IsBatchCoordinator is { })
@@ -1709,36 +1710,36 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     private static void AddRunParams(SqlCommand cmd, string prefix, JobRun run)
     {
-        cmd.Parameters.AddWithValue($"{prefix}id", run.Id);
-        cmd.Parameters.AddWithValue($"{prefix}job_name", run.JobName);
-        cmd.Parameters.AddWithValue($"{prefix}status", (int)run.Status);
-        cmd.Parameters.AddWithValue($"{prefix}arguments", (object?)run.Arguments ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}result", (object?)run.Result ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}error", (object?)run.Error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}progress", run.Progress);
-        cmd.Parameters.AddWithValue($"{prefix}created_at", run.CreatedAt);
-        cmd.Parameters.AddWithValue($"{prefix}started_at", run.StartedAt.HasValue ? run.StartedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}completed_at",
-            run.CompletedAt.HasValue ? run.CompletedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}cancelled_at",
-            run.CancelledAt.HasValue ? run.CancelledAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}node_name", (object?)run.NodeName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}attempt", run.Attempt);
-        cmd.Parameters.AddWithValue($"{prefix}trace_id", (object?)run.TraceId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}span_id", (object?)run.SpanId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}parent_run_id", (object?)run.ParentRunId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}root_run_id", (object?)run.RootRunId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}rerun_of_run_id", (object?)run.RerunOfRunId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}not_before", run.NotBefore);
-        cmd.Parameters.AddWithValue($"{prefix}not_after", run.NotAfter.HasValue ? run.NotAfter.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}priority", run.Priority);
-        cmd.Parameters.AddWithValue($"{prefix}deduplication_id", (object?)run.DeduplicationId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}last_heartbeat_at",
-            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}batch_total",
-            run.BatchTotal.HasValue ? run.BatchTotal.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}batch_completed", run.BatchCompleted ?? 0);
-        cmd.Parameters.AddWithValue($"{prefix}batch_failed", run.BatchFailed ?? 0);
+        cmd.Parameters.Add(CreateParameter($"{prefix}id", run.Id));
+        cmd.Parameters.Add(CreateParameter($"{prefix}job_name", run.JobName));
+        cmd.Parameters.Add(CreateParameter($"{prefix}status", (int)run.Status));
+        cmd.Parameters.Add(CreateParameter($"{prefix}arguments", (object?)run.Arguments ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}result", (object?)run.Result ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}error", (object?)run.Error ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}progress", run.Progress));
+        cmd.Parameters.Add(CreateParameter($"{prefix}created_at", run.CreatedAt));
+        cmd.Parameters.Add(CreateParameter($"{prefix}started_at", run.StartedAt.HasValue ? run.StartedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}completed_at",
+            run.CompletedAt.HasValue ? run.CompletedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}cancelled_at",
+            run.CancelledAt.HasValue ? run.CancelledAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}node_name", (object?)run.NodeName ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}attempt", run.Attempt));
+        cmd.Parameters.Add(CreateParameter($"{prefix}trace_id", (object?)run.TraceId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}span_id", (object?)run.SpanId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}parent_run_id", (object?)run.ParentRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}root_run_id", (object?)run.RootRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}rerun_of_run_id", (object?)run.RerunOfRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}not_before", run.NotBefore));
+        cmd.Parameters.Add(CreateParameter($"{prefix}not_after", run.NotAfter.HasValue ? run.NotAfter.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}priority", run.Priority));
+        cmd.Parameters.Add(CreateParameter($"{prefix}deduplication_id", (object?)run.DeduplicationId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}last_heartbeat_at",
+            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}batch_total",
+            run.BatchTotal.HasValue ? run.BatchTotal.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}batch_completed", run.BatchCompleted ?? 0));
+        cmd.Parameters.Add(CreateParameter($"{prefix}batch_failed", run.BatchFailed ?? 0));
     }
 
     private static JobRun ReadRun(SqlDataReader reader)
@@ -2018,7 +2019,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -2034,7 +2035,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT * FROM dbo.surefire_queues WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -2076,7 +2077,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               END
                           WHERE name = @name
                           """;
-        cmd.Parameters.AddWithValue("@name", rateLimitName);
+        cmd.Parameters.Add(CreateParameter("@name", rateLimitName));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -2104,6 +2105,98 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         };
     }
 
+    private static SqlParameter CreateParameter(string name, object? value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        var parameter = new SqlParameter { ParameterName = name };
+
+        if (value is null || value == DBNull.Value)
+        {
+            parameter.SqlDbType = SqlDbType.NVarChar;
+            parameter.Size = -1;
+            parameter.Value = DBNull.Value;
+            return parameter;
+        }
+
+        switch (value)
+        {
+            case string text:
+                parameter.SqlDbType = SqlDbType.NVarChar;
+                parameter.Size = -1;
+                parameter.Value = text;
+                return parameter;
+
+            case bool bit:
+                parameter.SqlDbType = SqlDbType.Bit;
+                parameter.Value = bit;
+                return parameter;
+
+            case byte tinyInt:
+                parameter.SqlDbType = SqlDbType.TinyInt;
+                parameter.Value = tinyInt;
+                return parameter;
+
+            case short smallInt:
+                parameter.SqlDbType = SqlDbType.SmallInt;
+                parameter.Value = smallInt;
+                return parameter;
+
+            case int int32:
+                parameter.SqlDbType = SqlDbType.Int;
+                parameter.Value = int32;
+                return parameter;
+
+            case long int64:
+                parameter.SqlDbType = SqlDbType.BigInt;
+                parameter.Value = int64;
+                return parameter;
+
+            case float real:
+                parameter.SqlDbType = SqlDbType.Real;
+                parameter.Value = real;
+                return parameter;
+
+            case double dbl:
+                parameter.SqlDbType = SqlDbType.Float;
+                parameter.Value = dbl;
+                return parameter;
+
+            case decimal number:
+                parameter.SqlDbType = SqlDbType.Decimal;
+                parameter.Value = number;
+                return parameter;
+
+            case DateTimeOffset dto:
+                parameter.SqlDbType = SqlDbType.DateTimeOffset;
+                parameter.Value = dto;
+                return parameter;
+
+            case DateTime dt:
+                parameter.SqlDbType = SqlDbType.DateTime2;
+                parameter.Value = dt;
+                return parameter;
+
+            case Guid guid:
+                parameter.SqlDbType = SqlDbType.UniqueIdentifier;
+                parameter.Value = guid;
+                return parameter;
+
+            case byte[] bytes:
+                parameter.SqlDbType = SqlDbType.VarBinary;
+                parameter.Size = -1;
+                parameter.Value = bytes;
+                return parameter;
+
+            default:
+                parameter.SqlDbType = SqlDbType.Variant;
+                parameter.Value = value;
+                return parameter;
+        }
+    }
+
     private static string EscapeLike(string input) =>
         input.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 }
+
+
