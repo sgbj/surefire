@@ -697,6 +697,36 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task GetRuns_FilterByStatusAndCreatedRange()
+    {
+        var jobName = $"StatusCreatedRange_{Guid.CreateVersion7():N}";
+
+        var early = CreateRun(jobName, JobStatus.Completed);
+        early.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30);
+        early.CompletedAt = early.CreatedAt;
+
+        var middle = CreateRun(jobName, JobStatus.Completed);
+        middle.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-15);
+        middle.CompletedAt = middle.CreatedAt;
+
+        var late = CreateRun(jobName, JobStatus.Completed);
+        late.CreatedAt = DateTimeOffset.UtcNow;
+        late.CompletedAt = late.CreatedAt;
+
+        await Store.CreateRunsAsync([early, middle, late]);
+
+        var results = await Store.GetRunsAsync(new()
+        {
+            Status = JobStatus.Completed,
+            CreatedAfter = DateTimeOffset.UtcNow.AddMinutes(-20),
+            CreatedBefore = DateTimeOffset.UtcNow.AddMinutes(-10)
+        });
+
+        Assert.Single(results.Items);
+        Assert.Equal(middle.Id, results.Items[0].Id);
+    }
+
+    [Fact]
     public async Task GetRuns_OrderBy_StartedAt()
     {
         var jobName = $"OrderStarted_{Guid.CreateVersion7():N}";
@@ -752,6 +782,55 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.Equal(run3.Id, results.Items[0].Id);
         Assert.Equal(run2.Id, results.Items[1].Id);
         Assert.Equal(run1.Id, results.Items[2].Id);
+    }
+
+    [Fact]
+    public async Task GetRuns_FilteredResort_LargeSkipTake_ReturnsExactPageAndTotal()
+    {
+        var jobName = $"FilteredResortLarge_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName));
+
+        var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));
+        var completedRuns = new List<JobRun>(300);
+
+        for (var i = 0; i < 300; i++)
+        {
+            var run = CreateRun(jobName, JobStatus.Completed);
+            var timestamp = baseTime.AddSeconds(i);
+            run.CreatedAt = timestamp;
+            run.NotBefore = timestamp;
+            run.StartedAt = timestamp;
+            run.CompletedAt = timestamp;
+            run.NodeName = "node-1";
+            run.Attempt = 1;
+            run.Progress = 1;
+            completedRuns.Add(run);
+        }
+
+        await Store.CreateRunsAsync(completedRuns);
+
+        const int skip = 150;
+        const int take = 30;
+
+        var page = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            ExactJobName = true,
+            Status = JobStatus.Completed,
+            OrderBy = RunOrderBy.CompletedAt
+        }, skip, take);
+
+        var expectedIds = completedRuns
+            .OrderByDescending(r => r.CompletedAt)
+            .ThenByDescending(r => r.Id)
+            .Skip(skip)
+            .Take(take)
+            .Select(r => r.Id)
+            .ToArray();
+
+        Assert.Equal(300, page.TotalCount);
+        Assert.Equal(take, page.Items.Count);
+        Assert.Equal(expectedIds, page.Items.Select(r => r.Id).ToArray());
     }
 
     [Fact]

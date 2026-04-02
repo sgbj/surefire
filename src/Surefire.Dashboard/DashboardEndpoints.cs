@@ -413,8 +413,12 @@ public static class DashboardEndpoints
                         await response.Body.FlushAsync(ct);
                     }
 
-                    // Check if run completed
-                    if (completedTcs.Task.IsCompleted)
+                    // Check terminal state from either notification or direct store state.
+                    // This protects stream completion when a completion notification is missed.
+                    var latestRun = await store.GetRunAsync(id, ct);
+                    var isTerminal = latestRun?.Status.IsTerminal ?? false;
+
+                    if (completedTcs.Task.IsCompleted || isTerminal)
                     {
                         lastSeenId = await DrainTerminalEventsUntilStableAsync(id, lastSeenId, response, store,
                             surefireOptions.PollingInterval, ct);
@@ -490,15 +494,13 @@ public static class DashboardEndpoints
             });
 
         api.MapPatch("/queues/{name}",
-            async (string name, UpdateQueueRequest request, IJobStore store, CancellationToken ct) =>
+            async Task<Results<NoContent, ProblemHttpResult>> (string name, UpdateQueueRequest request,
+                IJobStore store, CancellationToken ct) =>
             {
                 var queue = (await store.GetQueuesAsync(ct)).FirstOrDefault(q => q.Name == name);
-
-                // Implicit queues (e.g. "default") aren't in the store — materialize them so we can update properties.
                 if (queue is null)
                 {
-                    queue = new() { Name = name };
-                    await store.UpsertQueueAsync(queue, ct);
+                    return NotFoundProblem($"Queue '{name}' was not found.");
                 }
 
                 if (request.IsPaused is { })
@@ -526,7 +528,7 @@ public static class DashboardEndpoints
         api.MapGet("/nodes/{name}", async Task<Results<Ok<NodeResponse>, ProblemHttpResult>> (string name,
             IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
         {
-            var node = (await store.GetNodesAsync(ct)).FirstOrDefault(n => n.Name == name);
+            var node = await store.GetNodeAsync(name, ct);
             if (node is null)
             {
                 return NotFoundProblem($"Node '{name}' was not found.");

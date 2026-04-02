@@ -13,7 +13,7 @@ internal sealed partial class SurefireSchedulerService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(options.PollingInterval);
+        using var timer = new PeriodicTimer(options.PollingInterval, timeProvider);
 
         try
         {

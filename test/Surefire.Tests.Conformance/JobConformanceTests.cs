@@ -70,6 +70,19 @@ public abstract class JobConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task UpsertJob_TimeoutTicks_RoundTripsExactly()
+    {
+        var job = CreateJob($"TimeoutTicks_{Guid.CreateVersion7():N}");
+        job.Timeout = TimeSpan.FromTicks(12_345_679);
+
+        await Store.UpsertJobAsync(job);
+
+        var stored = await Store.GetJobAsync(job.Name);
+        Assert.NotNull(stored);
+        Assert.Equal(job.Timeout, stored.Timeout);
+    }
+
+    [Fact]
     public async Task UpsertJob_ClearsFireAllLimit_WhenSetToNull()
     {
         var name = $"ClearFireAllLimit_{Guid.CreateVersion7():N}";

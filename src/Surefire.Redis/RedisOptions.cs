@@ -13,6 +13,7 @@ internal sealed class RedisOptions : IAsyncDisposable
     private readonly bool _ownsConnection;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private IConnectionMultiplexer? _connection;
+    private int _disposeState;
 
     internal RedisOptions(string connectionString)
     {
@@ -28,6 +29,11 @@ internal sealed class RedisOptions : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposeState, 1) == 1)
+        {
+            return;
+        }
+
         if (_ownsConnection && Interlocked.Exchange(ref _connection, null) is { } conn)
         {
             await conn.CloseAsync();
@@ -39,6 +45,8 @@ internal sealed class RedisOptions : IAsyncDisposable
 
     internal async Task<IConnectionMultiplexer> GetConnectionAsync()
     {
+        ThrowIfDisposed();
+
         if (_connection is { })
         {
             return _connection;
@@ -47,11 +55,23 @@ internal sealed class RedisOptions : IAsyncDisposable
         await _semaphore.WaitAsync();
         try
         {
+            ThrowIfDisposed();
             return _connection ??= await ConnectionMultiplexer.ConnectAsync(_connectionString!);
         }
         finally
         {
-            _semaphore.Release();
+            if (Volatile.Read(ref _disposeState) == 0)
+            {
+                _semaphore.Release();
+            }
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposeState) == 1)
+        {
+            throw new ObjectDisposedException(nameof(RedisOptions));
         }
     }
 }

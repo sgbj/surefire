@@ -205,6 +205,43 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         Assert.Equal(2, settled.Items.Count);
     }
 
+    [Fact]
+    public async Task JobTimeout_TransitionsRunToCancelled()
+    {
+        var jobName = $"TimeoutCancel_{Guid.CreateVersion7():N}";
+
+        await using var harness = await CreateHarnessAsync(options =>
+            {
+                options.AutoMigrate = false;
+                options.PollingInterval = TimeSpan.FromMilliseconds(20);
+                options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+                options.InactiveThreshold = TimeSpan.FromMilliseconds(250);
+                options.RetentionPeriod = null;
+            },
+            (host, _) =>
+            {
+                host.AddJob(jobName, async (CancellationToken ct) =>
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                    return 1;
+                }).WithTimeout(TimeSpan.FromMilliseconds(120));
+            });
+
+        await harness.StartAsync();
+
+        var runId = await harness.Client.TriggerAsync(jobName);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var result = await harness.Client.WaitAsync(runId, cts.Token);
+
+        Assert.True(result.IsCancelled);
+
+        var run = await harness.Store.GetRunAsync(runId, cts.Token);
+        Assert.NotNull(run);
+        Assert.Equal(JobStatus.Cancelled, run.Status);
+        Assert.NotNull(run.CancelledAt);
+        Assert.NotNull(run.CompletedAt);
+    }
+
     private async Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
         Action<IHost, Channel<bool>> registerJobs)
     {

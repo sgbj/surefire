@@ -9,6 +9,15 @@ namespace Surefire.SqlServer;
 /// </summary>
 internal sealed class SqlServerJobStore(string connectionString, TimeProvider timeProvider) : IJobStore
 {
+    public async Task PingAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        _ = await cmd.ExecuteScalarAsync(cancellationToken);
+    }
+
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
@@ -926,6 +935,23 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return results;
     }
 
+    public async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT TOP (1) * FROM dbo.surefire_nodes WHERE name = @name";
+        cmd.Parameters.AddWithValue("@name", name);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return ReadNode(reader);
+        }
+
+        return null;
+    }
+
     public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
@@ -1015,23 +1041,39 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     }
 
     public async Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
+        => (await CancelExpiredRunsWithIdsAsync(cancellationToken)).Count;
+
+    public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+        CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL);
+
                           UPDATE dbo.surefire_runs SET
                               status = 4,
                               cancelled_at = @now,
                               completed_at = @now
+                          OUTPUT inserted.id INTO @cancelled(id)
                           WHERE status IN (0, 3)
                               AND batch_total IS NULL
                               AND not_after IS NOT NULL
-                              AND not_after < @now
+                              AND not_after < @now;
+
+                          SELECT id FROM @cancelled;
                           """;
 
-        return await cmd.ExecuteNonQueryAsync(cancellationToken);
+        var cancelledIds = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            cancelledIds.Add(reader.GetString(0));
+        }
+
+        return cancelledIds;
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1133,8 +1175,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                    ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS cancelled,
                                    ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS dead_letter
                                FROM dbo.surefire_runs
+                               WHERE created_at >= @since AND created_at < @now
                                """;
         statsCmd.Parameters.AddWithValue("@now", now);
+        statsCmd.Parameters.AddWithValue("@since", sinceTime);
 
         int totalJobs = 0, totalRuns = 0, activeRuns = 0, nodeCount = 0;
         var runsByStatus = new Dictionary<string, int>();

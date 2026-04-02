@@ -1,8 +1,24 @@
 const BASE = `${new URL(document.baseURI).pathname.replace(/\/$/, "")}/api`;
 
+interface ProblemDetailsLike {
+  title?: string;
+  detail?: string;
+}
+
 async function fetchApi<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
   if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/problem+json")) {
+      const problem = (await res
+        .json()
+        .catch(() => null)) as ProblemDetailsLike | null;
+      const title = problem?.title?.trim();
+      const detail = problem?.detail?.trim();
+      const message = [title, detail].filter(Boolean).join(": ");
+      throw new Error(message.length > 0 ? message : `API error ${res.status}`);
+    }
+
     const body = await res.text().catch(() => "");
     throw new Error(`API error ${res.status}: ${body}`);
   }
@@ -35,8 +51,6 @@ export interface DashboardStats {
 }
 
 function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
-  const successRate =
-    raw.successRate <= 1 ? raw.successRate * 100 : raw.successRate;
   const timeline = Array.isArray(raw.timeline)
     ? raw.timeline.map((bucket) => ({
         ...bucket,
@@ -51,7 +65,7 @@ function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
     : [];
   return {
     ...raw,
-    successRate,
+    successRate: raw.successRate ?? 0,
     recentRuns: Array.isArray(raw.recentRuns) ? raw.recentRuns : [],
     runsByStatus: raw.runsByStatus ?? {},
     timeline,
@@ -170,10 +184,12 @@ export interface JobRun {
   traceId?: string;
   spanId?: string;
   parentRunId?: string;
+  rootRunId?: string;
   rerunOfRunId?: string;
   notBefore?: string;
   notAfter?: string;
   priority: number;
+  queuePriority?: number;
   deduplicationId?: string;
   lastHeartbeatAt?: string;
   batchTotal?: number;

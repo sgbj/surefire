@@ -23,6 +23,45 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task CancelExpiredRunsWithIds_ReturnsCancelledRunIds()
+    {
+        var jobName = $"ExpireIds_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName));
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var expiredPending = CreateRun(jobName);
+        expiredPending.NotAfter = now.AddMinutes(-1);
+
+        var expiredRetrying = CreateRun(jobName, JobStatus.Retrying);
+        expiredRetrying.NotAfter = now.AddMinutes(-1);
+        expiredRetrying.NodeName = "node-1";
+        expiredRetrying.Attempt = 1;
+        expiredRetrying.StartedAt = now;
+        expiredRetrying.LastHeartbeatAt = now;
+        expiredRetrying.Error = "test failure";
+
+        var notExpired = CreateRun(jobName);
+        notExpired.NotAfter = now.AddMinutes(10);
+
+        await Store.CreateRunsAsync([expiredPending, expiredRetrying, notExpired]);
+
+        var cancelledIds = await Store.CancelExpiredRunsWithIdsAsync();
+
+        Assert.Equal(2, cancelledIds.Count);
+        Assert.Contains(expiredPending.Id, cancelledIds);
+        Assert.Contains(expiredRetrying.Id, cancelledIds);
+        Assert.DoesNotContain(notExpired.Id, cancelledIds);
+
+        var loadedPending = await Store.GetRunAsync(expiredPending.Id);
+        var loadedRetrying = await Store.GetRunAsync(expiredRetrying.Id);
+        var loadedNotExpired = await Store.GetRunAsync(notExpired.Id);
+
+        Assert.Equal(JobStatus.Cancelled, loadedPending!.Status);
+        Assert.Equal(JobStatus.Cancelled, loadedRetrying!.Status);
+        Assert.Equal(JobStatus.Pending, loadedNotExpired!.Status);
+    }
+
+    [Fact]
     public async Task CancelExpiredRuns_SkipsTerminal()
     {
         var jobName = $"TerminalJob_{Guid.CreateVersion7():N}";

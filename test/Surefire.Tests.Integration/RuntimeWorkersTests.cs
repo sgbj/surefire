@@ -264,7 +264,7 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("Slow", async (CancellationToken ct) =>
         {
-            await Task.Delay(300, ct);
+            await Task.Delay(800, ct);
             return 1;
         });
 
@@ -273,15 +273,20 @@ public sealed class RuntimeWorkersTests
         var runId = await harness.Client.TriggerAsync("Slow");
         var first = await WaitForStatusAsync(harness.Store, runId, JobStatus.Running);
         var hb1 = first.LastHeartbeatAt;
-
-        await Task.Delay(160);
-
-        var running = await harness.Store.GetRunAsync(runId);
-        Assert.NotNull(running);
-        Assert.Equal(JobStatus.Running, running.Status);
         Assert.NotNull(hb1);
-        Assert.NotNull(running.LastHeartbeatAt);
-        Assert.True(running.LastHeartbeatAt >= hb1);
+
+        var updated = await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(runId),
+            run => run.Status == JobStatus.Running
+                   && run.LastHeartbeatAt is { } latestHeartbeat
+                   && latestHeartbeat > hb1.Value,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(20),
+            "Expected heartbeat to advance while run is active.");
+
+        Assert.Equal(JobStatus.Running, updated.Status);
+        Assert.NotNull(updated.LastHeartbeatAt);
+        Assert.True(updated.LastHeartbeatAt > hb1);
     }
 
     [Fact]
@@ -813,7 +818,12 @@ public sealed class RuntimeWorkersTests
             options.RetentionPeriod = null;
         });
 
-        harness.Host.AddJob("CrashRecovery", () => 7).WithRetry(1);
+        harness.Host.AddJob("CrashRecovery", () => 7).WithRetry(retry =>
+        {
+            retry.MaxRetries = 1;
+            retry.InitialDelay = TimeSpan.Zero;
+            retry.Jitter = false;
+        });
 
         await harness.StartAsync();
 
@@ -961,6 +971,7 @@ public sealed class RuntimeWorkersTests
         Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
         Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
         Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+        Assert.Null(ReadOptionalString(envelope, "StackTrace", "stackTrace"));
 
         static int ReadInt(JsonElement element, string first, string second)
         {
@@ -980,6 +991,21 @@ public sealed class RuntimeWorkersTests
             }
 
             return element.GetProperty(second).GetString()!;
+        }
+
+        static string? ReadOptionalString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var firstValue))
+            {
+                return firstValue.ValueKind == JsonValueKind.Null ? null : firstValue.GetString();
+            }
+
+            if (element.TryGetProperty(second, out var secondValue))
+            {
+                return secondValue.ValueKind == JsonValueKind.Null ? null : secondValue.GetString();
+            }
+
+            return null;
         }
     }
 
@@ -1033,6 +1059,7 @@ public sealed class RuntimeWorkersTests
         Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
         Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
         Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+        Assert.Null(ReadOptionalString(envelope, "StackTrace", "stackTrace"));
 
         static int ReadInt(JsonElement element, string first, string second)
         {
@@ -1053,6 +1080,109 @@ public sealed class RuntimeWorkersTests
 
             return element.GetProperty(second).GetString()!;
         }
+
+        static string? ReadOptionalString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var firstValue))
+            {
+                return firstValue.ValueKind == JsonValueKind.Null ? null : firstValue.GetString();
+            }
+
+            if (element.TryGetProperty(second, out var secondValue))
+            {
+                return secondValue.ValueKind == JsonValueKind.Null ? null : secondValue.GetString();
+            }
+
+            return null;
+        }
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_Recovery_UsesConfiguredRetryBackoff()
+    {
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+            options.AddQueue("paused", queue => queue.IsPaused = true);
+        });
+
+        harness.Host.AddJob("CrashRecoveryBackoff", () => 7)
+            .WithQueue("paused")
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 2;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(500);
+                policy.MaxDelay = TimeSpan.FromMilliseconds(500);
+                policy.Jitter = false;
+            });
+
+        await harness.StartAsync();
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var stale = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryBackoff",
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([stale]);
+
+        var recovered = await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(stale.Id),
+            run => run.Status == JobStatus.Pending,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale run recovery to Pending state.");
+
+        var remainingDelay = recovered.NotBefore - DateTimeOffset.UtcNow;
+        Assert.True(
+            remainingDelay > TimeSpan.FromMilliseconds(250),
+            $"Expected stale recovery to preserve retry backoff. Remaining delay was {remainingDelay}.");
+    }
+
+    [Fact]
+    public async Task BatchCoordinator_DeadLetter_AppendsAttemptFailureEvent_FromExecutorPath()
+    {
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("BatchFailure", (int value) =>
+        {
+            throw new InvalidOperationException($"child failed: {value}");
+        }).WithRetry(0);
+
+        await harness.StartAsync();
+
+        var coordinatorId = await harness.Client.TriggerAllAsync("BatchFailure", [new { value = 1 }]);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var coordinatorResult = await harness.Client.WaitAsync(coordinatorId, cts.Token);
+        Assert.True(coordinatorResult.IsFailure);
+        Assert.Equal(JobStatus.DeadLetter, coordinatorResult.Status);
+
+        var failureEvents = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetEventsAsync(coordinatorId, 0, [RunEventType.AttemptFailure]),
+            events => events.Count > 0,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for coordinator attempt-failure event.");
+
+        Assert.Contains(failureEvents, e => e.Payload.Contains("BatchChildFailures", StringComparison.Ordinal));
     }
 
     [Fact]

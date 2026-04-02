@@ -80,8 +80,22 @@ public sealed class JobClientContractTests
         var jobName = "CancelOwned_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName });
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(120));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.RunAsync(jobName, cts.Token));
+        using var cts = new CancellationTokenSource();
+        var runTask = client.RunAsync(jobName, cts.Token);
+
+        _ = await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var runs = await store.GetRunsAsync(new RunFilter { JobName = jobName, ExactJobName = true }, 0, 5);
+                return runs.Items.SingleOrDefault();
+            },
+            run => run is not null,
+            TimeSpan.FromSeconds(3),
+            TimeSpan.FromMilliseconds(20),
+            "Expected RunAsync to create an owned run before cancellation.");
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runTask);
 
         var cancelledRun = await TestWait.PollUntilAsync(
             async _ =>
@@ -187,6 +201,65 @@ public sealed class JobClientContractTests
         var observations = await observedTask;
         Assert.Contains(observations, o => o.Event?.EventType == RunEventType.Log);
         Assert.Equal(JobStatus.Completed, observations[^1].Run.Status);
+    }
+
+    [Fact]
+    public async Task ObserveAsync_MissingRun_ThrowsRunNotFoundException()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(
+            store,
+            notifications,
+            TimeProvider.System,
+            new SurefireOptions { PollingInterval = TimeSpan.FromMilliseconds(20) },
+            logger);
+
+        await Assert.ThrowsAsync<RunNotFoundException>(async () =>
+        {
+            await foreach (var _ in client.ObserveAsync(Guid.CreateVersion7().ToString("N")))
+            {
+            }
+        });
+    }
+
+    [Fact]
+    public async Task CancelAsync_TerminalRun_IsIdempotentNoOp()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(
+            store,
+            notifications,
+            TimeProvider.System,
+            new SurefireOptions { PollingInterval = TimeSpan.FromMilliseconds(20) },
+            logger);
+
+        var jobName = "CancelNoOp_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+        var runId = await client.TriggerAsync(jobName);
+        var claimed = await WaitForClaimAsync(store, jobName);
+        var completed = RunStatusTransition.RunningToCompleted(
+            runId,
+            claimed.Attempt,
+            DateTimeOffset.UtcNow,
+            claimed.NotBefore,
+            claimed.NodeName,
+            1,
+            "{}",
+            null,
+            claimed.StartedAt,
+            claimed.LastHeartbeatAt);
+        Assert.True(await store.TryTransitionRunAsync(completed));
+
+        await client.CancelAsync(runId);
+
+        var run = await store.GetRunAsync(runId);
+        Assert.NotNull(run);
+        Assert.Equal(JobStatus.Completed, run.Status);
     }
 
     [Fact]
@@ -767,6 +840,157 @@ public sealed class JobClientContractTests
         Assert.Equal(21, resumed[0].Item);
         Assert.True(resumed[0].Cursor.ChildSinceEventIds.ContainsKey(childA.Id));
         Assert.True(resumed[0].Cursor.ChildSinceEventIds.ContainsKey(childB.Id));
+    }
+
+    [Fact]
+    public async Task StreamEachAsync_TerminalCoordinator_GracePoll_CapturesLateOutput()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(
+            store,
+            notifications,
+            TimeProvider.System,
+            new SurefireOptions { PollingInterval = TimeSpan.FromMilliseconds(50) },
+            logger);
+
+        var jobName = "BatchLateOutput_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+        var now = DateTimeOffset.UtcNow;
+        var batchId = Guid.CreateVersion7().ToString("N");
+        var childId = Guid.CreateVersion7().ToString("N");
+
+        await store.CreateRunsAsync([
+            new JobRun
+            {
+                Id = batchId,
+                JobName = jobName,
+                Status = JobStatus.Completed,
+                CreatedAt = now,
+                NotBefore = now,
+                StartedAt = now,
+                CompletedAt = now,
+                Attempt = 0,
+                Progress = 1,
+                BatchTotal = 1,
+                BatchCompleted = 1,
+                BatchFailed = 0
+            },
+            new JobRun
+            {
+                Id = childId,
+                ParentRunId = batchId,
+                RootRunId = batchId,
+                JobName = jobName,
+                Status = JobStatus.Completed,
+                CreatedAt = now,
+                NotBefore = now,
+                StartedAt = now,
+                CompletedAt = now,
+                Attempt = 1,
+                Progress = 1,
+                Result = "42"
+            }
+        ]);
+
+        var streamTask = Task.Run(async () =>
+        {
+            var items = new List<BatchStreamItem<int>>();
+            await foreach (var item in client.StreamEachAsync<int>(batchId))
+            {
+                items.Add(item);
+            }
+
+            return items;
+        });
+
+        await Task.Delay(20);
+
+        await store.AppendEventsAsync([
+            new RunEvent
+            {
+                RunId = childId,
+                EventType = RunEventType.Output,
+                Payload = JsonSerializer.Serialize(42),
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = 1
+            }
+        ]);
+
+        var streamed = await streamTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Single(streamed);
+        Assert.Equal(childId, streamed[0].RunId);
+        Assert.Equal(42, streamed[0].Item);
+    }
+
+    [Fact]
+    public async Task GetRunsAsync_UsesStableUpperBound_ExcludesRunsCreatedAfterEnumerationStarts()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(
+            store,
+            notifications,
+            TimeProvider.System,
+            new SurefireOptions { PollingInterval = TimeSpan.FromMilliseconds(20) },
+            logger);
+
+        var jobName = "StableGetRuns_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+        var baseline = DateTimeOffset.UtcNow.AddSeconds(-2);
+        var initialRuns = Enumerable.Range(0, 3)
+            .Select(i => new JobRun
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = jobName,
+                Status = JobStatus.Pending,
+                CreatedAt = baseline.AddMilliseconds(i),
+                NotBefore = baseline.AddMilliseconds(i),
+                Progress = 0
+            })
+            .ToList();
+
+        await store.CreateRunsAsync(initialRuns);
+
+        string? lateRunId = null;
+        var observed = new List<string>();
+
+        await foreach (var run in client.GetRunsAsync(new RunFilter
+                       {
+                           JobName = jobName,
+                           ExactJobName = true
+                       }))
+        {
+            observed.Add(run.Id);
+
+            if (observed.Count == 1)
+            {
+                var lateRun = new JobRun
+                {
+                    Id = Guid.CreateVersion7().ToString("N"),
+                    JobName = jobName,
+                    Status = JobStatus.Pending,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    NotBefore = DateTimeOffset.UtcNow,
+                    Progress = 0
+                };
+
+                lateRunId = lateRun.Id;
+                await store.CreateRunsAsync([lateRun]);
+            }
+        }
+
+        Assert.NotNull(lateRunId);
+        Assert.DoesNotContain(lateRunId, observed);
+
+        foreach (var run in initialRuns)
+        {
+            Assert.Contains(run.Id, observed);
+        }
     }
 
     [Fact]

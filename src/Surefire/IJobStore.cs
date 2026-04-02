@@ -14,6 +14,13 @@ public interface IJobStore
     Task MigrateAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Performs a lightweight connectivity probe against the underlying store.
+    ///     Implementations should avoid heavyweight scans.
+    /// </summary>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>
     ///     Inserts or updates a job definition. If a job with the same name exists, all mutable
     ///     fields are overwritten except <c>IsEnabled</c> and <c>LastCronFireAt</c>, which are
     ///     preserved across upserts.
@@ -232,6 +239,19 @@ public interface IJobStore
     Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Returns a specific node by name, or null when not found.
+    /// </summary>
+    /// <param name="name">The node name.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching node record, or null.</returns>
+    async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        var nodes = await GetNodesAsync(cancellationToken);
+        return nodes.FirstOrDefault(node => string.Equals(node.Name, name, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     ///     Inserts or updates a queue definition. If a queue with the same name exists, all mutable
     ///     fields are overwritten except <c>IsPaused</c>, which is preserved across upserts.
     /// </summary>
@@ -271,6 +291,19 @@ public interface IJobStore
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The number of runs that were cancelled.</returns>
     Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Cancels all pending or retrying runs whose <c>NotAfter</c> deadline has passed and
+    ///     returns the run IDs that were transitioned to <see cref="JobStatus.Cancelled"/>.
+    ///     Batch coordinator runs (those with a non-null <c>BatchTotal</c>) are excluded.
+    /// </summary>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The IDs of runs that were cancelled in this operation.</returns>
+    async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await CancelExpiredRunsAsync(cancellationToken);
+        return [];
+    }
 
     /// <summary>
     ///     Purges all data older than the specified threshold: terminal runs (by <c>CompletedAt</c>)

@@ -10,7 +10,7 @@ internal sealed class SurefireHealthCheck(IJobStore store, SurefireOptions optio
     {
         try
         {
-            _ = await store.GetDashboardStatsAsync(cancellationToken: cancellationToken);
+            await store.PingAsync(cancellationToken);
             var nodes = await store.GetNodesAsync(cancellationToken);
             var localNode =
                 nodes.FirstOrDefault(n => string.Equals(n.Name, options.NodeName, StringComparison.Ordinal));

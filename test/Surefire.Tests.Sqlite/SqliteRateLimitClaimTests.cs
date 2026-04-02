@@ -80,6 +80,81 @@ public sealed class SqliteRateLimitClaimTests
         }
     }
 
+    [Fact]
+    public async Task TryCreateRunAsync_ConcurrentMaxActive1_OnlyOneRunIsCreated()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"surefire_max_active_{Guid.NewGuid():N}.db");
+        var connectionString = $"Data Source={dbPath}";
+
+        try
+        {
+            var storeA = new SqliteJobStore(new() { ConnectionString = connectionString }, TimeProvider.System);
+            var storeB = new SqliteJobStore(new() { ConnectionString = connectionString }, TimeProvider.System);
+            await storeA.MigrateAsync();
+
+            var jobName = $"job-{Guid.CreateVersion7():N}";
+            await storeA.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+            var startGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var now = DateTimeOffset.UtcNow;
+
+            var runA = new JobRun
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = jobName,
+                Status = JobStatus.Pending,
+                CreatedAt = now,
+                NotBefore = now,
+                Attempt = 0,
+                Progress = 0
+            };
+
+            var runB = new JobRun
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = jobName,
+                Status = JobStatus.Pending,
+                CreatedAt = now,
+                NotBefore = now,
+                Attempt = 0,
+                Progress = 0
+            };
+
+            var createA = Task.Run(async () =>
+            {
+                await startGate.Task;
+                return await storeA.TryCreateRunAsync(runA, maxActiveForJob: 1);
+            });
+            var createB = Task.Run(async () =>
+            {
+                await startGate.Task;
+                return await storeB.TryCreateRunAsync(runB, maxActiveForJob: 1);
+            });
+
+            startGate.TrySetResult();
+
+            var results = await Task.WhenAll(createA, createB);
+            Assert.Equal(1, results.Count(created => created));
+
+            var runs = await storeA.GetRunsAsync(new()
+            {
+                JobName = jobName,
+                ExactJobName = true,
+                IsTerminal = false,
+                OrderBy = RunOrderBy.CreatedAt
+            }, 0, 10);
+            Assert.Single(runs.Items);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            SafeDelete(dbPath);
+            SafeDelete($"{dbPath}-wal");
+            SafeDelete($"{dbPath}-shm");
+            SafeDelete($"{dbPath}-journal");
+        }
+    }
+
     private static void SafeDelete(string path)
     {
         if (!File.Exists(path))

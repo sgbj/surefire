@@ -181,7 +181,7 @@ public sealed partial class JobClient(
             var run = await store.GetRunAsync(runId, cancellationToken);
             if (run is null)
             {
-                throw new InvalidOperationException($"Run '{runId}' was not found.");
+                throw new RunNotFoundException(runId);
             }
 
             var events = await store.GetEventsAsync(runId, sinceId, null, null, cancellationToken);
@@ -460,15 +460,10 @@ public sealed partial class JobClient(
         var sinceEventId = cursor.SinceEventId;
         var childSinceEventIds = new Dictionary<string, long>(cursor.ChildSinceEventIds, StringComparer.Ordinal);
 
-        while (true)
+        async Task<(bool EmittedAny, List<BatchStreamItem<T>> Items)> ReadBatchOutputEventsAsync()
         {
-            var coordinator = await store.GetRunAsync(batchId, cancellationToken);
-            if (coordinator is null)
-            {
-                throw new InvalidOperationException($"Batch run '{batchId}' was not found.");
-            }
-
             var emittedAny = false;
+            var items = new List<BatchStreamItem<T>>();
             while (true)
             {
                 var events = await store.GetBatchOutputEventsAsync(batchId, sinceEventId, 200, cancellationToken);
@@ -504,20 +499,57 @@ public sealed partial class JobClient(
                         continue;
                     }
 
-                    yield return new()
+                    items.Add(new()
                     {
                         RunId = @event.RunId,
                         Item = item!,
                         Cursor = CreateBatchCursorSnapshot(sinceEventId, childSinceEventIds)
-                    };
+                    });
                 }
+            }
+
+            return (emittedAny, items);
+        }
+
+        while (true)
+        {
+            var coordinator = await store.GetRunAsync(batchId, cancellationToken);
+            if (coordinator is null)
+            {
+                throw new InvalidOperationException($"Batch run '{batchId}' was not found.");
+            }
+
+            var (emittedAny, batchItems) = await ReadBatchOutputEventsAsync();
+            foreach (var item in batchItems)
+            {
+                yield return item;
             }
 
             if (coordinator.Status.IsTerminal)
             {
-                if (!coordinator.BatchTotal.HasValue || !emittedAny)
+                var (terminalDrainEmitted, terminalDrainItems) = await ReadBatchOutputEventsAsync();
+                foreach (var item in terminalDrainItems)
                 {
-                    yield break;
+                    yield return item;
+                }
+
+                if (!emittedAny && !terminalDrainEmitted)
+                {
+                    // Give one poll interval for any late output events committed right after terminal transition.
+                    await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+
+                    var (graceDrainEmitted, graceDrainItems) = await ReadBatchOutputEventsAsync();
+                    foreach (var item in graceDrainItems)
+                    {
+                        yield return item;
+                    }
+
+                    terminalDrainEmitted = graceDrainEmitted;
+
+                    if (!terminalDrainEmitted)
+                    {
+                        yield break;
+                    }
                 }
             }
 
@@ -611,7 +643,7 @@ public sealed partial class JobClient(
 
         if (run.Status.IsTerminal)
         {
-            throw new RunConflictException($"Run '{runId}' is already in a terminal state.");
+            return;
         }
 
         await CancelRunAndDescendantsAsync(runId, new HashSet<string>(StringComparer.Ordinal), cancellationToken);
@@ -718,20 +750,38 @@ public sealed partial class JobClient(
     public async IAsyncEnumerable<JobRun> GetRunsAsync(RunFilter filter,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        // Offset pagination is unstable on a moving dataset. Freeze the upper bound unless caller set one.
+        var stableFilter = filter.CreatedBefore is null
+            ? filter with { CreatedBefore = timeProvider.GetUtcNow() }
+            : filter;
+
         var skip = 0;
         const int pageSize = 200;
+        var seenRunIds = new HashSet<string>(StringComparer.Ordinal);
 
         while (true)
         {
-            var page = await store.GetRunsAsync(filter, skip, pageSize, cancellationToken);
+            var page = await store.GetRunsAsync(stableFilter, skip, pageSize, cancellationToken);
             if (page.Items.Count == 0)
             {
                 yield break;
             }
 
+            var yieldedInPage = 0;
             foreach (var run in page.Items)
             {
+                if (!seenRunIds.Add(run.Id))
+                {
+                    continue;
+                }
+
+                yieldedInPage++;
                 yield return run;
+            }
+
+            if (yieldedInPage == 0)
+            {
+                yield break;
             }
 
             skip += page.Items.Count;
@@ -1420,8 +1470,9 @@ public sealed partial class JobClient(
         {
             await CancelAsync(runId, CancellationToken.None);
         }
-        catch
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
+            Log.FailedBestEffortCancellation(logger, ex, runId);
         }
     }
 
@@ -1450,6 +1501,10 @@ public sealed partial class JobClient(
                 "Deserializer returned null for run '{RunId}', event '{EventId}' ({EventType}) during {Operation}.")]
         public static partial void DeserializationReturnedNull(ILogger logger, string runId, long eventId,
             RunEventType eventType, string operation);
+
+        [LoggerMessage(EventId = 1007, Level = LogLevel.Warning,
+            Message = "Best-effort cancellation failed for run '{RunId}'.")]
+        public static partial void FailedBestEffortCancellation(ILogger logger, Exception exception, string runId);
     }
 
     private sealed record PreparedArguments(

@@ -15,4 +15,15 @@ public sealed class RedisNotificationProviderTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             provider.PublishAsync(NotificationChannels.RunCreated, "run-1"));
     }
+
+    [Fact]
+    public async Task RedisOptions_DisposeAsync_IsIdempotent()
+    {
+        var options = new RedisOptions("localhost:1,abortConnect=false,connectTimeout=100");
+
+        await options.DisposeAsync();
+        await options.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await options.GetConnectionAsync());
+    }
 }

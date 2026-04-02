@@ -104,6 +104,17 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
+    public async Task PatchQueueEndpoint_UnknownQueue_ReturnsNotFound()
+    {
+        await using var app = await CreateAppAsync();
+        using var client = app.GetTestClient();
+
+        var response = await SendPatchAsync(client, "/surefire/api/queues/tests-missing-queue", new { isPaused = true });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task TriggerRunEndpoint_ReturnsRunId()
     {
         await using var app = await CreateAppAsync(a => a.AddJob("tests-trigger", () => "ok"));
@@ -177,7 +188,7 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
-    public async Task StatsEndpoint_ReturnsSuccessRateAsRatio()
+    public async Task StatsEndpoint_ReturnsSuccessRateAsPercent()
     {
         await using var app = await CreateAppAsync();
 
@@ -222,7 +233,7 @@ public sealed class DashboardEndpointsTests
         var stats = await client.GetFromJsonAsync<DashboardStatsResponse>("/surefire/api/stats");
 
         Assert.NotNull(stats);
-        Assert.Equal(0.5, stats.SuccessRate, 5);
+        Assert.Equal(50, stats.SuccessRate, 5);
     }
 
     [Fact]
@@ -237,7 +248,7 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
-    public async Task CancelRunEndpoint_TerminalRun_ReturnsConflict()
+    public async Task CancelRunEndpoint_TerminalRun_IsNoOp()
     {
         await using var app = await CreateAppAsync(a => a.AddJob("tests-cancel-terminal", () => "ok"));
         var api = app.Services.GetRequiredService<IJobClient>();
@@ -247,7 +258,7 @@ public sealed class DashboardEndpointsTests
         using var client = app.GetTestClient();
         var response = await client.PostAsync($"/surefire/api/runs/{runId}/cancel", null);
 
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
     }
 
     [Fact]
@@ -694,6 +705,56 @@ public sealed class DashboardEndpointsTests
         var body = await streamTask;
         Assert.Contains("data: 1", body);
         Assert.Contains("data: 2", body);
+        Assert.Contains("event: done", body);
+    }
+
+    [Fact]
+    public async Task StreamEndpoint_CompletesWhenRunBecomesTerminal_WithoutCompletionNotification()
+    {
+        await using var app = await CreateAppAsync();
+
+        var store = app.Services.GetRequiredService<IJobStore>();
+
+        var jobName = "tests-stream-terminal-without-completed-notification";
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+        var now = DateTimeOffset.UtcNow;
+        var run = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = jobName,
+            Status = JobStatus.Running,
+            CreatedAt = now,
+            NotBefore = now,
+            StartedAt = now,
+            LastHeartbeatAt = now,
+            NodeName = "node-1",
+            Attempt = 1,
+            Progress = 0.5
+        };
+
+        await store.CreateRunsAsync([run]);
+
+        using var client = app.GetTestClient();
+        var streamTask = client.GetStringAsync($"/surefire/api/runs/{run.Id}/stream");
+
+        await Task.Delay(40);
+
+        var completedTransition = RunStatusTransition.RunningToCompleted(
+            run.Id,
+            run.Attempt,
+            DateTimeOffset.UtcNow,
+            run.NotBefore,
+            run.NodeName,
+            1,
+            "{}",
+            null,
+            run.StartedAt,
+            DateTimeOffset.UtcNow);
+
+        Assert.True(await store.TryTransitionRunAsync(completedTransition));
+
+        var body = await streamTask.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Contains("event: done", body);
     }
 

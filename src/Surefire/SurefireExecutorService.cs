@@ -538,6 +538,19 @@ internal sealed partial class SurefireExecutorService(
 
         if (await store.TryTransitionRunAsync(transition, cancellationToken))
         {
+            if (counters.Failed > 0)
+            {
+                await AppendFailureEventAsync(
+                    coordinator,
+                    RunFailureEnvelope.FromMessage(
+                        coordinator.Attempt,
+                        timeProvider.GetUtcNow(),
+                        "Executor",
+                        "BatchChildFailures",
+                        $"Batch completed with {counters.Failed} failed run(s)."),
+                    cancellationToken);
+            }
+
             await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
                 cancellationToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
@@ -1404,28 +1417,36 @@ internal sealed partial class SurefireExecutorService(
                 $"Unable to bind callback parameter '{parameter.Name}' for job '{context.JobName}'.");
         }
 
-        var returned = callback.DynamicInvoke(args);
-        if (returned is Task task)
+        try
         {
-            await task;
-            return;
-        }
-
-        if (returned is ValueTask valueTask)
-        {
-            await valueTask;
-            return;
-        }
-
-        if (returned is { })
-        {
-            var type = returned.GetType();
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
+            var returned = callback.DynamicInvoke(args);
+            if (returned is Task task)
             {
-                var asTaskMethod = type.GetMethod("AsTask")!;
-                var convertedTask = (Task)asTaskMethod.Invoke(returned, null)!;
-                await convertedTask;
+                await task;
+                return;
             }
+
+            if (returned is ValueTask valueTask)
+            {
+                await valueTask;
+                return;
+            }
+
+            if (returned is { })
+            {
+                var type = returned.GetType();
+                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
+                {
+                    var asTaskMethod = type.GetMethod("AsTask")!;
+                    var convertedTask = (Task)asTaskMethod.Invoke(returned, null)!;
+                    await convertedTask;
+                }
+            }
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw;
         }
     }
 

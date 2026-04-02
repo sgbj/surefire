@@ -15,7 +15,7 @@ internal sealed partial class SurefireMaintenanceService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(options.HeartbeatInterval);
+        using var timer = new PeriodicTimer(options.HeartbeatInterval, timeProvider);
 
         try
         {
@@ -78,13 +78,38 @@ internal sealed partial class SurefireMaintenanceService(
                 cancellationToken);
         }
 
-        await store.CancelExpiredRunsAsync(cancellationToken);
+        var cancelledExpiredRunIds = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
+        await PublishExpiredCancellationNotificationsAsync(cancelledExpiredRunIds, cancellationToken);
+    }
+
+    private async Task PublishExpiredCancellationNotificationsAsync(IReadOnlyList<string> runIds,
+        CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var runId in runIds)
+        {
+            await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
+
+            var run = await store.GetRunAsync(runId, cancellationToken);
+            if (run?.ParentRunId is { } parentRunId)
+            {
+                await notifications.PublishAsync(NotificationChannels.RunEvent(parentRunId), runId,
+                    cancellationToken);
+            }
+        }
     }
 
     private async Task RecoverStaleRunningRunsAsync(CancellationToken cancellationToken)
     {
         var staleBefore = timeProvider.GetUtcNow() - options.InactiveThreshold;
-        var retryPolicyCache = new Dictionary<string, int>(StringComparer.Ordinal);
+        var retryPolicyCache = new Dictionary<string, RetryPolicy>(StringComparer.Ordinal);
+        var skip = 0;
+        const int take = 1000;
 
         while (true)
         {
@@ -96,8 +121,8 @@ internal sealed partial class SurefireMaintenanceService(
                     IsBatchCoordinator = false,
                     OrderBy = RunOrderBy.CreatedAt
                 },
-                0,
-                1000,
+                skip,
+                take,
                 cancellationToken);
 
             if (page.Items.Count == 0)
@@ -107,8 +132,10 @@ internal sealed partial class SurefireMaintenanceService(
 
             foreach (var run in page.Items)
             {
-                if (!await CanRetryAfterStaleRecoveryAsync(run.JobName, run.Attempt, retryPolicyCache,
-                        cancellationToken))
+                var retryPolicy = await GetRetryPolicyForStaleRecoveryAsync(run.JobName, retryPolicyCache,
+                    cancellationToken);
+
+                if (run.Attempt > retryPolicy.MaxRetries)
                 {
                     var now = timeProvider.GetUtcNow();
                     var deadLetter = RunStatusTransition.RunningToDeadLetter(
@@ -140,15 +167,16 @@ internal sealed partial class SurefireMaintenanceService(
 
                     await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
                         cancellationToken);
-                    await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
                     await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, cancellationToken);
                     continue;
                 }
 
+                var retryNotBefore = timeProvider.GetUtcNow() + retryPolicy.GetDelay(run.Attempt + 1);
+
                 var retrying = RunStatusTransition.RunningToRetrying(
                     run.Id,
                     run.Attempt,
-                    timeProvider.GetUtcNow(),
+                    retryNotBefore,
                     run.NodeName,
                     run.Progress,
                     run.Error,
@@ -173,7 +201,7 @@ internal sealed partial class SurefireMaintenanceService(
                 var pending = RunStatusTransition.RetryingToPending(
                     run.Id,
                     run.Attempt,
-                    timeProvider.GetUtcNow(),
+                    retryNotBefore,
                     null,
                     run.Progress,
                     run.Error,
@@ -185,22 +213,23 @@ internal sealed partial class SurefireMaintenanceService(
                 }
 
                 await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
-                await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
             }
+
+            skip += page.Items.Count;
         }
     }
 
-    private async Task<bool> CanRetryAfterStaleRecoveryAsync(string jobName, int currentAttempt,
-        Dictionary<string, int> retryPolicyCache, CancellationToken cancellationToken)
+    private async Task<RetryPolicy> GetRetryPolicyForStaleRecoveryAsync(string jobName,
+        Dictionary<string, RetryPolicy> retryPolicyCache, CancellationToken cancellationToken)
     {
-        if (!retryPolicyCache.TryGetValue(jobName, out var maxRetries))
+        if (!retryPolicyCache.TryGetValue(jobName, out var retryPolicy))
         {
             var job = await store.GetJobAsync(jobName, cancellationToken);
-            maxRetries = job?.RetryPolicy.MaxRetries ?? 0;
-            retryPolicyCache[jobName] = maxRetries;
+            retryPolicy = job?.RetryPolicy ?? new();
+            retryPolicyCache[jobName] = retryPolicy;
         }
 
-        return currentAttempt <= maxRetries;
+        return retryPolicy;
     }
 
     private async Task MaybeCompleteBatchAsync(string? batchRunId, string childRunId,

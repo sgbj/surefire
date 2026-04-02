@@ -11,6 +11,13 @@ internal sealed class SqliteJobStore(
 {
     private readonly string _connectionString = sqliteOptions.ConnectionString;
 
+    public async Task PingAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = await CreateConnectionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn, "SELECT 1;");
+        _ = await cmd.ExecuteScalarAsync(cancellationToken);
+    }
+
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
@@ -26,23 +33,24 @@ internal sealed class SqliteJobStore(
             await schemaCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var checkCmd = CreateCommand(conn,
-                         "SELECT COUNT(*) FROM surefire_schema_migrations WHERE version = 1"))
+        var hasV1 = await HasMigrationVersionAsync(conn, 1, cancellationToken);
+        var hasV2 = await HasMigrationVersionAsync(conn, 2, cancellationToken);
+
+        if (hasV1 && hasV2)
         {
-            if ((long)(await checkCmd.ExecuteScalarAsync(cancellationToken))! > 0)
-            {
-                return;
-            }
+            return;
         }
 
-        await using var ddlCmd = CreateCommand(conn, """
+        if (!hasV1)
+        {
+            await using var ddlCmd = CreateCommand(conn, """
                                                      CREATE TABLE IF NOT EXISTS surefire_jobs (
                                                          name TEXT PRIMARY KEY,
                                                          description TEXT,
                                                          tags TEXT NOT NULL DEFAULT '[]',
                                                          cron_expression TEXT,
                                                          time_zone_id TEXT,
-                                                         timeout_ms REAL,
+                                                         timeout_ticks INTEGER,
                                                          max_concurrency INTEGER,
                                                          priority INTEGER NOT NULL DEFAULT 0,
                                                          retry_policy TEXT,
@@ -143,8 +151,38 @@ internal sealed class SqliteJobStore(
                                                          last_heartbeat_at TEXT
                                                      );
                                                      INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (1);
+                                                     INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (2);
                                                      """);
-        await ddlCmd.ExecuteNonQueryAsync(cancellationToken);
+            await ddlCmd.ExecuteNonQueryAsync(cancellationToken);
+            return;
+        }
+
+        if (!hasV2)
+        {
+            var hasTimeoutTicks = await HasColumnAsync(conn, "surefire_jobs", "timeout_ticks", cancellationToken);
+            if (!hasTimeoutTicks)
+            {
+                await using var alterCmd = CreateCommand(conn,
+                    "ALTER TABLE surefire_jobs ADD COLUMN timeout_ticks INTEGER;");
+                await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var migrateDataCmd = CreateCommand(conn, """
+                                                                  UPDATE surefire_jobs
+                                                                  SET timeout_ticks = CASE
+                                                                      WHEN timeout_ticks IS NOT NULL THEN timeout_ticks
+                                                                      WHEN timeout_ms IS NULL THEN NULL
+                                                                      ELSE CAST(ROUND(timeout_ms * 10000.0) AS INTEGER)
+                                                                  END
+                                                                  """))
+            {
+                await migrateDataCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var versionCmd = CreateCommand(conn,
+                "INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (2);");
+            await versionCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
@@ -153,12 +191,12 @@ internal sealed class SqliteJobStore(
         await using var cmd = CreateCommand(conn, """
                                                   INSERT INTO surefire_jobs (
                                                       name, description, tags, cron_expression, time_zone_id,
-                                                      timeout_ms, max_concurrency, priority, retry_policy,
+                                                      timeout_ticks, max_concurrency, priority, retry_policy,
                                                       is_continuous, queue, rate_limit_name, is_enabled,
                                                       misfire_policy, fire_all_limit, arguments_schema, last_heartbeat_at
                                                   ) VALUES (
                                                       @name, @description, @tags, @cron_expression, @time_zone_id,
-                                                      @timeout_ms, @max_concurrency, @priority, @retry_policy,
+                                                      @timeout_ticks, @max_concurrency, @priority, @retry_policy,
                                                       @is_continuous, @queue, @rate_limit_name, @is_enabled,
                                                       @misfire_policy, @fire_all_limit, @arguments_schema, @last_heartbeat_at
                                                   )
@@ -167,7 +205,7 @@ internal sealed class SqliteJobStore(
                                                       tags = excluded.tags,
                                                       cron_expression = excluded.cron_expression,
                                                       time_zone_id = excluded.time_zone_id,
-                                                      timeout_ms = excluded.timeout_ms,
+                                                      timeout_ticks = excluded.timeout_ticks,
                                                       max_concurrency = excluded.max_concurrency,
                                                       priority = excluded.priority,
                                                       retry_policy = excluded.retry_policy,
@@ -901,6 +939,23 @@ internal sealed class SqliteJobStore(
         return nodes;
     }
 
+    public async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await CreateConnectionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn, """
+                                                  SELECT * FROM surefire_nodes WHERE name = @name LIMIT 1
+                                                  """);
+        cmd.Parameters.AddWithValue("@name", name);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return ReadNode(reader);
+        }
+
+        return null;
+    }
+
     public async Task UpsertQueueAsync(
         QueueDefinition queue, CancellationToken cancellationToken = default)
     {
@@ -1001,17 +1056,57 @@ internal sealed class SqliteJobStore(
     }
 
     public async Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
+        => (await CancelExpiredRunsWithIdsAsync(cancellationToken)).Count;
+
+    public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+        CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
-        await using var cmd = CreateCommand(conn, """
-                                                  UPDATE surefire_runs
-                                                  SET status = 4, cancelled_at = @now, completed_at = @now
-                                                  WHERE status IN (0, 3) AND batch_total IS NULL
-                                                      AND not_after IS NOT NULL AND not_after < @now
-                                                  """);
-        cmd.Parameters.AddWithValue("@now", now);
-        return await cmd.ExecuteNonQueryAsync(cancellationToken);
+        await using var tx = conn.BeginTransaction();
+
+        var cancelledIds = new List<string>();
+
+        await using (var selectCmd = CreateCommand(conn, """
+                                                         SELECT id
+                                                         FROM surefire_runs
+                                                         WHERE status IN (0, 3)
+                                                             AND batch_total IS NULL
+                                                             AND not_after IS NOT NULL
+                                                             AND not_after < @now
+                                                         """, tx))
+        {
+            selectCmd.Parameters.AddWithValue("@now", now);
+            await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                cancelledIds.Add(reader.GetString(0));
+            }
+        }
+
+        if (cancelledIds.Count == 0)
+        {
+            await tx.CommitAsync(cancellationToken);
+            return cancelledIds;
+        }
+
+        await using (var updateCmd = CreateCommand(conn, """
+                                                         UPDATE surefire_runs
+                                                         SET status = 4,
+                                                             cancelled_at = @now,
+                                                             completed_at = @now
+                                                         WHERE status IN (0, 3)
+                                                             AND batch_total IS NULL
+                                                             AND not_after IS NOT NULL
+                                                             AND not_after < @now
+                                                         """, tx))
+        {
+            updateCmd.Parameters.AddWithValue("@now", now);
+            await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return cancelledIds;
     }
 
     public async Task PurgeAsync(
@@ -1105,8 +1200,11 @@ internal sealed class SqliteJobStore(
                                                            COALESCE(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0),
                                                            COALESCE(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0)
                                                        FROM surefire_runs
+                                                       WHERE created_at >= @since AND created_at < @now
                                                        """, tx);
         statsCmd.Parameters.AddWithValue("@node_threshold", FormatTimestamp(now.AddMinutes(-2)));
+        statsCmd.Parameters.AddWithValue("@since", FormatTimestamp(sinceTime));
+        statsCmd.Parameters.AddWithValue("@now", FormatTimestamp(now));
 
         var runsByStatus = new Dictionary<string, int>();
         int totalJobs, nodeCount, totalRuns, activeRuns;
@@ -1373,7 +1471,7 @@ internal sealed class SqliteJobStore(
         CancellationToken cancellationToken)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
-        await using var tx = conn.BeginTransaction(false);
+        await using var tx = conn.BeginTransaction(deferred: false);
 
         if (run.DeduplicationId is { })
         {
@@ -1494,6 +1592,32 @@ internal sealed class SqliteJobStore(
     private static SqliteCommand CreateCommand(SqliteConnection conn, string sql, SqliteTransaction? tx = null) =>
         new(sql, conn) { Transaction = tx };
 
+    private static async Task<bool> HasMigrationVersionAsync(SqliteConnection conn, int version,
+        CancellationToken cancellationToken)
+    {
+        await using var cmd = CreateCommand(conn,
+            "SELECT COUNT(*) FROM surefire_schema_migrations WHERE version = @version");
+        cmd.Parameters.AddWithValue("@version", version);
+        return (long)(await cmd.ExecuteScalarAsync(cancellationToken))! > 0;
+    }
+
+    private static async Task<bool> HasColumnAsync(SqliteConnection conn, string tableName, string columnName,
+        CancellationToken cancellationToken)
+    {
+        await using var cmd = CreateCommand(conn, $"PRAGMA table_info({tableName});");
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (string.Equals(reader.GetString(reader.GetOrdinal("name")), columnName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static async Task ExecuteWithThresholdAsync(
         SqliteConnection conn, string sql, string threshold, SqliteTransaction tx, CancellationToken cancellationToken)
     {
@@ -1509,8 +1633,8 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@tags", JsonSerializer.Serialize(job.Tags));
         cmd.Parameters.AddWithValue("@cron_expression", (object?)job.CronExpression ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@timeout_ms",
-            job.Timeout.HasValue ? job.Timeout.Value.TotalMilliseconds : DBNull.Value);
+        cmd.Parameters.AddWithValue("@timeout_ticks",
+            job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value);
         cmd.Parameters.AddWithValue("@max_concurrency",
             job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("@priority", job.Priority);
@@ -1581,37 +1705,53 @@ internal sealed class SqliteJobStore(
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private JobDefinition ReadJob(SqliteDataReader reader) => new()
+    private JobDefinition ReadJob(SqliteDataReader reader)
     {
-        Name = reader.GetString(reader.GetOrdinal("name")),
-        Description = GetNullableString(reader, "description"),
-        Tags = JsonSerializer.Deserialize<string[]>(
-            reader.GetString(reader.GetOrdinal("tags"))) ?? [],
-        CronExpression = GetNullableString(reader, "cron_expression"),
-        TimeZoneId = GetNullableString(reader, "time_zone_id"),
-        Timeout = reader.IsDBNull(reader.GetOrdinal("timeout_ms"))
-            ? null
-            : TimeSpan.FromMilliseconds(reader.GetDouble(reader.GetOrdinal("timeout_ms"))),
-        MaxConcurrency = reader.IsDBNull(reader.GetOrdinal("max_concurrency"))
-            ? null
-            : reader.GetInt32(reader.GetOrdinal("max_concurrency")),
-        Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-        RetryPolicy = reader.IsDBNull(reader.GetOrdinal("retry_policy"))
-            ? new()
-            : JsonSerializer.Deserialize<RetryPolicy>(
-                reader.GetString(reader.GetOrdinal("retry_policy"))) ?? new(),
-        IsContinuous = reader.GetInt32(reader.GetOrdinal("is_continuous")) != 0,
-        Queue = GetNullableString(reader, "queue"),
-        RateLimitName = GetNullableString(reader, "rate_limit_name"),
-        IsEnabled = reader.GetInt32(reader.GetOrdinal("is_enabled")) != 0,
-        MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy")),
-        FireAllLimit = reader.IsDBNull(reader.GetOrdinal("fire_all_limit"))
-            ? null
-            : reader.GetInt32(reader.GetOrdinal("fire_all_limit")),
-        ArgumentsSchema = GetNullableString(reader, "arguments_schema"),
-        LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at"),
-        LastCronFireAt = GetNullableTimestamp(reader, "last_cron_fire_at")
-    };
+        TimeSpan? timeout = null;
+        var timeoutTicksOrdinal = TryGetOrdinal(reader, "timeout_ticks");
+        if (timeoutTicksOrdinal >= 0 && !reader.IsDBNull(timeoutTicksOrdinal))
+        {
+            timeout = TimeSpan.FromTicks(reader.GetInt64(timeoutTicksOrdinal));
+        }
+        else
+        {
+            var timeoutMsOrdinal = TryGetOrdinal(reader, "timeout_ms");
+            if (timeoutMsOrdinal >= 0 && !reader.IsDBNull(timeoutMsOrdinal))
+            {
+                timeout = TimeSpan.FromMilliseconds(reader.GetDouble(timeoutMsOrdinal));
+            }
+        }
+
+        return new()
+        {
+            Name = reader.GetString(reader.GetOrdinal("name")),
+            Description = GetNullableString(reader, "description"),
+            Tags = JsonSerializer.Deserialize<string[]>(
+                reader.GetString(reader.GetOrdinal("tags"))) ?? [],
+            CronExpression = GetNullableString(reader, "cron_expression"),
+            TimeZoneId = GetNullableString(reader, "time_zone_id"),
+            Timeout = timeout,
+            MaxConcurrency = reader.IsDBNull(reader.GetOrdinal("max_concurrency"))
+                ? null
+                : reader.GetInt32(reader.GetOrdinal("max_concurrency")),
+            Priority = reader.GetInt32(reader.GetOrdinal("priority")),
+            RetryPolicy = reader.IsDBNull(reader.GetOrdinal("retry_policy"))
+                ? new()
+                : JsonSerializer.Deserialize<RetryPolicy>(
+                    reader.GetString(reader.GetOrdinal("retry_policy"))) ?? new(),
+            IsContinuous = reader.GetInt32(reader.GetOrdinal("is_continuous")) != 0,
+            Queue = GetNullableString(reader, "queue"),
+            RateLimitName = GetNullableString(reader, "rate_limit_name"),
+            IsEnabled = reader.GetInt32(reader.GetOrdinal("is_enabled")) != 0,
+            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy")),
+            FireAllLimit = reader.IsDBNull(reader.GetOrdinal("fire_all_limit"))
+                ? null
+                : reader.GetInt32(reader.GetOrdinal("fire_all_limit")),
+            ArgumentsSchema = GetNullableString(reader, "arguments_schema"),
+            LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at"),
+            LastCronFireAt = GetNullableTimestamp(reader, "last_cron_fire_at")
+        };
+    }
 
     private static QueueDefinition ReadQueue(SqliteDataReader reader) => new()
     {
@@ -1762,6 +1902,19 @@ internal sealed class SqliteJobStore(
 
     private static DateTimeOffset ParseTimestamp(string s) =>
         DateTimeOffset.Parse(s, null, DateTimeStyles.RoundtripKind);
+
+    private static int TryGetOrdinal(SqliteDataReader reader, string column)
+    {
+        for (var i = 0; i < reader.FieldCount; i++)
+        {
+            if (string.Equals(reader.GetName(i), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
 
     private static string? GetNullableString(SqliteDataReader reader, string column)
     {

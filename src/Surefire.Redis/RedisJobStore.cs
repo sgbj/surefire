@@ -185,6 +185,12 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         _db = mux.GetDatabase();
     }
 
+    public async Task PingAsync(CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        _ = await Db.PingAsync();
+    }
+
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
         const string script = """
@@ -410,11 +416,16 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
         else if (filter.Status is { } status)
         {
+            var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
             if (NoAdditionalFiltersExceptStatus(filter))
             {
-                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}status:{(int)status}");
+                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}status:{(int)status}", minScore, maxScore,
+                    exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync(
                     $"{P}status:{(int)status}",
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     skip: skip,
                     take: take);
@@ -428,24 +439,31 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                     skip,
                     take,
                     RunOrderBy.CreatedAt,
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     cancellationToken: cancellationToken);
             }
         }
         else if (filter.IsTerminal == true)
         {
+            var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
             var noPostFilters = filter.JobName is null && filter.NodeName is null
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
-                                                       && filter.IsBatchCoordinator is null &&
-                                                       filter.CreatedAfter is null && filter.CreatedBefore is null
+                                                       && filter.IsBatchCoordinator is null
                                                        && filter.OrderBy == RunOrderBy.CreatedAt;
 
             if (noPostFilters)
             {
-                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}runs:terminal");
+                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}runs:terminal", minScore, maxScore,
+                    exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:terminal",
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     skip: skip,
                     take: take);
@@ -459,24 +477,31 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                     skip,
                     take,
                     RunOrderBy.CreatedAt,
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     cancellationToken: cancellationToken);
             }
         }
         else if (filter.IsTerminal == false)
         {
+            var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
             var noPostFilters = filter.JobName is null && filter.NodeName is null
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
-                                                       && filter.IsBatchCoordinator is null &&
-                                                       filter.CreatedAfter is null && filter.CreatedBefore is null
+                                                       && filter.IsBatchCoordinator is null
                                                        && filter.OrderBy == RunOrderBy.CreatedAt;
 
             if (noPostFilters)
             {
-                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}runs:nonterminal");
+                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}runs:nonterminal", minScore, maxScore,
+                    exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:nonterminal",
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     skip: skip,
                     take: take);
@@ -490,17 +515,25 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                     skip,
                     take,
                     RunOrderBy.CreatedAt,
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     cancellationToken: cancellationToken);
             }
         }
         else if (filter.JobName is { } jobName && filter.ExactJobName)
         {
+            var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
             if (NoAdditionalFiltersExceptExactJobName(filter))
             {
-                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}job_runs:{jobName}");
+                totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}job_runs:{jobName}", minScore, maxScore,
+                    exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync(
                     $"{P}job_runs:{jobName}",
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     skip: skip,
                     take: take);
@@ -514,6 +547,9 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                     skip,
                     take,
                     RunOrderBy.CreatedAt,
+                    minScore,
+                    maxScore,
+                    exclude,
                     order: Order.Descending,
                     cancellationToken: cancellationToken);
             }
@@ -623,7 +659,14 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         var requiresResort = filter.OrderBy != indexOrderBy;
         var matchedCount = 0;
         var page = new List<JobRun>(take);
-        var allMatched = requiresResort ? new List<JobRun>() : null;
+        if (skip > int.MaxValue - take)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), "The sum of skip and take is too large.");
+        }
+
+        var topLimit = skip + take;
+        var topRuns = requiresResort ? new List<JobRun>(Math.Min(topLimit, 128)) : null;
+        var runOrderComparer = requiresResort ? new RunOrderComparer(filter.OrderBy) : null;
         var offset = 0L;
 
         while (true)
@@ -655,7 +698,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
 
                 if (requiresResort)
                 {
-                    allMatched!.Add(run);
+                    InsertIntoTopRuns(topRuns!, run, runOrderComparer!, topLimit);
                 }
                 else if (matchedCount >= skip && page.Count < take)
                 {
@@ -671,12 +714,93 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             return new() { Items = page, TotalCount = matchedCount };
         }
 
-        var sorted = SortRuns(allMatched!, filter.OrderBy);
+        var sorted = topRuns!;
         return new()
         {
             Items = sorted.Skip(skip).Take(take).ToList(),
-            TotalCount = sorted.Count
+            TotalCount = matchedCount
         };
+    }
+
+    private static void InsertIntoTopRuns(List<JobRun> topRuns, JobRun candidate, IComparer<JobRun> comparer,
+        int limit)
+    {
+        if (limit <= 0)
+        {
+            return;
+        }
+
+        var index = topRuns.BinarySearch(candidate, comparer);
+        if (index < 0)
+        {
+            index = ~index;
+        }
+
+        if (topRuns.Count == limit && index >= limit)
+        {
+            return;
+        }
+
+        topRuns.Insert(index, candidate);
+        if (topRuns.Count > limit)
+        {
+            topRuns.RemoveAt(topRuns.Count - 1);
+        }
+    }
+
+    private sealed class RunOrderComparer(RunOrderBy orderBy) : IComparer<JobRun>
+    {
+        public int Compare(JobRun? x, JobRun? y)
+        {
+            if (ReferenceEquals(x, y))
+            {
+                return 0;
+            }
+
+            if (x is null)
+            {
+                return 1;
+            }
+
+            if (y is null)
+            {
+                return -1;
+            }
+
+            var valueComparison = orderBy switch
+            {
+                RunOrderBy.StartedAt => CompareDescendingNullable(x.StartedAt, y.StartedAt),
+                RunOrderBy.CompletedAt => CompareDescendingNullable(x.CompletedAt, y.CompletedAt),
+                _ => y.CreatedAt.CompareTo(x.CreatedAt)
+            };
+
+            if (valueComparison != 0)
+            {
+                return valueComparison;
+            }
+
+            return string.CompareOrdinal(y.Id, x.Id);
+        }
+
+        private static int CompareDescendingNullable(DateTimeOffset? left, DateTimeOffset? right)
+        {
+            if (left.HasValue && right.HasValue)
+            {
+                return right.Value.CompareTo(left.Value);
+            }
+
+            if (left.HasValue)
+            {
+                return -1;
+            }
+
+            if (right.HasValue)
+            {
+                return 1;
+            }
+
+            return 0;
+        }
     }
 
     private async Task<List<JobRun>> LoadRunsByIdsAsync(RedisValue[] runIds)
@@ -1665,6 +1789,17 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return results;
     }
 
+    public async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        var hash = await Db.HashGetAllAsync($"{P}node:{name}");
+        if (hash.Length == 0)
+        {
+            return null;
+        }
+
+        return HashToNode(hash);
+    }
+
     public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
     {
         const string script = """
@@ -1788,13 +1923,17 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
     }
 
     public async Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
+        => (await CancelExpiredRunsWithIdsAsync(cancellationToken)).Count;
+
+    public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+        CancellationToken cancellationToken = default)
     {
         const string script = """
                               local t = redis.call('TIME')
                               local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
                               local offset = tonumber(ARGV[1])
                               local expired = redis.call('ZRANGEBYSCORE', '{surefire}:expiring', '-inf', now_ms, 'LIMIT', offset, 500)
-                              local cancelled = 0
+                              local cancelled_ids = {}
                               local cleaned = 0
                               local skipped = 0
 
@@ -1853,27 +1992,40 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                           redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                                           redis.call('ZREM', '{surefire}:expiring', run_id)
 
-                                          cancelled = cancelled + 1
+                                          cancelled_ids[#cancelled_ids + 1] = run_id
                                       elseif r.status == 1 then
                                           skipped = skipped + 1
                                       end
                                   end
                               end
 
-                              return cjson.encode({cancelled, cleaned, skipped})
+                              return cjson.encode({cancelled = cancelled_ids, cleaned = cleaned, skipped = skipped})
                               """;
 
-        var totalCancelled = 0;
+        var totalCancelled = new List<string>();
         var offset = 0;
         while (true)
         {
             var result = await EvaluateScriptAsync(script, [RoutingKey],
                 [offset.ToString()]);
-            var arr = JsonSerializer.Deserialize<int[]>(result.ToString()!)!;
-            int batchCancelled = arr[0], batchCleaned = arr[1], batchSkipped = arr[2];
-            totalCancelled += batchCancelled;
+            using var payload = JsonDocument.Parse(result.ToString()!);
+            var root = payload.RootElement;
 
-            if (batchCancelled == 0 && batchCleaned == 0 && batchSkipped == 0)
+            var batchCancelled = new List<string>();
+            var cancelledElement = root.GetProperty("cancelled");
+            if (cancelledElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var id in cancelledElement.EnumerateArray())
+                {
+                    batchCancelled.Add(id.GetString()!);
+                }
+            }
+
+            var batchCleaned = root.GetProperty("cleaned").GetInt32();
+            var batchSkipped = root.GetProperty("skipped").GetInt32();
+            totalCancelled.AddRange(batchCancelled);
+
+            if (batchCancelled.Count == 0 && batchCleaned == 0 && batchSkipped == 0)
             {
                 break;
             }
@@ -2752,9 +2904,26 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.LastHeartbeatBefore is null
         && filter.IsBatchCoordinator is null
         && filter.IsTerminal is null
-        && filter.CreatedAfter is null
-        && filter.CreatedBefore is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
+
+    private static (double MinScore, double MaxScore, Exclude Exclude) GetCreatedScoreWindow(RunFilter filter)
+    {
+        var minScore = filter.CreatedAfter?.ToUnixTimeMilliseconds() ?? double.NegativeInfinity;
+        var maxScore = filter.CreatedBefore?.ToUnixTimeMilliseconds() ?? double.PositiveInfinity;
+        var exclude = Exclude.None;
+
+        if (filter.CreatedAfter is { })
+        {
+            exclude |= Exclude.Start;
+        }
+
+        if (filter.CreatedBefore is { })
+        {
+            exclude |= Exclude.Stop;
+        }
+
+        return (minScore, maxScore, exclude);
+    }
 
     private static string SerializeRun(JobRun run) =>
         JsonSerializer.Serialize(SerializeRunAsObject(run));

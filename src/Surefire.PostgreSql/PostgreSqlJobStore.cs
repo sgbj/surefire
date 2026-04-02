@@ -174,6 +174,14 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
     }
 
+    public async Task PingAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        _ = await cmd.ExecuteScalarAsync(cancellationToken);
+    }
+
     private static async Task AcquireMigrationLockAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -875,6 +883,22 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return results;
     }
 
+    public async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM surefire_nodes WHERE name = @name LIMIT 1";
+        cmd.Parameters.AddWithValue("name", name);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return ReadNode(reader);
+        }
+
+        return null;
+    }
+
     public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
@@ -952,6 +976,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
     }
 
     public async Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
+        => (await CancelExpiredRunsWithIdsAsync(cancellationToken)).Count;
+
+    public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+        CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -964,9 +992,17 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                               AND batch_total IS NULL
                               AND not_after IS NOT NULL
                               AND not_after < NOW()
+                          RETURNING id
                           """;
 
-        return await cmd.ExecuteNonQueryAsync(cancellationToken);
+        var cancelledIds = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            cancelledIds.Add(reader.GetString(0));
+        }
+
+        return cancelledIds;
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1073,8 +1109,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                                    COUNT(*) FILTER (WHERE status = 4) AS cancelled,
                                    COUNT(*) FILTER (WHERE status = 5) AS dead_letter
                                FROM surefire_runs
+                               WHERE created_at >= @since AND created_at < @now
                                """;
         statsCmd.Parameters.AddWithValue("now", now);
+        statsCmd.Parameters.AddWithValue("since", sinceTime);
 
         int totalJobs = 0, totalRuns = 0, nodeCount = 0;
         int pending = 0, running = 0, completed = 0, retrying = 0, cancelled = 0, deadLetter = 0;

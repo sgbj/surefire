@@ -649,18 +649,6 @@ public sealed class RuntimeContractPendingTests
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
 
-        var waitTask = Task.Run(async () =>
-        {
-            var ids = new List<string>();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
-            {
-                ids.Add(result.RunId);
-            }
-
-            return ids;
-        });
-
         var claimed = new List<JobRun>();
         for (var i = 0; i < 3; i++)
         {
@@ -709,7 +697,13 @@ public sealed class RuntimeContractPendingTests
             coordinator.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
 
-        var completedIds = await waitTask;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var completedIds = new List<string>();
+        await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
+        {
+            completedIds.Add(result.RunId);
+        }
+
         var expected = completionPlan
             .OrderBy(x => x.CompletedAt)
             .Select(x => x.Run.Id)

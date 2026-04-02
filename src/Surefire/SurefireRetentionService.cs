@@ -11,7 +11,7 @@ internal sealed partial class SurefireRetentionService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(options.RetentionCheckInterval);
+        using var timer = new PeriodicTimer(options.RetentionCheckInterval, timeProvider);
 
         try
         {

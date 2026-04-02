@@ -27,6 +27,8 @@ internal sealed class InMemoryJobStore : IJobStore
 
     public Task MigrateAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
+    public Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
     public Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
         var now = _timeProvider.GetUtcNow();
@@ -655,6 +657,14 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
+    public Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            return Task.FromResult(_nodes.TryGetValue(name, out var node) ? CopyNode(node) : null);
+        }
+    }
+
     public Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
     {
         var now = _timeProvider.GetUtcNow();
@@ -721,10 +731,13 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    public Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
+    public async Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
+        => (await CancelExpiredRunsWithIdsAsync(cancellationToken)).Count;
+
+    public Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default)
     {
         var now = _timeProvider.GetUtcNow();
-        var count = 0;
+        var cancelledIds = new List<string>();
 
         lock (_lock)
         {
@@ -756,11 +769,11 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
 
                 UpdateIndexes(run, oldStatus, JobStatus.Cancelled);
-                count++;
+                cancelledIds.Add(run.Id);
             }
         }
 
-        return Task.FromResult(count);
+        return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
     }
 
     public Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)

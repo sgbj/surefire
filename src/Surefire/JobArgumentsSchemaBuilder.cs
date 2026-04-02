@@ -15,6 +15,7 @@ internal static class JobArgumentsSchemaBuilder
 
     public static string? Build(Delegate handler, Func<Type, bool> isServiceType)
     {
+        var nullabilityContext = new NullabilityInfoContext();
         var method = handler.Method;
         var parameters = method.GetParameters()
             .Where(p => !IsFrameworkParameter(p.ParameterType) && !isServiceType(p.ParameterType))
@@ -37,7 +38,7 @@ internal static class JobArgumentsSchemaBuilder
             }
 
             properties[name] = BuildSchemaForType(parameter.ParameterType);
-            if (IsRequiredParameter(parameter))
+            if (IsRequiredParameter(parameter, nullabilityContext))
             {
                 required.Add(name);
             }
@@ -71,7 +72,7 @@ internal static class JobArgumentsSchemaBuilder
     private static bool IsFrameworkParameter(Type type) =>
         type == typeof(JobContext) || type == typeof(CancellationToken);
 
-    private static bool IsRequiredParameter(ParameterInfo parameter)
+    private static bool IsRequiredParameter(ParameterInfo parameter, NullabilityInfoContext nullabilityContext)
     {
         if (parameter.HasDefaultValue)
         {
@@ -81,7 +82,7 @@ internal static class JobArgumentsSchemaBuilder
         var type = parameter.ParameterType;
         if (!type.IsValueType)
         {
-            return NullabilityInfoContextCache.Instance
+            return nullabilityContext
                 .Create(parameter)
                 .WriteState == NullabilityState.NotNull;
         }
@@ -94,10 +95,5 @@ internal static class JobArgumentsSchemaBuilder
         var targetType = Nullable.GetUnderlyingType(type) ?? type;
         return SchemaSerializerOptions.GetJsonSchemaAsNode(targetType,
             new());
-    }
-
-    private static class NullabilityInfoContextCache
-    {
-        public static readonly NullabilityInfoContext Instance = new();
     }
 }

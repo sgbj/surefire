@@ -31,6 +31,6 @@ internal sealed class RunFailureEnvelope
         FailureCode = failureCode,
         ExceptionType = exceptionType,
         Message = message,
-        StackTrace = message
+        StackTrace = null
     };
 }
