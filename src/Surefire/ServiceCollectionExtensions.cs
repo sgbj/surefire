@@ -30,8 +30,9 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<ActiveRunTracker>();
         services.TryAddSingleton<SurefireInstrumentation>();
         services.TryAddSingleton<SurefireLogEventPump>();
-        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService>(
-            sp => sp.GetRequiredService<SurefireLogEventPump>()));
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IHostedService, SurefireLogEventPump>(
+                sp => sp.GetRequiredService<SurefireLogEventPump>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILoggerProvider, SurefireLoggerProvider>());
         services.AddHealthChecks().AddCheck<SurefireHealthCheck>("surefire");
         services.TryAddSingleton<IJobStore, InMemoryJobStore>();
