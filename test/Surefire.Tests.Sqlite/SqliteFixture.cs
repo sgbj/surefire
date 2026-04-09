@@ -5,7 +5,7 @@ using Surefire.Tests.Conformance;
 
 namespace Surefire.Tests.Sqlite;
 
-public sealed class SqliteFixture : IAsyncLifetime, IStoreTestFixture
+internal sealed class SqliteFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"surefire_{Guid.NewGuid():N}.db");
     private SqliteJobStore? _store;

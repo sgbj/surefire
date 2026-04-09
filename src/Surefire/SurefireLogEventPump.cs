@@ -9,11 +9,12 @@ namespace Surefire;
 internal sealed class SurefireLogEventPump(
     IJobStore store,
     INotificationProvider notifications,
-    SurefireOptions options) : BackgroundService
+    SurefireOptions options,
+    SurefireInstrumentation instrumentation) : BackgroundService
 {
     private readonly Channel<LogEntry> _channel = Channel.CreateBounded<LogEntry>(new BoundedChannelOptions(1024)
     {
-        FullMode = BoundedChannelFullMode.DropOldest,
+        FullMode = BoundedChannelFullMode.DropWrite,
         SingleReader = true,
         SingleWriter = false
     });
@@ -25,7 +26,13 @@ internal sealed class SurefireLogEventPump(
             return false;
         }
 
-        return _channel.Writer.TryWrite(entry);
+        if (!_channel.Writer.TryWrite(entry))
+        {
+            instrumentation.RecordLogEntryDropped();
+            return false;
+        }
+
+        return true;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -41,42 +48,7 @@ internal sealed class SurefireLogEventPump(
                     break;
                 }
 
-                buffer.Clear();
-                while (buffer.Count < 128 && _channel.Reader.TryRead(out var item))
-                {
-                    buffer.Add(item);
-                }
-
-                if (buffer.Count == 0)
-                {
-                    continue;
-                }
-
-                var events = buffer.Select(entry => new RunEvent
-                    {
-                        RunId = entry.RunId,
-                        EventType = RunEventType.Log,
-                        Payload = JsonSerializer.Serialize(new LogEventPayload
-                        {
-                            Timestamp = entry.Timestamp,
-                            Category = entry.Category,
-                            Level = (int)entry.Level,
-                            EventId = entry.EventId,
-                            EventName = entry.EventName,
-                            Message = entry.Message,
-                            Exception = entry.Exception
-                        }, options.SerializerOptions),
-                        CreatedAt = entry.Timestamp,
-                        Attempt = entry.Attempt
-                    })
-                    .ToList();
-
-                await store.AppendEventsAsync(events, stoppingToken);
-
-                foreach (var runId in buffer.Select(e => e.RunId).Distinct(StringComparer.Ordinal))
-                {
-                    await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, stoppingToken);
-                }
+                await ReadAndFlushAsync(buffer, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -86,6 +58,64 @@ internal sealed class SurefireLogEventPump(
             {
                 Trace.TraceWarning("Surefire log event pump failed: {0}", ex.Message);
                 await Task.Delay(TimeSpan.FromMilliseconds(200), stoppingToken);
+            }
+        }
+
+        // Drain remaining items on shutdown so final job logs aren't lost.
+        _channel.Writer.TryComplete();
+        try
+        {
+            await ReadAndFlushAsync(buffer, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning("Surefire log event pump drain failed: {0}", ex.Message);
+        }
+    }
+
+    private async Task ReadAndFlushAsync(List<LogEntry> buffer, CancellationToken cancellationToken)
+    {
+        buffer.Clear();
+        while (buffer.Count < 128 && _channel.Reader.TryRead(out var item))
+        {
+            buffer.Add(item);
+        }
+
+        if (buffer.Count == 0)
+        {
+            return;
+        }
+
+        var events = buffer.Select(entry => new RunEvent
+            {
+                RunId = entry.RunId,
+                EventType = RunEventType.Log,
+                Payload = JsonSerializer.Serialize(new LogEventPayload
+                {
+                    Timestamp = entry.Timestamp,
+                    Category = entry.Category,
+                    Level = (int)entry.Level,
+                    EventId = entry.EventId,
+                    EventName = entry.EventName,
+                    Message = entry.Message,
+                    Exception = entry.Exception
+                }, options.SerializerOptions),
+                CreatedAt = entry.Timestamp,
+                Attempt = entry.Attempt
+            })
+            .ToList();
+
+        await store.AppendEventsAsync(events, cancellationToken);
+
+        foreach (var runId in buffer.Select(e => e.RunId).Distinct(StringComparer.Ordinal))
+        {
+            try
+            {
+                await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("Surefire log event notification failed for run {0}: {1}", runId, ex.Message);
             }
         }
     }

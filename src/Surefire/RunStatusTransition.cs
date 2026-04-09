@@ -129,9 +129,9 @@ public sealed class RunStatusTransition
     };
 
     /// <summary>
-    ///     Creates a Running -> Completed transition.
+    ///     Creates a Running -> Succeeded transition.
     /// </summary>
-    public static RunStatusTransition RunningToCompleted(string runId, int expectedAttempt,
+    public static RunStatusTransition RunningToSucceeded(string runId, int expectedAttempt,
         DateTimeOffset completedAt, DateTimeOffset notBefore, string? nodeName = null,
         double progress = 1, string? result = null, string? error = null,
         DateTimeOffset? startedAt = null, DateTimeOffset? lastHeartbeatAt = null) => new()
@@ -139,7 +139,7 @@ public sealed class RunStatusTransition
         RunId = runId,
         ExpectedStatus = JobStatus.Running,
         ExpectedAttempt = expectedAttempt,
-        NewStatus = JobStatus.Completed,
+        NewStatus = JobStatus.Succeeded,
         CompletedAt = completedAt,
         NotBefore = notBefore,
         NodeName = nodeName,
@@ -151,9 +151,9 @@ public sealed class RunStatusTransition
     };
 
     /// <summary>
-    ///     Creates a Running -> DeadLetter transition.
+    ///     Creates a Running -> Failed transition.
     /// </summary>
-    public static RunStatusTransition RunningToDeadLetter(string runId, int expectedAttempt,
+    public static RunStatusTransition RunningToFailed(string runId, int expectedAttempt,
         DateTimeOffset completedAt, DateTimeOffset notBefore, string? nodeName = null,
         double progress = 1, string? error = null, string? result = null,
         DateTimeOffset? startedAt = null, DateTimeOffset? lastHeartbeatAt = null) => new()
@@ -161,7 +161,7 @@ public sealed class RunStatusTransition
         RunId = runId,
         ExpectedStatus = JobStatus.Running,
         ExpectedAttempt = expectedAttempt,
-        NewStatus = JobStatus.DeadLetter,
+        NewStatus = JobStatus.Failed,
         CompletedAt = completedAt,
         NotBefore = notBefore,
         NodeName = nodeName,
@@ -204,8 +204,8 @@ public sealed class RunStatusTransition
         (JobStatus.Pending, JobStatus.Running) => StartedAt.HasValue && LastHeartbeatAt.HasValue && NodeName is { },
         (JobStatus.Running, JobStatus.Retrying) => true,
         (JobStatus.Retrying, JobStatus.Pending) => true,
-        (JobStatus.Running, JobStatus.Completed) => CompletedAt.HasValue,
-        (JobStatus.Running, JobStatus.DeadLetter) => CompletedAt.HasValue,
+        (JobStatus.Running, JobStatus.Succeeded) => CompletedAt.HasValue,
+        (JobStatus.Running, JobStatus.Failed) => CompletedAt.HasValue,
         (JobStatus.Pending, JobStatus.Cancelled) => CompletedAt.HasValue && CancelledAt.HasValue,
         (JobStatus.Running, JobStatus.Cancelled) => CompletedAt.HasValue && CancelledAt.HasValue,
         (JobStatus.Retrying, JobStatus.Cancelled) => CompletedAt.HasValue && CancelledAt.HasValue,

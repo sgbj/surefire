@@ -5,7 +5,7 @@ using Testcontainers.PostgreSql;
 
 namespace Surefire.Tests.PostgreSql;
 
-public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
+internal sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly PostgreSqlContainer _container = new PostgreSqlBuilder()
         .WithImage("postgres:17-alpine")

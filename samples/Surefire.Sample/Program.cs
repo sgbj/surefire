@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Threading.Channels;
 using Surefire;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,10 +19,11 @@ app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
     {
         var a = Random.Shared.Next(1, 100);
         var b = Random.Shared.Next(1, 100);
-        var sum = await client.RunAsync<int>("Add", new { a, b }, ct);
-        return new { a, b, sum };
+        var sum = await client.RunAsync<int>("Add", new { a, b }, cancellationToken: ct);
+        return new AddRandomResult(a, b, sum);
     })
-    .WithDescription("Adds two random numbers by calling the Add job");
+    .WithDescription("Adds two random numbers by calling the Add job")
+    .WithMaxConcurrency(50);
 
 app.AddJob("DataImport", async (JobContext context, ILogger<Program> logger, CancellationToken ct, int count = 10) =>
     {
@@ -36,7 +36,7 @@ app.AddJob("DataImport", async (JobContext context, ILogger<Program> logger, Can
     })
     .WithDescription("Reports progress")
     .WithTags("progress", "max-concurrency")
-    .WithMaxConcurrency(2);
+    .WithMaxConcurrency(25);
 
 app.AddJob("Flaky", () =>
     {
@@ -83,8 +83,8 @@ app.AddJob("DoubleNumbers", (IAsyncEnumerable<int> values) => values.Select(x =>
 
 app.AddJob("SumNumbers", async (IJobClient client, CancellationToken ct) =>
     {
-        var values = client.StreamAsync<int>("GenerateNumbers", ct);
-        var doubled = client.StreamAsync<int>("DoubleNumbers", new { values }, ct);
+        var values = client.StreamAsync<int>("GenerateNumbers", cancellationToken: ct);
+        var doubled = client.StreamAsync<int>("DoubleNumbers", new { values }, cancellationToken: ct);
         return await doubled.SumAsync(ct);
     })
     .WithDescription("Composes stream jobs")
@@ -102,8 +102,8 @@ app.AddJob("Fibonacci", async (IJobClient client, CancellationToken ct, int n = 
             return n;
         }
 
-        return await client.RunAsync<int>("Fibonacci", new { n = n - 1 }, ct) +
-               await client.RunAsync<int>("Fibonacci", new { n = n - 2 }, ct);
+        return await client.RunAsync<int>("Fibonacci", new { n = n - 1 }, cancellationToken: ct) +
+               await client.RunAsync<int>("Fibonacci", new { n = n - 2 }, cancellationToken: ct);
     })
     .WithDescription("Computes Fibonacci recursively")
     .WithRateLimit("Fibonacci")
@@ -134,68 +134,24 @@ app.AddJob("AlwaysRunning", async (ILogger<Program> logger, CancellationToken ct
     .Continuous()
     .WithTags("continuous");
 
-app.AddJob("SuperJob", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+app.AddJob("BigJob", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {
-        var runs = new List<IAsyncEnumerable<long>>();
-
         for (var i = 1; i <= 10000; i++)
         {
-            logger.LogTrace("SuperJob Trace {I}", i);
-            logger.LogDebug("SuperJob Debug {I}", i);
-            logger.LogInformation("SuperJob Information {I}", i);
-            logger.LogWarning("SuperJob Warning {I}", i);
-            logger.LogError("SuperJob Error {I}", i);
-            logger.LogCritical("SuperJob Critical {I}", i);
-
-            runs.Add(client.StreamAsync<long>("ChildJob", ct));
+            logger.LogInformation("Iteration: {I}", i);
         }
 
-        return await MergeAll(runs, ct).SumAsync(ct);
-
-        //return (await client.RunAllAsync<long[]>("ChildJob2", new object?[10000], ct)).SelectMany(x => x).Sum();
+        var results = await client.RunManyAsync<AddRandomResult>("AddRandom", new object?[10000], cancellationToken: ct);
+        return results.Sum(r => (long)r.Sum);
     });
-
-static IAsyncEnumerable<T> MergeAll<T>(IEnumerable<IAsyncEnumerable<T>> sources, CancellationToken ct = default)
-{
-    var channel = Channel.CreateUnbounded<T>(new UnboundedChannelOptions
-    {
-        SingleReader = true,
-        SingleWriter = false
-    });
-
-    _ = Task.Run(async () =>
-    {
-        var tasks = sources.Select(async source =>
-        {
-            await foreach (var item in source.WithCancellation(ct))
-            {
-                await channel.Writer.WriteAsync(item, ct);
-            }
-        });
-
-        try
-        {
-            await Task.WhenAll(tasks);
-        }
-        catch (Exception ex)
-        {
-            channel.Writer.Complete(ex);
-            return;
-        }
-
-        channel.Writer.Complete();
-    }, ct);
-
-    return channel.Reader.ReadAllAsync(ct);
-}
-
-app.AddJob("ChildJob", () => AsyncEnumerable.Range(0, 10).Select(_ => Random.Shared.Next(1, 100)));
-
-app.AddJob("ChildJob2", () => Enumerable.Range(0, 10).Select(_ => Random.Shared.Next(1, 100)));
 
 app.MapSurefireDashboard("/");
 
+app.MapHealthChecks("/healthz");
+
 app.Run();
+
+record AddRandomResult(int A, int B, int Sum);
 
 class StopwatchJobFilter(ILogger<StopwatchJobFilter> logger) : IJobFilter
 {

@@ -2,7 +2,7 @@ namespace Surefire.Tests.Conformance;
 
 public abstract class StoreConformanceBase : IAsyncLifetime
 {
-    protected IJobStore Store { get; private set; } = null!;
+    internal IJobStore Store { get; private set; } = null!;
 
     public async Task InitializeAsync()
     {
@@ -11,9 +11,9 @@ public abstract class StoreConformanceBase : IAsyncLifetime
     }
 
     public virtual Task DisposeAsync() => Task.CompletedTask;
-    protected abstract Task<IJobStore> CreateStoreAsync();
+    internal abstract Task<IJobStore> CreateStoreAsync();
 
-    protected static JobRun CreateRun(string? jobName = null, JobStatus status = JobStatus.Pending,
+    internal static RunRecord CreateRun(string? jobName = null, JobStatus status = JobStatus.Pending,
         string? id = null)
     {
         // Truncate to milliseconds for cross-store compatibility (Redis uses millisecond precision).
@@ -32,7 +32,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
     protected static DateTimeOffset TruncateToMilliseconds(DateTimeOffset dt) =>
         new(dt.Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond, dt.Offset);
 
-    protected static RunStatusTransition Transition(JobRun run, JobStatus expectedStatus) =>
+    internal static RunStatusTransition Transition(RunRecord run, JobStatus expectedStatus) =>
         (expectedStatus, run.Status) switch
         {
             (JobStatus.Pending, JobStatus.Running) when run.StartedAt.HasValue && run.LastHeartbeatAt.HasValue &&
@@ -48,13 +48,13 @@ public abstract class StoreConformanceBase : IAsyncLifetime
                 => RunStatusTransition.RetryingToPending(run.Id, run.Attempt, run.NotBefore, run.NodeName,
                     run.Progress, run.Error, run.Result, run.LastHeartbeatAt),
 
-            (JobStatus.Running, JobStatus.Completed) when run.CompletedAt.HasValue
-                => RunStatusTransition.RunningToCompleted(run.Id, run.Attempt, run.CompletedAt.Value,
+            (JobStatus.Running, JobStatus.Succeeded) when run.CompletedAt.HasValue
+                => RunStatusTransition.RunningToSucceeded(run.Id, run.Attempt, run.CompletedAt.Value,
                     run.NotBefore, run.NodeName, run.Progress, run.Result, run.Error, run.StartedAt,
                     run.LastHeartbeatAt),
 
-            (JobStatus.Running, JobStatus.DeadLetter) when run.CompletedAt.HasValue
-                => RunStatusTransition.RunningToDeadLetter(run.Id, run.Attempt, run.CompletedAt.Value,
+            (JobStatus.Running, JobStatus.Failed) when run.CompletedAt.HasValue
+                => RunStatusTransition.RunningToFailed(run.Id, run.Attempt, run.CompletedAt.Value,
                     run.NotBefore, run.NodeName, run.Progress, run.Error, run.Result, run.StartedAt,
                     run.LastHeartbeatAt),
 
@@ -77,7 +77,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
                 $"No valid transition factory for {expectedStatus} -> {run.Status} in conformance helper.")
         };
 
-    protected static RunStatusTransition InvalidTransition(JobRun run, JobStatus expectedStatus) => new()
+    internal static RunStatusTransition InvalidTransition(RunRecord run, JobStatus expectedStatus) => new()
     {
         RunId = run.Id,
         ExpectedStatus = expectedStatus,

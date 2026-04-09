@@ -14,8 +14,8 @@ public sealed record TimelineBucket
     /// <summary>The number of running runs in this bucket.</summary>
     public int Running { get; init; }
 
-    /// <summary>The number of runs that completed successfully in this bucket.</summary>
-    public int Completed { get; init; }
+    /// <summary>The number of runs that succeeded in this bucket.</summary>
+    public int Succeeded { get; init; }
 
     /// <summary>The number of retrying runs in this bucket.</summary>
     public int Retrying { get; init; }
@@ -24,5 +24,5 @@ public sealed record TimelineBucket
     public int Cancelled { get; init; }
 
     /// <summary>The number of runs that failed permanently in this bucket.</summary>
-    public int DeadLetter { get; init; }
+    public int Failed { get; init; }
 }

@@ -18,7 +18,8 @@ public sealed class JobClientContractTests
         var jobName = "PriorityDefault_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Priority = 17 });
 
-        var runId = await client.TriggerAsync(jobName, null, new RunOptions());
+        var triggered = await client.TriggerAsync(jobName, null, new RunOptions());
+        var runId = triggered.Id;
 
         var run = await store.GetRunAsync(runId);
         Assert.NotNull(run);
@@ -37,7 +38,9 @@ public sealed class JobClientContractTests
         var jobName = "PriorityOverride_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Priority = 3 });
 
-        var runId = await client.TriggerAsync(jobName, null, new RunOptions { Priority = 99 });
+        var triggered = await client.TriggerAsync(jobName, null, new RunOptions { Priority = 99 });
+
+        var runId = triggered.Id;
 
         var run = await store.GetRunAsync(runId);
         Assert.NotNull(run);
@@ -55,13 +58,48 @@ public sealed class JobClientContractTests
 
         var jobName = "UnknownJob_" + Guid.CreateVersion7().ToString("N");
 
-        var runId = await client.TriggerAsync(jobName, null, new RunOptions());
+        var triggered = await client.TriggerAsync(jobName, null, new RunOptions());
+        var runId = triggered.Id;
 
         var run = await store.GetRunAsync(runId);
         Assert.NotNull(run);
         Assert.Equal(0, run.Priority);
         Assert.Single(logger.Warnings);
         Assert.Contains(jobName, logger.Warnings[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TriggerAllAsync_WithDeduplicationId_ThrowsArgumentException()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(store, notifications, TimeProvider.System, new SurefireOptions(), logger);
+
+        var jobName = "BatchDedup_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName });
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            client.TriggerAllAsync(jobName, [1, 2], new RunOptions { DeduplicationId = "dup" }));
+    }
+
+    [Fact]
+    public async Task TriggerAsync_Rejected_ThrowsRunConflictException()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(store, notifications, TimeProvider.System, new SurefireOptions(), logger);
+
+        var jobName = "ConflictType_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName });
+
+        // Create first run with dedup id
+        await client.TriggerAsync(jobName, null, new RunOptions { DeduplicationId = "unique-1" });
+
+        // Second trigger with same dedup id should throw RunConflictException specifically
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            client.TriggerAsync(jobName, null, new RunOptions { DeduplicationId = "unique-1" }));
     }
 
     [Fact]
@@ -81,7 +119,7 @@ public sealed class JobClientContractTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName });
 
         using var cts = new CancellationTokenSource();
-        var runTask = client.RunAsync(jobName, cts.Token);
+        var runTask = client.RunAsync(jobName, cancellationToken: cts.Token);
 
         _ = await TestWait.PollUntilAsync(
             async _ =>
@@ -127,7 +165,8 @@ public sealed class JobClientContractTests
 
         var jobName = "WaitOnly_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName });
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(80));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.WaitAsync(runId, cts.Token));
@@ -154,7 +193,8 @@ public sealed class JobClientContractTests
         var jobName = "ObserveRun_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var observedTask = Task.Run(async () =>
         {
             var observations = new List<RunObservation>();
@@ -184,7 +224,7 @@ public sealed class JobClientContractTests
         ]);
         await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -196,11 +236,11 @@ public sealed class JobClientContractTests
             claimed.StartedAt,
             claimed.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completed));
-        await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), runId);
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId);
 
         var observations = await observedTask;
         Assert.Contains(observations, o => o.Event?.EventType == RunEventType.Log);
-        Assert.Equal(JobStatus.Completed, observations[^1].Run.Status);
+        Assert.Equal(JobStatus.Succeeded, observations[^1].Run.Status);
     }
 
     [Fact]
@@ -240,9 +280,10 @@ public sealed class JobClientContractTests
         var jobName = "CancelNoOp_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var claimed = await WaitForClaimAsync(store, jobName);
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -259,7 +300,7 @@ public sealed class JobClientContractTests
 
         var run = await store.GetRunAsync(runId);
         Assert.NotNull(run);
-        Assert.Equal(JobStatus.Completed, run.Status);
+        Assert.Equal(JobStatus.Succeeded, run.Status);
     }
 
     [Fact]
@@ -278,7 +319,8 @@ public sealed class JobClientContractTests
         var jobName = "WaitStream_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var collectTask = Task.Run(async () =>
         {
             var values = new List<int>();
@@ -320,7 +362,7 @@ public sealed class JobClientContractTests
         ]);
         await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -332,7 +374,7 @@ public sealed class JobClientContractTests
             claimed.StartedAt,
             claimed.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completed));
-        await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), runId);
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId);
 
         var values = await collectTask;
         Assert.Equal([3, 4], values);
@@ -354,7 +396,8 @@ public sealed class JobClientContractTests
         var jobName = "WaitStreamTerminal_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var claimed = await WaitForClaimAsync(store, jobName);
 
         var now = DateTimeOffset.UtcNow;
@@ -385,7 +428,7 @@ public sealed class JobClientContractTests
             }
         ]);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -423,7 +466,8 @@ public sealed class JobClientContractTests
         var jobName = "ObserveCursor_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var claimed = await WaitForClaimAsync(store, jobName);
 
         var now = DateTimeOffset.UtcNow;
@@ -454,7 +498,7 @@ public sealed class JobClientContractTests
             }
         ]);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -504,7 +548,8 @@ public sealed class JobClientContractTests
         var jobName = "WaitStreamCursor_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var claimed = await WaitForClaimAsync(store, jobName);
 
         var now = DateTimeOffset.UtcNow;
@@ -535,7 +580,7 @@ public sealed class JobClientContractTests
             }
         ]);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -576,7 +621,8 @@ public sealed class JobClientContractTests
         var jobName = "WaitStreamMalformed_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var runId = await client.TriggerAsync(jobName);
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
         var claimed = await WaitForClaimAsync(store, jobName);
 
         var now = DateTimeOffset.UtcNow;
@@ -608,7 +654,7 @@ public sealed class JobClientContractTests
         ]);
         await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             runId,
             claimed.Attempt,
             DateTimeOffset.UtcNow,
@@ -620,7 +666,7 @@ public sealed class JobClientContractTests
             claimed.StartedAt,
             claimed.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completed));
-        await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), runId);
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId);
 
         var values = new List<int>();
         await foreach (var value in client.WaitStreamAsync<int>(runId))
@@ -649,11 +695,11 @@ public sealed class JobClientContractTests
         var jobName = "WaitEachOrdering_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var coordinator = new JobRun
+        var coordinator = new RunRecord
         {
             Id = "batch_ordering_coordinator",
             JobName = jobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAt = now,
             NotBefore = now,
             StartedAt = now,
@@ -668,13 +714,13 @@ public sealed class JobClientContractTests
         var completedAt = now.AddSeconds(1);
         var children = new[]
         {
-            new JobRun
+            new RunRecord
             {
                 Id = "child-c",
                 ParentRunId = coordinator.Id,
                 RootRunId = coordinator.Id,
                 JobName = jobName,
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -683,13 +729,13 @@ public sealed class JobClientContractTests
                 Progress = 1,
                 Result = "1"
             },
-            new JobRun
+            new RunRecord
             {
                 Id = "child-a",
                 ParentRunId = coordinator.Id,
                 RootRunId = coordinator.Id,
                 JobName = jobName,
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -698,13 +744,13 @@ public sealed class JobClientContractTests
                 Progress = 1,
                 Result = "2"
             },
-            new JobRun
+            new RunRecord
             {
                 Id = "child-b",
                 ParentRunId = coordinator.Id,
                 RootRunId = coordinator.Id,
                 JobName = jobName,
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -776,7 +822,7 @@ public sealed class JobClientContractTests
         var childAEvents = await store.GetEventsAsync(childA.Id, 0, [RunEventType.Output], childA.Attempt);
         Assert.Equal(2, childAEvents.Count);
 
-        var completeA = RunStatusTransition.RunningToCompleted(
+        var completeA = RunStatusTransition.RunningToSucceeded(
             childA.Id,
             childA.Attempt,
             DateTimeOffset.UtcNow,
@@ -787,7 +833,7 @@ public sealed class JobClientContractTests
             null,
             childA.StartedAt,
             childA.LastHeartbeatAt);
-        var completeB = RunStatusTransition.RunningToCompleted(
+        var completeB = RunStatusTransition.RunningToSucceeded(
             childB.Id,
             childB.Attempt,
             DateTimeOffset.UtcNow,
@@ -807,7 +853,7 @@ public sealed class JobClientContractTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             DateTimeOffset.UtcNow,
@@ -863,11 +909,11 @@ public sealed class JobClientContractTests
         var childId = Guid.CreateVersion7().ToString("N");
 
         await store.CreateRunsAsync([
-            new JobRun
+            new RunRecord
             {
                 Id = batchId,
                 JobName = jobName,
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -878,13 +924,13 @@ public sealed class JobClientContractTests
                 BatchCompleted = 1,
                 BatchFailed = 0
             },
-            new JobRun
+            new RunRecord
             {
                 Id = childId,
                 ParentRunId = batchId,
                 RootRunId = batchId,
                 JobName = jobName,
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -943,7 +989,7 @@ public sealed class JobClientContractTests
 
         var baseline = DateTimeOffset.UtcNow.AddSeconds(-2);
         var initialRuns = Enumerable.Range(0, 3)
-            .Select(i => new JobRun
+            .Select(i => new RunRecord
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = jobName,
@@ -969,7 +1015,7 @@ public sealed class JobClientContractTests
 
             if (observed.Count == 1)
             {
-                var lateRun = new JobRun
+                var lateRun = new RunRecord
                 {
                     Id = Guid.CreateVersion7().ToString("N"),
                     JobName = jobName,
@@ -1037,10 +1083,11 @@ public sealed class JobClientContractTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         using var cts = new CancellationTokenSource();
-        var runId = await client.TriggerAsync(jobName, new
+        var triggered = await client.TriggerAsync(jobName, new
         {
             values = ProduceStream()
-        }, cts.Token);
+        }, cancellationToken: cts.Token);
+        var runId = triggered.Id;
 
         cts.Cancel();
 
@@ -1086,10 +1133,11 @@ public sealed class JobClientContractTests
         var jobName = "StreamOnlyArgs_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName });
 
-        var runId = await client.TriggerAsync(jobName, new
+        var triggered = await client.TriggerAsync(jobName, new
         {
             values = ProduceStream()
         });
+        var runId = triggered.Id;
 
         var run = await store.GetRunAsync(runId);
         Assert.NotNull(run);
@@ -1103,7 +1151,7 @@ public sealed class JobClientContractTests
         }
     }
 
-    private static async Task<JobRun> WaitForClaimAsync(InMemoryJobStore store, string jobName)
+    private static async Task<RunRecord> WaitForClaimAsync(InMemoryJobStore store, string jobName)
     {
         return await TestWait.PollUntilAsync(
             () => store.ClaimRunAsync("node-1", [jobName], ["default"]),

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import type { JobRun } from "@/lib/api";
 import { formatMs } from "@/lib/format";
 
@@ -78,9 +79,11 @@ const SCALE = 0.9;
 export function TraceView({
   runs,
   currentRunId,
+  scrollContainerRef,
 }: {
   runs: JobRun[];
   currentRunId: string;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
 }) {
   const hasActiveRuns = useMemo(
     () => runs.some((run) => run.status === 0 || run.status === 1),
@@ -122,8 +125,16 @@ export function TraceView({
     };
   }, [runs, nowMs]);
 
-  const currentRef = useRef<HTMLAnchorElement>(null);
   const hasScrolled = useRef(false);
+
+  const ROW_HEIGHT = 28; // h-7 = 28px
+
+  const rowVirtualizer = useVirtualizer({
+    count: flatNodes.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 20,
+  });
 
   // Only scroll once on mount or when navigating to a different run
   useEffect(() => {
@@ -131,11 +142,13 @@ export function TraceView({
   }, [currentRunId]);
 
   useEffect(() => {
-    if (currentRef.current && !hasScrolled.current) {
-      currentRef.current.scrollIntoView({ block: "center" });
+    if (hasScrolled.current) return;
+    const idx = flatNodes.findIndex((n) => n.run.id === currentRunId);
+    if (idx >= 0) {
+      rowVirtualizer.scrollToIndex(idx, { align: "center" });
       hasScrolled.current = true;
     }
-  }, [flatNodes]);
+  }, [flatNodes, currentRunId, rowVirtualizer]);
 
   if (flatNodes.length === 0) return null;
 
@@ -143,10 +156,10 @@ export function TraceView({
 
   return (
     <div className="w-full min-h-0">
-      <div className="grid grid-cols-[auto_1fr]">
-        {/* Time axis header */}
-        <div className="col-span-2 grid grid-cols-subgrid items-stretch sticky top-10 z-10 h-10 border-b bg-muted/30 backdrop-blur-sm px-2">
-          <span className="pr-3" />
+      {/* Time axis header */}
+      <div className="sticky top-0 z-10 h-10 border-b bg-muted/30 backdrop-blur-sm px-2">
+        <div className="grid grid-cols-[auto_1fr] h-full">
+          <span className="pr-3 max-w-[200px]" />
           <div className="relative overflow-visible">
             {ticks.map((t, i) => (
               <span
@@ -159,9 +172,15 @@ export function TraceView({
             ))}
           </div>
         </div>
+      </div>
 
-        {/* Trace rows */}
-        {flatNodes.map(({ run, depth }) => {
+      {/* Virtualized trace rows */}
+      <div
+        className="relative w-full"
+        style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+      >
+        {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+          const { run, depth } = flatNodes[virtualItem.index];
           const created = new Date(run.createdAt).getTime();
           const started = run.startedAt
             ? new Date(run.startedAt).getTime()
@@ -183,13 +202,16 @@ export function TraceView({
           return (
             <Link
               key={run.id}
-              ref={isCurrent ? currentRef : undefined}
               to={`/runs/${run.id}`}
-              className={`col-span-2 grid grid-cols-subgrid items-center transition-colors border-b border-border/20 last:border-b-0 ${
+              className={`absolute top-0 left-0 w-full grid grid-cols-[auto_1fr] items-center transition-colors border-b border-border/20 ${
                 isCurrent
                   ? "bg-primary/5 hover:bg-primary/10"
                   : "hover:bg-muted/50"
               }`}
+              style={{
+                height: `${virtualItem.size}px`,
+                transform: `translateY(${virtualItem.start}px)`,
+              }}
             >
               {/* Name */}
               <div

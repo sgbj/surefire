@@ -5,7 +5,7 @@ using Testcontainers.Redis;
 
 namespace Surefire.Tests.Redis;
 
-public sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
+internal sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly RedisContainer _container = new RedisBuilder()
         .WithImage("redis:7-alpine")

@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using System.Text.Json;
 
 namespace Surefire;
 
@@ -11,6 +10,7 @@ internal sealed partial class SurefireMaintenanceService(
     ActiveRunTracker activeRuns,
     SurefireOptions options,
     TimeProvider timeProvider,
+    BatchCompletionHandler batchCompletionHandler,
     ILogger<SurefireMaintenanceService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -92,7 +92,7 @@ internal sealed partial class SurefireMaintenanceService(
 
         foreach (var runId in runIds)
         {
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
 
             var run = await store.GetRunAsync(runId, cancellationToken);
@@ -108,20 +108,20 @@ internal sealed partial class SurefireMaintenanceService(
     {
         var staleBefore = timeProvider.GetUtcNow() - options.InactiveThreshold;
         var retryPolicyCache = new Dictionary<string, RetryPolicy>(StringComparer.Ordinal);
-        var skip = 0;
         const int take = 1000;
 
         while (true)
         {
+            // Always query from skip=0: recovered runs transition out of Running status,
+            // so the result set naturally shrinks each iteration.
             var page = await store.GetRunsAsync(
                 new()
                 {
                     Status = JobStatus.Running,
                     LastHeartbeatBefore = staleBefore,
-                    IsBatchCoordinator = false,
                     OrderBy = RunOrderBy.CreatedAt
                 },
-                skip,
+                0,
                 take,
                 cancellationToken);
 
@@ -132,13 +132,18 @@ internal sealed partial class SurefireMaintenanceService(
 
             foreach (var run in page.Items)
             {
+                if (run.BatchTotal is { })
+                {
+                    continue;
+                }
+
                 var retryPolicy = await GetRetryPolicyForStaleRecoveryAsync(run.JobName, retryPolicyCache,
                     cancellationToken);
 
                 if (run.Attempt > retryPolicy.MaxRetries)
                 {
                     var now = timeProvider.GetUtcNow();
-                    var deadLetter = RunStatusTransition.RunningToDeadLetter(
+                    var deadLetter = RunStatusTransition.RunningToFailed(
                         run.Id,
                         run.Attempt,
                         now,
@@ -155,7 +160,7 @@ internal sealed partial class SurefireMaintenanceService(
                         continue;
                     }
 
-                    await AppendFailureEventAsync(
+                    await batchCompletionHandler.AppendFailureEventAsync(
                         run,
                         RunFailureEnvelope.FromMessage(
                             run.Attempt,
@@ -165,13 +170,13 @@ internal sealed partial class SurefireMaintenanceService(
                             run.Error ?? "Run became stale and exhausted retry policy."),
                         cancellationToken);
 
-                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+                    await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                         cancellationToken);
-                    await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, cancellationToken);
+                    await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Maintenance", cancellationToken);
                     continue;
                 }
 
-                var retryNotBefore = timeProvider.GetUtcNow() + retryPolicy.GetDelay(run.Attempt + 1);
+                var retryNotBefore = timeProvider.GetUtcNow() + retryPolicy.GetDelay(run.Attempt);
 
                 var retrying = RunStatusTransition.RunningToRetrying(
                     run.Id,
@@ -188,7 +193,7 @@ internal sealed partial class SurefireMaintenanceService(
                     continue;
                 }
 
-                await AppendFailureEventAsync(
+                await batchCompletionHandler.AppendFailureEventAsync(
                     run,
                     RunFailureEnvelope.FromMessage(
                         run.Attempt,
@@ -214,8 +219,6 @@ internal sealed partial class SurefireMaintenanceService(
 
                 await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
             }
-
-            skip += page.Items.Count;
         }
     }
 
@@ -232,147 +235,6 @@ internal sealed partial class SurefireMaintenanceService(
         return retryPolicy;
     }
 
-    private async Task MaybeCompleteBatchAsync(string? batchRunId, string childRunId,
-        CancellationToken cancellationToken)
-    {
-        if (batchRunId is null)
-        {
-            return;
-        }
-
-        if (await store.TryIncrementBatchCounterAsync(batchRunId, true, cancellationToken) is not { } counters)
-        {
-            return;
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId, cancellationToken);
-
-        if (counters.Completed + counters.Failed < counters.Total)
-        {
-            return;
-        }
-
-        var coordinator = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (coordinator is null || coordinator.Status.IsTerminal)
-        {
-            return;
-        }
-
-        var coordinatorStartedAt = coordinator.StartedAt ??
-                                   await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
-
-        var now = timeProvider.GetUtcNow();
-        var transition = counters.Failed == 0
-            ? RunStatusTransition.RunningToCompleted(
-                coordinator.Id,
-                coordinator.Attempt,
-                now,
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                null,
-                null,
-                coordinatorStartedAt,
-                now)
-            : RunStatusTransition.RunningToDeadLetter(
-                coordinator.Id,
-                coordinator.Attempt,
-                now,
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                $"Batch completed with {counters.Failed} failed run(s).",
-                null,
-                coordinatorStartedAt,
-                now);
-
-        if (await store.TryTransitionRunAsync(transition, cancellationToken))
-        {
-            if (counters.Failed > 0)
-            {
-                await AppendFailureEventAsync(
-                    coordinator,
-                    RunFailureEnvelope.FromMessage(
-                        coordinator.Attempt,
-                        now,
-                        "Maintenance",
-                        "BatchChildFailures",
-                        $"Batch completed with {counters.Failed} failed run(s)."),
-                    cancellationToken);
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
-                cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
-                cancellationToken);
-        }
-    }
-
-    private async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
-        CancellationToken cancellationToken)
-    {
-        var payload = JsonSerializer.Serialize(envelope, options.SerializerOptions);
-
-        await store.AppendEventsAsync(
-        [
-            new()
-            {
-                RunId = run.Id,
-                EventType = RunEventType.AttemptFailure,
-                Payload = payload,
-                CreatedAt = envelope.OccurredAt,
-                Attempt = run.Attempt
-            }
-        ], cancellationToken);
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.ParentRunId is { } batchRunId)
-        {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
-        }
-    }
-
-    private async Task<DateTimeOffset?> GetBatchEarliestChildStartedAtAsync(string batchRunId,
-        CancellationToken cancellationToken)
-    {
-        DateTimeOffset? earliest = null;
-        var skip = 0;
-        const int take = 200;
-
-        while (true)
-        {
-            var page = await store.GetRunsAsync(
-                new()
-                {
-                    ParentRunId = batchRunId,
-                    OrderBy = RunOrderBy.CreatedAt
-                },
-                skip,
-                take,
-                cancellationToken);
-
-            if (page.Items.Count == 0)
-            {
-                break;
-            }
-
-            foreach (var child in page.Items)
-            {
-                if (child.StartedAt is not { } startedAt)
-                {
-                    continue;
-                }
-
-                earliest = earliest is null || startedAt < earliest
-                    ? startedAt
-                    : earliest;
-            }
-
-            skip += page.Items.Count;
-        }
-
-        return earliest;
-    }
     private static partial class Log
     {
         [LoggerMessage(EventId = 1301, Level = LogLevel.Error, Message = "Maintenance tick failed.")]

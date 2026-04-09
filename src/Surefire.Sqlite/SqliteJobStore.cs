@@ -299,19 +299,19 @@ internal sealed class SqliteJobStore(
     }
 
     public Task CreateRunsAsync(
-        IReadOnlyList<JobRun> runs,
+        IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
 
     public Task<bool> TryCreateRunAsync(
-        JobRun run, int? maxActiveForJob = null,
+        RunRecord run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
-    public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
@@ -322,7 +322,7 @@ internal sealed class SqliteJobStore(
         return await reader.ReadAsync(cancellationToken) ? ReadRun(reader) : null;
     }
 
-    public async Task<PagedResult<JobRun>> GetRunsAsync(
+    public async Task<PagedResult<RunRecord>> GetRunsAsync(
         RunFilter filter, int skip = 0, int take = 50, CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -403,11 +403,10 @@ internal sealed class SqliteJobStore(
             cmd.Parameters.AddWithValue("@lhb", FormatTimestamp(filter.LastHeartbeatBefore.Value));
         }
 
-        if (filter.IsBatchCoordinator is { })
+        if (filter.BatchId is { })
         {
-            where += filter.IsBatchCoordinator.Value
-                ? " AND batch_total IS NOT NULL"
-                : " AND batch_total IS NULL";
+            where += " AND batch_id = @bid";
+            cmd.Parameters.AddWithValue("@bid", filter.BatchId);
         }
 
         if (filter.IsTerminal is { })
@@ -436,7 +435,7 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@tk", take);
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        var items = new List<JobRun>();
+        var items = new List<RunRecord>();
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(ReadRun(reader));
@@ -446,7 +445,7 @@ internal sealed class SqliteJobStore(
         return new() { Items = items, TotalCount = totalCount };
     }
 
-    public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
+    public async Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
@@ -518,7 +517,7 @@ internal sealed class SqliteJobStore(
         return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
-    public async Task<JobRun?> ClaimRunAsync(
+    public async Task<RunRecord?> ClaimRunAsync(
         string nodeName,
         IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames,
@@ -690,7 +689,7 @@ internal sealed class SqliteJobStore(
             """,
             [new("@name", jobName)], now, tx, cancellationToken);
 
-        JobRun? result;
+        RunRecord? result;
         await using (var readCmd = CreateCommand(conn, """
                                                        SELECT * FROM surefire_runs WHERE id = @id
                                                        """, tx))
@@ -773,6 +772,7 @@ internal sealed class SqliteJobStore(
         long sinceId = 0,
         RunEventType[]? types = null,
         int? attempt = null,
+        int? take = null,
         CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
@@ -801,7 +801,14 @@ internal sealed class SqliteJobStore(
             cmd.Parameters.AddWithValue("@att", attempt.Value);
         }
 
-        cmd.CommandText = sql + " ORDER BY id";
+        sql += " ORDER BY id";
+        if (take is { } t)
+        {
+            sql += " LIMIT @take";
+            cmd.Parameters.AddWithValue("@take", t);
+        }
+
+        cmd.CommandText = sql;
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         var result = new List<RunEvent>();
         while (await reader.ReadAsync(cancellationToken))
@@ -1239,7 +1246,7 @@ internal sealed class SqliteJobStore(
 
             if (completed > 0)
             {
-                runsByStatus["Completed"] = completed;
+                runsByStatus["Succeeded"] = completed;
             }
 
             if (retrying > 0)
@@ -1254,15 +1261,14 @@ internal sealed class SqliteJobStore(
 
             if (deadLetter > 0)
             {
-                runsByStatus["DeadLetter"] = deadLetter;
+                runsByStatus["Failed"] = deadLetter;
             }
         }
 
         var bucketSeconds = bucketMinutes * 60;
         var bucketSize = TimeSpan.FromMinutes(bucketMinutes);
         var bucketData =
-            new Dictionary<int, (int Pending, int Running, int Completed, int Retrying, int Cancelled, int DeadLetter
-                )>();
+            new Dictionary<int, (int Pending, int Running, int Succeeded, int Retrying, int Cancelled, int Failed)>();
 
         await using (var timelineCmd = CreateCommand(conn, """
                                                            SELECT
@@ -1291,18 +1297,18 @@ internal sealed class SqliteJobStore(
 
                 bucketData[idx] = status switch
                 {
-                    JobStatus.Pending => (entry.Pending + cnt, entry.Running, entry.Completed, entry.Retrying,
-                        entry.Cancelled, entry.DeadLetter),
-                    JobStatus.Running => (entry.Pending, entry.Running + cnt, entry.Completed, entry.Retrying,
-                        entry.Cancelled, entry.DeadLetter),
-                    JobStatus.Completed => (entry.Pending, entry.Running, entry.Completed + cnt, entry.Retrying,
-                        entry.Cancelled, entry.DeadLetter),
-                    JobStatus.Retrying => (entry.Pending, entry.Running, entry.Completed, entry.Retrying + cnt,
-                        entry.Cancelled, entry.DeadLetter),
-                    JobStatus.Cancelled => (entry.Pending, entry.Running, entry.Completed, entry.Retrying,
-                        entry.Cancelled + cnt, entry.DeadLetter),
-                    JobStatus.DeadLetter => (entry.Pending, entry.Running, entry.Completed, entry.Retrying,
-                        entry.Cancelled, entry.DeadLetter + cnt),
+                    JobStatus.Pending => (entry.Pending + cnt, entry.Running, entry.Succeeded, entry.Retrying,
+                        entry.Cancelled, entry.Failed),
+                    JobStatus.Running => (entry.Pending, entry.Running + cnt, entry.Succeeded, entry.Retrying,
+                        entry.Cancelled, entry.Failed),
+                    JobStatus.Succeeded => (entry.Pending, entry.Running, entry.Succeeded + cnt, entry.Retrying,
+                        entry.Cancelled, entry.Failed),
+                    JobStatus.Retrying => (entry.Pending, entry.Running, entry.Succeeded, entry.Retrying + cnt,
+                        entry.Cancelled, entry.Failed),
+                    JobStatus.Cancelled => (entry.Pending, entry.Running, entry.Succeeded, entry.Retrying,
+                        entry.Cancelled + cnt, entry.Failed),
+                    JobStatus.Failed => (entry.Pending, entry.Running, entry.Succeeded, entry.Retrying,
+                        entry.Cancelled, entry.Failed + cnt),
                     _ => entry
                 };
             }
@@ -1321,10 +1327,10 @@ internal sealed class SqliteJobStore(
                 Start = bucketStart,
                 Pending = entry.Pending,
                 Running = entry.Running,
-                Completed = entry.Completed,
+                Succeeded = entry.Succeeded,
                 Retrying = entry.Retrying,
                 Cancelled = entry.Cancelled,
-                DeadLetter = entry.DeadLetter
+                Failed = entry.Failed
             });
             bucketStart += bucketSize;
             bucketIdx++;
@@ -1444,7 +1450,7 @@ internal sealed class SqliteJobStore(
     }
 
     private async Task CreateRunsCoreAsync(
-        IReadOnlyList<JobRun> runs,
+        IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1466,7 +1472,7 @@ internal sealed class SqliteJobStore(
     }
 
     private async Task<bool> TryCreateRunCoreAsync(
-        JobRun run, int? maxActiveForJob, DateTimeOffset? lastCronFireAt,
+        RunRecord run, int? maxActiveForJob, DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1652,7 +1658,7 @@ internal sealed class SqliteJobStore(
 
     private static async Task InsertRunAsync(
         SqliteConnection conn,
-        JobRun run,
+        RunRecord run,
         CancellationToken cancellationToken,
         SqliteTransaction? tx = null)
     {
@@ -1765,7 +1771,7 @@ internal sealed class SqliteJobStore(
         LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at")
     };
 
-    private static JobRun ReadRun(SqliteDataReader reader)
+    private static RunRecord ReadRun(SqliteDataReader reader)
     {
         var batchTotal = reader.IsDBNull(reader.GetOrdinal("batch_total"))
             ? (int?)null

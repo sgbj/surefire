@@ -273,7 +273,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
             var run = CreateRun(jobName);
             await Store.CreateRunsAsync([run]);
 
-            var results = new ConcurrentBag<JobRun?>();
+            var results = new ConcurrentBag<RunRecord?>();
 
             var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
             {
@@ -503,7 +503,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
                 await Store.CreateRunsAsync([run]);
             }
 
-            var results = new ConcurrentBag<JobRun?>();
+            var results = new ConcurrentBag<RunRecord?>();
 
             var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
             {

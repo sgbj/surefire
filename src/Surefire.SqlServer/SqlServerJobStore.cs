@@ -351,18 +351,18 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
+    public Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
 
-    public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
+    public Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
-    public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
@@ -379,7 +379,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return ReadRun(reader);
     }
 
-    public async Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    public async Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -413,7 +413,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         cmd.Parameters.Add(CreateParameter("@take", take));
         cmd.Parameters.Add(CreateParameter("@skip", skip));
 
-        var items = new List<JobRun>();
+        var items = new List<RunRecord>();
         var totalCount = 0;
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -429,7 +429,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return new() { Items = items, TotalCount = totalCount };
     }
 
-    public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
+    public async Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
@@ -532,7 +532,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return rows > 0;
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public async Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
@@ -686,7 +686,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         cmd.Parameters.Add(CreateParameter("@node_name", nodeName));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        JobRun? claimed = null;
+        RunRecord? claimed = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             claimed = ReadRun(reader);
@@ -790,7 +790,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     }
 
     public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
-        RunEventType[]? types = null, int? attempt = null, CancellationToken cancellationToken = default)
+        RunEventType[]? types = null, int? attempt = null, int? take = null, CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
@@ -818,6 +818,13 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         }
 
         sb.Append(" ORDER BY id");
+
+        if (take is { })
+        {
+            sb.Append(" OFFSET 0 ROWS FETCH NEXT @take ROWS ONLY");
+            cmd.Parameters.Add(CreateParameter("@take", take.Value));
+        }
+
         cmd.CommandText = sb.ToString();
 
         var results = new List<RunEvent>();
@@ -1171,10 +1178,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                    COUNT(*) AS total_runs,
                                    ISNULL(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) AS pending,
                                    ISNULL(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), 0) AS running,
-                                   ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS completed,
+                                   ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS succeeded,
                                    ISNULL(SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END), 0) AS retrying,
                                    ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS cancelled,
-                                   ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS dead_letter
+                                   ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS failed
                                FROM dbo.surefire_runs
                                WHERE created_at >= @since AND created_at < @now
                                """;
@@ -1194,10 +1201,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
                 var pending = reader.GetInt32(reader.GetOrdinal("pending"));
                 var running = reader.GetInt32(reader.GetOrdinal("running"));
-                var completed = reader.GetInt32(reader.GetOrdinal("completed"));
+                var succeeded = reader.GetInt32(reader.GetOrdinal("succeeded"));
                 var retrying = reader.GetInt32(reader.GetOrdinal("retrying"));
                 var cancelled = reader.GetInt32(reader.GetOrdinal("cancelled"));
-                var deadLetter = reader.GetInt32(reader.GetOrdinal("dead_letter"));
+                var failed = reader.GetInt32(reader.GetOrdinal("failed"));
 
                 activeRuns = pending + running + retrying;
 
@@ -1211,9 +1218,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                     runsByStatus["Running"] = running;
                 }
 
-                if (completed > 0)
+                if (succeeded > 0)
                 {
-                    runsByStatus["Completed"] = completed;
+                    runsByStatus["Succeeded"] = succeeded;
                 }
 
                 if (retrying > 0)
@@ -1226,13 +1233,13 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                     runsByStatus["Cancelled"] = cancelled;
                 }
 
-                if (deadLetter > 0)
+                if (failed > 0)
                 {
-                    runsByStatus["DeadLetter"] = deadLetter;
+                    runsByStatus["Failed"] = failed;
                 }
 
-                var terminalCount = completed + cancelled + deadLetter;
-                successRate = terminalCount > 0 ? completed / (double)terminalCount : 0.0;
+                var terminalCount = succeeded + cancelled + failed;
+                successRate = terminalCount > 0 ? succeeded / (double)terminalCount : 0.0;
             }
         }
 
@@ -1242,10 +1249,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                     DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since) AS bucket_start,
                                     SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS pending,
                                     SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS running,
-                                    SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS completed,
+                                    SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
                                     SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) AS retrying,
                                     SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS cancelled,
-                                    SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS dead_letter
+                                    SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed
                                 FROM dbo.surefire_runs
                                 WHERE created_at >= @since AND created_at < @now
                                 GROUP BY DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since)
@@ -1266,10 +1273,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                     Start = start,
                     Pending = reader.GetInt32(1),
                     Running = reader.GetInt32(2),
-                    Completed = reader.GetInt32(3),
+                    Succeeded = reader.GetInt32(3),
                     Retrying = reader.GetInt32(4),
                     Cancelled = reader.GetInt32(5),
-                    DeadLetter = reader.GetInt32(6)
+                    Failed = reader.GetInt32(6)
                 };
             }
         }
@@ -1402,7 +1409,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return results;
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
+    private async Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1469,7 +1476,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         await tx.CommitAsync(cancellationToken);
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -1693,11 +1700,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             cmd.Parameters.Add(CreateParameter("@filter_hb_before", filter.LastHeartbeatBefore.Value));
         }
 
-        if (filter.IsBatchCoordinator is { })
+        if (filter.BatchId is { })
         {
-            parts.Add(filter.IsBatchCoordinator.Value
-                ? "batch_total IS NOT NULL"
-                : "batch_total IS NULL");
+            parts.Add("batch_id = @batch_id_filter");
+            cmd.Parameters.Add(CreateParameter("@batch_id_filter", filter.BatchId));
         }
 
         if (filter.IsTerminal is { })
@@ -1708,7 +1714,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         }
     }
 
-    private static void AddRunParams(SqlCommand cmd, string prefix, JobRun run)
+    private static void AddRunParams(SqlCommand cmd, string prefix, RunRecord run)
     {
         cmd.Parameters.Add(CreateParameter($"{prefix}id", run.Id));
         cmd.Parameters.Add(CreateParameter($"{prefix}job_name", run.JobName));
@@ -1742,9 +1748,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         cmd.Parameters.Add(CreateParameter($"{prefix}batch_failed", run.BatchFailed ?? 0));
     }
 
-    private static JobRun ReadRun(SqlDataReader reader)
+    private static RunRecord ReadRun(SqlDataReader reader)
     {
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = reader.GetString(reader.GetOrdinal("id")),
             JobName = reader.GetString(reader.GetOrdinal("job_name")),

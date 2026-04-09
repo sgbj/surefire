@@ -15,17 +15,18 @@ internal sealed class SurefireInstrumentation : IDisposable
         _meter = meterFactory.Create("Surefire");
 
         RunsClaimed = _meter.CreateCounter<long>("surefire.runs.claimed");
-        RunsCompleted = _meter.CreateCounter<long>("surefire.runs.completed");
+        RunsSucceeded = _meter.CreateCounter<long>("surefire.runs.completed");
         RunsFailed = _meter.CreateCounter<long>("surefire.runs.failed");
         RunsCancelled = _meter.CreateCounter<long>("surefire.runs.cancelled");
         RunDurationMs = _meter.CreateHistogram<double>("surefire.runs.duration.ms");
+        LogEntriesDropped = _meter.CreateCounter<long>("surefire.log_entries.dropped");
     }
 
     public ActivitySource ActivitySource { get; }
 
     public Counter<long> RunsClaimed { get; }
 
-    public Counter<long> RunsCompleted { get; }
+    public Counter<long> RunsSucceeded { get; }
 
     public Counter<long> RunsFailed { get; }
 
@@ -33,38 +34,49 @@ internal sealed class SurefireInstrumentation : IDisposable
 
     public Histogram<double> RunDurationMs { get; }
 
+    public Counter<long> LogEntriesDropped { get; }
+
     public void Dispose()
     {
         ActivitySource.Dispose();
         _meter.Dispose();
     }
 
-    public void RecordRunClaimed() => RunsClaimed.Add(1);
-
-    public void RecordRunCompleted(DateTimeOffset? startedAt, DateTimeOffset completedAt)
+    public void RecordRunClaimed(string jobName)
     {
-        RunsCompleted.Add(1);
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        RunsClaimed.Add(1, tags);
+    }
+
+    public void RecordRunCompleted(string jobName, DateTimeOffset? startedAt, DateTimeOffset completedAt)
+    {
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        RunsSucceeded.Add(1, tags);
         if (startedAt is { } started)
         {
-            RunDurationMs.Record((completedAt - started).TotalMilliseconds);
+            RunDurationMs.Record((completedAt - started).TotalMilliseconds, tags);
         }
     }
 
-    public void RecordRunFailed(DateTimeOffset? startedAt, DateTimeOffset completedAt)
+    public void RecordRunFailed(string jobName, DateTimeOffset? startedAt, DateTimeOffset completedAt)
     {
-        RunsFailed.Add(1);
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        RunsFailed.Add(1, tags);
         if (startedAt is { } started)
         {
-            RunDurationMs.Record((completedAt - started).TotalMilliseconds);
+            RunDurationMs.Record((completedAt - started).TotalMilliseconds, tags);
         }
     }
 
-    public void RecordRunCancelled(DateTimeOffset? startedAt, DateTimeOffset cancelledAt)
+    public void RecordRunCancelled(string jobName, DateTimeOffset? startedAt, DateTimeOffset cancelledAt)
     {
-        RunsCancelled.Add(1);
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        RunsCancelled.Add(1, tags);
         if (startedAt is { } started)
         {
-            RunDurationMs.Record((cancelledAt - started).TotalMilliseconds);
+            RunDurationMs.Record((cancelledAt - started).TotalMilliseconds, tags);
         }
     }
+
+    public void RecordLogEntryDropped() => LogEntriesDropped.Add(1);
 }

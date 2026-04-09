@@ -243,7 +243,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         }
 
         // Claim concurrently from 10 threads — only 2 should succeed due to queue max_concurrency=2
-        var results = new ConcurrentBag<JobRun?>();
+        var results = new ConcurrentBag<RunRecord?>();
         var tasks = Enumerable.Range(0, 10).Select(t => Task.Run(async () =>
         {
             var claimed = await Store.ClaimRunAsync($"node-{t}", jobNames, [queueName]);
@@ -297,7 +297,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         Assert.Equal(2, stats2[queueName].PendingCount);
 
         // Transition coordinator to Completed
-        coordinator.Status = JobStatus.Completed;
+        coordinator.Status = JobStatus.Succeeded;
         coordinator.CompletedAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(coordinator, JobStatus.Running));
 

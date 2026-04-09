@@ -35,8 +35,8 @@ public sealed record RunFilter
     /// <summary>Filters runs whose last heartbeat is before the specified time.</summary>
     public DateTimeOffset? LastHeartbeatBefore { get; init; }
 
-    /// <summary>Filters runs that are batch coordinators.</summary>
-    public bool? IsBatchCoordinator { get; init; }
+    /// <summary>Filters runs that belong to the specified batch.</summary>
+    public string? BatchId { get; init; }
 
     /// <summary>Filters runs by whether they are in a terminal state.</summary>
     public bool? IsTerminal { get; init; }

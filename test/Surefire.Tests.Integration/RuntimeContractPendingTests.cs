@@ -123,7 +123,7 @@ public sealed class RuntimeContractPendingTests
             }
         ]);
 
-        var completed = RunStatusTransition.RunningToCompleted(
+        var completed = RunStatusTransition.RunningToSucceeded(
             run.Id,
             claimed2.Attempt,
             DateTimeOffset.UtcNow,
@@ -137,7 +137,7 @@ public sealed class RuntimeContractPendingTests
         Assert.True(await store.TryTransitionRunAsync(completed));
 
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id));
-        await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id));
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id));
 
         var streamed = await streamTask;
         Assert.Equal([1, 2], streamed);
@@ -173,7 +173,7 @@ public sealed class RuntimeContractPendingTests
 
         var claimedA = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimedA);
-        var completeA = RunStatusTransition.RunningToCompleted(
+        var completeA = RunStatusTransition.RunningToSucceeded(
             claimedA.Id,
             claimedA.Attempt,
             DateTimeOffset.UtcNow,
@@ -189,7 +189,7 @@ public sealed class RuntimeContractPendingTests
 
         var claimedB = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimedB);
-        var completeB = RunStatusTransition.RunningToCompleted(
+        var completeB = RunStatusTransition.RunningToSucceeded(
             claimedB.Id,
             claimedB.Attempt,
             DateTimeOffset.UtcNow,
@@ -205,7 +205,7 @@ public sealed class RuntimeContractPendingTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             DateTimeOffset.UtcNow,
@@ -240,7 +240,7 @@ public sealed class RuntimeContractPendingTests
         var coordinator = await store.GetRunAsync(batchId);
 
         Assert.NotNull(coordinator);
-        Assert.Equal(JobStatus.Completed, coordinator.Status);
+        Assert.Equal(JobStatus.Succeeded, coordinator.Status);
         Assert.Equal(0, coordinator.BatchTotal);
         Assert.Equal(1, coordinator.Progress);
         Assert.NotNull(coordinator.CompletedAt);
@@ -269,11 +269,12 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
 
         var originalBatchId = await client.TriggerAllAsync(jobName, Array.Empty<object?>());
-        var rerunBatchId = await client.RerunAsync(originalBatchId);
+        var rerunBatch = await client.RerunAsync(originalBatchId);
+        var rerunBatchId = rerunBatch.Id;
         var coordinator = await store.GetRunAsync(rerunBatchId);
 
         Assert.NotNull(coordinator);
-        Assert.Equal(JobStatus.Completed, coordinator.Status);
+        Assert.Equal(JobStatus.Succeeded, coordinator.Status);
         Assert.Equal(0, coordinator.BatchTotal);
         Assert.Equal(1, coordinator.Progress);
         Assert.NotNull(coordinator.CompletedAt);
@@ -322,7 +323,7 @@ public sealed class RuntimeContractPendingTests
             var claimed = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
             Assert.NotNull(claimed);
 
-            var complete = RunStatusTransition.RunningToCompleted(
+            var complete = RunStatusTransition.RunningToSucceeded(
                 claimed.Id,
                 claimed.Attempt,
                 DateTimeOffset.UtcNow,
@@ -339,7 +340,7 @@ public sealed class RuntimeContractPendingTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             DateTimeOffset.UtcNow,
@@ -483,7 +484,7 @@ public sealed class RuntimeContractPendingTests
         var childAEvents = await store.GetEventsAsync(childA.Id, 0, [RunEventType.Output], childA.Attempt);
         Assert.Equal(2, childAEvents.Count);
 
-        var completeA = RunStatusTransition.RunningToCompleted(
+        var completeA = RunStatusTransition.RunningToSucceeded(
             childA.Id,
             childA.Attempt,
             DateTimeOffset.UtcNow,
@@ -494,7 +495,7 @@ public sealed class RuntimeContractPendingTests
             null,
             childA.StartedAt,
             childA.LastHeartbeatAt);
-        var completeB = RunStatusTransition.RunningToCompleted(
+        var completeB = RunStatusTransition.RunningToSucceeded(
             childB.Id,
             childB.Attempt,
             DateTimeOffset.UtcNow,
@@ -513,7 +514,7 @@ public sealed class RuntimeContractPendingTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             DateTimeOffset.UtcNow,
@@ -560,7 +561,7 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
-        var claimed = new List<JobRun>();
+        var claimed = new List<RunRecord>();
         for (var i = 0; i < 3; i++)
         {
             var run = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
@@ -581,7 +582,7 @@ public sealed class RuntimeContractPendingTests
         });
 
         var first = claimed[0];
-        var completeFirst = RunStatusTransition.RunningToCompleted(
+        var completeFirst = RunStatusTransition.RunningToSucceeded(
             first.Id,
             first.Attempt,
             DateTimeOffset.UtcNow,
@@ -597,7 +598,7 @@ public sealed class RuntimeContractPendingTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             DateTimeOffset.UtcNow,
@@ -614,7 +615,7 @@ public sealed class RuntimeContractPendingTests
 
         foreach (var run in claimed.Skip(1))
         {
-            var complete = RunStatusTransition.RunningToCompleted(
+            var complete = RunStatusTransition.RunningToSucceeded(
                 run.Id,
                 run.Attempt,
                 DateTimeOffset.UtcNow,
@@ -649,7 +650,7 @@ public sealed class RuntimeContractPendingTests
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
 
-        var claimed = new List<JobRun>();
+        var claimed = new List<RunRecord>();
         for (var i = 0; i < 3; i++)
         {
             var run = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
@@ -667,7 +668,7 @@ public sealed class RuntimeContractPendingTests
 
         foreach (var (run, completedAt) in completionPlan.Reverse())
         {
-            var complete = RunStatusTransition.RunningToCompleted(
+            var complete = RunStatusTransition.RunningToSucceeded(
                 run.Id,
                 run.Attempt,
                 completedAt,
@@ -684,7 +685,7 @@ public sealed class RuntimeContractPendingTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             baseTime.AddMilliseconds(40),
@@ -732,7 +733,7 @@ public sealed class RuntimeContractPendingTests
         Assert.NotNull(claimedB);
 
         var completedAt = DateTimeOffset.UtcNow;
-        var completeA = RunStatusTransition.RunningToCompleted(
+        var completeA = RunStatusTransition.RunningToSucceeded(
             claimedA.Id,
             claimedA.Attempt,
             completedAt,
@@ -749,7 +750,7 @@ public sealed class RuntimeContractPendingTests
 
         var coordinator = await store.GetRunAsync(batchId);
         Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToCompleted(
+        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
             batchId,
             coordinator.Attempt,
             completedAt.AddMilliseconds(10),
@@ -773,7 +774,7 @@ public sealed class RuntimeContractPendingTests
         Assert.Equal(claimedA.Id, results[0].RunId);
     }
 
-    private static async Task<JobRun> WaitForRunAsync(IJobStore store, string jobName, string marker)
+    private static async Task<RunRecord> WaitForRunAsync(IJobStore store, string jobName, string marker)
     {
         return await TestWait.PollUntilAsync(
             async _ =>

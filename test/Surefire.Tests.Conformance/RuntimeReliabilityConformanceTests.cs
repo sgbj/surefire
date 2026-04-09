@@ -65,7 +65,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         await harness.StartAsync();
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
-        var stale = new JobRun
+        var stale = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -83,7 +83,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         var recovered = await TestWait.PollUntilAsync(
             () => harness.Store.GetRunAsync(stale.Id),
-            run => run.Status == JobStatus.Completed,
+            run => run.Status == JobStatus.Succeeded,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
             "Timed out waiting for stale running run to be recovered and completed.");
@@ -110,7 +110,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         await harness.StartAsync();
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
-        var stale = new JobRun
+        var stale = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -128,13 +128,13 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         var recovered = await TestWait.PollUntilAsync(
             () => harness.Store.GetRunAsync(stale.Id),
-            run => run.Status == JobStatus.DeadLetter,
+            run => run.Status == JobStatus.Failed,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
             "Timed out waiting for stale running run to dead-letter when retries are exhausted.");
 
         Assert.NotNull(recovered);
-        Assert.Equal(JobStatus.DeadLetter, recovered.Status);
+        Assert.Equal(JobStatus.Failed, recovered.Status);
     }
 
     [Fact]
@@ -229,13 +229,13 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         await harness.StartAsync();
 
-        var runId = await harness.Client.TriggerAsync(jobName);
+        var jobRun = await harness.Client.TriggerAsync(jobName);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var result = await jobRun.WaitAsync(cts.Token);
 
         Assert.True(result.IsCancelled);
 
-        var run = await harness.Store.GetRunAsync(runId, cts.Token);
+        var run = await harness.Store.GetRunAsync(jobRun.Id, cts.Token);
         Assert.NotNull(run);
         Assert.Equal(JobStatus.Cancelled, run.Status);
         Assert.NotNull(run.CancelledAt);

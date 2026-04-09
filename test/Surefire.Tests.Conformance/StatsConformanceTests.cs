@@ -14,17 +14,17 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         {
             CreateRun(jobName),
             CreateRun(jobName, JobStatus.Running),
-            CreateRun(jobName, JobStatus.Completed),
+            CreateRun(jobName, JobStatus.Succeeded),
             CreateRun(jobName, JobStatus.Retrying),
             CreateRun(jobName, JobStatus.Cancelled),
-            CreateRun(jobName, JobStatus.DeadLetter)
+            CreateRun(jobName, JobStatus.Failed)
         };
 
         foreach (var run in runs)
         {
             run.CreatedAt = now;
             run.NotBefore = now;
-            if (run.Status is JobStatus.Completed or JobStatus.Cancelled or JobStatus.DeadLetter)
+            if (run.Status is JobStatus.Succeeded or JobStatus.Cancelled or JobStatus.Failed)
             {
                 run.StartedAt = now;
                 run.CompletedAt = now;
@@ -41,24 +41,24 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         Assert.Equal(1, stats.RunsByStatus["Pending"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Running"));
         Assert.Equal(1, stats.RunsByStatus["Running"]);
-        Assert.True(stats.RunsByStatus.ContainsKey("Completed"));
-        Assert.Equal(1, stats.RunsByStatus["Completed"]);
+        Assert.True(stats.RunsByStatus.ContainsKey("Succeeded"));
+        Assert.Equal(1, stats.RunsByStatus["Succeeded"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Retrying"));
         Assert.Equal(1, stats.RunsByStatus["Retrying"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Cancelled"));
         Assert.Equal(1, stats.RunsByStatus["Cancelled"]);
-        Assert.True(stats.RunsByStatus.ContainsKey("DeadLetter"));
-        Assert.Equal(1, stats.RunsByStatus["DeadLetter"]);
+        Assert.True(stats.RunsByStatus.ContainsKey("Failed"));
+        Assert.Equal(1, stats.RunsByStatus["Failed"]);
         Assert.True(stats.TotalJobs >= 1);
         Assert.Equal(1d / 3d, stats.SuccessRate, 5);
         Assert.NotEmpty(stats.Timeline);
 
         Assert.Equal(1, stats.Timeline.Sum(b => b.Pending));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Running));
-        Assert.Equal(1, stats.Timeline.Sum(b => b.Completed));
+        Assert.Equal(1, stats.Timeline.Sum(b => b.Succeeded));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Retrying));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Cancelled));
-        Assert.Equal(1, stats.Timeline.Sum(b => b.DeadLetter));
+        Assert.Equal(1, stats.Timeline.Sum(b => b.Failed));
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([r1]);
         var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c1);
-        c1.Status = JobStatus.Completed;
+        c1.Status = JobStatus.Succeeded;
         c1.CompletedAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running));
 
@@ -80,7 +80,7 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([r2]);
         var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c2);
-        c2.Status = JobStatus.DeadLetter;
+        c2.Status = JobStatus.Failed;
         c2.CompletedAt = DateTimeOffset.UtcNow;
         c2.Error = "permanent failure";
         await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running));
@@ -144,12 +144,12 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         var now = DateTimeOffset.UtcNow;
 
         // Create a completed run in the past (before "since")
-        var oldRun = CreateRun(jobName, JobStatus.Completed);
+        var oldRun = CreateRun(jobName, JobStatus.Succeeded);
         oldRun.CompletedAt = now.AddHours(-5);
         oldRun.StartedAt = now.AddHours(-5);
 
         // Create a completed run recently (after "since")
-        var recentRun = CreateRun(jobName, JobStatus.Completed);
+        var recentRun = CreateRun(jobName, JobStatus.Succeeded);
         recentRun.CompletedAt = now.AddMinutes(-30);
         recentRun.StartedAt = now.AddMinutes(-30);
 
@@ -204,13 +204,13 @@ public abstract class StatsConformanceTests : StoreConformanceBase
 
         var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c1);
-        c1.Status = JobStatus.Completed;
+        c1.Status = JobStatus.Succeeded;
         c1.CompletedAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running));
 
         var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c2);
-        c2.Status = JobStatus.DeadLetter;
+        c2.Status = JobStatus.Failed;
         c2.CompletedAt = DateTimeOffset.UtcNow;
         c2.Error = "permanent failure";
         await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running));
@@ -218,8 +218,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         var since = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));
         var stats = await Store.GetDashboardStatsAsync(since);
 
-        var totalCompleted = stats.Timeline.Sum(b => b.Completed);
-        var totalDeadLetter = stats.Timeline.Sum(b => b.DeadLetter);
+        var totalCompleted = stats.Timeline.Sum(b => b.Succeeded);
+        var totalDeadLetter = stats.Timeline.Sum(b => b.Failed);
 
         Assert.True(totalCompleted >= 1,
             $"Expected >= 1 completed, got {totalCompleted}. Buckets: {stats.Timeline.Count}");

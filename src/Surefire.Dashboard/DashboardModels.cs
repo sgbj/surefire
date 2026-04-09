@@ -15,7 +15,7 @@ public sealed class DashboardStatsResponse
     public IReadOnlyList<TimelineBucketResponse> Timeline { get; init; } = [];
     public IReadOnlyList<RunResponse> RecentRuns { get; init; } = [];
 
-    public static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<JobRun> recentRuns) => new()
+    internal static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<RunRecord> recentRuns) => new()
     {
         TotalJobs = stats.TotalJobs,
         TotalRuns = stats.TotalRuns,
@@ -58,7 +58,7 @@ public sealed class RunResponse
     public int? BatchCompleted { get; init; }
     public int? BatchFailed { get; init; }
 
-    public static RunResponse From(JobRun run) => new()
+    internal static RunResponse From(RunRecord run) => new()
     {
         Id = run.Id,
         JobName = run.JobName,
@@ -127,20 +127,20 @@ public sealed class TimelineBucketResponse
     public DateTimeOffset Timestamp { get; init; }
     public int Pending { get; init; }
     public int Running { get; init; }
-    public int Completed { get; init; }
+    public int Succeeded { get; init; }
     public int Retrying { get; init; }
     public int Cancelled { get; init; }
-    public int DeadLetter { get; init; }
+    public int Failed { get; init; }
 
     public static TimelineBucketResponse From(TimelineBucket bucket) => new()
     {
         Timestamp = bucket.Start,
         Pending = bucket.Pending,
         Running = bucket.Running,
-        Completed = bucket.Completed,
+        Succeeded = bucket.Succeeded,
         Retrying = bucket.Retrying,
         Cancelled = bucket.Cancelled,
-        DeadLetter = bucket.DeadLetter
+        Failed = bucket.Failed
     };
 }
 
@@ -268,6 +268,12 @@ public sealed class UpdateJobRequest
 public sealed class UpdateQueueRequest
 {
     public bool? IsPaused { get; set; }
+}
+
+public sealed class LogPageResponse
+{
+    public required IReadOnlyList<JsonElement> Items { get; init; }
+    public long? NextCursor { get; init; }
 }
 
 public sealed record RunIdResponse(string RunId);

@@ -318,6 +318,13 @@ public sealed class SurefireOptions
 
     internal void Validate()
     {
+        if (InactiveThreshold < HeartbeatInterval * 2)
+        {
+            throw new InvalidOperationException(
+                $"InactiveThreshold ({InactiveThreshold}) must be at least 2x HeartbeatInterval ({HeartbeatInterval}) " +
+                "to avoid premature stale detection between heartbeat cycles.");
+        }
+
         foreach (var queue in Queues)
         {
             ValidateQueue(queue, nameof(Queues));

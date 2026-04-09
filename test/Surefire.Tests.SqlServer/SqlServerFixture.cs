@@ -5,7 +5,7 @@ using Testcontainers.MsSql;
 
 namespace Surefire.Tests.SqlServer;
 
-public sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
+internal sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly MsSqlContainer _container = new MsSqlBuilder()
         .WithImage("mcr.microsoft.com/mssql/server:2022-latest")

@@ -27,10 +27,10 @@ public sealed record RunResult
     internal JsonSerializerOptions? SerializerOptions { get; init; }
 
     /// <summary>Gets whether the run completed successfully.</summary>
-    public bool IsSuccess => Status is JobStatus.Completed;
+    public bool IsSuccess => Status is JobStatus.Succeeded;
 
     /// <summary>Gets whether the run failed permanently.</summary>
-    public bool IsFailure => Status is JobStatus.DeadLetter;
+    public bool IsFailure => Status is JobStatus.Failed;
 
     /// <summary>Gets whether the run was cancelled.</summary>
     public bool IsCancelled => Status is JobStatus.Cancelled;
@@ -60,7 +60,7 @@ public sealed record RunResult
     /// <returns>True if the result was successfully deserialized; otherwise, false.</returns>
     public bool TryGetResult<T>([MaybeNullWhen(false)] out T result)
     {
-        if (ResultJson is { } && Status is JobStatus.Completed)
+        if (ResultJson is { } && Status is JobStatus.Succeeded)
         {
             result = JsonSerializer.Deserialize<T>(ResultJson, SerializerOptions)!;
             return true;

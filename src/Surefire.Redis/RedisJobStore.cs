@@ -365,18 +365,18 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             [fireAt.ToUnixTimeMilliseconds().ToString()]);
     }
 
-    public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
+    public Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
 
-    public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
+    public Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
-    public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         var json = await Db.StringGetAsync($"{P}run:{id}");
         if (json.IsNullOrEmpty)
@@ -387,7 +387,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return DeserializeRun(json!);
     }
 
-    public async Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    public async Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -453,7 +453,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
-                                                       && filter.IsBatchCoordinator is null
+                                                       && filter.BatchId is null
                                                        && filter.OrderBy == RunOrderBy.CreatedAt;
 
             if (noPostFilters)
@@ -491,7 +491,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
-                                                       && filter.IsBatchCoordinator is null
+                                                       && filter.BatchId is null
                                                        && filter.OrderBy == RunOrderBy.CreatedAt;
 
             if (noPostFilters)
@@ -616,7 +616,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         batch.Execute();
         await Task.WhenAll(fetchTasks);
 
-        var runs = new List<JobRun>();
+        var runs = new List<RunRecord>();
         foreach (var task in fetchTasks)
         {
             var json = await task;
@@ -644,7 +644,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return new() { Items = page, TotalCount = totalCount };
     }
 
-    private async Task<PagedResult<JobRun>> GetRunsFromSortedSetWithFilterAsync(
+    private async Task<PagedResult<RunRecord>> GetRunsFromSortedSetWithFilterAsync(
         RedisKey key,
         RunFilter filter,
         int skip,
@@ -658,14 +658,14 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
     {
         var requiresResort = filter.OrderBy != indexOrderBy;
         var matchedCount = 0;
-        var page = new List<JobRun>(take);
+        var page = new List<RunRecord>(take);
         if (skip > int.MaxValue - take)
         {
             throw new ArgumentOutOfRangeException(nameof(skip), "The sum of skip and take is too large.");
         }
 
         var topLimit = skip + take;
-        var topRuns = requiresResort ? new List<JobRun>(Math.Min(topLimit, 128)) : null;
+        var topRuns = requiresResort ? new List<RunRecord>(Math.Min(topLimit, 128)) : null;
         var runOrderComparer = requiresResort ? new RunOrderComparer(filter.OrderBy) : null;
         var offset = 0L;
 
@@ -722,7 +722,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         };
     }
 
-    private static void InsertIntoTopRuns(List<JobRun> topRuns, JobRun candidate, IComparer<JobRun> comparer,
+    private static void InsertIntoTopRuns(List<RunRecord> topRuns, RunRecord candidate, IComparer<RunRecord> comparer,
         int limit)
     {
         if (limit <= 0)
@@ -748,9 +748,9 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
     }
 
-    private sealed class RunOrderComparer(RunOrderBy orderBy) : IComparer<JobRun>
+    private sealed class RunOrderComparer(RunOrderBy orderBy) : IComparer<RunRecord>
     {
-        public int Compare(JobRun? x, JobRun? y)
+        public int Compare(RunRecord? x, RunRecord? y)
         {
             if (ReferenceEquals(x, y))
             {
@@ -803,7 +803,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
     }
 
-    private async Task<List<JobRun>> LoadRunsByIdsAsync(RedisValue[] runIds)
+    private async Task<List<RunRecord>> LoadRunsByIdsAsync(RedisValue[] runIds)
     {
         if (runIds.Length == 0)
         {
@@ -815,7 +815,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         batch.Execute();
         await Task.WhenAll(fetchTasks);
 
-        var runs = new List<JobRun>(fetchTasks.Length);
+        var runs = new List<RunRecord>(fetchTasks.Length);
         foreach (var task in fetchTasks)
         {
             var json = await task;
@@ -830,7 +830,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return runs;
     }
 
-    public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
+    public async Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
     {
         const string script = """
                               local function s(v) return (v ~= nil and v ~= cjson.null) and v or '' end
@@ -1102,7 +1102,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return (int)result == 1;
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public async Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
@@ -1477,7 +1477,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
     }
 
     public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
-        RunEventType[]? types = null, int? attempt = null, CancellationToken cancellationToken = default)
+        RunEventType[]? types = null, int? attempt = null, int? take = null, CancellationToken cancellationToken = default)
     {
         var db = Db;
 
@@ -1488,7 +1488,10 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             var requestedAttemptTask = db.SortedSetRangeByScoreAsync(requestedAttemptKey,
                 sinceId,
                 double.PositiveInfinity,
-                Exclude.Start);
+                Exclude.Start,
+                Order.Ascending,
+                0,
+                take ?? -1);
 
             Task<RedisValue[]>? wildcardAttemptTask = null;
             if (attempt.Value != 0)
@@ -1497,7 +1500,10 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                 wildcardAttemptTask = db.SortedSetRangeByScoreAsync(wildcardAttemptKey,
                     sinceId,
                     double.PositiveInfinity,
-                    Exclude.Start);
+                    Exclude.Start,
+                    Order.Ascending,
+                    0,
+                    take ?? -1);
             }
 
             if (wildcardAttemptTask is { })
@@ -1511,6 +1517,10 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                     .Select(id => (RedisValue)id)
                     .ToArray();
                 ids = merged;
+                if (take is { })
+                {
+                    ids = ids.Take(take.Value).ToArray();
+                }
             }
             else
             {
@@ -1528,7 +1538,10 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             ids = await db.SortedSetRangeByScoreAsync(indexKey,
                 sinceId,
                 double.PositiveInfinity,
-                Exclude.Start);
+                Exclude.Start,
+                Order.Ascending,
+                0,
+                take ?? -1);
         }
 
         if (ids.Length == 0)
@@ -1725,7 +1738,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                 continue;
             }
 
-            JobRun run;
+            RunRecord run;
             try
             {
                 run = DeserializeRun(json!);
@@ -2400,10 +2413,10 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                 Start = bucketStart,
                 Pending = (int)await countTasks[JobStatus.Pending],
                 Running = (int)await countTasks[JobStatus.Running],
-                Completed = (int)await countTasks[JobStatus.Completed],
+                Succeeded = (int)await countTasks[JobStatus.Succeeded],
                 Retrying = (int)await countTasks[JobStatus.Retrying],
                 Cancelled = (int)await countTasks[JobStatus.Cancelled],
-                DeadLetter = (int)await countTasks[JobStatus.DeadLetter]
+                Failed = (int)await countTasks[JobStatus.Failed]
             });
             bucketStart = bucketEnd;
         }
@@ -2574,7 +2587,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
+    private async Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -2590,7 +2603,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             [(RedisValue)runsJson, (RedisValue)initialEventsJson]);
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -2775,7 +2788,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return (int)result == 1;
     }
 
-    private static bool MatchesFilter(JobRun run, RunFilter filter)
+    private static bool MatchesFilter(RunRecord run, RunFilter filter)
     {
         if (filter.Status is { } && run.Status != filter.Status.Value)
         {
@@ -2836,12 +2849,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             return false;
         }
 
-        if (filter.IsBatchCoordinator is true && run.BatchTotal is null)
-        {
-            return false;
-        }
-
-        if (filter.IsBatchCoordinator is false && run.BatchTotal is { })
+        if (filter.BatchId is { } batchIdFilter && run.BatchId != batchIdFilter)
         {
             return false;
         }
@@ -2859,7 +2867,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return true;
     }
 
-    private static List<JobRun> SortRuns(List<JobRun> runs, RunOrderBy orderBy)
+    private static List<RunRecord> SortRuns(List<RunRecord> runs, RunOrderBy orderBy)
     {
         return orderBy switch
         {
@@ -2877,7 +2885,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.NodeName is null
         && filter.CompletedAfter is null
         && filter.LastHeartbeatBefore is null
-        && filter.IsBatchCoordinator is null
+        && filter.BatchId is null
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
@@ -2889,7 +2897,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.NodeName is null
         && filter.CompletedAfter is null
         && filter.LastHeartbeatBefore is null
-        && filter.IsBatchCoordinator is null
+        && filter.BatchId is null
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
@@ -2902,7 +2910,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.NodeName is null
         && filter.CompletedAfter is null
         && filter.LastHeartbeatBefore is null
-        && filter.IsBatchCoordinator is null
+        && filter.BatchId is null
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
@@ -2925,7 +2933,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return (minScore, maxScore, exclude);
     }
 
-    private static string SerializeRun(JobRun run) =>
+    private static string SerializeRun(RunRecord run) =>
         JsonSerializer.Serialize(SerializeRunAsObject(run));
 
     private static List<object> SerializeEventsAsObjects(IReadOnlyList<RunEvent>? events)
@@ -2945,7 +2953,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }).ToList();
     }
 
-    private static object SerializeRunAsObject(JobRun run) => new
+    private static object SerializeRunAsObject(RunRecord run) => new
     {
         id = run.Id,
         job_name = run.JobName,
@@ -2979,12 +2987,12 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
     private static long GetMs(JsonElement v) =>
         v.ValueKind == JsonValueKind.String ? long.Parse(v.GetString()!) : v.GetInt64();
 
-    private static JobRun DeserializeRun(string json)
+    private static RunRecord DeserializeRun(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var r = doc.RootElement;
 
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = r.GetProperty("id").GetString()!,
             JobName = r.GetProperty("job_name").GetString()!,

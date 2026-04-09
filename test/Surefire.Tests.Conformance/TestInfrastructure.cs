@@ -104,7 +104,7 @@ public sealed class RuntimeHarness : IAsyncDisposable
     private readonly IReadOnlyList<IHostedService> _hostedServices;
     private readonly bool _disposeProvider;
 
-    public RuntimeHarness(
+    internal RuntimeHarness(
         ServiceProvider provider,
         IHost host,
         IJobStore store,
@@ -115,7 +115,7 @@ public sealed class RuntimeHarness : IAsyncDisposable
     {
     }
 
-    public RuntimeHarness(
+    internal RuntimeHarness(
         ServiceProvider provider,
         IHost host,
         IJobStore store,
@@ -135,7 +135,7 @@ public sealed class RuntimeHarness : IAsyncDisposable
 
     public ServiceProvider Provider { get; }
     public IHost Host { get; }
-    public IJobStore Store { get; }
+    internal IJobStore Store { get; }
     public IJobClient Client { get; }
     public Channel<bool> Permits { get; }
 

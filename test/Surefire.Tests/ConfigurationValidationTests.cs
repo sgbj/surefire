@@ -59,6 +59,33 @@ public sealed class ConfigurationValidationTests
         Assert.Throws<ArgumentException>(() => job.WithRateLimit(" "));
     }
 
+    [Fact]
+    public void AddSurefire_InactiveThresholdLessThanTwiceHeartbeatInterval_Throws()
+    {
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddSurefire(options =>
+            {
+                options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+                options.InactiveThreshold = TimeSpan.FromSeconds(30);
+            }));
+
+        Assert.Contains("2x", ex.Message);
+    }
+
+    [Fact]
+    public void AddSurefire_InactiveThresholdExactlyTwiceHeartbeatInterval_Succeeds()
+    {
+        var services = new ServiceCollection();
+
+        services.AddSurefire(options =>
+        {
+            options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+            options.InactiveThreshold = TimeSpan.FromSeconds(60);
+        });
+    }
+
     private static JobBuilder CreateJobBuilder()
     {
         var ctor = typeof(JobBuilder).GetConstructor(

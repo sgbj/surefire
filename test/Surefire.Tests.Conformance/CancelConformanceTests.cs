@@ -107,7 +107,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = DateTimeOffset.UtcNow;
         var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
         Assert.True(ok);
@@ -122,6 +122,99 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var result = await Store.TryCancelRunAsync("nonexistent-id");
         Assert.False(result);
+    }
+
+    [Fact]
+    public async Task CancelChildRuns_CancelsAllNonTerminalChildren()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+
+        // Create a batch: coordinator + 3 children
+        var coordinator = CreateRun(job.Name);
+        coordinator.Status = JobStatus.Running;
+        coordinator.BatchTotal = 3;
+        coordinator.BatchCompleted = 0;
+        coordinator.BatchFailed = 0;
+
+        var child1 = CreateRun(job.Name);
+        child1.ParentRunId = coordinator.Id;
+
+        var child2 = CreateRun(job.Name);
+        child2.ParentRunId = coordinator.Id;
+
+        var child3 = CreateRun(job.Name);
+        child3.ParentRunId = coordinator.Id;
+
+        await Store.CreateRunsAsync([coordinator, child1, child2, child3]);
+
+        // Claim and complete one child so it's terminal (whichever the store picks first)
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        Assert.NotNull(claimed);
+        var completedChildId = claimed.Id;
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        Assert.True(await Store.TryTransitionRunAsync(RunStatusTransition.RunningToSucceeded(
+            completedChildId, claimed.Attempt, now, claimed.NotBefore, "node-1", 1, null, null,
+            claimed.StartedAt, now)));
+
+        // Cancel all children of coordinator
+        var cancelledIds = await Store.CancelChildRunsAsync(coordinator.Id);
+
+        // The completed child should not be cancelled; the other 2 should be
+        Assert.Equal(2, cancelledIds.Count);
+        Assert.DoesNotContain(completedChildId, cancelledIds);
+
+        // Verify the completed child remains completed
+        var storedCompleted = await Store.GetRunAsync(completedChildId);
+        Assert.Equal(JobStatus.Succeeded, storedCompleted!.Status);
+
+        // Verify cancelled children
+        foreach (var cancelledId in cancelledIds)
+        {
+            var stored = await Store.GetRunAsync(cancelledId);
+            Assert.NotNull(stored);
+            Assert.Equal(JobStatus.Cancelled, stored.Status);
+            Assert.NotNull(stored.CancelledAt);
+        }
+    }
+
+    [Fact]
+    public async Task CancelChildRuns_NoChildren_ReturnsEmpty()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run]);
+
+        var cancelledIds = await Store.CancelChildRunsAsync(run.Id);
+
+        Assert.Empty(cancelledIds);
+    }
+
+    [Fact]
+    public async Task CancelChildRuns_AllTerminal_ReturnsEmpty()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+
+        var coordinator = CreateRun(job.Name);
+        coordinator.Status = JobStatus.Running;
+        coordinator.BatchTotal = 1;
+        coordinator.BatchCompleted = 0;
+        coordinator.BatchFailed = 0;
+
+        var child = CreateRun(job.Name);
+        child.ParentRunId = coordinator.Id;
+
+        await Store.CreateRunsAsync([coordinator, child]);
+
+        // Cancel the child first
+        Assert.True(await Store.TryCancelRunAsync(child.Id));
+
+        // Now CancelChildRuns should find nothing to cancel
+        var cancelledIds = await Store.CancelChildRunsAsync(coordinator.Id);
+        Assert.Empty(cancelledIds);
     }
 
     [Fact]
@@ -153,7 +246,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
                 }
                 else
                 {
-                    var attempt = new JobRun
+                    var attempt = new RunRecord
                     {
                         Id = claimed.Id,
                         JobName = claimed.JobName,

@@ -56,7 +56,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = DateTimeOffset.UtcNow;
         var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
@@ -64,7 +64,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         var stored = await Store.GetRunAsync(run.Id);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Completed, stored.Status);
+        Assert.Equal(JobStatus.Succeeded, stored.Status);
     }
 
     [Fact]
@@ -128,13 +128,13 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = DateTimeOffset.UtcNow;
         var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
         Assert.True(ok);
 
         claimed.Status = JobStatus.Running;
-        var result = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Completed));
+        var result = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Succeeded));
 
         Assert.False(result);
     }
@@ -153,11 +153,11 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         Assert.Equal(1, claimed.Attempt);
 
         // Create a stale copy with wrong attempt
-        var stale = new JobRun
+        var stale = new RunRecord
         {
             Id = claimed.Id,
             JobName = claimed.JobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             Attempt = 0, // stale attempt
             CreatedAt = claimed.CreatedAt,
             NotBefore = claimed.NotBefore,
@@ -184,7 +184,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         var expectedStartedAt = claimed.StartedAt;
 
-        var update = new JobRun
+        var update = new RunRecord
         {
             Id = claimed.Id,
             JobName = claimed.JobName,
@@ -217,7 +217,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run]);
 
-        run.Status = JobStatus.Completed;
+        run.Status = JobStatus.Succeeded;
         run.CompletedAt = DateTimeOffset.UtcNow;
 
         var ok = await Store.TryTransitionRunAsync(InvalidTransition(run, JobStatus.Pending));
@@ -242,7 +242,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = null;
 
         var ok = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Running));
@@ -299,11 +299,11 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
             {
                 await Task.Delay(1);
 
-                var attempt = new JobRun
+                var attempt = new RunRecord
                 {
                     Id = claimed.Id,
                     JobName = claimed.JobName,
-                    Status = i < 5 ? JobStatus.Completed : JobStatus.Cancelled,
+                    Status = i < 5 ? JobStatus.Succeeded : JobStatus.Cancelled,
                     Attempt = claimed.Attempt,
                     CreatedAt = claimed.CreatedAt,
                     NotBefore = claimed.NotBefore,
@@ -357,7 +357,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.DeadLetter;
+        claimed.Status = JobStatus.Failed;
         claimed.CompletedAt = DateTimeOffset.UtcNow;
         var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
@@ -365,7 +365,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         var stored = await Store.GetRunAsync(run.Id);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.DeadLetter, stored.Status);
+        Assert.Equal(JobStatus.Failed, stored.Status);
     }
 
     [Fact]

@@ -166,11 +166,11 @@ public sealed class DashboardEndpointsTests
         });
 
         await store.CreateRunsAsync([
-            new JobRun
+            new RunRecord
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = "tests-job-stats-percent",
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -202,11 +202,11 @@ public sealed class DashboardEndpointsTests
         });
 
         await store.CreateRunsAsync([
-            new JobRun
+            new RunRecord
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = "tests-stats-success-rate-ratio",
-                Status = JobStatus.Completed,
+                Status = JobStatus.Succeeded,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -214,11 +214,11 @@ public sealed class DashboardEndpointsTests
                 Attempt = 1,
                 Progress = 1
             },
-            new JobRun
+            new RunRecord
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = "tests-stats-success-rate-ratio",
-                Status = JobStatus.DeadLetter,
+                Status = JobStatus.Failed,
                 CreatedAt = now,
                 NotBefore = now,
                 StartedAt = now,
@@ -252,8 +252,9 @@ public sealed class DashboardEndpointsTests
     {
         await using var app = await CreateAppAsync(a => a.AddJob("tests-cancel-terminal", () => "ok"));
         var api = app.Services.GetRequiredService<IJobClient>();
-        var runId = await api.TriggerAsync("tests-cancel-terminal");
-        _ = await api.WaitAsync(runId);
+        var run = await api.TriggerAsync("tests-cancel-terminal");
+        var runId = run.Id;
+        _ = await run.WaitAsync();
 
         using var client = app.GetTestClient();
         var response = await client.PostAsync($"/surefire/api/runs/{runId}/cancel", null);
@@ -279,7 +280,7 @@ public sealed class DashboardEndpointsTests
             a.AddJob("tests-batch", (int n) => n));
 
         var clientApi = app.Services.GetRequiredService<IJobClient>();
-        var batchId = await clientApi.TriggerAllAsync("tests-batch", [1, 2, 3]);
+        var batchId = (await clientApi.TriggerManyAsync("tests-batch", new object?[] { 1, 2, 3 })).Id;
 
         var store = app.Services.GetRequiredService<IJobStore>();
         var children = await store.GetRunsAsync(new RunFilter { ParentRunId = batchId }, take: 10);
@@ -305,7 +306,7 @@ public sealed class DashboardEndpointsTests
         var rootId = Guid.CreateVersion7().ToString("N");
         const int childCount = 1200;
 
-        var root = new JobRun
+        var root = new RunRecord
         {
             Id = rootId,
             JobName = "tests-trace-unbounded",
@@ -322,11 +323,11 @@ public sealed class DashboardEndpointsTests
             .Select(i =>
             {
                 var createdAt = now.AddMilliseconds(-(childCount - i));
-                return new JobRun
+                return new RunRecord
                 {
                     Id = Guid.CreateVersion7().ToString("N"),
                     JobName = "tests-trace-unbounded",
-                    Status = JobStatus.Completed,
+                    Status = JobStatus.Succeeded,
                     ParentRunId = rootId,
                     RootRunId = rootId,
                     CreatedAt = createdAt,
@@ -391,11 +392,11 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAt = now,
             NotBefore = now,
             StartedAt = now,
@@ -470,11 +471,11 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAt = now,
             NotBefore = now,
             StartedAt = now,
@@ -551,11 +552,11 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAt = now,
             NotBefore = now,
             StartedAt = now,
@@ -586,11 +587,11 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAt = now,
             NotBefore = now,
             StartedAt = now,
@@ -622,11 +623,11 @@ public sealed class DashboardEndpointsTests
         ]);
 
         using var client = app.GetTestClient();
-        var logs = await client.GetFromJsonAsync<List<JsonElement>>($"/surefire/api/runs/{run.Id}/logs");
+        var response = await client.GetFromJsonAsync<JsonElement>($"/surefire/api/runs/{run.Id}/logs");
 
-        Assert.NotNull(logs);
-        Assert.Single(logs);
-        Assert.Equal("ok", logs[0].GetProperty("message").GetString());
+        var items = response.GetProperty("items");
+        Assert.Equal(1, items.GetArrayLength());
+        Assert.Equal("ok", items[0].GetProperty("message").GetString());
     }
 
     [Fact]
@@ -641,7 +642,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -674,7 +675,7 @@ public sealed class DashboardEndpointsTests
         ]);
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id);
 
-        var transition = RunStatusTransition.RunningToCompleted(
+        var transition = RunStatusTransition.RunningToSucceeded(
             run.Id,
             run.Attempt,
             DateTimeOffset.UtcNow,
@@ -686,7 +687,7 @@ public sealed class DashboardEndpointsTests
             run.StartedAt,
             DateTimeOffset.UtcNow);
         Assert.True(await store.TryTransitionRunAsync(transition));
-        await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id);
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id);
 
         // Simulate an event appended in the narrow completion window.
         await Task.Delay(5);
@@ -719,7 +720,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -740,7 +741,7 @@ public sealed class DashboardEndpointsTests
 
         await Task.Delay(40);
 
-        var completedTransition = RunStatusTransition.RunningToCompleted(
+        var completedTransition = RunStatusTransition.RunningToSucceeded(
             run.Id,
             run.Attempt,
             DateTimeOffset.UtcNow,

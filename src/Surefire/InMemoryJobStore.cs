@@ -19,7 +19,7 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, RateLimitWindowState> _rateLimitWindows = new();
     private readonly Dictionary<string, int> _runningCountByJob = new();
     private readonly Dictionary<string, int> _runningCountByQueue = new();
-    private readonly Dictionary<string, JobRun> _runs = new();
+    private readonly Dictionary<string, RunRecord> _runs = new();
     private readonly TimeProvider _timeProvider;
     private long _eventIdCounter;
 
@@ -135,18 +135,18 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
+    public Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents);
 
-    public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
+    public Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents);
 
-    public Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
@@ -154,7 +154,7 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    public Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -168,11 +168,11 @@ internal sealed class InMemoryJobStore : IJobStore
         }
 
         int totalCount;
-        List<JobRun> items;
+        List<RunRecord> items;
 
         lock (_lock)
         {
-            IEnumerable<JobRun> query = _runs.Values;
+            IEnumerable<RunRecord> query = _runs.Values;
 
             if (filter.Status is { })
             {
@@ -218,16 +218,9 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
             }
 
-            if (filter.IsBatchCoordinator is { })
+            if (filter.BatchId is { })
             {
-                if (filter.IsBatchCoordinator.Value)
-                {
-                    query = query.Where(r => r.BatchTotal != null);
-                }
-                else
-                {
-                    query = query.Where(r => r.BatchTotal == null);
-                }
+                query = query.Where(r => r.BatchId == filter.BatchId);
             }
 
             if (filter.CreatedAfter is { })
@@ -252,7 +245,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
             totalCount = query.Count();
 
-            IEnumerable<JobRun> ordered = filter.OrderBy switch
+            IEnumerable<RunRecord> ordered = filter.OrderBy switch
             {
                 RunOrderBy.StartedAt => query
                     .OrderByDescending(r => r.StartedAt)
@@ -268,14 +261,14 @@ internal sealed class InMemoryJobStore : IJobStore
             items = ordered.Skip(skip).Take(take).Select(CopyRun).ToList();
         }
 
-        return Task.FromResult(new PagedResult<JobRun>
+        return Task.FromResult(new PagedResult<RunRecord>
         {
             Items = items,
             TotalCount = totalCount
         });
     }
 
-    public Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
+    public Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
@@ -387,7 +380,41 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
+        CancellationToken cancellationToken = default)
+    {
+        var cancelledIds = new List<string>();
+        var now = _timeProvider.GetUtcNow();
+
+        lock (_lock)
+        {
+            foreach (var run in _runs.Values)
+            {
+                if (run.ParentRunId != parentRunId || run.Status.IsTerminal)
+                {
+                    continue;
+                }
+
+                var oldStatus = run.Status;
+                run.Status = JobStatus.Cancelled;
+                run.CancelledAt = now;
+                run.CompletedAt = now;
+
+                UpdateIndexes(run, oldStatus, JobStatus.Cancelled);
+
+                if (run.DeduplicationId is { })
+                {
+                    _dedupIndex.Remove((run.JobName, run.DeduplicationId));
+                }
+
+                cancelledIds.Add(run.Id);
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
+    }
+
+    public Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         lock (_lock)
@@ -491,10 +518,10 @@ internal sealed class InMemoryJobStore : IJobStore
                 IncrementCount(_runningCountByJob, run.JobName);
                 IncrementCount(_runningCountByQueue, queueName);
 
-                return Task.FromResult<JobRun?>(CopyRun(run));
+                return Task.FromResult<RunRecord?>(CopyRun(run));
             }
 
-            return Task.FromResult<JobRun?>(null);
+            return Task.FromResult<RunRecord?>(null);
         }
     }
 
@@ -548,7 +575,7 @@ internal sealed class InMemoryJobStore : IJobStore
     }
 
     public Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null,
-        int? attempt = null, CancellationToken cancellationToken = default)
+        int? attempt = null, int? take = null, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
@@ -568,6 +595,11 @@ internal sealed class InMemoryJobStore : IJobStore
             if (attempt is { })
             {
                 query = query.Where(e => e.Attempt == attempt.Value || e.Attempt == 0);
+            }
+
+            if (take is { })
+            {
+                query = query.Take(take.Value);
             }
 
             IReadOnlyList<RunEvent> result = query.Select(CopyEvent).ToList();
@@ -889,10 +921,10 @@ internal sealed class InMemoryJobStore : IJobStore
 
         var bucketPending = new int[bucketCount];
         var bucketRunning = new int[bucketCount];
-        var bucketCompleted = new int[bucketCount];
+        var bucketSucceeded = new int[bucketCount];
         var bucketRetrying = new int[bucketCount];
         var bucketCancelled = new int[bucketCount];
-        var bucketDeadLetter = new int[bucketCount];
+        var bucketFailed = new int[bucketCount];
 
         var statusCounts = new Dictionary<string, int>();
         int totalRuns;
@@ -917,7 +949,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 if (run.Status.IsTerminal)
                 {
                     terminalCount++;
-                    if (run.Status == JobStatus.Completed)
+                    if (run.Status == JobStatus.Succeeded)
                     {
                         completedCount++;
                     }
@@ -941,8 +973,8 @@ internal sealed class InMemoryJobStore : IJobStore
                             case JobStatus.Running:
                                 bucketRunning[bucketIndex]++;
                                 break;
-                            case JobStatus.Completed:
-                                bucketCompleted[bucketIndex]++;
+                            case JobStatus.Succeeded:
+                                bucketSucceeded[bucketIndex]++;
                                 break;
                             case JobStatus.Retrying:
                                 bucketRetrying[bucketIndex]++;
@@ -950,8 +982,8 @@ internal sealed class InMemoryJobStore : IJobStore
                             case JobStatus.Cancelled:
                                 bucketCancelled[bucketIndex]++;
                                 break;
-                            case JobStatus.DeadLetter:
-                                bucketDeadLetter[bucketIndex]++;
+                            case JobStatus.Failed:
+                                bucketFailed[bucketIndex]++;
                                 break;
                         }
                     }
@@ -970,10 +1002,10 @@ internal sealed class InMemoryJobStore : IJobStore
                 Start = bucketStart,
                 Pending = bucketPending[i],
                 Running = bucketRunning[i],
-                Completed = bucketCompleted[i],
+                Succeeded = bucketSucceeded[i],
                 Retrying = bucketRetrying[i],
                 Cancelled = bucketCancelled[i],
-                DeadLetter = bucketDeadLetter[i]
+                Failed = bucketFailed[i]
             });
             bucketStart += bucketSpan;
         }
@@ -992,12 +1024,12 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.FromResult(stats);
     }
 
-    private static DateTimeOffset GetTimelineBucketTimestamp(JobRun run) => run.Status switch
+    private static DateTimeOffset GetTimelineBucketTimestamp(RunRecord run) => run.Status switch
     {
         JobStatus.Running => run.StartedAt ?? run.CreatedAt,
-        JobStatus.Completed => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
+        JobStatus.Succeeded => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
         JobStatus.Cancelled => run.CancelledAt ?? run.CompletedAt ?? run.CreatedAt,
-        JobStatus.DeadLetter => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
+        JobStatus.Failed => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
         _ => run.CreatedAt
     };
 
@@ -1033,7 +1065,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 if (run.Status.IsTerminal)
                 {
                     terminalCount++;
-                    if (run.Status == JobStatus.Completed)
+                    if (run.Status == JobStatus.Succeeded)
                     {
                         completedCount++;
                         if (run.StartedAt is { } s && run.CompletedAt is { } c)
@@ -1042,7 +1074,7 @@ internal sealed class InMemoryJobStore : IJobStore
                             durationCount++;
                         }
                     }
-                    else if (run.Status == JobStatus.DeadLetter)
+                    else if (run.Status == JobStatus.Failed)
                     {
                         failedCount++;
                     }
@@ -1102,11 +1134,11 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.FromResult<IReadOnlyDictionary<string, QueueStats>>(result);
     }
 
-    private Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs, IReadOnlyList<RunEvent>? initialEvents)
+    private Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs, IReadOnlyList<RunEvent>? initialEvents)
     {
         lock (_lock)
         {
-            var copies = new List<JobRun>(runs.Count);
+            var copies = new List<RunRecord>(runs.Count);
             var seenIds = new HashSet<string>(runs.Count);
             foreach (var run in runs)
             {
@@ -1152,7 +1184,7 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    private Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents)
     {
@@ -1243,7 +1275,7 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    private bool CanPurgeTerminalRun(JobRun run, DateTimeOffset threshold)
+    private bool CanPurgeTerminalRun(RunRecord run, DateTimeOffset threshold)
     {
         if (!run.Status.IsTerminal || run.CompletedAt is null)
         {
@@ -1270,7 +1302,7 @@ internal sealed class InMemoryJobStore : IJobStore
                && parentCompletedAt < threshold;
     }
 
-    private void AddToPendingIndex(JobRun run)
+    private void AddToPendingIndex(RunRecord run)
     {
         run.QueuePriority = GetQueuePriority(run.JobName);
         var key = new PendingRunKey(run.QueuePriority, run.Priority, run.NotBefore, run.Id);
@@ -1308,7 +1340,7 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    private void UpdateIndexes(JobRun run, JobStatus oldStatus, JobStatus newStatus)
+    private void UpdateIndexes(RunRecord run, JobStatus oldStatus, JobStatus newStatus)
     {
         if (oldStatus == newStatus)
         {
@@ -1488,7 +1520,7 @@ internal sealed class InMemoryJobStore : IJobStore
         Attempt = e.Attempt
     };
 
-    private static JobRun CopyRun(JobRun run) => new()
+    private static RunRecord CopyRun(RunRecord run) => new()
     {
         Id = run.Id,
         JobName = run.JobName,

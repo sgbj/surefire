@@ -20,4 +20,7 @@ public sealed record RunOptions
     ///     after the existing run reaches a terminal status.
     /// </summary>
     public string? DeduplicationId { get; init; }
+
+    /// <summary>An optional caller-supplied run ID. When set, this ID is used instead of a generated one.</summary>
+    public string? RunId { get; init; }
 }

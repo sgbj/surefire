@@ -245,6 +245,11 @@ export interface RunLogEntry {
   category?: string;
 }
 
+export interface LogPage {
+  items: RunLogEntry[];
+  nextCursor: number | null;
+}
+
 export const JobStatusLabels: Record<number, string> = {
   0: "Pending",
   1: "Running",
@@ -355,8 +360,21 @@ export const api = {
         method: "POST",
       },
     ).then(normalizeRunIdResponse),
-  getRunLogs: (id: string) =>
-    fetchApi<RunLogEntry[]>(`/runs/${encodeURIComponent(id)}/logs`),
+  getRunLogs: async (id: string): Promise<RunLogEntry[]> => {
+    const all: RunLogEntry[] = [];
+    let cursor: number | null = null;
+    while (true) {
+      const params = new URLSearchParams({ take: "1000" });
+      if (cursor != null) params.set("sinceEventId", cursor.toString());
+      const page = await fetchApi<LogPage>(
+        `/runs/${encodeURIComponent(id)}/logs?${params}`,
+      );
+      all.push(...page.items);
+      if (page.nextCursor == null) break;
+      cursor = page.nextCursor;
+    }
+    return all;
+  },
   getRunTracePage: (id: string, params?: TracePageParams) => {
     const search = new URLSearchParams();
     if (params?.skip != null) search.set("skip", params.skip.toString());

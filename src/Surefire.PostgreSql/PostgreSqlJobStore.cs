@@ -349,18 +349,18 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
+    public Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
 
-    public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
+    public Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
-    public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -376,7 +376,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return ReadRun(reader);
     }
 
-    public async Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    public async Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -409,7 +409,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue("take", take);
         cmd.Parameters.AddWithValue("skip", skip);
 
-        var items = new List<JobRun>();
+        var items = new List<RunRecord>();
         var totalCount = 0;
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -424,7 +424,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return new() { Items = items, TotalCount = totalCount };
     }
 
-    public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
+    public async Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -522,7 +522,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return rows > 0;
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public async Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
@@ -656,7 +656,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue("queue_names", queueNames.ToArray());
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        JobRun? claimed = null;
+        RunRecord? claimed = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             claimed = ReadRun(reader);
@@ -758,7 +758,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
     }
 
     public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
-        RunEventType[]? types = null, int? attempt = null, CancellationToken cancellationToken = default)
+        RunEventType[]? types = null, int? attempt = null, int? take = null, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -780,6 +780,13 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
 
         sb.Append(" ORDER BY id");
+
+        if (take is { })
+        {
+            sb.Append(" LIMIT @take");
+            cmd.Parameters.AddWithValue("take", take.Value);
+        }
+
         cmd.CommandText = sb.ToString();
 
         var results = new List<RunEvent>();
@@ -1104,10 +1111,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                                    COUNT(*) AS total_runs,
                                    COUNT(*) FILTER (WHERE status = 0) AS pending,
                                    COUNT(*) FILTER (WHERE status = 1) AS running,
-                                   COUNT(*) FILTER (WHERE status = 2) AS completed,
+                                   COUNT(*) FILTER (WHERE status = 2) AS succeeded,
                                    COUNT(*) FILTER (WHERE status = 3) AS retrying,
                                    COUNT(*) FILTER (WHERE status = 4) AS cancelled,
-                                   COUNT(*) FILTER (WHERE status = 5) AS dead_letter
+                                   COUNT(*) FILTER (WHERE status = 5) AS failed
                                FROM surefire_runs
                                WHERE created_at >= @since AND created_at < @now
                                """;
@@ -1146,7 +1153,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
         if (completed > 0)
         {
-            runsByStatus["Completed"] = completed;
+            runsByStatus["Succeeded"] = completed;
         }
 
         if (retrying > 0)
@@ -1161,7 +1168,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
         if (deadLetter > 0)
         {
-            runsByStatus["DeadLetter"] = deadLetter;
+            runsByStatus["Failed"] = deadLetter;
         }
 
         var terminalCount = completed + cancelled + deadLetter;
@@ -1185,10 +1192,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                                     date_bin(@interval::interval, bucket_time, @since) AS bucket_start,
                                     COUNT(*) FILTER (WHERE status = 0) AS pending,
                                     COUNT(*) FILTER (WHERE status = 1) AS running,
-                                    COUNT(*) FILTER (WHERE status = 2) AS completed,
+                                    COUNT(*) FILTER (WHERE status = 2) AS succeeded,
                                     COUNT(*) FILTER (WHERE status = 3) AS retrying,
                                     COUNT(*) FILTER (WHERE status = 4) AS cancelled,
-                                    COUNT(*) FILTER (WHERE status = 5) AS dead_letter
+                                    COUNT(*) FILTER (WHERE status = 5) AS failed
                                 FROM bucketed_runs
                                 WHERE bucket_time >= @since AND bucket_time < @now
                                 GROUP BY bucket_start
@@ -1209,10 +1216,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                     Start = start,
                     Pending = (int)reader.GetInt64(1),
                     Running = (int)reader.GetInt64(2),
-                    Completed = (int)reader.GetInt64(3),
+                    Succeeded = (int)reader.GetInt64(3),
                     Retrying = (int)reader.GetInt64(4),
                     Cancelled = (int)reader.GetInt64(5),
-                    DeadLetter = (int)reader.GetInt64(6)
+                    Failed = (int)reader.GetInt64(6)
                 };
             }
         }
@@ -1341,7 +1348,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return results;
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
+    private async Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1407,7 +1414,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         await tx.CommitAsync(cancellationToken);
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -1624,11 +1631,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
             cmd.Parameters.AddWithValue("filter_hb_before", filter.LastHeartbeatBefore.Value);
         }
 
-        if (filter.IsBatchCoordinator is { })
+        if (filter.BatchId is { })
         {
-            parts.Add(filter.IsBatchCoordinator.Value
-                ? "batch_total IS NOT NULL"
-                : "batch_total IS NULL");
+            parts.Add("batch_id = @batch_id_filter");
+            cmd.Parameters.AddWithValue("batch_id_filter", filter.BatchId);
         }
 
         if (filter.IsTerminal is { })
@@ -1639,7 +1645,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
     }
 
-    private static void AddRunParams(NpgsqlCommand cmd, string prefix, JobRun run)
+    private static void AddRunParams(NpgsqlCommand cmd, string prefix, RunRecord run)
     {
         cmd.Parameters.AddWithValue($"{prefix}id", run.Id);
         cmd.Parameters.AddWithValue($"{prefix}job_name", run.JobName);
@@ -1673,9 +1679,9 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue($"{prefix}batch_failed", run.BatchFailed ?? 0);
     }
 
-    private static JobRun ReadRun(NpgsqlDataReader reader)
+    private static RunRecord ReadRun(NpgsqlDataReader reader)
     {
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = reader.GetString(reader.GetOrdinal("id")),
             JobName = reader.GetString(reader.GetOrdinal("job_name")),

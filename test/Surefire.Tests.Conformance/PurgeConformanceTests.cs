@@ -20,7 +20,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = OldTime;
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 

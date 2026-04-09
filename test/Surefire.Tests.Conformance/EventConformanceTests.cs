@@ -259,4 +259,124 @@ public abstract class EventConformanceTests : StoreConformanceBase
         Assert.Contains(filtered, e => e.Attempt == 2 && e.Payload == "attempt-2-output");
         Assert.DoesNotContain(filtered, e => e.Attempt == 3);
     }
+
+    [Fact]
+    public async Task GetEvents_WithTake_LimitsResults()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run]);
+
+        var events = Enumerable.Range(1, 10).Select(i => new RunEvent
+        {
+            RunId = run.Id,
+            EventType = RunEventType.Log,
+            Payload = $"log-{i}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            Attempt = 1
+        }).ToList();
+        await Store.AppendEventsAsync(events);
+
+        var limited = await Store.GetEventsAsync(run.Id, take: 3);
+
+        Assert.Equal(3, limited.Count);
+        Assert.Equal("log-1", limited[0].Payload);
+        Assert.Equal("log-2", limited[1].Payload);
+        Assert.Equal("log-3", limited[2].Payload);
+    }
+
+    [Fact]
+    public async Task GetEvents_WithTake_AndSinceId_ReturnsCorrectSlice()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run]);
+
+        var events = Enumerable.Range(1, 10).Select(i => new RunEvent
+        {
+            RunId = run.Id,
+            EventType = RunEventType.Log,
+            Payload = $"log-{i}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            Attempt = 1
+        }).ToList();
+        await Store.AppendEventsAsync(events);
+
+        var all = await Store.GetEventsAsync(run.Id);
+        var cursorId = all[2].Id; // after 3rd event
+
+        var slice = await Store.GetEventsAsync(run.Id, sinceId: cursorId, take: 2);
+
+        Assert.Equal(2, slice.Count);
+        Assert.Equal("log-4", slice[0].Payload);
+        Assert.Equal("log-5", slice[1].Payload);
+    }
+
+    [Fact]
+    public async Task GetEvents_WithTake_AndTypeFilter_LimitsCorrectly()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run]);
+
+        await Store.AppendEventsAsync([
+            new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "log-1", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = run.Id, EventType = RunEventType.Progress, Payload = "0.5", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "log-2", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "log-3", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = run.Id, EventType = RunEventType.Progress, Payload = "1.0", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 }
+        ]);
+
+        var logs = await Store.GetEventsAsync(run.Id, types: [RunEventType.Log], take: 2);
+
+        Assert.Equal(2, logs.Count);
+        Assert.All(logs, e => Assert.Equal(RunEventType.Log, e.EventType));
+        Assert.Equal("log-1", logs[0].Payload);
+        Assert.Equal("log-2", logs[1].Payload);
+    }
+
+    [Fact]
+    public async Task GetEvents_WithTakeNull_ReturnsAll()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run]);
+
+        var events = Enumerable.Range(1, 10).Select(i => new RunEvent
+        {
+            RunId = run.Id,
+            EventType = RunEventType.Log,
+            Payload = $"log-{i}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            Attempt = 1
+        }).ToList();
+        await Store.AppendEventsAsync(events);
+
+        var all = await Store.GetEventsAsync(run.Id, take: null);
+
+        Assert.Equal(10, all.Count);
+    }
+
+    [Fact]
+    public async Task GetEvents_WithTake_LargerThanTotal_ReturnsAll()
+    {
+        var job = CreateJob();
+        await Store.UpsertJobAsync(job);
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run]);
+
+        await Store.AppendEventsAsync([
+            new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "a", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "b", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "c", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 }
+        ]);
+
+        var result = await Store.GetEventsAsync(run.Id, take: 100);
+
+        Assert.Equal(3, result.Count);
+    }
 }

@@ -20,6 +20,7 @@ internal sealed partial class SurefireExecutorService(
     SurefireOptions options,
     TimeProvider timeProvider,
     SurefireInstrumentation instrumentation,
+    BatchCompletionHandler batchCompletionHandler,
     ILogger<SurefireExecutorService> logger) : BackgroundService
 {
     private readonly ConcurrentDictionary<string, Task> _activeTasks = new(StringComparer.Ordinal);
@@ -57,7 +58,7 @@ internal sealed partial class SurefireExecutorService(
                     continue;
                 }
 
-                instrumentation.RecordRunClaimed();
+                instrumentation.RecordRunClaimed(claimed.JobName);
 
                 var executionTask = ExecuteClaimedRunAsync(claimed, stoppingToken);
                 _activeTasks[claimed.Id] = executionTask;
@@ -66,6 +67,7 @@ internal sealed partial class SurefireExecutorService(
                     {
                         _activeTasks.TryRemove(claimed.Id, out var ignored);
                         activeRunTracker.Remove(claimed.Id);
+                        ReleaseWakeupAsync(wakeup);
                     },
                     CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously,
@@ -85,7 +87,7 @@ internal sealed partial class SurefireExecutorService(
         await WaitForActiveRunsAsync();
     }
 
-    private async Task ExecuteClaimedRunAsync(JobRun run, CancellationToken stoppingToken)
+    private async Task ExecuteClaimedRunAsync(RunRecord run, CancellationToken stoppingToken)
     {
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         _runCancellation[run.Id] = runCts;
@@ -121,7 +123,7 @@ internal sealed partial class SurefireExecutorService(
             {
                 if (await TryTransitionToDeadLetterAsync(run, "No handler registered for this job.", stoppingToken))
                 {
-                    await AppendFailureEventAsync(
+                    await batchCompletionHandler.AppendFailureEventAsync(
                         run,
                         RunFailureEnvelope.FromMessage(
                             run.Attempt,
@@ -131,10 +133,10 @@ internal sealed partial class SurefireExecutorService(
                             "No handler registered for this job.",
                             typeof(InvalidOperationException).FullName),
                         stoppingToken);
-                    instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
-                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
+                    instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
+                    await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, stoppingToken);
                     await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
-                    await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, stoppingToken);
+                    await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Executor", stoppingToken);
                 }
 
                 return;
@@ -153,7 +155,7 @@ internal sealed partial class SurefireExecutorService(
 
             var completedAt = timeProvider.GetUtcNow();
 
-            var completed = RunStatusTransition.RunningToCompleted(
+            var completed = RunStatusTransition.RunningToSucceeded(
                 run.Id,
                 run.Attempt,
                 completedAt,
@@ -167,7 +169,7 @@ internal sealed partial class SurefireExecutorService(
 
             if (await store.TryTransitionRunAsync(completed, runCts.Token))
             {
-                instrumentation.RecordRunCompleted(run.StartedAt, completedAt);
+                instrumentation.RecordRunCompleted(run.JobName, run.StartedAt, completedAt);
                 await RunPostCompletionHousekeepingAsync(
                     job,
                     run,
@@ -207,10 +209,10 @@ internal sealed partial class SurefireExecutorService(
 
             if (await store.TryTransitionRunAsync(cancelled, bestEffortToken))
             {
-                instrumentation.RecordRunCancelled(run.StartedAt, cancelledAt);
-                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+                instrumentation.RecordRunCancelled(run.JobName, run.StartedAt, cancelledAt);
+                await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                     bestEffortToken);
-                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, bestEffortToken);
+                await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Executor", bestEffortToken);
             }
         }
         catch (Exception ex)
@@ -225,13 +227,13 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task HandleRunFailureAsync(JobRun run, Exception ex, CancellationToken stoppingToken)
+    private async Task HandleRunFailureAsync(RunRecord run, Exception ex, CancellationToken stoppingToken)
     {
         using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
         var bestEffortToken = bestEffortCts.Token;
         var isShutdownInterruption = ex is ShutdownInterruptedException;
 
-        await AppendFailureEventAsync(
+        await batchCompletionHandler.AppendFailureEventAsync(
             run,
             RunFailureEnvelope.FromException(
                 run.Attempt,
@@ -247,7 +249,7 @@ internal sealed partial class SurefireExecutorService(
             var attemptError = BuildDeadLetterError(ex);
             if (canRetry)
             {
-                var notBefore = timeProvider.GetUtcNow() + job.Definition.RetryPolicy.GetDelay(run.Attempt + 1);
+                var notBefore = timeProvider.GetUtcNow() + job.Definition.RetryPolicy.GetDelay(run.Attempt);
                 var retrying = RunStatusTransition.RunningToRetrying(
                     run.Id,
                     run.Attempt,
@@ -361,15 +363,15 @@ internal sealed partial class SurefireExecutorService(
                 logger.LogError(ex, "Run moved to dead letter after attempt {Attempt}.", run.Attempt);
             }
 
-            instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+            instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                 bestEffortToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, bestEffortToken);
-            await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, bestEffortToken);
+            await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Executor", bestEffortToken);
         }
     }
 
-    private async Task<Activity?> StartRunActivityAsync(JobRun run, CancellationToken cancellationToken)
+    private async Task<Activity?> StartRunActivityAsync(RunRecord run, CancellationToken cancellationToken)
     {
         var parent = await ResolveParentActivityContextAsync(run, cancellationToken);
         var activity = parent is { } parentContext
@@ -416,7 +418,7 @@ internal sealed partial class SurefireExecutorService(
         return activity;
     }
 
-    private async Task<ActivityContext?> ResolveParentActivityContextAsync(JobRun run,
+    private async Task<ActivityContext?> ResolveParentActivityContextAsync(RunRecord run,
         CancellationToken cancellationToken)
     {
         if (TryParseActivityContext(run.TraceId, run.SpanId, out var runContext))
@@ -463,10 +465,10 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private async Task<bool> TryTransitionToDeadLetterAsync(JobRun run, string error,
+    private async Task<bool> TryTransitionToDeadLetterAsync(RunRecord run, string error,
         CancellationToken cancellationToken)
     {
-        var deadLetter = RunStatusTransition.RunningToDeadLetter(
+        var deadLetter = RunStatusTransition.RunningToFailed(
             run.Id,
             run.Attempt,
             timeProvider.GetUtcNow(),
@@ -483,124 +485,7 @@ internal sealed partial class SurefireExecutorService(
 
     private static string BuildDeadLetterError(Exception exception) => exception.ToString();
 
-    private async Task MaybeCompleteBatchAsync(string? batchRunId, string? childRunId, bool failed,
-        CancellationToken cancellationToken)
-    {
-        if (batchRunId is null)
-        {
-            return;
-        }
-
-        if (await store.TryIncrementBatchCounterAsync(batchRunId, failed, cancellationToken) is not { } counters)
-        {
-            return;
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId ?? batchRunId,
-            cancellationToken);
-        if (counters.Completed + counters.Failed < counters.Total)
-        {
-            return;
-        }
-
-        var coordinator = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (coordinator is null || coordinator.Status.IsTerminal)
-        {
-            return;
-        }
-
-        var coordinatorStartedAt = coordinator.StartedAt ??
-                                   await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
-
-        var transition = counters.Failed == 0
-            ? RunStatusTransition.RunningToCompleted(
-                coordinator.Id,
-                coordinator.Attempt,
-                timeProvider.GetUtcNow(),
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                null,
-                null,
-                coordinatorStartedAt,
-                timeProvider.GetUtcNow())
-            : RunStatusTransition.RunningToDeadLetter(
-                coordinator.Id,
-                coordinator.Attempt,
-                timeProvider.GetUtcNow(),
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                $"Batch completed with {counters.Failed} failed run(s).",
-                null,
-                coordinatorStartedAt,
-                timeProvider.GetUtcNow());
-
-        if (await store.TryTransitionRunAsync(transition, cancellationToken))
-        {
-            if (counters.Failed > 0)
-            {
-                await AppendFailureEventAsync(
-                    coordinator,
-                    RunFailureEnvelope.FromMessage(
-                        coordinator.Attempt,
-                        timeProvider.GetUtcNow(),
-                        "Executor",
-                        "BatchChildFailures",
-                        $"Batch completed with {counters.Failed} failed run(s)."),
-                    cancellationToken);
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
-                cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
-                cancellationToken);
-        }
-    }
-
-    private async Task<DateTimeOffset?> GetBatchEarliestChildStartedAtAsync(string batchRunId,
-        CancellationToken cancellationToken)
-    {
-        DateTimeOffset? earliest = null;
-        var skip = 0;
-        const int take = 200;
-
-        while (true)
-        {
-            var page = await store.GetRunsAsync(
-                new()
-                {
-                    ParentRunId = batchRunId,
-                    OrderBy = RunOrderBy.CreatedAt
-                },
-                skip,
-                take,
-                cancellationToken);
-
-            if (page.Items.Count == 0)
-            {
-                break;
-            }
-
-            foreach (var child in page.Items)
-            {
-                if (child.StartedAt is not { } startedAt)
-                {
-                    continue;
-                }
-
-                earliest = earliest is null || startedAt < earliest
-                    ? startedAt
-                    : earliest;
-            }
-
-            skip += page.Items.Count;
-        }
-
-        return earliest;
-    }
-
-    private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, JobRun run,
+    private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, RunRecord run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
         var allFilterTypes = new List<Type>(options.FilterTypes.Count + registration.FilterTypes.Count);
@@ -624,7 +509,7 @@ internal sealed partial class SurefireExecutorService(
         return invocation;
     }
 
-    private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, JobRun run, JobContext context,
+    private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, RunRecord run, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
         var parameters = registration.Handler.Method.GetParameters();
@@ -671,7 +556,7 @@ internal sealed partial class SurefireExecutorService(
             null);
     }
 
-    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, JobRun run,
+    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, RunRecord run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
         using var doc = run.Arguments is null ? null : JsonDocument.Parse(run.Arguments);
@@ -752,8 +637,8 @@ internal sealed partial class SurefireExecutorService(
             runId,
             0,
             [RunEventType.InputDeclared],
-            0,
-            cancellationToken);
+            attempt: 0,
+            cancellationToken: cancellationToken);
 
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var @event in events)
@@ -926,8 +811,8 @@ internal sealed partial class SurefireExecutorService(
         {
             var events = await store.GetEventsAsync(runId, sinceId,
                 [RunEventType.Input, RunEventType.InputComplete],
-                0,
-                cancellationToken);
+                attempt: 0,
+                cancellationToken: cancellationToken);
 
             foreach (var @event in events)
             {
@@ -1097,7 +982,7 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, JobRun run,
+    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, RunRecord run,
         CancellationToken cancellationToken)
     {
         var items = new List<string>();
@@ -1115,7 +1000,7 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
-        JobRun run,
+        RunRecord run,
         CancellationToken cancellationToken)
     {
         var items = new List<string>();
@@ -1131,7 +1016,7 @@ internal sealed partial class SurefireExecutorService(
         return items;
     }
 
-    private async Task AppendOutputEventAsync(JobRun run, string payload,
+    private async Task AppendOutputEventAsync(RunRecord run, string payload,
         CancellationToken cancellationToken)
     {
         await store.AppendEventsAsync(
@@ -1153,7 +1038,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task AppendOutputCompleteEventAsync(JobRun run, CancellationToken cancellationToken)
+    private async Task AppendOutputCompleteEventAsync(RunRecord run, CancellationToken cancellationToken)
     {
         await store.AppendEventsAsync(
         [
@@ -1193,7 +1078,7 @@ internal sealed partial class SurefireExecutorService(
             _ => ReleaseWakeupAsync(wakeup),
             stoppingToken);
         await using var completionSub = await notifications.SubscribeAsync(
-            NotificationChannels.RunCompleted(runId),
+            NotificationChannels.RunTerminated(runId),
             _ => ReleaseWakeupAsync(wakeup),
             stoppingToken);
 
@@ -1237,7 +1122,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task TryCreateContinuousRunAsync(RegisteredJob job, JobRun completedRun,
+    private async Task TryCreateContinuousRunAsync(RegisteredJob job, RunRecord completedRun,
         CancellationToken cancellationToken)
     {
         if (!job.Definition.IsContinuous || completedRun.ParentRunId is { })
@@ -1246,7 +1131,7 @@ internal sealed partial class SurefireExecutorService(
         }
 
         var now = timeProvider.GetUtcNow();
-        var nextRun = new JobRun
+        var nextRun = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = completedRun.JobName,
@@ -1273,7 +1158,7 @@ internal sealed partial class SurefireExecutorService(
         await notifications.PublishAsync(NotificationChannels.RunCreated, nextRun.Id, cancellationToken);
     }
 
-    private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, JobRun run, JobContext context,
+    private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, RunRecord run, JobContext context,
         IServiceProvider services, CancellationToken stoppingToken)
     {
         try
@@ -1284,9 +1169,9 @@ internal sealed partial class SurefireExecutorService(
                 services,
                 stoppingToken);
 
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, stoppingToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
-            await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, false, stoppingToken);
+            await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, false, "Executor", stoppingToken);
             await TryCreateContinuousRunAsync(job, run, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -1317,9 +1202,9 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task AppendAttemptFailureEventAsync(JobRun run, Exception exception,
+    private async Task AppendAttemptFailureEventAsync(RunRecord run, Exception exception,
         CancellationToken cancellationToken)
-        => await AppendFailureEventAsync(
+        => await batchCompletionHandler.AppendFailureEventAsync(
             run,
             RunFailureEnvelope.FromException(
                 run.Attempt,
@@ -1328,37 +1213,6 @@ internal sealed partial class SurefireExecutorService(
                 "Executor",
                 GetFailureCode(exception)),
             cancellationToken);
-
-    private async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var payload = JsonSerializer.Serialize(envelope, options.SerializerOptions);
-
-            await store.AppendEventsAsync(
-            [
-                new()
-                {
-                    RunId = run.Id,
-                    EventType = RunEventType.AttemptFailure,
-                    Payload = payload,
-                    CreatedAt = timeProvider.GetUtcNow(),
-                    Attempt = run.Attempt
-                }
-            ], cancellationToken);
-
-            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-            if (run.ParentRunId is { } batchRunId)
-            {
-                await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.FailedToAppendAttemptFailure(logger, ex, run.Id);
-        }
-    }
 
     private static string GetFailureCode(Exception exception) => exception switch
     {
@@ -1491,6 +1345,13 @@ internal sealed partial class SurefireExecutorService(
             return;
         }
 
+        // Signal all active runs to cancel, then wait up to ShutdownTimeout for them
+        // to complete cleanup (state transitions, failure events, notifications).
+        foreach (var cts in _runCancellation.Values)
+        {
+            cts.Cancel();
+        }
+
         using var timeoutCts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
@@ -1498,10 +1359,6 @@ internal sealed partial class SurefireExecutorService(
         }
         catch (OperationCanceledException)
         {
-            foreach (var cts in _runCancellation.Values)
-            {
-                cts.Cancel();
-            }
         }
     }
 
@@ -1521,10 +1378,6 @@ internal sealed partial class SurefireExecutorService(
         [LoggerMessage(EventId = 1104, Level = LogLevel.Warning,
             Message = "Lifecycle callback failed for job '{JobName}'.")]
         public static partial void LifecycleCallbackFailed(ILogger logger, Exception exception, string jobName);
-
-        [LoggerMessage(EventId = 1105, Level = LogLevel.Warning,
-            Message = "Failed to append attempt failure event for run '{RunId}'.")]
-        public static partial void FailedToAppendAttemptFailure(ILogger logger, Exception exception, string runId);
 
         [LoggerMessage(EventId = 1106, Level = LogLevel.Warning,
             Message = "Post-completion housekeeping failed for run '{RunId}' (job '{JobName}').")]

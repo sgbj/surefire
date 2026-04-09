@@ -131,10 +131,10 @@ public static class DashboardEndpoints
                 {
                     var runId = runOptions is { }
                         ? await client.TriggerAsync(name, args, runOptions, ct)
-                        : await client.TriggerAsync(name, args, ct);
-                    return TypedResults.Ok(new RunIdResponse(runId));
+                        : await client.TriggerAsync(name, args, cancellationToken: ct);
+                    return TypedResults.Ok(new RunIdResponse(runId.Id));
                 }
-                catch (InvalidOperationException ex)
+                catch (RunConflictException ex)
                 {
                     return ConflictProblem(ex.Message);
                 }
@@ -197,7 +197,7 @@ public static class DashboardEndpoints
 
                 var includeRoot = resolvedSkip == 0;
                 var remainingTake = resolvedTake - (includeRoot ? 1 : 0);
-                var descendants = new List<JobRun>(Math.Max(remainingTake, 0));
+                var descendants = new List<RunRecord>(Math.Max(remainingTake, 0));
 
                 var descendantsSkip = Math.Max(resolvedSkip - 1, 0);
 
@@ -255,7 +255,7 @@ public static class DashboardEndpoints
                 try
                 {
                     var newRunId = await client.RerunAsync(id, ct);
-                    return TypedResults.Ok(new RunIdResponse(newRunId));
+                    return TypedResults.Ok(new RunIdResponse(newRunId.Id));
                 }
                 catch (RunNotFoundException ex)
                 {
@@ -268,8 +268,8 @@ public static class DashboardEndpoints
             });
 
         api.MapGet("/runs/{id}/logs",
-            async Task<Results<Ok<List<JsonElement>>, ProblemHttpResult>> (string id, IJobStore store,
-                ILoggerFactory loggerFactory, CancellationToken ct) =>
+            async Task<Results<Ok<LogPageResponse>, ProblemHttpResult>> (string id, long? sinceEventId,
+                int? take, IJobStore store, ILoggerFactory loggerFactory, CancellationToken ct) =>
             {
                 var run = await store.GetRunAsync(id, ct);
                 if (run is null)
@@ -277,14 +277,25 @@ public static class DashboardEndpoints
                     return NotFoundProblem($"Run '{id}' was not found.");
                 }
 
+                var resolvedTake = Math.Clamp(take ?? 200, 1, 1000);
                 var logger = loggerFactory.CreateLogger(typeof(DashboardEndpoints));
-                var events = await store.GetEventsAsync(id, types: [RunEventType.Log], cancellationToken: ct);
-                var logs = new List<JsonElement>(events.Count);
+                // Fetch one extra to detect whether more pages exist.
+                var events = await store.GetEventsAsync(id, sinceEventId ?? 0,
+                    types: [RunEventType.Log], take: resolvedTake + 1, cancellationToken: ct);
+
+                var logs = new List<JsonElement>(Math.Min(events.Count, resolvedTake));
+                long? nextCursor = null;
                 foreach (var @event in events)
                 {
+                    if (logs.Count >= resolvedTake)
+                    {
+                        break;
+                    }
+
                     try
                     {
                         logs.Add(JsonSerializer.Deserialize<JsonElement>(@event.Payload));
+                        nextCursor = @event.Id;
                     }
                     catch (JsonException ex)
                     {
@@ -295,7 +306,12 @@ public static class DashboardEndpoints
                     }
                 }
 
-                return TypedResults.Ok(logs);
+                var hasMore = events.Count > resolvedTake;
+                return TypedResults.Ok(new LogPageResponse
+                {
+                    Items = logs,
+                    NextCursor = hasMore ? nextCursor : null
+                });
             });
 
         api.MapGet("/runs/{id}/stream", async Task<Results<ProblemHttpResult, EmptyHttpResult>> (string id,
@@ -337,7 +353,7 @@ public static class DashboardEndpoints
 
             var completedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             await using var completedSub = await notifications.SubscribeAsync(
-                NotificationChannels.RunCompleted(id),
+                NotificationChannels.RunTerminated(id),
                 _ =>
                 {
                     completedTcs.TrySetResult();

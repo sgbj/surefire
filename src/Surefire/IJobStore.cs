@@ -4,7 +4,7 @@ namespace Surefire;
 ///     Defines the storage contract for Surefire job data. All implementations must provide
 ///     equivalent behavioral and atomicity guarantees as specified in the store contract.
 /// </summary>
-public interface IJobStore
+internal interface IJobStore
 {
     /// <summary>
     ///     Creates or updates the store schema. This is always the first method called on the store,
@@ -74,7 +74,7 @@ public interface IJobStore
     /// <param name="runs">The runs to insert.</param>
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
+    Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default);
 
@@ -97,7 +97,7 @@ public interface IJobStore
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>True if the run was created; false if it was rejected.</returns>
-    Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
+    Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default);
@@ -108,7 +108,7 @@ public interface IJobStore
     /// <param name="id">The run ID.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching run, or null.</returns>
-    Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default);
+    Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns a page of runs matching the specified filter criteria.
@@ -122,7 +122,7 @@ public interface IJobStore
     ///     <paramref name="skip" /> is less than 0, or <paramref name="take" /> is
     ///     less than or equal to 0.
     /// </exception>
-    Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -133,7 +133,7 @@ public interface IJobStore
     /// </summary>
     /// <param name="run">The run with updated fields. <c>NodeName</c> is used as a fencing token.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default);
+    Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Atomically applies a run status transition using compare-and-swap. The transition succeeds only
@@ -159,6 +159,39 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Cancels all non-terminal runs that are direct children of the specified parent run.
+    ///     Returns the IDs of runs that were transitioned to <see cref="JobStatus.Cancelled"/>.
+    ///     Batch coordinator runs (those with a non-null <c>BatchTotal</c>) among the children
+    ///     are also cancelled.
+    /// </summary>
+    /// <param name="parentRunId">The parent run ID whose children should be cancelled.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The IDs of child runs that were cancelled.</returns>
+    async Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
+        CancellationToken cancellationToken = default)
+    {
+        var cancelledIds = new List<string>();
+        const int take = 200;
+        while (true)
+        {
+            // Always query from skip=0: cancelled items become terminal and fall out of
+            // the IsTerminal=false filter, so the result set naturally shrinks each iteration.
+            var page = await GetRunsAsync(
+                new() { ParentRunId = parentRunId, IsTerminal = false, OrderBy = RunOrderBy.CreatedAt },
+                0, take, cancellationToken);
+            if (page.Items.Count == 0) break;
+            foreach (var child in page.Items)
+            {
+                if (await TryCancelRunAsync(child.Id, cancellationToken))
+                {
+                    cancelledIds.Add(child.Id);
+                }
+            }
+        }
+        return cancelledIds;
+    }
+
+    /// <summary>
     ///     Atomically finds and claims the highest-priority pending run that matches the node's
     ///     registered jobs and queues. The claim operation verifies max concurrency (job and queue),
     ///     rate limits, and queue pause status in a single atomic operation. The run's attempt is
@@ -169,7 +202,7 @@ public interface IJobStore
     /// <param name="queueNames">The queue names this node is registered to process.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The claimed run with updated status, node, and attempt; or null if no eligible run was found.</returns>
-    Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -202,10 +235,11 @@ public interface IJobStore
     ///     When non-null, only return events for this attempt number. Events with
     ///     <c>Attempt = 0</c> (run-scoped, shared across attempts) are always included.
     /// </param>
+    /// <param name="take">When non-null, limits the number of events returned. Must be greater than 0.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching events ordered by ID ascending.</returns>
     Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null,
-        int? attempt = null, CancellationToken cancellationToken = default);
+        int? attempt = null, int? take = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns output events across all direct child runs of a batch coordinator, ordered by

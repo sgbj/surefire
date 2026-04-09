@@ -38,6 +38,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IJobStore, InMemoryJobStore>();
         services.TryAddSingleton<INotificationProvider, InMemoryNotificationProvider>();
         services.TryAddSingleton<IJobClient, JobClient>();
+        services.TryAddSingleton<BatchCompletionHandler>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, SurefireInitializationService>());
         services.TryAddEnumerable(

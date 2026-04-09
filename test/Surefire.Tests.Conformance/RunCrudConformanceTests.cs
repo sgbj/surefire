@@ -235,7 +235,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
@@ -330,7 +330,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"StatusFilter_{Guid.CreateVersion7():N}";
 
         var pending = CreateRun(jobName);
-        var completed = CreateRun(jobName, JobStatus.Completed);
+        var completed = CreateRun(jobName, JobStatus.Succeeded);
         completed.CompletedAt = DateTimeOffset.UtcNow;
         var cancelled = CreateRun(jobName, JobStatus.Cancelled);
         cancelled.CompletedAt = DateTimeOffset.UtcNow;
@@ -417,25 +417,23 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task GetRuns_FilterByIsBatchCoordinator()
+    public async Task GetRuns_FilterByBatchId()
     {
-        var coordinator = CreateRun();
-        coordinator.BatchTotal = 10;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
+        var batchId = Guid.CreateVersion7().ToString("N");
+        var batchRun = CreateRun();
+        batchRun.BatchId = batchId;
+        batchRun.BatchTotal = 10;
+        batchRun.BatchCompleted = 0;
+        batchRun.BatchFailed = 0;
 
         var normal = CreateRun();
 
-        await Store.CreateRunsAsync([coordinator, normal]);
+        await Store.CreateRunsAsync([batchRun, normal]);
 
-        var coordinators = await Store.GetRunsAsync(new() { IsBatchCoordinator = true });
-        var nonCoordinators = await Store.GetRunsAsync(new() { IsBatchCoordinator = false });
+        var batchFiltered = await Store.GetRunsAsync(new() { BatchId = batchId });
 
-        Assert.Contains(coordinators.Items, r => r.Id == coordinator.Id);
-        Assert.DoesNotContain(coordinators.Items, r => r.Id == normal.Id);
-
-        Assert.Contains(nonCoordinators.Items, r => r.Id == normal.Id);
-        Assert.DoesNotContain(nonCoordinators.Items, r => r.Id == coordinator.Id);
+        Assert.Contains(batchFiltered.Items, r => r.Id == batchRun.Id);
+        Assert.DoesNotContain(batchFiltered.Items, r => r.Id == normal.Id);
     }
 
     [Fact]
@@ -446,9 +444,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var pending = CreateRun(jobName);
         var running = CreateRun(jobName, JobStatus.Running);
         running.StartedAt = DateTimeOffset.UtcNow;
-        var completed = CreateRun(jobName, JobStatus.Completed);
+        var completed = CreateRun(jobName, JobStatus.Succeeded);
         completed.CompletedAt = DateTimeOffset.UtcNow;
-        var deadLetter = CreateRun(jobName, JobStatus.DeadLetter);
+        var deadLetter = CreateRun(jobName, JobStatus.Failed);
         deadLetter.CompletedAt = DateTimeOffset.UtcNow;
 
         await Store.CreateRunsAsync([pending, running, completed, deadLetter]);
@@ -648,7 +646,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     [Fact]
     public async Task UpdateRun_SkipsTerminalRuns()
     {
-        var run = CreateRun(status: JobStatus.Completed);
+        var run = CreateRun(status: JobStatus.Succeeded);
         run.CompletedAt = DateTimeOffset.UtcNow;
         run.Progress = 1.0;
         run.NodeName = "node-1";
@@ -701,15 +699,15 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"StatusCreatedRange_{Guid.CreateVersion7():N}";
 
-        var early = CreateRun(jobName, JobStatus.Completed);
+        var early = CreateRun(jobName, JobStatus.Succeeded);
         early.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30);
         early.CompletedAt = early.CreatedAt;
 
-        var middle = CreateRun(jobName, JobStatus.Completed);
+        var middle = CreateRun(jobName, JobStatus.Succeeded);
         middle.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-15);
         middle.CompletedAt = middle.CreatedAt;
 
-        var late = CreateRun(jobName, JobStatus.Completed);
+        var late = CreateRun(jobName, JobStatus.Succeeded);
         late.CreatedAt = DateTimeOffset.UtcNow;
         late.CompletedAt = late.CreatedAt;
 
@@ -717,7 +715,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var results = await Store.GetRunsAsync(new()
         {
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAfter = DateTimeOffset.UtcNow.AddMinutes(-20),
             CreatedBefore = DateTimeOffset.UtcNow.AddMinutes(-10)
         });
@@ -762,11 +760,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run1 = CreateRun(jobName, JobStatus.Completed);
+        var run1 = CreateRun(jobName, JobStatus.Succeeded);
         run1.CompletedAt = baseTime.AddMinutes(-3);
-        var run2 = CreateRun(jobName, JobStatus.Completed);
+        var run2 = CreateRun(jobName, JobStatus.Succeeded);
         run2.CompletedAt = baseTime.AddMinutes(-2);
-        var run3 = CreateRun(jobName, JobStatus.Completed);
+        var run3 = CreateRun(jobName, JobStatus.Succeeded);
         run3.CompletedAt = baseTime.AddMinutes(-1);
 
         await Store.CreateRunsAsync([run1, run2, run3]);
@@ -791,11 +789,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));
-        var completedRuns = new List<JobRun>(300);
+        var completedRuns = new List<RunRecord>(300);
 
         for (var i = 0; i < 300; i++)
         {
-            var run = CreateRun(jobName, JobStatus.Completed);
+            var run = CreateRun(jobName, JobStatus.Succeeded);
             var timestamp = baseTime.AddSeconds(i);
             run.CreatedAt = timestamp;
             run.NotBefore = timestamp;
@@ -816,7 +814,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         {
             JobName = jobName,
             ExactJobName = true,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             OrderBy = RunOrderBy.CompletedAt
         }, skip, take);
 
@@ -879,9 +877,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run1 = CreateRun(jobName, JobStatus.Completed);
+        var run1 = CreateRun(jobName, JobStatus.Succeeded);
         run1.CompletedAt = baseTime.AddMinutes(-10);
-        var run2 = CreateRun(jobName, JobStatus.Completed);
+        var run2 = CreateRun(jobName, JobStatus.Succeeded);
         run2.CompletedAt = baseTime.AddMinutes(-1);
 
         await Store.CreateRunsAsync([run1, run2]);
@@ -1022,7 +1020,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = DateTimeOffset.UtcNow.AddDays(-30);
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
@@ -1055,7 +1053,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = now;
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
@@ -1089,10 +1087,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"TermPage_{Guid.CreateVersion7():N}";
 
-        var runs = new List<JobRun>();
+        var runs = new List<RunRecord>();
         for (var i = 0; i < 5; i++)
         {
-            var r = CreateRun(jobName, JobStatus.Completed);
+            var r = CreateRun(jobName, JobStatus.Succeeded);
             r.CompletedAt = DateTimeOffset.UtcNow;
             runs.Add(r);
         }

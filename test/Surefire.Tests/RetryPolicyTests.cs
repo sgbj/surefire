@@ -58,6 +58,25 @@ public sealed class RetryPolicyTests
     }
 
     [Fact]
+    public void GetDelay_Exponential_FirstRetryEqualsInitialDelay()
+    {
+        var policy = new RetryPolicy
+        {
+            BackoffType = BackoffType.Exponential,
+            InitialDelay = TimeSpan.FromSeconds(5),
+            MaxDelay = TimeSpan.FromMinutes(5),
+            Jitter = false
+        };
+
+        // Attempt 1 = first retry, should equal InitialDelay exactly
+        Assert.Equal(TimeSpan.FromSeconds(5), policy.GetDelay(1));
+        // Attempt 2 = second retry, should be 2x
+        Assert.Equal(TimeSpan.FromSeconds(10), policy.GetDelay(2));
+        // Attempt 3 = third retry, should be 4x
+        Assert.Equal(TimeSpan.FromSeconds(20), policy.GetDelay(3));
+    }
+
+    [Fact]
     public void GetDelay_ExponentialHugeAttempt_ClampsToMaxDelay()
     {
         var policy = new RetryPolicy

@@ -113,7 +113,7 @@ internal sealed partial class SurefireSchedulerService(
     private async Task TryCreateScheduledRunAsync(JobDefinition job, DateTimeOffset notBefore,
         DateTimeOffset cronFireAt, CancellationToken cancellationToken)
     {
-        var run = new JobRun
+        var run = new RunRecord
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = job.Name,

@@ -68,7 +68,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run = CreateRun(jobName, JobStatus.Completed);
+        var run = CreateRun(jobName, JobStatus.Succeeded);
         run.NotAfter = now.AddMinutes(-1);
         run.NodeName = "node1";
         run.Attempt = 1;
@@ -82,7 +82,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         var loaded = await Store.GetRunAsync(run.Id);
         Assert.NotNull(loaded);
-        Assert.Equal(JobStatus.Completed, loaded.Status);
+        Assert.Equal(JobStatus.Succeeded, loaded.Status);
     }
 
     [Fact]
@@ -168,7 +168,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
+        claimed.Status = JobStatus.Succeeded;
         claimed.CompletedAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
@@ -279,7 +279,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         coordinator.BatchCompleted = 1;
         coordinator.BatchFailed = 0;
 
-        var child = CreateRun(jobName, JobStatus.Completed);
+        var child = CreateRun(jobName, JobStatus.Succeeded);
         child.ParentRunId = coordinator.Id;
         child.RootRunId = coordinator.Id;
         child.CompletedAt = old;
@@ -312,7 +312,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         coordinator.BatchCompleted = 1;
         coordinator.BatchFailed = 0;
 
-        var child = CreateRun(jobName, JobStatus.Completed);
+        var child = CreateRun(jobName, JobStatus.Succeeded);
         child.ParentRunId = coordinator.Id;
         child.RootRunId = coordinator.Id;
         child.CompletedAt = old;
@@ -321,7 +321,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         await Store.CreateRunsAsync([coordinator, child]);
 
-        coordinator.Status = JobStatus.Completed;
+        coordinator.Status = JobStatus.Succeeded;
         coordinator.CompletedAt = old;
         coordinator.Progress = 1;
         Assert.True(await Store.TryTransitionRunAsync(Transition(coordinator, JobStatus.Running)));

@@ -2,7 +2,7 @@ namespace Surefire.Tests.Conformance;
 
 public abstract class BatchConformanceTests : StoreConformanceBase
 {
-    private async Task<JobRun> CreateCoordinatorRunAsync(int batchTotal, JobStatus status = JobStatus.Running)
+    private async Task<RunRecord> CreateCoordinatorRunAsync(int batchTotal, JobStatus status = JobStatus.Running)
     {
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
@@ -36,7 +36,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.NotNull(counters);
 
         Assert.Equal(5, counters.Value.Total);
-        Assert.Equal(1, counters.Value.Completed);
+        Assert.Equal(1, counters.Value.Succeeded);
         Assert.Equal(0, counters.Value.Failed);
     }
 
@@ -49,7 +49,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.NotNull(counters);
 
         Assert.Equal(5, counters.Value.Total);
-        Assert.Equal(0, counters.Value.Completed);
+        Assert.Equal(0, counters.Value.Succeeded);
         Assert.Equal(1, counters.Value.Failed);
     }
 
@@ -60,15 +60,15 @@ public abstract class BatchConformanceTests : StoreConformanceBase
 
         var c1 = await Store.TryIncrementBatchCounterAsync(run.Id, false);
         Assert.NotNull(c1);
-        Assert.Equal(1, c1.Value.Completed);
+        Assert.Equal(1, c1.Value.Succeeded);
 
         var c2 = await Store.TryIncrementBatchCounterAsync(run.Id, false);
         Assert.NotNull(c2);
-        Assert.Equal(2, c2.Value.Completed);
+        Assert.Equal(2, c2.Value.Succeeded);
 
         var c3 = await Store.TryIncrementBatchCounterAsync(run.Id, true);
         Assert.NotNull(c3);
-        Assert.Equal(2, c3.Value.Completed);
+        Assert.Equal(2, c3.Value.Succeeded);
         Assert.Equal(1, c3.Value.Failed);
     }
 
@@ -105,7 +105,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
 
             var results = await Task.WhenAll(tasks);
 
-            var crossedCount = results.Count(c => c is { } value && value.Completed + value.Failed == value.Total);
+            var crossedCount = results.Count(c => c is { } value && value.Succeeded + value.Failed == value.Total);
             Assert.Equal(1, crossedCount);
         }
     }
@@ -126,7 +126,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         run.LastHeartbeatAt = DateTimeOffset.UtcNow;
         await Store.CreateRunsAsync([run]);
 
-        run.Status = JobStatus.Completed;
+        run.Status = JobStatus.Succeeded;
         run.CompletedAt = DateTimeOffset.UtcNow;
         await Store.TryTransitionRunAsync(Transition(run, JobStatus.Running));
 
@@ -134,7 +134,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.NotNull(counters);
 
         Assert.Equal(5, counters.Value.Total);
-        Assert.Equal(5, counters.Value.Completed);
+        Assert.Equal(5, counters.Value.Succeeded);
         Assert.Equal(0, counters.Value.Failed);
     }
 

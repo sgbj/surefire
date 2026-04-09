@@ -44,7 +44,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { TraceView } from "@/components/trace-view";
-import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Select,
   SelectContent,
@@ -338,9 +338,108 @@ export function RunDetailPage() {
       logFilter === null ? logs : logs.filter((l) => l.level >= logFilter),
     [logs, logFilter],
   );
-  const logScrollRef = useStickToBottom(logs.length);
-  const inputScrollRef = useStickToBottom(inputItems.length);
-  const outputScrollRef = useStickToBottom(outputItems.length);
+
+  // Virtualized log viewer
+  const logScrollContainerRef = useRef<HTMLDivElement>(null);
+  const logIsAtBottom = useRef(true);
+  const logProgrammatic = useRef(false);
+  const logVirtualizer = useVirtualizer({
+    count: filteredLogs.length,
+    getScrollElement: () => logScrollContainerRef.current,
+    estimateSize: () => 24,
+    overscan: 20,
+  });
+
+  // Virtualized input stream
+  const inputScrollContainerRef = useRef<HTMLDivElement>(null);
+  const inputIsAtBottom = useRef(true);
+  const inputProgrammatic = useRef(false);
+  const inputVirtualizer = useVirtualizer({
+    count: inputItems.length,
+    getScrollElement: () => inputScrollContainerRef.current,
+    estimateSize: () => 24,
+    overscan: 20,
+  });
+
+  // Virtualized output stream
+  const outputScrollContainerRef = useRef<HTMLDivElement>(null);
+  const outputIsAtBottom = useRef(true);
+  const outputProgrammatic = useRef(false);
+  const outputVirtualizer = useVirtualizer({
+    count: outputItems.length,
+    getScrollElement: () => outputScrollContainerRef.current,
+    estimateSize: () => 24,
+    overscan: 20,
+  });
+
+  // Stick-to-bottom for log virtualizer
+  useEffect(() => {
+    const el = logScrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (logProgrammatic.current) return;
+      logIsAtBottom.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (logIsAtBottom.current && filteredLogs.length > 0) {
+      logProgrammatic.current = true;
+      logVirtualizer.scrollToIndex(filteredLogs.length - 1, { align: "end" });
+      requestAnimationFrame(() => {
+        logProgrammatic.current = false;
+      });
+    }
+  }, [filteredLogs.length, logVirtualizer]);
+
+  // Stick-to-bottom for input virtualizer
+  useEffect(() => {
+    const el = inputScrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (inputProgrammatic.current) return;
+      inputIsAtBottom.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (inputIsAtBottom.current && inputItems.length > 0) {
+      inputProgrammatic.current = true;
+      inputVirtualizer.scrollToIndex(inputItems.length - 1, { align: "end" });
+      requestAnimationFrame(() => {
+        inputProgrammatic.current = false;
+      });
+    }
+  }, [inputItems.length, inputVirtualizer]);
+
+  // Stick-to-bottom for output virtualizer
+  useEffect(() => {
+    const el = outputScrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (outputProgrammatic.current) return;
+      outputIsAtBottom.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (outputIsAtBottom.current && outputItems.length > 0) {
+      outputProgrammatic.current = true;
+      outputVirtualizer.scrollToIndex(outputItems.length - 1, { align: "end" });
+      requestAnimationFrame(() => {
+        outputProgrammatic.current = false;
+      });
+    }
+  }, [outputItems.length, outputVirtualizer]);
 
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(id!),
@@ -577,6 +676,18 @@ export function RunDetailPage() {
       return a.id.localeCompare(b.id);
     });
   }, [childRunsData]);
+
+  // Trace view scroll container
+  const traceScrollRef = useRef<HTMLDivElement>(null);
+
+  // Virtualized triggered runs table
+  const triggeredRunsScrollRef = useRef<HTMLDivElement>(null);
+  const triggeredRunsVirtualizer = useVirtualizer({
+    count: sortedStepRuns.length,
+    getScrollElement: () => triggeredRunsScrollRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  });
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
   const progress = sseProgress ?? run?.progress ?? 0;
@@ -919,7 +1030,7 @@ export function RunDetailPage() {
       )}
 
       {traceRuns.length > 1 && (
-        <div className="max-h-[32rem] overflow-auto rounded-md border">
+        <div ref={traceScrollRef} className="max-h-[32rem] overflow-auto rounded-md border">
           <div className="sticky top-0 z-10 flex items-center justify-between h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
             <span className="text-sm text-muted-foreground">
               Trace ({traceRuns.length} / {traceTotalCount || traceRuns.length})
@@ -936,12 +1047,15 @@ export function RunDetailPage() {
               </Button>
             )}
           </div>
-          <TraceView runs={traceRuns} currentRunId={id!} />
+          <TraceView runs={traceRuns} currentRunId={id!} scrollContainerRef={traceScrollRef} />
         </div>
       )}
 
       {sortedStepRuns.length > 0 && (
-        <div className="max-h-[32rem] overflow-auto rounded-md border">
+        <div
+          ref={triggeredRunsScrollRef}
+          className="max-h-[32rem] overflow-auto rounded-md border"
+        >
           <div className="sticky top-0 z-10 flex items-center justify-between h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
             <span className="text-sm text-muted-foreground">
               Triggered runs ({sortedStepRuns.length} /{" "}
@@ -971,50 +1085,66 @@ export function RunDetailPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {sortedStepRuns.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="pl-4">
-                    <Link
-                      to={`/runs/${r.id}`}
-                      className="text-primary hover:underline truncate max-w-[200px] inline-block"
-                      title={r.id}
-                    >
-                      {r.id}
-                    </Link>
-                  </TableCell>
-                  <TableCell>
-                    <Link
-                      to={`/jobs/${encodeURIComponent(r.jobName)}`}
-                      className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block"
-                      title={r.jobName}
-                    >
-                      {r.jobName}
-                    </Link>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={r.status} />
-                  </TableCell>
-                  <TableCell>
-                    {r.startedAt ? formatDate(r.startedAt) : ""}
-                  </TableCell>
-                  <TableCell>
-                    {formatDuration(r.startedAt, r.completedAt)}
-                  </TableCell>
-                  <TableCell>
-                    {r.nodeName ? (
-                      <Link
-                        to={`/nodes/${encodeURIComponent(r.nodeName)}`}
-                        className="text-sm text-primary hover:underline truncate max-w-[160px] inline-block"
-                        title={r.nodeName}
+              <tr style={{ height: `${triggeredRunsVirtualizer.getTotalSize()}px` }}>
+                <td colSpan={6} className="p-0 relative">
+                  {triggeredRunsVirtualizer.getVirtualItems().map((virtualItem) => {
+                    const r = sortedStepRuns[virtualItem.index];
+                    return (
+                      <div
+                        key={r.id}
+                        className="absolute top-0 left-0 w-full flex items-center border-b border-border/50 text-sm"
+                        style={{
+                          height: `${virtualItem.size}px`,
+                          transform: `translateY(${virtualItem.start}px)`,
+                        }}
                       >
-                        {r.nodeName}
-                      </Link>
-                    ) : (
-                      ""
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
+                        <div className="flex-1 grid grid-cols-6 items-center">
+                          <div className="pl-4 py-2 truncate">
+                            <Link
+                              to={`/runs/${r.id}`}
+                              className="text-primary hover:underline truncate max-w-[200px] inline-block"
+                              title={r.id}
+                            >
+                              {r.id}
+                            </Link>
+                          </div>
+                          <div className="py-2 truncate">
+                            <Link
+                              to={`/jobs/${encodeURIComponent(r.jobName)}`}
+                              className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block"
+                              title={r.jobName}
+                            >
+                              {r.jobName}
+                            </Link>
+                          </div>
+                          <div className="py-2">
+                            <StatusBadge status={r.status} />
+                          </div>
+                          <div className="py-2 tabular-nums">
+                            {r.startedAt ? formatDate(r.startedAt) : ""}
+                          </div>
+                          <div className="py-2 tabular-nums">
+                            {formatDuration(r.startedAt, r.completedAt)}
+                          </div>
+                          <div className="py-2 truncate">
+                            {r.nodeName ? (
+                              <Link
+                                to={`/nodes/${encodeURIComponent(r.nodeName)}`}
+                                className="text-sm text-primary hover:underline truncate max-w-[160px] inline-block"
+                                title={r.nodeName}
+                              >
+                                {r.nodeName}
+                              </Link>
+                            ) : (
+                              ""
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </td>
+              </tr>
             </TableBody>
           </Table>
         </div>
@@ -1023,7 +1153,7 @@ export function RunDetailPage() {
       {inputItems.length > 0 && (
         <div className="flex max-h-[26rem]">
           <div
-            ref={inputScrollRef}
+            ref={inputScrollContainerRef}
             className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto"
           >
             <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
@@ -1031,13 +1161,26 @@ export function RunDetailPage() {
                 {inputHeader}
               </span>
             </div>
-            <div className="p-2">
-              {inputItems.map((item, i) => (
-                <div key={i} className="py-0.5 break-all">
-                  <span className="text-muted-foreground">{item.param}:</span>{" "}
-                  {JSON.stringify(item.value)}
-                </div>
-              ))}
+            <div
+              className="relative px-2"
+              style={{ height: `${inputVirtualizer.getTotalSize()}px` }}
+            >
+              {inputVirtualizer.getVirtualItems().map((virtualItem) => {
+                const item = inputItems[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.index}
+                    className="absolute top-0 left-0 w-full px-2 py-0.5 break-all"
+                    style={{
+                      height: `${virtualItem.size}px`,
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <span className="text-muted-foreground">{item.param}:</span>{" "}
+                    {JSON.stringify(item.value)}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -1046,7 +1189,7 @@ export function RunDetailPage() {
       {outputItems.length > 0 && (
         <div className="flex max-h-[26rem]">
           <div
-            ref={outputScrollRef}
+            ref={outputScrollContainerRef}
             className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto"
           >
             <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
@@ -1054,12 +1197,25 @@ export function RunDetailPage() {
                 Output stream ({outputItems.length} items)
               </span>
             </div>
-            <div className="p-2">
-              {outputItems.map((item, i) => (
-                <div key={i} className="py-0.5 break-all">
-                  {JSON.stringify(item)}
-                </div>
-              ))}
+            <div
+              className="relative px-2"
+              style={{ height: `${outputVirtualizer.getTotalSize()}px` }}
+            >
+              {outputVirtualizer.getVirtualItems().map((virtualItem) => {
+                const item = outputItems[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.index}
+                    className="absolute top-0 left-0 w-full px-2 py-0.5 break-all"
+                    style={{
+                      height: `${virtualItem.size}px`,
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    {JSON.stringify(item)}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -1068,7 +1224,7 @@ export function RunDetailPage() {
       {logs.length > 0 && (
         <div className="flex max-h-[26rem]">
           <div
-            ref={logScrollRef}
+            ref={logScrollContainerRef}
             className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto"
           >
             <div className="sticky top-0 z-10 flex items-center gap-3 h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
@@ -1101,18 +1257,31 @@ export function RunDetailPage() {
                 </Select>
               </div>
             </div>
-            <div className="p-2">
-              {filteredLogs.map((log, i) => (
-                <div key={i} className="py-0.5">
-                  <span className="text-muted-foreground tabular-nums">
-                    {formatLogTime(log.timestamp)}
-                  </span>{" "}
-                  <span className={logLevelColor(log.level)}>
-                    [{LogLevelLabels[log.level] ?? "?"}]
-                  </span>{" "}
-                  <span>{log.message}</span>
-                </div>
-              ))}
+            <div
+              className="relative px-2"
+              style={{ height: `${logVirtualizer.getTotalSize()}px` }}
+            >
+              {logVirtualizer.getVirtualItems().map((virtualItem) => {
+                const log = filteredLogs[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.index}
+                    className="absolute top-0 left-0 w-full px-2 py-0.5"
+                    style={{
+                      height: `${virtualItem.size}px`,
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <span className="text-muted-foreground tabular-nums">
+                      {formatLogTime(log.timestamp)}
+                    </span>{" "}
+                    <span className={logLevelColor(log.level)}>
+                      [{LogLevelLabels[log.level] ?? "?"}]
+                    </span>{" "}
+                    <span>{log.message}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
