@@ -27,10 +27,10 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("Echo", new { value = "ok" });
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal("ok", result.GetResult<string>());
+        Assert.True(run.IsSuccess);
+        Assert.Equal("ok", run.GetResult<string>());
     }
 
     [Fact]
@@ -64,10 +64,10 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("Flaky");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(42, result.GetResult<int>());
+        Assert.True(run.IsSuccess);
+        Assert.Equal(42, run.GetResult<int>());
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
         Assert.NotNull(runRecord);
@@ -89,10 +89,10 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("NoResultTask");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.False(result.TryGetResult<object?>(out _));
+        Assert.True(run.IsSuccess);
+        Assert.False(run.TryGetResult<object?>(out _));
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
         Assert.NotNull(runRecord);
@@ -114,10 +114,10 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("ExplicitNull");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.True(result.TryGetResult<object?>(out var typed));
+        Assert.True(run.IsSuccess);
+        Assert.True(run.TryGetResult<object?>(out var typed));
         Assert.Null(typed);
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
@@ -140,10 +140,10 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("EmptyObject");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.True(result.TryGetResult<JsonElement>(out var typed));
+        Assert.True(run.IsSuccess);
+        Assert.True(run.TryGetResult<JsonElement>(out var typed));
         Assert.Equal(JsonValueKind.Object, typed.ValueKind);
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
@@ -322,8 +322,8 @@ public sealed class RuntimeWorkersTests
         Assert.True(cancelled);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
-        Assert.True(result.IsCancelled);
+        await run.WaitAsync(cts.Token);
+        Assert.True(run.IsCancelled);
     }
 
     [Fact]
@@ -394,14 +394,14 @@ public sealed class RuntimeWorkersTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run.WaitAsync(cts.Token));
 
         using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(completionCts.Token);
+        await run.WaitAsync(completionCts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(123, result.GetResult<int>());
+        Assert.True(run.IsSuccess);
+        Assert.Equal(123, run.GetResult<int>());
     }
 
     [Fact]
-    public async Task CancelAsync_OnBatchCoordinator_CancelsChildren()
+    public async Task CancelBatchAsync_CancelsChildren()
     {
         await using var harness = await CreateHarnessAsync(options =>
         {
@@ -421,14 +421,14 @@ public sealed class RuntimeWorkersTests
         var batchId = await ((JobClient)harness.Client).TriggerAllAsync(
             "SlowBatch",
             [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
-        await harness.Client.CancelAsync(batchId);
+        await harness.Client.CancelBatchAsync(batchId);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var coordinator = await ((JobClient)harness.Client).WaitAsync(batchId, cts.Token);
-        Assert.True(coordinator.IsCancelled || coordinator.IsFailure);
+        var batch = await ((IJobClientInternal)harness.Client).WaitForBatchAsync(batchId, cts.Token);
+        Assert.True(batch.Status == JobStatus.Cancelled || batch.Status == JobStatus.Failed);
 
         var children = new List<JobRun>();
-        await foreach (var run in harness.Client.GetRunsAsync(new() { ParentRunId = batchId }, cts.Token))
+        await foreach (var run in harness.Client.GetRunsAsync(new() { BatchId = batchId }, cts.Token))
         {
             children.Add(run);
         }
@@ -633,9 +633,9 @@ public sealed class RuntimeWorkersTests
             "Expected at least one output event while run status was Running.");
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
-        Assert.True(result.IsSuccess);
-        Assert.Equal([1, 2, 3], result.GetResult<List<int>>());
+        await run.WaitAsync(cts.Token);
+        Assert.True(run.IsSuccess);
+        Assert.Equal([1, 2, 3], run.GetResult<List<int>>());
 
         var allOutputEvents = await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output]);
         var completionEvents = await harness.Store.GetEventsAsync(runId, types: [RunEventType.OutputComplete]);
@@ -670,8 +670,8 @@ public sealed class RuntimeWorkersTests
 
         var firstRun = await harness.Client.TriggerAsync("Continuous");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var first = await firstRun.WaitAsync(cts.Token);
-        Assert.True(first.IsSuccess);
+        await firstRun.WaitAsync(cts.Token);
+        Assert.True(firstRun.IsSuccess);
 
         var second = await WaitForAnotherRunAsync(harness.Store, "Continuous", firstRun.Id, cts.Token);
         Assert.NotNull(second);
@@ -693,8 +693,8 @@ public sealed class RuntimeWorkersTests
 
         var firstRun = await harness.Client.TriggerAsync("Continuous");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var first = await firstRun.WaitAsync(cts.Token);
-        Assert.True(first.IsSuccess);
+        await firstRun.WaitAsync(cts.Token);
+        Assert.True(firstRun.IsSuccess);
 
         var successor = await WaitForAnotherRunAsync(harness.Store, "Continuous", firstRun.Id, cts.Token);
         Assert.NotNull(successor);
@@ -1157,7 +1157,7 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task BatchCoordinator_DeadLetter_AppendsAttemptFailureEvent_FromExecutorPath()
+    public async Task BatchChild_DeadLetter_AppendsAttemptFailureEvent()
     {
         await using var harness = await CreateHarnessAsync(options =>
         {
@@ -1173,21 +1173,24 @@ public sealed class RuntimeWorkersTests
 
         await harness.StartAsync();
 
-        var coordinatorId = await ((JobClient)harness.Client).TriggerAllAsync("BatchFailure", [new { value = 1 }]);
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync("BatchFailure", [new { value = 1 }]);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var coordinatorResult = await ((JobClient)harness.Client).WaitAsync(coordinatorId, cts.Token);
-        Assert.True(coordinatorResult.IsFailure);
-        Assert.Equal(JobStatus.Failed, coordinatorResult.Status);
+        var batch = await ((IJobClientInternal)harness.Client).WaitForBatchAsync(batchId, cts.Token);
+        Assert.Equal(JobStatus.Failed, batch.Status);
+
+        var childRuns = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 10, cts.Token);
+        Assert.Single(childRuns.Items);
+        var childRunId = childRuns.Items[0].Id;
 
         var failureEvents = await TestWait.PollUntilAsync(
-            async _ => await harness.Store.GetEventsAsync(coordinatorId, 0, [RunEventType.AttemptFailure]),
+            async _ => await harness.Store.GetEventsAsync(childRunId, 0, [RunEventType.AttemptFailure]),
             events => events.Count > 0,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for coordinator attempt-failure event.");
+            "Timed out waiting for child attempt-failure event.");
 
-        Assert.Contains(failureEvents, e => e.Payload.Contains("BatchChildFailures", StringComparison.Ordinal));
+        Assert.Contains(failureEvents, e => e.Payload.Contains("child failed: 1", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1211,9 +1214,9 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("Filtered");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsSuccess);
+        Assert.True(run.IsSuccess);
         var sink = harness.Provider.GetRequiredService<TraceSink>();
         Assert.Equal(
             ["global-before", "job-before", "handler", "job-after", "global-after"],
@@ -1257,9 +1260,9 @@ public sealed class RuntimeWorkersTests
 
         var run = await harness.Client.TriggerAsync("CallbackFlaky");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
         Assert.Equal(1, globalRetry);
         Assert.Equal(1, globalDead);
         Assert.Equal(0, globalSuccess);
@@ -1285,9 +1288,9 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("DeadLetterDetails");
         var runId = run.Id;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
 
         var storedRun = await harness.Store.GetRunAsync(runId, cts.Token);
         Assert.NotNull(storedRun);
@@ -1315,9 +1318,9 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("RetryFrameworkLogs");
         var runId = run.Id;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
 
         var logEvents = await harness.Store.GetEventsAsync(runId, 0, [RunEventType.Log], cancellationToken: cts.Token);
         var logs = logEvents
@@ -1355,9 +1358,9 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("RetryFailureEvents");
         var runId = run.Id;
         using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var result = await run.WaitAsync(completionCts.Token);
+        await run.WaitAsync(completionCts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
 
         using var eventsCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var failureEvents = await TestWait.PollUntilAsync(
@@ -1456,7 +1459,7 @@ public sealed class RuntimeWorkersTests
         var parentRun = await harness.Client.TriggerAsync("NestedParent");
         var parentRunId = parentRun.Id;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var childRunId = await parentRun.WaitAsync<string>(cts.Token);
+        var childRunId = await parentRun.GetResultAsync<string>(cts.Token);
 
         var childRun = await harness.Store.GetRunAsync(childRunId, cts.Token);
         Assert.NotNull(childRun);
@@ -1465,7 +1468,7 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task TriggerAllAsync_InsideRun_AutoLinksCoordinatorAndChildrenToOuterRoot()
+    public async Task TriggerAllAsync_InsideRun_AutoLinksChildrenToOuterRoot()
     {
         await using var harness = await CreateHarnessAsync(options =>
         {
@@ -1483,18 +1486,17 @@ public sealed class RuntimeWorkersTests
         var parentRun = await harness.Client.TriggerAsync("NestedBatchParent");
         var parentRunId = parentRun.Id;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var batchCoordinatorId = await parentRun.WaitAsync<string>(cts.Token);
+        var batchId = await parentRun.GetResultAsync<string>(cts.Token);
 
-        var coordinator = await harness.Store.GetRunAsync(batchCoordinatorId, cts.Token);
-        Assert.NotNull(coordinator);
-        Assert.Equal(parentRunId, coordinator.ParentRunId);
-        Assert.Equal(parentRunId, coordinator.RootRunId);
+        var batch = await harness.Store.GetBatchAsync(batchId, cts.Token);
+        Assert.NotNull(batch);
+        Assert.Equal(2, batch.Total);
 
-        var children = await harness.Store.GetRunsAsync(new() { ParentRunId = batchCoordinatorId }, 0, 20, cts.Token);
+        var children = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 20, cts.Token);
         Assert.Equal(2, children.Items.Count);
         Assert.All(children.Items, child =>
         {
-            Assert.Equal(batchCoordinatorId, child.ParentRunId);
+            Assert.Equal(parentRunId, child.ParentRunId);
             Assert.Equal(parentRunId, child.RootRunId);
         });
     }
@@ -1684,10 +1686,10 @@ public sealed class RuntimeWorkersTests
         });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await run.WaitAsync(cts.Token);
+        await run.WaitAsync(cts.Token);
 
-        Assert.True(result.IsFailure);
-        Assert.NotEqual(JobStatus.Succeeded, result.Status);
+        Assert.True(run.IsFailure);
+        Assert.NotEqual(JobStatus.Succeeded, run.Status);
 
         static async IAsyncEnumerable<int> SourceCancelledStream()
         {
@@ -1764,14 +1766,14 @@ public sealed class RuntimeWorkersTests
         });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var originalCompleted = await original.WaitAsync(cts.Token);
-        Assert.True(originalCompleted.IsSuccess);
-        Assert.Equal(6, originalCompleted.GetResult<int>());
+        await original.WaitAsync(cts.Token);
+        Assert.True(original.IsSuccess);
+        Assert.Equal(6, original.GetResult<int>());
 
         var rerun = await harness.Client.RerunAsync(original.Id, cts.Token);
-        var rerunCompleted = await rerun.WaitAsync(cts.Token);
-        Assert.True(rerunCompleted.IsSuccess);
-        Assert.Equal(6, rerunCompleted.GetResult<int>());
+        await rerun.WaitAsync(cts.Token);
+        Assert.True(rerun.IsSuccess);
+        Assert.Equal(6, rerun.GetResult<int>());
 
         var rerunRun = await harness.Store.GetRunAsync(rerun.Id, cts.Token);
         Assert.NotNull(rerunRun);
@@ -1779,7 +1781,7 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task RerunAsync_BatchCoordinator_ReplaysChildStreamInputEvents()
+    public async Task RerunAsync_BatchChildren_ReplayStreamInputEvents()
     {
         await using var harness = await CreateHarnessAsync(options =>
         {
@@ -1818,37 +1820,35 @@ public sealed class RuntimeWorkersTests
         Assert.Equal([3, 165], firstPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
 
         var originalChildrenPage = await harness.Store.GetRunsAsync(
-            new() { ParentRunId = originalBatchId },
+            new() { BatchId = originalBatchId },
             0,
             20,
             cts.Token);
+        Assert.Equal(2, originalChildrenPage.Items.Count);
         var originalChildIds = originalChildrenPage.Items.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
 
-        var rerunBatch = await harness.Client.RerunAsync(originalBatchId, cts.Token);
-        var rerunPass = new List<RunResult>();
-        await foreach (var result in ((JobClient)harness.Client).WaitEachAsync(rerunBatch.Id, cts.Token))
+        // Rerun each child individually — stream inputs are replayed
+        var rerunRuns = new List<JobRun>();
+        foreach (var child in originalChildrenPage.Items)
         {
-            rerunPass.Add(result);
+            rerunRuns.Add(await harness.Client.RerunAsync(child.Id, cts.Token));
         }
 
-        Assert.Equal(2, rerunPass.Count);
-        Assert.All(rerunPass, result => Assert.True(result.IsSuccess));
-        Assert.Equal([3, 165], rerunPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
-
-        var rerunCoordinator = await harness.Store.GetRunAsync(rerunBatch.Id, cts.Token);
-        Assert.NotNull(rerunCoordinator);
-        Assert.Equal(originalBatchId, rerunCoordinator.RerunOfRunId);
-
-        var rerunChildrenPage = await harness.Store.GetRunsAsync(
-            new() { ParentRunId = rerunBatch.Id },
-            0,
-            20,
-            cts.Token);
-        Assert.Equal(2, rerunChildrenPage.Items.Count);
-        Assert.All(rerunChildrenPage.Items, child =>
+        var rerunResults = new List<int>();
+        foreach (var rerun in rerunRuns)
         {
-            Assert.NotNull(child.RerunOfRunId);
-            Assert.Contains(child.RerunOfRunId, originalChildIds);
+            var v = await rerun.GetResultAsync<int>(cts.Token);
+            rerunResults.Add(v);
+        }
+
+        Assert.Equal(2, rerunResults.Count);
+        Assert.Equal([3, 165], rerunResults.OrderBy(v => v).ToArray());
+
+        // Each rerun references the original child it was derived from
+        Assert.All(rerunRuns, rerun =>
+        {
+            Assert.NotNull(rerun.RerunOfRunId);
+            Assert.Contains(rerun.RerunOfRunId, originalChildIds);
         });
     }
 

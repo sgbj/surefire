@@ -10,6 +10,7 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, NodeInfo> _nodes = new();
     private readonly Dictionary<string, int> _nonTerminalCountByJob = new();
     private readonly Dictionary<string, int> _pendingCountByQueue = new();
+    private readonly Dictionary<string, BatchRecord> _batches = new();
 
     private readonly SortedSet<PendingRunKey> _pendingIndex = new();
     private readonly Dictionary<string, PendingRunKey> _pendingKeyByRunId = new();
@@ -445,11 +446,6 @@ internal sealed class InMemoryJobStore : IJobStore
                     continue;
                 }
 
-                if (run.BatchTotal is { })
-                {
-                    continue;
-                }
-
                 if (!jobNameSet.Contains(run.JobName))
                 {
                     continue;
@@ -525,42 +521,95 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    public Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            var batchCopy = CopyBatch(batch);
+            _batches[batchCopy.Id] = batchCopy;
+
+            var copies = new List<RunRecord>(runs.Count);
+            foreach (var run in runs)
+            {
+                var copy = CopyRun(run);
+                if (_runs.ContainsKey(copy.Id))
+                    throw new InvalidOperationException($"Run '{copy.Id}' already exists.");
+                copies.Add(copy);
+            }
+
+            foreach (var copy in copies)
+            {
+                copy.QueuePriority = GetQueuePriority(copy.JobName);
+                _runs[copy.Id] = copy;
+
+                if (copy.Status == JobStatus.Pending)
+                {
+                    AddToPendingIndex(copy);
+                    IncrementCount(_pendingCountByQueue, GetQueueName(copy.JobName));
+                }
+
+                if (!copy.Status.IsTerminal)
+                    IncrementCount(_nonTerminalCountByJob, copy.JobName);
+
+                if (copy.DeduplicationId is { })
+                    _dedupIndex.Add((copy.JobName, copy.DeduplicationId));
+            }
+
+            if (initialEvents?.Count > 0)
+                AppendEventsCore(initialEvents);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            return Task.FromResult(_batches.TryGetValue(batchId, out var batch) ? CopyBatch(batch) : null);
+        }
+    }
+
+    public Task<BatchCounters?> TryIncrementBatchProgressAsync(string batchId, JobStatus terminalStatus,
         CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
-            if (!_runs.TryGetValue(batchRunId, out var run))
-            {
+            if (!_batches.TryGetValue(batchId, out var batch))
                 return Task.FromResult<BatchCounters?>(null);
-            }
 
-            if (run.BatchTotal is null)
+            if (batch.Status.IsTerminal)
+                return Task.FromResult<BatchCounters?>(new BatchCounters(batch.Total, batch.Succeeded, batch.Failed, batch.Cancelled));
+
+            switch (terminalStatus)
             {
-                return Task.FromResult<BatchCounters?>(null);
+                case JobStatus.Failed:
+                    batch.Failed++;
+                    break;
+                case JobStatus.Cancelled:
+                    batch.Cancelled++;
+                    break;
+                default:
+                    batch.Succeeded++;
+                    break;
             }
 
-            if (run.Status.IsTerminal)
-            {
-                return Task.FromResult<BatchCounters?>(new BatchCounters(run.BatchTotal.Value,
-                    run.BatchCompleted ?? 0, run.BatchFailed ?? 0));
-            }
+            return Task.FromResult<BatchCounters?>(new BatchCounters(batch.Total, batch.Succeeded, batch.Failed, batch.Cancelled));
+        }
+    }
 
-            if (isFailed)
-            {
-                run.BatchFailed = (run.BatchFailed ?? 0) + 1;
-            }
-            else
-            {
-                run.BatchCompleted = (run.BatchCompleted ?? 0) + 1;
-            }
+    public Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
+        CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            if (!_batches.TryGetValue(batchId, out var batch) || batch.Status.IsTerminal)
+                return Task.FromResult(false);
 
-            run.Progress = run.BatchTotal.Value > 0
-                ? ((run.BatchCompleted ?? 0) + (run.BatchFailed ?? 0)) / (double)run.BatchTotal.Value
-                : 1.0;
-
-            return Task.FromResult<BatchCounters?>(new BatchCounters(run.BatchTotal.Value,
-                run.BatchCompleted ?? 0, run.BatchFailed ?? 0));
+            batch.Status = status;
+            batch.CompletedAt = completedAt;
+            return Task.FromResult(true);
         }
     }
 
@@ -618,7 +667,7 @@ internal sealed class InMemoryJobStore : IJobStore
             }
 
             var childIds = _runs.Values
-                .Where(r => string.Equals(r.ParentRunId, batchRunId, StringComparison.Ordinal))
+                .Where(r => string.Equals(r.BatchId, batchRunId, StringComparison.Ordinal))
                 .Select(r => r.Id)
                 .ToHashSet(StringComparer.Ordinal);
 
@@ -785,11 +834,6 @@ internal sealed class InMemoryJobStore : IJobStore
                     continue;
                 }
 
-                if (run.BatchTotal is { })
-                {
-                    continue;
-                }
-
                 var oldStatus = run.Status;
                 run.Status = JobStatus.Cancelled;
                 run.CancelledAt = now;
@@ -892,6 +936,16 @@ internal sealed class InMemoryJobStore : IJobStore
             foreach (var name in nodesToRemove)
             {
                 _nodes.Remove(name);
+            }
+
+            var batchesToRemove = _batches.Values
+                .Where(b => b.Status.IsTerminal && b.CompletedAt < threshold)
+                .Select(b => b.Id)
+                .ToList();
+
+            foreach (var id in batchesToRemove)
+            {
+                _batches.Remove(id);
             }
         }
 
@@ -1156,7 +1210,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 copy.QueuePriority = GetQueuePriority(copy.JobName);
                 _runs[copy.Id] = copy;
 
-                if (copy.Status == JobStatus.Pending && copy.BatchTotal is null)
+                if (copy.Status == JobStatus.Pending)
                 {
                     AddToPendingIndex(copy);
                     IncrementCount(_pendingCountByQueue, GetQueueName(copy.JobName));
@@ -1222,7 +1276,7 @@ internal sealed class InMemoryJobStore : IJobStore
             copy.QueuePriority = GetQueuePriority(copy.JobName);
             _runs[copy.Id] = copy;
 
-            if (copy.Status == JobStatus.Pending && copy.BatchTotal is null)
+            if (copy.Status == JobStatus.Pending)
             {
                 AddToPendingIndex(copy);
                 IncrementCount(_pendingCountByQueue, GetQueueName(copy.JobName));
@@ -1282,24 +1336,19 @@ internal sealed class InMemoryJobStore : IJobStore
             return false;
         }
 
-        if (run.ParentRunId is null)
+        if (run.BatchId is null)
         {
             return true;
         }
 
-        if (!_runs.TryGetValue(run.ParentRunId, out var parent))
+        if (!_batches.TryGetValue(run.BatchId, out var batch))
         {
             return true;
         }
 
-        if (parent.BatchTotal is null)
-        {
-            return true;
-        }
-
-        return parent.Status.IsTerminal
-               && parent.CompletedAt is { } parentCompletedAt
-               && parentCompletedAt < threshold;
+        return batch.Status.IsTerminal
+               && batch.CompletedAt is { } batchCompletedAt
+               && batchCompletedAt < threshold;
     }
 
     private void AddToPendingIndex(RunRecord run)
@@ -1349,7 +1398,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         var queueName = GetQueueName(run.JobName);
 
-        if (oldStatus == JobStatus.Pending && run.BatchTotal is null)
+        if (oldStatus == JobStatus.Pending)
         {
             RemoveFromPendingIndex(run.Id);
             DecrementCount(_pendingCountByQueue, queueName);
@@ -1361,7 +1410,7 @@ internal sealed class InMemoryJobStore : IJobStore
             DecrementCount(_runningCountByQueue, queueName);
         }
 
-        if (newStatus == JobStatus.Pending && run.BatchTotal is null)
+        if (newStatus == JobStatus.Pending)
         {
             AddToPendingIndex(run);
             IncrementCount(_pendingCountByQueue, queueName);
@@ -1520,6 +1569,18 @@ internal sealed class InMemoryJobStore : IJobStore
         Attempt = e.Attempt
     };
 
+    private static BatchRecord CopyBatch(BatchRecord batch) => new()
+    {
+        Id = batch.Id,
+        Status = batch.Status,
+        Total = batch.Total,
+        Succeeded = batch.Succeeded,
+        Failed = batch.Failed,
+        Cancelled = batch.Cancelled,
+        CreatedAt = batch.CreatedAt,
+        CompletedAt = batch.CompletedAt
+    };
+
     private static RunRecord CopyRun(RunRecord run) => new()
     {
         Id = run.Id,
@@ -1546,9 +1607,7 @@ internal sealed class InMemoryJobStore : IJobStore
         QueuePriority = run.QueuePriority,
         DeduplicationId = run.DeduplicationId,
         LastHeartbeatAt = run.LastHeartbeatAt,
-        BatchTotal = run.BatchTotal,
-        BatchCompleted = run.BatchTotal is null ? null : run.BatchCompleted,
-        BatchFailed = run.BatchTotal is null ? null : run.BatchFailed
+        BatchId = run.BatchId
     };
 
     private static JobDefinition CopyJob(JobDefinition job) => new()

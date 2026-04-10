@@ -141,63 +141,29 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task BatchCoordinator_NotCountedInPendingQueueStats()
+    public async Task BatchChildRuns_CountedInPendingQueueStats()
     {
         var jobName = $"BatchStats_{Guid.CreateVersion7():N}";
         var queueName = "default";
         await Store.UpsertJobAsync(CreateJob(jobName));
         await Store.UpsertQueueAsync(new() { Name = queueName });
 
-        var coordinator = CreateRun(jobName);
-        coordinator.BatchTotal = 3;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
-
+        var batchId = Guid.CreateVersion7().ToString("N");
         var child1 = CreateRun(jobName);
-        child1.ParentRunId = coordinator.Id;
-        child1.RootRunId = coordinator.Id;
+        child1.BatchId = batchId;
 
         var child2 = CreateRun(jobName);
-        child2.ParentRunId = coordinator.Id;
-        child2.RootRunId = coordinator.Id;
+        child2.BatchId = batchId;
 
         var child3 = CreateRun(jobName);
-        child3.ParentRunId = coordinator.Id;
-        child3.RootRunId = coordinator.Id;
+        child3.BatchId = batchId;
 
-        await Store.CreateRunsAsync([coordinator, child1, child2, child3]);
+        await Store.CreateRunsAsync([child1, child2, child3]);
 
         var queueStats = await Store.GetQueueStatsAsync();
         Assert.True(queueStats.ContainsKey(queueName));
-        // Only the 3 children should be pending, not the coordinator
+        // All 3 batch children should be pending
         Assert.Equal(3, queueStats[queueName].PendingCount);
-    }
-
-    [Fact]
-    public async Task IncrementBatchCounter_ZeroBatchTotal_ProgressIsOne()
-    {
-        var jobName = $"ZeroBatch_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
-
-        var run = CreateRun(jobName);
-        run.BatchTotal = 0;
-        run.BatchCompleted = 0;
-        run.BatchFailed = 0;
-        run.NodeName = "node1";
-        await Store.CreateRunsAsync([run]);
-
-        // Transition to Running first
-        run.Status = JobStatus.Running;
-        run.Attempt = 1;
-        run.StartedAt = DateTimeOffset.UtcNow;
-        run.LastHeartbeatAt = DateTimeOffset.UtcNow;
-        await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending));
-
-        var counters = await Store.TryIncrementBatchCounterAsync(run.Id, false);
-        var stored = await Store.GetRunAsync(run.Id);
-
-        Assert.NotNull(stored);
-        Assert.True(double.IsFinite(stored.Progress), "Progress should be finite, not Infinity");
     }
 
     [Fact]
@@ -256,55 +222,41 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task BatchCoordinator_StatusTransition_DoesNotCorruptPendingCount()
+    public async Task BatchChildRuns_PendingCount_NotAffectedByOtherRunTransitions()
     {
         var jobName = $"BatchPending_{Guid.CreateVersion7():N}";
         var queueName = "default";
         await Store.UpsertJobAsync(CreateJob(jobName));
         await Store.UpsertQueueAsync(new() { Name = queueName });
 
-        // Create a coordinator and some children
-        var coordinator = CreateRun(jobName);
-        coordinator.BatchTotal = 2;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
-
+        var batchId = Guid.CreateVersion7().ToString("N");
         var child1 = CreateRun(jobName);
-        child1.ParentRunId = coordinator.Id;
-        child1.RootRunId = coordinator.Id;
+        child1.BatchId = batchId;
         var child2 = CreateRun(jobName);
-        child2.ParentRunId = coordinator.Id;
-        child2.RootRunId = coordinator.Id;
+        child2.BatchId = batchId;
 
-        await Store.CreateRunsAsync([coordinator, child1, child2]);
+        // An unrelated run in the same queue
+        var unrelated = CreateRun(jobName);
 
-        // Verify initial pending count: 2 children, not the coordinator
+        await Store.CreateRunsAsync([child1, child2, unrelated]);
+
+        // 3 pending: 2 children + 1 unrelated
         var stats1 = await Store.GetQueueStatsAsync();
         Assert.True(stats1.ContainsKey(queueName));
-        Assert.Equal(2, stats1[queueName].PendingCount);
+        Assert.Equal(3, stats1[queueName].PendingCount);
 
-        // Transition coordinator to Running (simulating batch start)
-        coordinator.Status = JobStatus.Running;
-        coordinator.Attempt = 1;
-        coordinator.NodeName = "node1";
-        coordinator.StartedAt = DateTimeOffset.UtcNow;
-        coordinator.LastHeartbeatAt = DateTimeOffset.UtcNow;
-        await Store.TryTransitionRunAsync(Transition(coordinator, JobStatus.Pending));
+        // Claim and complete the unrelated run
+        var claimed = await Store.ClaimRunAsync("node1", [jobName], [queueName]);
+        Assert.NotNull(claimed);
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        await Store.TryTransitionRunAsync(RunStatusTransition.RunningToSucceeded(
+            claimed.Id, claimed.Attempt, now, claimed.NotBefore, "node1", 1, null, null,
+            claimed.StartedAt, now));
 
-        // Pending count should still be 2 (children only)
+        // 2 pending: only the batch children remain
         var stats2 = await Store.GetQueueStatsAsync();
         Assert.True(stats2.ContainsKey(queueName));
         Assert.Equal(2, stats2[queueName].PendingCount);
-
-        // Transition coordinator to Completed
-        coordinator.Status = JobStatus.Succeeded;
-        coordinator.CompletedAt = DateTimeOffset.UtcNow;
-        await Store.TryTransitionRunAsync(Transition(coordinator, JobStatus.Running));
-
-        // Pending count should still be 2 — coordinator transition must not affect it
-        var stats3 = await Store.GetQueueStatsAsync();
-        Assert.True(stats3.ContainsKey(queueName));
-        Assert.Equal(2, stats3[queueName].PendingCount);
     }
 
     [Fact]

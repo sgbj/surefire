@@ -6,121 +6,110 @@ internal interface IStoreTestFixture
     Task CleanAsync();
 }
 
-internal abstract class FixtureBackedJobConformanceTests<TFixture>(TFixture fixture) : JobConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedJobConformanceTests<TFixture>(TFixture fixture) : JobConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedRunCrudConformanceTests<TFixture>(TFixture fixture) : RunCrudConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedRunCrudConformanceTests<TFixture>(TFixture fixture) : RunCrudConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedTransitionConformanceTests<TFixture>(TFixture fixture)
-    : TransitionConformanceTests where TFixture : IStoreTestFixture
+public abstract class FixtureBackedTransitionConformanceTests<TFixture>(TFixture fixture)
+    : TransitionConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedCancelConformanceTests<TFixture>(TFixture fixture) : CancelConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedCancelConformanceTests<TFixture>(TFixture fixture) : CancelConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedClaimConformanceTests<TFixture>(TFixture fixture) : ClaimConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedClaimConformanceTests<TFixture>(TFixture fixture) : ClaimConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedBatchConformanceTests<TFixture>(TFixture fixture) : BatchConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedBatchConformanceTests<TFixture>(TFixture fixture) : BatchConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedEventConformanceTests<TFixture>(TFixture fixture) : EventConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedEventConformanceTests<TFixture>(TFixture fixture) : EventConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedNodeConformanceTests<TFixture>(TFixture fixture) : NodeConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedNodeConformanceTests<TFixture>(TFixture fixture) : NodeConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedQueueConformanceTests<TFixture>(TFixture fixture) : QueueConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedQueueConformanceTests<TFixture>(TFixture fixture) : QueueConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedRateLimitConformanceTests<TFixture>(TFixture fixture)
-    : RateLimitConformanceTests where TFixture : IStoreTestFixture
+public abstract class FixtureBackedRateLimitConformanceTests<TFixture>(TFixture fixture)
+    : RateLimitConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedMaintenanceConformanceTests<TFixture>(TFixture fixture)
-    : MaintenanceConformanceTests where TFixture : IStoreTestFixture
+public abstract class FixtureBackedMaintenanceConformanceTests<TFixture>(TFixture fixture)
+    : MaintenanceConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedPurgeConformanceTests<TFixture>(TFixture fixture) : PurgeConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedPurgeConformanceTests<TFixture>(TFixture fixture) : PurgeConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedStatsConformanceTests<TFixture>(TFixture fixture) : StatsConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedStatsConformanceTests<TFixture>(TFixture fixture) : StatsConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedSchemaConformanceTests<TFixture>(TFixture fixture) : SchemaConformanceTests
-    where TFixture : IStoreTestFixture
+public abstract class FixtureBackedSchemaConformanceTests<TFixture>(TFixture fixture) : SchemaConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedStoreFixConformanceTests<TFixture>(TFixture fixture)
-    : StoreFixConformanceTests where TFixture : IStoreTestFixture
+public abstract class FixtureBackedStoreFixConformanceTests<TFixture>(TFixture fixture)
+    : StoreFixConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedQueueStatsParityConformanceTests<TFixture>(TFixture fixture)
-    : QueueStatsParityConformanceTests where TFixture : IStoreTestFixture
+public abstract class FixtureBackedQueueStatsParityConformanceTests<TFixture>(TFixture fixture)
+    : QueueStatsParityConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }
 
-internal abstract class FixtureBackedRuntimeReliabilityConformanceTests<TFixture>(TFixture fixture)
-    : RuntimeReliabilityConformanceTests where TFixture : IStoreTestFixture
+public abstract class FixtureBackedRuntimeReliabilityConformanceTests<TFixture>(TFixture fixture)
+    : RuntimeReliabilityConformanceTests
 {
-    internal override Task<IJobStore> CreateStoreAsync() => fixture.CreateStoreAsync();
-    public override Task DisposeAsync() => fixture.CleanAsync();
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)(object)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)(object)fixture!).CleanAsync());
 }

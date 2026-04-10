@@ -20,6 +20,15 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                             local runs = cjson.decode(ARGV[1])
                                             local initial_events = cjson.decode(ARGV[2])
 
+                                            -- Optional ARGV[3]: batch JSON to write atomically before runs
+                                            -- become claimable, ensuring TryIncrementBatchProgressAsync
+                                            -- never races against a missing batch record.
+                                            local batch_arg = ARGV[3]
+                                            if batch_arg and batch_arg ~= '' then
+                                                local batch = cjson.decode(batch_arg)
+                                                redis.call('SET', '{surefire}:batch:' .. batch.id, batch_arg)
+                                            end
+
                                             local function append_events(events)
                                                 if not events then
                                                     return
@@ -137,8 +146,11 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                                 if run.root_run_id and run.root_run_id ~= cjson.null and run.root_run_id ~= '' then
                                                     redis.call('SADD', '{surefire}:tree:' .. run.root_run_id, run_id)
                                                 end
+                                                if run.batch_id and run.batch_id ~= cjson.null and run.batch_id ~= '' then
+                                                    redis.call('SADD', '{surefire}:batch_runs:' .. run.batch_id, run_id)
+                                                end
 
-                                                if run.status == 0 and type(run.batch_total) ~= 'number' then
+                                                if run.status == 0 then
                                                     add_to_pending(run, run_id, qname)
                                                 elseif run.status == 1 then
                                                     redis.call('SADD', '{surefire}:running:' .. run.job_name, run_id)
@@ -414,6 +426,10 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         {
             candidateIds = await db.SetMembersAsync($"{P}tree:{rootId}");
         }
+        else if (filter.BatchId is { } batchId)
+        {
+            candidateIds = await db.SetMembersAsync($"{P}batch_runs:{batchId}");
+        }
         else if (filter.Status is { } status)
         {
             var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
@@ -453,7 +469,6 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
-                                                       && filter.BatchId is null
                                                        && filter.OrderBy == RunOrderBy.CreatedAt;
 
             if (noPostFilters)
@@ -491,7 +506,6 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
-                                                       && filter.BatchId is null
                                                        && filter.OrderBy == RunOrderBy.CreatedAt;
 
             if (noPostFilters)
@@ -1241,7 +1255,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                               local run_data = redis.call('GET', '{surefire}:run:' .. run_id)
                                               if run_data then
                                                   local r = cjson.decode(run_data)
-                                                  if r.status == 0 and type(r.batch_total) ~= 'number' and r.not_before_ms <= now_ms
+                                                  if r.status == 0 and r.not_before_ms <= now_ms
                                                       and (r.not_after == nil or r.not_after == cjson.null or tonumber(r.not_after) > now_ms)
                                                       and job_set[r.job_name] then
                                                       local job = job_cache[r.job_name]
@@ -1291,7 +1305,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
 
                                                           retained = retained + 1
                                                       end
-                                                  elseif r.status ~= 0 or type(r.batch_total) == 'number' then
+                                                  elseif r.status ~= 0 then
                                                       redis.call('ZREM', '{surefire}:pending_q:' .. queue_name, entry)
                                                       redis.call('DEL', '{surefire}:pending_member:' .. run_id)
                                                   else
@@ -1385,45 +1399,42 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         return DeserializeRun(result.ToString()!);
     }
 
-    public async Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    public Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
+        => CreateRunsCoreAsync(runs, initialEvents, cancellationToken, SerializeBatch(batch));
+
+    public async Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    {
+        var json = await Db.StringGetAsync($"{P}batch:{batchId}");
+        return json.IsNullOrEmpty ? null : DeserializeBatch(json!);
+    }
+
+    public async Task<BatchCounters?> TryIncrementBatchProgressAsync(string batchId, JobStatus terminalStatus,
         CancellationToken cancellationToken = default)
     {
         const string script = """
-                              local key = '{surefire}:run:' .. ARGV[1]
+                              local key = '{surefire}:batch:' .. ARGV[1]
                               local data = redis.call('GET', key)
-                              if not data then
-                                  return nil
+                              if not data then return nil end
+                              local b = cjson.decode(data)
+                              if b.status == 2 or b.status == 4 or b.status == 5 then
+                                  return cjson.encode({b.total, b.succeeded or 0, b.failed or 0, b.cancelled or 0})
                               end
-
-                              local r = cjson.decode(data)
-                              if type(r.batch_total) ~= 'number' then
-                                  return nil
+                              local s = tonumber(ARGV[2])
+                              if s == 2 then
+                                  b.succeeded = (b.succeeded or 0) + 1
+                              elseif s == 5 then
+                                  b.failed = (b.failed or 0) + 1
+                              elseif s == 4 then
+                                  b.cancelled = (b.cancelled or 0) + 1
                               end
-
-                              local function num(v) return type(v) == 'number' and v or 0 end
-
-                              if r.status == 2 or r.status == 4 or r.status == 5 then
-                                  return cjson.encode({r.batch_total, num(r.batch_completed), num(r.batch_failed)})
-                              end
-
-                              if ARGV[2] == '1' then
-                                  r.batch_failed = num(r.batch_failed) + 1
-                              else
-                                  r.batch_completed = num(r.batch_completed) + 1
-                              end
-
-                              r.progress = r.batch_total == 0 and 1.0 or (num(r.batch_completed) + num(r.batch_failed)) / r.batch_total
-
-                              redis.call('SET', key, cjson.encode(r))
-                              return cjson.encode({r.batch_total, r.batch_completed, r.batch_failed})
+                              redis.call('SET', key, cjson.encode(b))
+                              return cjson.encode({b.total, b.succeeded or 0, b.failed or 0, b.cancelled or 0})
                               """;
 
         var result = await EvaluateScriptAsync(script,
             [RoutingKey],
-            [
-                batchRunId,
-                isFailed ? "1" : "0"
-            ]);
+            [batchId, ((int)terminalStatus).ToString()]);
 
         if (result.IsNull)
         {
@@ -1431,7 +1442,112 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
 
         var arr = JsonSerializer.Deserialize<int[]>(result.ToString()!)!;
-        return new(arr[0], arr[1], arr[2]);
+        return new(arr[0], arr[1], arr[2], arr[3]);
+    }
+
+    public async Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
+        CancellationToken cancellationToken = default)
+    {
+        const string script = """
+                              local key = '{surefire}:batch:' .. ARGV[1]
+                              local data = redis.call('GET', key)
+                              if not data then return 0 end
+                              local b = cjson.decode(data)
+                              if b.status == 2 or b.status == 4 or b.status == 5 then return 0 end
+                              b.status = tonumber(ARGV[2])
+                              b.completed_at = tonumber(ARGV[3])
+                              redis.call('SET', key, cjson.encode(b))
+                              -- Track in {surefire}:batches with completed_at score for purge
+                              redis.call('ZADD', '{surefire}:batches', tonumber(ARGV[3]), ARGV[1])
+                              return 1
+                              """;
+
+        var result = await EvaluateScriptAsync(script,
+            [RoutingKey],
+            [
+                batchId,
+                ((int)status).ToString(),
+                completedAt.ToUnixTimeMilliseconds().ToString()
+            ]);
+
+        return (int)result == 1;
+    }
+
+    public async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+        CancellationToken cancellationToken = default)
+    {
+        const string script = """
+                              local batch_runs_key = '{surefire}:batch_runs:' .. ARGV[1]
+                              local now_ms = tonumber(ARGV[2])
+                              local run_ids = redis.call('SMEMBERS', batch_runs_key)
+                              local cancelled = {}
+                              for _, run_id in ipairs(run_ids) do
+                                  local key = '{surefire}:run:' .. run_id
+                                  local data = redis.call('GET', key)
+                                  if data then
+                                      local r = cjson.decode(data)
+                                      if r.status == 0 or r.status == 1 or r.status == 3 then
+                                          local old_status = r.status
+                                          r.status = 4
+                                          r.cancelled_at = now_ms
+                                          r.completed_at = now_ms
+                                          redis.call('SET', key, cjson.encode(r))
+                                          redis.call('ZREM', '{surefire}:expiring', run_id)
+                                          redis.call('SREM', '{surefire}:nonterminal:' .. r.job_name, run_id)
+                                          redis.call('ZREM', '{surefire}:runs:nonterminal', run_id)
+                                          redis.call('ZADD', '{surefire}:runs:terminal', r.created_at, run_id)
+                                          redis.call('ZADD', '{surefire}:runs:completed', now_ms, run_id)
+                                          redis.call('ZREM', '{surefire}:status:' .. tostring(old_status), run_id)
+                                          redis.call('ZADD', '{surefire}:status:4', r.created_at, run_id)
+                                          redis.call('HINCRBY', '{surefire}:status_counts', tostring(old_status), -1)
+                                          redis.call('HINCRBY', '{surefire}:status_counts', '4', 1)
+                                          if r.deduplication_id and r.deduplication_id ~= cjson.null and r.deduplication_id ~= '' then
+                                              redis.call('DEL', '{surefire}:dedup:' .. r.job_name .. ':' .. r.deduplication_id)
+                                          end
+                                          local minute = math.floor(now_ms / 60000)
+                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'cancelled', 1)
+                                          redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
+                                          if old_status == 0 then
+                                              local pm = redis.call('GET', '{surefire}:pending_member:' .. run_id)
+                                              if pm then
+                                                  local qname = 'default'
+                                                  local jdata = redis.call('HGETALL', '{surefire}:job:' .. r.job_name)
+                                                  for j = 1, #jdata, 2 do
+                                                      if jdata[j] == 'queue' and jdata[j+1] ~= '' then qname = jdata[j+1] end
+                                                  end
+                                                  redis.call('ZREM', '{surefire}:pending_q:' .. qname, pm)
+                                                  redis.call('DEL', '{surefire}:pending_member:' .. run_id)
+                                              end
+                                          elseif old_status == 1 then
+                                              local qname = 'default'
+                                              local jdata = redis.call('HGETALL', '{surefire}:job:' .. r.job_name)
+                                              for j = 1, #jdata, 2 do
+                                                  if jdata[j] == 'queue' and jdata[j+1] ~= '' then qname = jdata[j+1] end
+                                              end
+                                              redis.call('SREM', '{surefire}:running:' .. r.job_name, run_id)
+                                              redis.call('SREM', '{surefire}:running_q:' .. qname, run_id)
+                                              if r.node_name and r.node_name ~= cjson.null and r.node_name ~= '' then
+                                                  redis.call('SREM', '{surefire}:node_runs:' .. r.node_name, run_id)
+                                              end
+                                          end
+                                          cancelled[#cancelled + 1] = run_id
+                                      end
+                                  end
+                              end
+                              if #cancelled == 0 then return nil end
+                              return cjson.encode(cancelled)
+                              """;
+
+        var result = await EvaluateScriptAsync(script,
+            [RoutingKey],
+            [batchId, timeProvider.GetUtcNow().ToUnixTimeMilliseconds().ToString()]);
+
+        if (result.IsNull)
+        {
+            return [];
+        }
+
+        return JsonSerializer.Deserialize<string[]>(result.ToString()!) ?? [];
     }
 
     public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
@@ -1615,7 +1731,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         }
 
         var db = Db;
-        var childIds = await db.SetMembersAsync($"{P}children:{batchRunId}");
+        var childIds = await db.SetMembersAsync($"{P}batch_runs:{batchRunId}");
         if (childIds.Length == 0)
         {
             return [];
@@ -1961,9 +2077,6 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                       if r.status == 2 or r.status == 4 or r.status == 5 then
                                           redis.call('ZREM', '{surefire}:expiring', run_id)
                                           cleaned = cleaned + 1
-                                      elseif type(r.batch_total) == 'number' then
-                                          redis.call('ZREM', '{surefire}:expiring', run_id)
-                                          cleaned = cleaned + 1
                                       elseif r.status == 0 or r.status == 3 then
                                           local old_status = r.status
                                           r.status = 4
@@ -2176,6 +2289,9 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                            decrement_timeline(status_num, r.completed_at)
                                            cleanup_events(run_id)
 
+                                           if r.batch_id and r.batch_id ~= cjson.null and r.batch_id ~= '' then
+                                               redis.call('SREM', '{surefire}:batch_runs:' .. r.batch_id, run_id)
+                                           end
                                            redis.call('DEL', '{surefire}:run:' .. run_id)
                                            redis.call('DEL', '{surefire}:pending_member:' .. run_id)
                                            redis.call('ZREM', '{surefire}:expiring', run_id)
@@ -2187,19 +2303,17 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                            if data then
                                                local r = cjson.decode(data)
                                                local can_purge = true
-                                               if r.parent_run_id and r.parent_run_id ~= cjson.null and r.parent_run_id ~= '' then
-                                                   local parent_data = redis.call('GET', '{surefire}:run:' .. r.parent_run_id)
-                                                   if parent_data then
-                                                       local parent = cjson.decode(parent_data)
-                                                       if parent.batch_total and parent.batch_total ~= cjson.null then
-                                                           local parent_status = tonumber(parent.status)
-                                                           local parent_completed = tonumber(parent.completed_at) or 0
-                                                           if (parent_status ~= 2 and parent_status ~= 4 and parent_status ~= 5)
-                                                               or parent.completed_at == nil
-                                                               or parent.completed_at == cjson.null
-                                                               or parent_completed >= threshold_ms then
-                                                               can_purge = false
-                                                           end
+                                               if r.batch_id and r.batch_id ~= cjson.null and r.batch_id ~= '' then
+                                                   local batch_data = redis.call('GET', '{surefire}:batch:' .. r.batch_id)
+                                                   if batch_data then
+                                                       local batch = cjson.decode(batch_data)
+                                                       local batch_status = tonumber(batch.status) or 0
+                                                       local batch_completed = tonumber(batch.completed_at) or 0
+                                                       if (batch_status ~= 2 and batch_status ~= 4 and batch_status ~= 5)
+                                                           or batch.completed_at == nil
+                                                           or batch.completed_at == cjson.null
+                                                           or batch_completed >= threshold_ms then
+                                                           can_purge = false
                                                        end
                                                    end
                                                end
@@ -2261,6 +2375,24 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                                end
                                            end
                                            retrying_offset = retrying_offset + retrying_batch - batch_purged
+                                       end
+
+                                       -- Purge terminal batches whose runs have all been purged
+                                       local old_batches = redis.call('ZRANGEBYSCORE', '{surefire}:batches', '-inf', threshold_ms)
+                                       for _, bid in ipairs(old_batches) do
+                                           local bdata = redis.call('GET', '{surefire}:batch:' .. bid)
+                                           if bdata then
+                                               local b = cjson.decode(bdata)
+                                               if (b.status == 2 or b.status == 4 or b.status == 5)
+                                                   and redis.call('SCARD', '{surefire}:batch_runs:' .. bid) == 0 then
+                                                   redis.call('DEL', '{surefire}:batch:' .. bid)
+                                                   redis.call('DEL', '{surefire}:batch_runs:' .. bid)
+                                                   redis.call('ZREM', '{surefire}:batches', bid)
+                                                   purged = purged + 1
+                                               end
+                                           else
+                                               redis.call('ZREM', '{surefire}:batches', bid)
+                                           end
                                        end
 
                                        return purged
@@ -2589,10 +2721,18 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
 
     private async Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs,
         IReadOnlyList<RunEvent>? initialEvents,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? batchJson = null)
     {
         if (runs.Count == 0 && (initialEvents is null || initialEvents.Count == 0))
         {
+            if (batchJson is not null)
+            {
+                // Empty batch: persist only the batch record with no runs
+                await EvaluateScriptAsync(CreateRunsScript,
+                    [RoutingKey],
+                    [(RedisValue)"[]", (RedisValue)"[]", (RedisValue)batchJson]);
+            }
             return;
         }
 
@@ -2600,7 +2740,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         var initialEventsJson = JsonSerializer.Serialize(SerializeEventsAsObjects(initialEvents));
         await EvaluateScriptAsync(CreateRunsScript,
             [RoutingKey],
-            [(RedisValue)runsJson, (RedisValue)initialEventsJson]);
+            [(RedisValue)runsJson, (RedisValue)initialEventsJson, (RedisValue)(batchJson ?? "")]);
     }
 
     private async Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
@@ -2735,6 +2875,9 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                               if root_run_id ~= '' then
                                   redis.call('SADD', '{surefire}:tree:' .. root_run_id, ARGV[1])
                               end
+                              if run.batch_id and run.batch_id ~= cjson.null and run.batch_id ~= '' then
+                                  redis.call('SADD', '{surefire}:batch_runs:' .. run.batch_id, ARGV[1])
+                              end
                               if tonumber(run.status) == 1 then
                                   redis.call('SADD', '{surefire}:running:' .. job_name, ARGV[1])
                                   redis.call('SADD', '{surefire}:running_q:' .. qname, ARGV[1])
@@ -2743,7 +2886,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                   end
                               end
 
-                              if run.status == 0 and type(run.batch_total) ~= 'number' then
+                              if run.status == 0 then
                                   local member = string.format('%010d%020d%s|%s',
                                       999999999 - run.priority,
                                       run.not_before_ms,
@@ -2885,7 +3028,6 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.NodeName is null
         && filter.CompletedAfter is null
         && filter.LastHeartbeatBefore is null
-        && filter.BatchId is null
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
@@ -2897,7 +3039,6 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.NodeName is null
         && filter.CompletedAfter is null
         && filter.LastHeartbeatBefore is null
-        && filter.BatchId is null
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
@@ -2910,7 +3051,6 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         && filter.NodeName is null
         && filter.CompletedAfter is null
         && filter.LastHeartbeatBefore is null
-        && filter.BatchId is null
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
@@ -2979,9 +3119,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
         deduplication_id = run.DeduplicationId,
         last_heartbeat_at = run.LastHeartbeatAt?.ToUnixTimeMilliseconds(),
         queue_priority = run.QueuePriority,
-        batch_total = run.BatchTotal,
-        batch_completed = run.BatchCompleted,
-        batch_failed = run.BatchFailed
+        batch_id = run.BatchId
     };
 
     private static long GetMs(JsonElement v) =>
@@ -3084,19 +3222,9 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             run.QueuePriority = v.GetInt32();
         }
 
-        if (r.TryGetProperty("batch_total", out v) && v.ValueKind != JsonValueKind.Null)
+        if (r.TryGetProperty("batch_id", out v) && v.ValueKind != JsonValueKind.Null)
         {
-            run.BatchTotal = v.GetInt32();
-
-            if (r.TryGetProperty("batch_completed", out var bc) && bc.ValueKind != JsonValueKind.Null)
-            {
-                run.BatchCompleted = bc.GetInt32();
-            }
-
-            if (r.TryGetProperty("batch_failed", out var bf) && bf.ValueKind != JsonValueKind.Null)
-            {
-                run.BatchFailed = bf.GetInt32();
-            }
+            run.BatchId = v.GetString();
         }
 
         return run;
@@ -3225,6 +3353,41 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                 ? JsonSerializer.Deserialize<string[]>(qn) ?? []
                 : []
         };
+    }
+
+    private static string SerializeBatch(BatchRecord batch) =>
+        JsonSerializer.Serialize(new
+        {
+            id = batch.Id,
+            status = (int)batch.Status,
+            total = batch.Total,
+            succeeded = batch.Succeeded,
+            failed = batch.Failed,
+            cancelled = batch.Cancelled,
+            created_at = batch.CreatedAt.ToUnixTimeMilliseconds(),
+            completed_at = batch.CompletedAt?.ToUnixTimeMilliseconds()
+        });
+
+    private static BatchRecord DeserializeBatch(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var r = doc.RootElement;
+        var batch = new BatchRecord
+        {
+            Id = r.GetProperty("id").GetString()!,
+            Status = (JobStatus)r.GetProperty("status").GetInt32(),
+            Total = r.GetProperty("total").GetInt32(),
+            Succeeded = r.GetProperty("succeeded").GetInt32(),
+            Failed = r.GetProperty("failed").GetInt32(),
+            Cancelled = r.TryGetProperty("cancelled", out var cProp) ? cProp.GetInt32() : 0,
+            CreatedAt = DateTimeOffset.FromUnixTimeMilliseconds(GetMs(r.GetProperty("created_at")))
+        };
+        if (r.TryGetProperty("completed_at", out var v) && v.ValueKind != JsonValueKind.Null)
+        {
+            batch.CompletedAt = DateTimeOffset.FromUnixTimeMilliseconds(GetMs(v));
+        }
+
+        return batch;
     }
 
     private static string SerializeRetryPolicy(RetryPolicy policy) =>

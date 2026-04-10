@@ -5,7 +5,7 @@ using Testcontainers.PostgreSql;
 
 namespace Surefire.Tests.PostgreSql;
 
-internal sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
+public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly PostgreSqlContainer _container = new PostgreSqlBuilder()
         .WithImage("postgres:17-alpine")
@@ -15,7 +15,7 @@ internal sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
     private PostgreSqlJobStore? _store;
     private string _connectionString = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
         var csb = new NpgsqlConnectionStringBuilder(_container.GetConnectionString())
@@ -30,7 +30,7 @@ internal sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
         await _store.MigrateAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_options is { })
         {
@@ -40,10 +40,10 @@ internal sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
         await _container.DisposeAsync();
     }
 
-    public Task<IJobStore> CreateStoreAsync()
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync()
         => Task.FromResult<IJobStore>(_store!);
 
-    public async Task CleanAsync()
+    async Task IStoreTestFixture.CleanAsync()
     {
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync();

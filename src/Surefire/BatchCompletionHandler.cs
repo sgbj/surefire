@@ -10,79 +10,41 @@ internal sealed partial class BatchCompletionHandler(
     TimeProvider timeProvider,
     ILogger<BatchCompletionHandler> logger)
 {
-    public async Task MaybeCompleteBatchAsync(string? batchRunId, string? childRunId, bool failed,
+    public async Task MaybeCompleteBatchAsync(string? batchId, string? childRunId, JobStatus terminalStatus,
         string failureSource, CancellationToken cancellationToken)
     {
-        if (batchRunId is null)
+        if (batchId is null)
         {
             return;
         }
 
-        if (await store.TryIncrementBatchCounterAsync(batchRunId, failed, cancellationToken) is not { } counters)
+        if (await store.TryIncrementBatchProgressAsync(batchId, terminalStatus, cancellationToken) is not { } counters)
         {
             return;
         }
 
-        await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId ?? batchRunId,
+        await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), childRunId ?? batchId,
             cancellationToken);
-        if (counters.Succeeded + counters.Failed < counters.Total)
+        if (counters.Succeeded + counters.Failed + counters.Cancelled < counters.Total)
         {
             return;
         }
 
-        var coordinator = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (coordinator is null || coordinator.Status.IsTerminal)
+        var completedAt = timeProvider.GetUtcNow();
+        var batchStatus = counters.Failed > 0 ? JobStatus.Failed
+            : counters.Cancelled > 0 ? JobStatus.Cancelled
+            : JobStatus.Succeeded;
+        if (!await store.TryCompleteBatchAsync(batchId, batchStatus, completedAt, cancellationToken))
         {
             return;
         }
 
-        var coordinatorStartedAt = coordinator.StartedAt ??
-                                   await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
-
-        var transition = counters.Failed == 0
-            ? RunStatusTransition.RunningToSucceeded(
-                coordinator.Id,
-                coordinator.Attempt,
-                timeProvider.GetUtcNow(),
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                null,
-                null,
-                coordinatorStartedAt,
-                timeProvider.GetUtcNow())
-            : RunStatusTransition.RunningToFailed(
-                coordinator.Id,
-                coordinator.Attempt,
-                timeProvider.GetUtcNow(),
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                $"Batch completed with {counters.Failed} failed run(s).",
-                null,
-                coordinatorStartedAt,
-                timeProvider.GetUtcNow());
-
-        if (await store.TryTransitionRunAsync(transition, cancellationToken))
+        if (counters.Failed > 0 || counters.Cancelled > 0)
         {
-            if (counters.Failed > 0)
-            {
-                await AppendFailureEventAsync(
-                    coordinator,
-                    RunFailureEnvelope.FromMessage(
-                        coordinator.Attempt,
-                        timeProvider.GetUtcNow(),
-                        failureSource,
-                        "BatchChildFailures",
-                        $"Batch completed with {counters.Failed} failed run(s)."),
-                    cancellationToken);
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunTerminated(coordinator.Id), coordinator.Id,
-                cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
-                cancellationToken);
+            Log.BatchCompletedWithFailures(logger, batchId, counters.Failed, counters.Cancelled);
         }
+
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
     }
 
     public async Task AppendFailureEventAsync(RunRecord run, RunFailureEnvelope envelope,
@@ -105,9 +67,9 @@ internal sealed partial class BatchCompletionHandler(
             ], cancellationToken);
 
             await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-            if (run.ParentRunId is { } batchRunId)
+            if (run.BatchId is { } batchId)
             {
-                await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+                await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), run.Id, cancellationToken);
             }
         }
         catch (Exception ex)
@@ -116,52 +78,15 @@ internal sealed partial class BatchCompletionHandler(
         }
     }
 
-    private async Task<DateTimeOffset?> GetBatchEarliestChildStartedAtAsync(string batchRunId,
-        CancellationToken cancellationToken)
-    {
-        DateTimeOffset? earliest = null;
-        var skip = 0;
-        const int take = 200;
-
-        while (true)
-        {
-            var page = await store.GetRunsAsync(
-                new()
-                {
-                    ParentRunId = batchRunId,
-                    OrderBy = RunOrderBy.CreatedAt
-                },
-                skip,
-                take,
-                cancellationToken);
-
-            if (page.Items.Count == 0)
-            {
-                break;
-            }
-
-            foreach (var child in page.Items)
-            {
-                if (child.StartedAt is not { } startedAt)
-                {
-                    continue;
-                }
-
-                earliest = earliest is null || startedAt < earliest
-                    ? startedAt
-                    : earliest;
-            }
-
-            skip += page.Items.Count;
-        }
-
-        return earliest;
-    }
-
     private static partial class Log
     {
+        [LoggerMessage(EventId = 1500, Level = LogLevel.Information,
+            Message = "Batch '{BatchId}' completed with {FailedCount} failed and {CancelledCount} cancelled run(s).")]
+        public static partial void BatchCompletedWithFailures(ILogger logger, string batchId, int failedCount, int cancelledCount);
+
         [LoggerMessage(EventId = 1501, Level = LogLevel.Warning,
             Message = "Failed to append attempt failure event for run '{RunId}'.")]
         public static partial void FailedToAppendAttemptFailure(ILogger logger, Exception exception, string runId);
     }
 }
+

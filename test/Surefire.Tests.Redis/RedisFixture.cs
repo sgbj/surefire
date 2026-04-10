@@ -5,7 +5,7 @@ using Testcontainers.Redis;
 
 namespace Surefire.Tests.Redis;
 
-internal sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
+public sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly RedisContainer _container = new RedisBuilder()
         .WithImage("redis:7-alpine")
@@ -17,7 +17,7 @@ internal sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
     private IServer? _server;
     private RedisJobStore? _store;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
         _options = new(_container.GetConnectionString());
@@ -28,7 +28,7 @@ internal sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
         _server = _mux.GetServers()[0];
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_options is { })
         {
@@ -43,9 +43,9 @@ internal sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
         await _container.DisposeAsync();
     }
 
-    public Task<IJobStore> CreateStoreAsync() => Task.FromResult<IJobStore>(_store!);
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync() => Task.FromResult<IJobStore>(_store!);
 
-    public async Task CleanAsync()
+    async Task IStoreTestFixture.CleanAsync()
     {
         await _server!.FlushDatabaseAsync();
     }

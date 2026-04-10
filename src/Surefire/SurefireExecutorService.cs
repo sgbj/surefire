@@ -108,7 +108,7 @@ internal sealed partial class SurefireExecutorService(
             RootRunId = run.RootRunId ?? run.Id,
             JobName = run.JobName,
             Attempt = run.Attempt,
-            BatchRunId = run.ParentRunId,
+            BatchRunId = run.BatchId,
             CancellationToken = runCts.Token,
             Store = store,
             Notifications = notifications,
@@ -136,7 +136,7 @@ internal sealed partial class SurefireExecutorService(
                     instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
                     await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, stoppingToken);
                     await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
-                    await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Executor", stoppingToken);
+                    await batchCompletionHandler.MaybeCompleteBatchAsync(run.BatchId, run.Id, JobStatus.Failed, "Executor", stoppingToken);
                 }
 
                 return;
@@ -178,6 +178,10 @@ internal sealed partial class SurefireExecutorService(
                     stoppingToken);
             }
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await HandleRunFailureAsync(run, ex, stoppingToken);
+        }
         catch (OperationCanceledException ex)
         {
             if (stoppingToken.IsCancellationRequested)
@@ -212,12 +216,8 @@ internal sealed partial class SurefireExecutorService(
                 instrumentation.RecordRunCancelled(run.JobName, run.StartedAt, cancelledAt);
                 await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                     bestEffortToken);
-                await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Executor", bestEffortToken);
+                await batchCompletionHandler.MaybeCompleteBatchAsync(run.BatchId, run.Id, JobStatus.Cancelled, "Executor", bestEffortToken);
             }
-        }
-        catch (Exception ex)
-        {
-            await HandleRunFailureAsync(run, ex, stoppingToken);
         }
         finally
         {
@@ -289,7 +289,7 @@ internal sealed partial class SurefireExecutorService(
                             RootRunId = run.RootRunId ?? run.Id,
                             JobName = run.JobName,
                             Attempt = run.Attempt,
-                            BatchRunId = run.ParentRunId,
+                            BatchRunId = run.BatchId,
                             CancellationToken = bestEffortToken,
                             Store = store,
                             Notifications = notifications,
@@ -336,7 +336,7 @@ internal sealed partial class SurefireExecutorService(
                 RootRunId = run.RootRunId ?? run.Id,
                 JobName = run.JobName,
                 Attempt = run.Attempt,
-                BatchRunId = run.ParentRunId,
+                BatchRunId = run.BatchId,
                 CancellationToken = bestEffortToken,
                 Store = store,
                 Notifications = notifications,
@@ -367,7 +367,7 @@ internal sealed partial class SurefireExecutorService(
             await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                 bestEffortToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, bestEffortToken);
-            await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Executor", bestEffortToken);
+            await batchCompletionHandler.MaybeCompleteBatchAsync(run.BatchId, run.Id, JobStatus.Failed, "Executor", bestEffortToken);
         }
     }
 
@@ -1032,9 +1032,9 @@ internal sealed partial class SurefireExecutorService(
         ], cancellationToken);
 
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.ParentRunId is { } batchRunId)
+        if (run.BatchId is { } batchId1)
         {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId1), run.Id, cancellationToken);
         }
     }
 
@@ -1053,9 +1053,9 @@ internal sealed partial class SurefireExecutorService(
         ], cancellationToken);
 
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.ParentRunId is { } batchRunId)
+        if (run.BatchId is { } batchId2)
         {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId2), run.Id, cancellationToken);
         }
     }
 
@@ -1171,7 +1171,7 @@ internal sealed partial class SurefireExecutorService(
 
             await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, stoppingToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
-            await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, false, "Executor", stoppingToken);
+            await batchCompletionHandler.MaybeCompleteBatchAsync(run.BatchId, run.Id, JobStatus.Succeeded, "Executor", stoppingToken);
             await TryCreateContinuousRunAsync(job, run, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

@@ -101,16 +101,14 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                       priority INT NOT NULL DEFAULT 0,
                                       deduplication_id NVARCHAR(450),
                                       last_heartbeat_at DATETIMEOFFSET,
-                                      batch_total INT,
-                                      batch_completed INT NOT NULL DEFAULT 0,
-                                      batch_failed INT NOT NULL DEFAULT 0,
+                                      batch_id NVARCHAR(450),
                                       queue_priority INT NOT NULL DEFAULT 0
                                   );
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_claim')
                                   CREATE INDEX ix_surefire_runs_claim
                                       ON dbo.surefire_runs (queue_priority DESC, priority DESC, not_before, id)
-                                      WHERE status = 0 AND batch_total IS NULL;
+                                      WHERE status = 0;
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_root')
                                   CREATE INDEX ix_surefire_runs_root
@@ -121,6 +119,11 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                   CREATE INDEX ix_surefire_runs_parent
                                       ON dbo.surefire_runs (parent_run_id)
                                       WHERE parent_run_id IS NOT NULL;
+
+                                  IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_batch_id')
+                                  CREATE INDEX ix_surefire_runs_batch_id
+                                      ON dbo.surefire_runs (batch_id)
+                                      WHERE batch_id IS NOT NULL;
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_dedup')
                                   CREATE UNIQUE INDEX ix_surefire_runs_dedup
@@ -144,6 +147,17 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                   IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_created')
                                   CREATE INDEX ix_surefire_runs_created
                                       ON dbo.surefire_runs (created_at DESC, id DESC);
+
+                                  IF OBJECT_ID('dbo.surefire_batches', 'U') IS NULL
+                                  CREATE TABLE dbo.surefire_batches (
+                                      id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                                      status SMALLINT NOT NULL DEFAULT 0,
+                                      total INT NOT NULL DEFAULT 0,
+                                      succeeded INT NOT NULL DEFAULT 0,
+                                      failed INT NOT NULL DEFAULT 0,
+                                      created_at DATETIMEOFFSET NOT NULL,
+                                      completed_at DATETIMEOFFSET
+                                  );
 
                                   IF OBJECT_ID('dbo.surefire_events', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_events (
@@ -196,6 +210,19 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                   SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_schema_migrations WHERE version = 1);
                                   """;
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (currentVersion < 2)
+            {
+                await using var v2Cmd = conn.CreateCommand();
+                v2Cmd.CommandText = """
+                                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.surefire_batches') AND name = 'cancelled')
+                                    ALTER TABLE dbo.surefire_batches ADD cancelled INT NOT NULL DEFAULT 0;
+
+                                    INSERT INTO dbo.surefire_schema_migrations (version)
+                                    SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_schema_migrations WHERE version = 2);
+                                    """;
+                await v2Cmd.ExecuteNonQueryAsync(cancellationToken);
             }
         }
         finally
@@ -606,7 +633,6 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                JOIN dbo.surefire_jobs j ON j.name = r.job_name
                                LEFT JOIN dbo.surefire_queues q ON q.name = ISNULL(j.queue, 'default')
                                WHERE r.status = 0
-                                   AND r.batch_total IS NULL
                                    AND r.not_before <= @now
                                    AND (r.not_after IS NULL OR r.not_after > @now)
                                    AND r.job_name IN ({jobNamesIn})
@@ -720,41 +746,126 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return claimed;
     }
 
-    public async Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
+
+    public async Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+
+        await using var batchCmd = conn.CreateCommand();
+        batchCmd.Transaction = tx;
+        batchCmd.CommandText = """
+                               INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, cancelled, created_at, completed_at)
+                               VALUES (@id, @status, @total, @succeeded, @failed, @cancelled, @created_at, @completed_at)
+                               """;
+        batchCmd.Parameters.Add(CreateParameter("@id", batch.Id));
+        batchCmd.Parameters.Add(CreateParameter("@status", (short)batch.Status));
+        batchCmd.Parameters.Add(CreateParameter("@total", batch.Total));
+        batchCmd.Parameters.Add(CreateParameter("@succeeded", batch.Succeeded));
+        batchCmd.Parameters.Add(CreateParameter("@failed", batch.Failed));
+        batchCmd.Parameters.Add(CreateParameter("@cancelled", batch.Cancelled));
+        batchCmd.Parameters.Add(CreateParameter("@created_at", batch.CreatedAt));
+        batchCmd.Parameters.Add(CreateParameter("@completed_at",
+            batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value));
+        await batchCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        const int paramsPerRun = 24;
+        const int maxParams = 2100;
+        var chunkSize = maxParams / paramsPerRun;
+
+        for (var offset = 0; offset < runs.Count; offset += chunkSize)
+        {
+            var chunk = runs.Skip(offset).Take(chunkSize).ToList();
+            var sb = new StringBuilder();
+            sb.Append("""
+                      INSERT INTO dbo.surefire_runs (
+                          id, job_name, status, arguments, result, error, progress,
+                          created_at, started_at, completed_at, cancelled_at, node_name,
+                          attempt, trace_id, span_id, parent_run_id, root_run_id,
+                          rerun_of_run_id, not_before, not_after, priority, deduplication_id,
+                          last_heartbeat_at, batch_id, queue_priority
+                      ) VALUES
+                      """);
+
+            await using var runCmd = conn.CreateCommand();
+            runCmd.Transaction = tx;
+
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                var p = $"@p{i}_";
+                sb.Append($"""
+                           (
+                               {p}id, {p}job_name, {p}status, {p}arguments, {p}result, {p}error, {p}progress,
+                               {p}created_at, {p}started_at, {p}completed_at, {p}cancelled_at, {p}node_name,
+                               {p}attempt, {p}trace_id, {p}span_id, {p}parent_run_id, {p}root_run_id,
+                               {p}rerun_of_run_id, {p}not_before, {p}not_after, {p}priority, {p}deduplication_id,
+                               {p}last_heartbeat_at, {p}batch_id,
+                               ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = {p}job_name), 'default')), 0)
+                           )
+                           """);
+                AddRunParams(runCmd, $"@p{i}_", chunk[i]);
+            }
+
+            runCmd.CommandText = sb.ToString();
+            await runCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await InsertEventsAsync(conn, tx, initialEvents, cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+    }
+
+    public async Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM dbo.surefire_batches WHERE id = @id";
+        cmd.Parameters.Add(CreateParameter("@id", batchId));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return ReadBatch(reader);
+    }
+
+    public async Task<BatchCounters?> TryIncrementBatchProgressAsync(string batchId, JobStatus terminalStatus,
         CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-                          UPDATE dbo.surefire_runs SET
-                              batch_completed = batch_completed + CASE WHEN @is_failed = 0 THEN 1 ELSE 0 END,
-                              batch_failed = batch_failed + CASE WHEN @is_failed = 1 THEN 1 ELSE 0 END,
-                              progress = CASE WHEN batch_total = 0 THEN 1.0 ELSE CAST(ISNULL(batch_completed, 0) + ISNULL(batch_failed, 0) + 1 AS FLOAT) / batch_total END
-                          OUTPUT INSERTED.batch_total, INSERTED.batch_completed, INSERTED.batch_failed
-                          WHERE id = @id AND status NOT IN (2, 4, 5) AND batch_total IS NOT NULL
+                          UPDATE dbo.surefire_batches
+                          SET succeeded = succeeded + CASE WHEN @status = 2 THEN 1 ELSE 0 END,
+                              failed    = failed    + CASE WHEN @status = 5 THEN 1 ELSE 0 END,
+                              cancelled = cancelled + CASE WHEN @status = 4 THEN 1 ELSE 0 END
+                          OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                          WHERE id = @id AND status NOT IN (2, 4, 5)
                           """;
-
-        cmd.Parameters.Add(CreateParameter("@id", batchRunId));
-        cmd.Parameters.Add(CreateParameter("@is_failed", isFailed));
+        cmd.Parameters.Add(CreateParameter("@id", batchId));
+        cmd.Parameters.Add(CreateParameter("@status", (int)terminalStatus));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
         {
             return new(
-                reader.GetInt32(reader.GetOrdinal("batch_total")),
-                reader.GetInt32(reader.GetOrdinal("batch_completed")),
-                reader.GetInt32(reader.GetOrdinal("batch_failed")));
+                reader.GetInt32(reader.GetOrdinal("total")),
+                reader.GetInt32(reader.GetOrdinal("succeeded")),
+                reader.GetInt32(reader.GetOrdinal("failed")),
+                reader.GetInt32(reader.GetOrdinal("cancelled")));
         }
 
         await reader.CloseAsync();
 
         await using var fallback = conn.CreateCommand();
-        fallback.CommandText = """
-                               SELECT batch_total, batch_completed, batch_failed
-                               FROM dbo.surefire_runs WHERE id = @id
-                               """;
-        fallback.Parameters.Add(CreateParameter("@id", batchRunId));
+        fallback.CommandText = "SELECT total, succeeded, failed, cancelled FROM dbo.surefire_batches WHERE id = @id";
+        fallback.Parameters.Add(CreateParameter("@id", batchId));
 
         await using var fr = await fallback.ExecuteReaderAsync(cancellationToken);
         if (!await fr.ReadAsync(cancellationToken))
@@ -762,17 +873,62 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             return null;
         }
 
-        if (fr.IsDBNull(fr.GetOrdinal("batch_total")))
-        {
-            return null;
-        }
-
         return new(
-            fr.GetInt32(fr.GetOrdinal("batch_total")),
-            fr.GetInt32(fr.GetOrdinal("batch_completed")),
-            fr.GetInt32(fr.GetOrdinal("batch_failed")));
+            fr.GetInt32(fr.GetOrdinal("total")),
+            fr.GetInt32(fr.GetOrdinal("succeeded")),
+            fr.GetInt32(fr.GetOrdinal("failed")),
+            fr.GetInt32(fr.GetOrdinal("cancelled")));
     }
 
+    public async Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                          UPDATE dbo.surefire_batches
+                          SET status = @status, completed_at = @completed_at
+                          OUTPUT INSERTED.id
+                          WHERE id = @id AND status NOT IN (2, 4, 5)
+                          """;
+        cmd.Parameters.Add(CreateParameter("@id", batchId));
+        cmd.Parameters.Add(CreateParameter("@status", (short)status));
+        cmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL);
+
+                          UPDATE dbo.surefire_runs SET
+                              status = 4,
+                              cancelled_at = SYSDATETIMEOFFSET(),
+                              completed_at = SYSDATETIMEOFFSET()
+                          OUTPUT INSERTED.id INTO @cancelled(id)
+                          WHERE batch_id = @batch_id AND status IN (0, 1, 3);
+
+                          SELECT id FROM @cancelled;
+                          """;
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
+
+        var cancelledIds = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            cancelledIds.Add(reader.GetString(0));
+        }
+
+        return cancelledIds;
+    }
     public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
     {
         if (events.Count == 0)
@@ -852,7 +1008,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           SELECT TOP (@take) e.*
                           FROM dbo.surefire_events e
                           INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
-                          WHERE r.parent_run_id = @batch_run_id
+                          WHERE r.batch_id = @batch_run_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
                           ORDER BY e.id ASC
@@ -982,7 +1138,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           FROM dbo.surefire_runs r
                           JOIN dbo.surefire_jobs j ON j.name = r.job_name
                           WHERE ISNULL(j.queue, 'default') = @name AND r.status = 0
-                              AND r.batch_total IS NULL AND r.queue_priority != @priority;
+                              AND r.queue_priority != @priority;
                           """;
 
         cmd.Parameters.Add(CreateParameter("@name", queue.Name));
@@ -1067,8 +1223,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               completed_at = @now
                           OUTPUT inserted.id INTO @cancelled(id)
                           WHERE status IN (0, 3)
-                              AND batch_total IS NULL
-                              AND not_after IS NOT NULL
+                             AND not_after IS NOT NULL
                               AND not_after < @now;
 
                           SELECT id FROM @cancelled;
@@ -1093,34 +1248,17 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         {
             await using var runCmd = conn.CreateCommand();
             runCmd.CommandText = """
-                                 DELETE TOP(1000)
-                                 FROM dbo.surefire_runs
-                                 WHERE status IN (2, 4, 5)
+                                 DELETE TOP (1000) FROM dbo.surefire_runs
+                                 WHERE (status IN (2, 4, 5)
                                      AND completed_at < @threshold
-                                     AND NOT EXISTS (
-                                         SELECT 1
-                                         FROM dbo.surefire_runs parent
-                                         WHERE parent.id = dbo.surefire_runs.parent_run_id
-                                             AND parent.batch_total IS NOT NULL
-                                             AND (
-                                                 parent.status NOT IN (2, 4, 5)
-                                                 OR parent.completed_at IS NULL
-                                                 OR parent.completed_at >= @threshold
-                                             )
-                                     )
-                                 """;
-            runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
-            if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
-            {
-                break;
-            }
-        }
-
-        while (true)
-        {
-            await using var runCmd = conn.CreateCommand();
-            runCmd.CommandText = """
-                                 DELETE TOP(1000) FROM dbo.surefire_runs WHERE status IN (0, 3) AND not_before < @threshold
+                                     AND (batch_id IS NULL OR EXISTS (
+                                         SELECT 1 FROM dbo.surefire_batches b
+                                         WHERE b.id = dbo.surefire_runs.batch_id
+                                             AND b.status IN (2, 4, 5)
+                                             AND b.completed_at IS NOT NULL
+                                             AND b.completed_at < @threshold
+                                     )))
+                                     OR (status IN (0, 3) AND not_before < @threshold)
                                  """;
             runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
             if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
@@ -1147,6 +1285,11 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         rlCmd.CommandText = "DELETE FROM dbo.surefire_rate_limits WHERE last_heartbeat_at < @threshold";
         rlCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await rlCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var batchCmd = conn.CreateCommand();
+        batchCmd.CommandText = "DELETE FROM dbo.surefire_batches WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold";
+        batchCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+        await batchCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await using var nodeCmd = conn.CreateCommand();
         nodeCmd.CommandText = "DELETE FROM dbo.surefire_nodes WHERE last_heartbeat_at < @threshold";
@@ -1183,7 +1326,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                    ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS cancelled,
                                    ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS failed
                                FROM dbo.surefire_runs
-                               WHERE created_at >= @since AND created_at < @now
+                               WHERE created_at >= @since AND created_at <= @now
                                """;
         statsCmd.Parameters.Add(CreateParameter("@now", now));
         statsCmd.Parameters.Add(CreateParameter("@since", sinceTime));
@@ -1254,7 +1397,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                     SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS cancelled,
                                     SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed
                                 FROM dbo.surefire_runs
-                                WHERE created_at >= @since AND created_at < @now
+                                WHERE created_at >= @since AND created_at <= @now
                                 GROUP BY DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since)
                                 ORDER BY bucket_start
                                 """;
@@ -1284,7 +1427,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         var buckets = new List<TimelineBucket>();
         var bucketStart = sinceTime;
         var bucketSpan = TimeSpan.FromMinutes(bucketMinutes);
-        while (bucketStart < now)
+        while (bucketStart <= now)
         {
             if (bucketMap.TryGetValue(bucketStart, out var bucket))
             {
@@ -1364,7 +1507,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               SELECT ISNULL(j.queue, 'default') AS name
                               FROM dbo.surefire_runs r
                               JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                              WHERE r.status = 0 AND r.batch_total IS NULL
+                              WHERE r.status = 0
                               UNION
                               SELECT ISNULL(j.queue, 'default') AS name
                               FROM dbo.surefire_runs r
@@ -1375,7 +1518,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                               SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
                               FROM dbo.surefire_runs r
                               JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                              WHERE r.status = 0 AND r.batch_total IS NULL
+                              WHERE r.status = 0
                               GROUP BY ISNULL(j.queue, 'default')
                           ),
                           running AS (
@@ -1436,8 +1579,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                           created_at, started_at, completed_at, cancelled_at, node_name,
                           attempt, trace_id, span_id, parent_run_id, root_run_id,
                           rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                          last_heartbeat_at, batch_total, batch_completed, batch_failed,
-                          queue_priority
+                          last_heartbeat_at, batch_id, queue_priority
                       ) VALUES
                       """);
 
@@ -1458,7 +1600,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                {p}created_at, {p}started_at, {p}completed_at, {p}cancelled_at, {p}node_name,
                                {p}attempt, {p}trace_id, {p}span_id, {p}parent_run_id, {p}root_run_id,
                                {p}rerun_of_run_id, {p}not_before, {p}not_after, {p}priority, {p}deduplication_id,
-                               {p}last_heartbeat_at, {p}batch_total, {p}batch_completed, {p}batch_failed,
+                               {p}last_heartbeat_at, {p}batch_id,
                                ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = {p}job_name), 'default')), 0)
                            )
                            """);
@@ -1530,15 +1672,14 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                   created_at, started_at, completed_at, cancelled_at, node_name,
                                   attempt, trace_id, span_id, parent_run_id, root_run_id,
                                   rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                                  last_heartbeat_at, batch_total, batch_completed, batch_failed,
-                                  queue_priority
+                                  last_heartbeat_at, batch_id, queue_priority
                               )
                               SELECT
                                   @id, @job_name, @status, @arguments, @result, @error, @progress,
                                   @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
                                   @attempt, @trace_id, @span_id, @parent_run_id, @root_run_id,
                                   @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                                  @last_heartbeat_at, @batch_total, @batch_completed, @batch_failed,
+                                  @last_heartbeat_at, @batch_id,
                                   ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = @job_name), 'default')), 0)
                               WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_runs WHERE id = @id)
                               """;
@@ -1552,15 +1693,14 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                    created_at, started_at, completed_at, cancelled_at, node_name,
                                    attempt, trace_id, span_id, parent_run_id, root_run_id,
                                    rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                                   last_heartbeat_at, batch_total, batch_completed, batch_failed,
-                                   queue_priority
+                                   last_heartbeat_at, batch_id, queue_priority
                                )
                                SELECT
                                    @id, @job_name, @status, @arguments, @result, @error, @progress,
                                    @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
                                    @attempt, @trace_id, @span_id, @parent_run_id, @root_run_id,
                                    @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                                   @last_heartbeat_at, @batch_total, @batch_completed, @batch_failed,
+                                   @last_heartbeat_at, @batch_id,
                                    ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = @job_name), 'default')), 0)
                                WHERE {whereClause}
                                """;
@@ -1742,10 +1882,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         cmd.Parameters.Add(CreateParameter($"{prefix}deduplication_id", (object?)run.DeduplicationId ?? DBNull.Value));
         cmd.Parameters.Add(CreateParameter($"{prefix}last_heartbeat_at",
             run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value));
-        cmd.Parameters.Add(CreateParameter($"{prefix}batch_total",
-            run.BatchTotal.HasValue ? run.BatchTotal.Value : DBNull.Value));
-        cmd.Parameters.Add(CreateParameter($"{prefix}batch_completed", run.BatchCompleted ?? 0));
-        cmd.Parameters.Add(CreateParameter($"{prefix}batch_failed", run.BatchFailed ?? 0));
+        cmd.Parameters.Add(CreateParameter($"{prefix}batch_id", (object?)run.BatchId ?? DBNull.Value));
     }
 
     private static RunRecord ReadRun(SqlDataReader reader)
@@ -1853,31 +1990,35 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             run.LastHeartbeatAt = reader.GetDateTimeOffset(col);
         }
 
-        col = reader.GetOrdinal("batch_total");
+        col = reader.GetOrdinal("batch_id");
         if (!reader.IsDBNull(col))
         {
-            run.BatchTotal = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("batch_completed");
-        if (!reader.IsDBNull(col))
-        {
-            run.BatchCompleted = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("batch_failed");
-        if (!reader.IsDBNull(col))
-        {
-            run.BatchFailed = reader.GetInt32(col);
-        }
-
-        if (run.BatchTotal is null)
-        {
-            run.BatchCompleted = null;
-            run.BatchFailed = null;
+            run.BatchId = reader.GetString(col);
         }
 
         return run;
+    }
+
+    private static BatchRecord ReadBatch(SqlDataReader reader)
+    {
+        var batch = new BatchRecord
+        {
+            Id = reader.GetString(reader.GetOrdinal("id")),
+            Status = (JobStatus)reader.GetInt16(reader.GetOrdinal("status")),
+            Total = reader.GetInt32(reader.GetOrdinal("total")),
+            Succeeded = reader.GetInt32(reader.GetOrdinal("succeeded")),
+            Failed = reader.GetInt32(reader.GetOrdinal("failed")),
+            Cancelled = reader.GetOrdinal("cancelled") is var cCol && !reader.IsDBNull(cCol) ? reader.GetInt32(cCol) : 0,
+            CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at"))
+        };
+
+        var col = reader.GetOrdinal("completed_at");
+        if (!reader.IsDBNull(col))
+        {
+            batch.CompletedAt = reader.GetDateTimeOffset(col);
+        }
+
+        return batch;
     }
 
     private static JobDefinition ReadJob(SqlDataReader reader)

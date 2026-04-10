@@ -254,7 +254,7 @@ public sealed class DashboardEndpointsTests
         var api = app.Services.GetRequiredService<IJobClient>();
         var run = await api.TriggerAsync("tests-cancel-terminal");
         var runId = run.Id;
-        _ = await run.WaitAsync();
+        await run.WaitAsync();
 
         using var client = app.GetTestClient();
         var response = await client.PostAsync($"/surefire/api/runs/{runId}/cancel", null);
@@ -274,7 +274,7 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
-    public async Task RunTraceEndpoint_ForBatchChild_IncludesCoordinatorAndSiblings()
+    public async Task RunTraceEndpoint_ForBatchChild_IncludesSiblings()
     {
         await using var app = await CreateAppAsync(a =>
             a.AddJob("tests-batch", (int n) => n));
@@ -283,7 +283,7 @@ public sealed class DashboardEndpointsTests
         var batchId = (await clientApi.TriggerManyAsync("tests-batch", new object?[] { 1, 2, 3 })).Id;
 
         var store = app.Services.GetRequiredService<IJobStore>();
-        var children = await store.GetRunsAsync(new RunFilter { ParentRunId = batchId }, take: 10);
+        var children = await store.GetRunsAsync(new RunFilter { BatchId = batchId }, take: 10);
         var childId = children.Items[0].Id;
 
         using var client = app.GetTestClient();
@@ -291,9 +291,10 @@ public sealed class DashboardEndpointsTests
             $"/surefire/api/runs/{childId}/trace?skip=0&take=500");
 
         Assert.NotNull(tracePage);
-        Assert.Contains(tracePage.Items, r => r.Id == batchId);
-        Assert.Equal(4, tracePage.Items.Count);
-        Assert.Equal(4, tracePage.TotalCount);
+        // All 3 batch siblings are included in the trace
+        Assert.Equal(3, tracePage.Items.Count);
+        Assert.Equal(3, tracePage.TotalCount);
+        Assert.DoesNotContain(tracePage.Items, r => r.Id == batchId);
     }
 
     [Fact]

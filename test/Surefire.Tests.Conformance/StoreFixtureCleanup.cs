@@ -7,6 +7,7 @@ public static class StoreFixtureCleanup
     public static string SqlServerDeleteAllScript { get; } = """
                                                              DELETE FROM dbo.surefire_events;
                                                              DELETE FROM dbo.surefire_runs;
+                                                             DELETE FROM dbo.surefire_batches;
                                                              DELETE FROM dbo.surefire_jobs;
                                                              DELETE FROM dbo.surefire_queues;
                                                              DELETE FROM dbo.surefire_rate_limits;
@@ -16,6 +17,7 @@ public static class StoreFixtureCleanup
     public static string DefaultDeleteAllScript { get; } = """
                                                            DELETE FROM surefire_events;
                                                            DELETE FROM surefire_runs;
+                                                           DELETE FROM surefire_batches;
                                                            DELETE FROM surefire_jobs;
                                                            DELETE FROM surefire_queues;
                                                            DELETE FROM surefire_rate_limits;

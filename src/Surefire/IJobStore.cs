@@ -69,7 +69,6 @@ internal interface IJobStore
     ///     Inserts one or more runs in a single atomic transaction. All runs are inserted or none.
     ///     When <paramref name="initialEvents" /> is provided, runs and events are persisted atomically
     ///     in the same transaction/critical section.
-    ///     Used for both single-run creation (list of 1) and batch creation (coordinator + children).
     /// </summary>
     /// <param name="runs">The runs to insert.</param>
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
@@ -159,10 +158,8 @@ internal interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Cancels all non-terminal runs that are direct children of the specified parent run.
+    ///     Cancels all non-terminal runs belonging to the specified parent run.
     ///     Returns the IDs of runs that were transitioned to <see cref="JobStatus.Cancelled"/>.
-    ///     Batch coordinator runs (those with a non-null <c>BatchTotal</c>) among the children
-    ///     are also cancelled.
     /// </summary>
     /// <param name="parentRunId">The parent run ID whose children should be cancelled.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
@@ -206,17 +203,99 @@ internal interface IJobStore
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Attempts to atomically increment the batch coordinator's completion counters and returns the
-    ///     post-increment values. Returns <c>null</c> when the run does not exist or is not a batch
-    ///     coordinator. The increment is skipped if the coordinator is already in a terminal status
-    ///     (returns current values without modifying them).
+    ///     Inserts a batch record and its child runs atomically. The batch starts with
+    ///     <see cref="JobStatus.Pending" /> status and transitions when runs complete.
     /// </summary>
-    /// <param name="batchRunId">The batch coordinator run ID.</param>
-    /// <param name="isFailed">True to increment the failed counter; false to increment the completed counter.</param>
+    /// <param name="batch">The batch record to create.</param>
+    /// <param name="runs">The child runs belonging to the batch.</param>
+    /// <param name="initialEvents">Optional events to append atomically with batch and run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The post-increment batch counters, or null when not applicable.</returns>
-    Task<BatchCounters?> TryIncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+        IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the batch record with the specified ID, or null if not found.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching batch record, or null.</returns>
+    Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the IDs of all runs belonging to the specified batch.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The run IDs belonging to the batch.</returns>
+    async Task<IReadOnlyList<string>> GetBatchRunIdsAsync(string batchId,
+        CancellationToken cancellationToken = default)
+    {
+        var ids = new List<string>();
+        var skip = 0;
+        const int pageSize = 200;
+        while (true)
+        {
+            var page = await GetRunsAsync(new() { BatchId = batchId }, skip, pageSize, cancellationToken);
+            foreach (var run in page.Items)
+                ids.Add(run.Id);
+            if (page.Items.Count < pageSize)
+                break;
+            skip += page.Items.Count;
+        }
+        return ids;
+    }
+
+    /// <summary>
+    ///     Atomically increments the batch progress counters and returns the post-increment values.
+    ///     Returns <c>null</c> when the batch does not exist. The increment is skipped (returning
+    ///     current values) if the batch is already in a terminal status.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="terminalStatus">The terminal status of the completed run.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The post-increment batch counters, or null when the batch does not exist.</returns>
+    Task<BatchCounters?> TryIncrementBatchProgressAsync(string batchId, JobStatus terminalStatus,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Atomically transitions a batch from a non-terminal status to the specified terminal status.
+    ///     Returns true if the transition was applied; false if already terminal.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="status">The terminal status to transition to.</param>
+    /// <param name="completedAt">The completion timestamp to record.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>True if the transition was applied; false if the batch was already terminal.</returns>
+    Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Cancels all non-terminal runs belonging to the specified batch.
+    ///     Returns the IDs of runs that were transitioned to <see cref="JobStatus.Cancelled"/>.
+    /// </summary>
+    /// <param name="batchId">The batch ID whose runs should be cancelled.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The IDs of runs that were cancelled.</returns>
+    async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+        CancellationToken cancellationToken = default)
+    {
+        var cancelledIds = new List<string>();
+        const int take = 200;
+        while (true)
+        {
+            var page = await GetRunsAsync(
+                new() { BatchId = batchId, IsTerminal = false, OrderBy = RunOrderBy.CreatedAt },
+                0, take, cancellationToken);
+            if (page.Items.Count == 0) break;
+            foreach (var child in page.Items)
+            {
+                if (await TryCancelRunAsync(child.Id, cancellationToken))
+                    cancelledIds.Add(child.Id);
+            }
+        }
+        return cancelledIds;
+    }
 
     /// <summary>
     ///     Appends one or more events to the event log. Events are immutable once written.
@@ -320,7 +399,6 @@ internal interface IJobStore
 
     /// <summary>
     ///     Cancels all pending or retrying runs whose <c>NotAfter</c> deadline has passed.
-    ///     Batch coordinator runs (those with a non-null <c>BatchTotal</c>) are excluded.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The number of runs that were cancelled.</returns>
@@ -329,7 +407,6 @@ internal interface IJobStore
     /// <summary>
     ///     Cancels all pending or retrying runs whose <c>NotAfter</c> deadline has passed and
     ///     returns the run IDs that were transitioned to <see cref="JobStatus.Cancelled"/>.
-    ///     Batch coordinator runs (those with a non-null <c>BatchTotal</c>) are excluded.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The IDs of runs that were cancelled in this operation.</returns>

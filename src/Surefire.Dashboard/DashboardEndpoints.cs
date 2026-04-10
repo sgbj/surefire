@@ -190,9 +190,32 @@ public static class DashboardEndpoints
                 var snapshotCreatedBefore = timeProvider.GetUtcNow().AddTicks(1);
                 var rootRunId = run.RootRunId ?? run.Id;
                 var rootRun = run.RootRunId is null ? run : await store.GetRunAsync(rootRunId, ct);
+
+                // rootRunId may point to a batch (not a run) — fall back to batch-aware trace
                 if (rootRun is null)
                 {
-                    return NotFoundProblem($"Root run '{rootRunId}' was not found.");
+                    var batch = await store.GetBatchAsync(rootRunId, ct);
+                    if (batch is null)
+                    {
+                        return NotFoundProblem($"Root run '{rootRunId}' was not found.");
+                    }
+
+                    var batchRunsPage = await store.GetRunsAsync(
+                        new()
+                        {
+                            BatchId = rootRunId,
+                            OrderBy = RunOrderBy.CreatedAt,
+                            CreatedBefore = snapshotCreatedBefore
+                        },
+                        resolvedSkip,
+                        resolvedTake,
+                        ct);
+
+                    return TypedResults.Ok(new PagedResponse<RunResponse>
+                    {
+                        Items = batchRunsPage.Items.Select(RunResponse.From).ToList(),
+                        TotalCount = batchRunsPage.TotalCount
+                    });
                 }
 
                 var includeRoot = resolvedSkip == 0;

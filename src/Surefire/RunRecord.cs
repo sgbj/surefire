@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Surefire;
 
 internal sealed class RunRecord
@@ -26,9 +28,6 @@ internal sealed class RunRecord
     public int QueuePriority { get; set; }
     public string? DeduplicationId { get; set; }
     public DateTimeOffset? LastHeartbeatAt { get; set; }
-    public int? BatchTotal { get; set; }
-    public int? BatchCompleted { get; set; }
-    public int? BatchFailed { get; set; }
     public string? BatchId { get; set; }
 
     internal JobRun ToPublic() => new()
@@ -36,11 +35,12 @@ internal sealed class RunRecord
         Id = Id, JobName = JobName, Status = Status, Arguments = Arguments, Result = Result,
         Error = Error, Progress = Progress, CreatedAt = CreatedAt, StartedAt = StartedAt,
         CompletedAt = CompletedAt, CancelledAt = CancelledAt, NodeName = NodeName, Attempt = Attempt,
-        TraceId = TraceId, SpanId = SpanId, ParentRunId = ParentRunId, RootRunId = RootRunId,
+        TraceId = TraceId != null ? ActivityTraceId.CreateFromString(TraceId.AsSpan()) : default,
+        SpanId = SpanId != null ? ActivitySpanId.CreateFromString(SpanId.AsSpan()) : default,
+        ParentRunId = ParentRunId, RootRunId = RootRunId,
         RerunOfRunId = RerunOfRunId, NotBefore = NotBefore, NotAfter = NotAfter,
-        Priority = Priority, QueuePriority = QueuePriority, DeduplicationId = DeduplicationId,
-        LastHeartbeatAt = LastHeartbeatAt, BatchTotal = BatchTotal, BatchCompleted = BatchCompleted,
-        BatchFailed = BatchFailed
+        Priority = Priority, DeduplicationId = DeduplicationId,
+        LastHeartbeatAt = LastHeartbeatAt
     };
 
     internal JobRun ToPublicWithClient(IJobClientInternal client) => new(client)
@@ -48,17 +48,12 @@ internal sealed class RunRecord
         Id = Id, JobName = JobName, Status = Status, Arguments = Arguments, Result = Result,
         Error = Error, Progress = Progress, CreatedAt = CreatedAt, StartedAt = StartedAt,
         CompletedAt = CompletedAt, CancelledAt = CancelledAt, NodeName = NodeName, Attempt = Attempt,
-        TraceId = TraceId, SpanId = SpanId, ParentRunId = ParentRunId, RootRunId = RootRunId,
+        TraceId = TraceId != null ? ActivityTraceId.CreateFromString(TraceId.AsSpan()) : default,
+        SpanId = SpanId != null ? ActivitySpanId.CreateFromString(SpanId.AsSpan()) : default,
+        ParentRunId = ParentRunId, RootRunId = RootRunId,
         RerunOfRunId = RerunOfRunId, NotBefore = NotBefore, NotAfter = NotAfter,
-        Priority = Priority, QueuePriority = QueuePriority, DeduplicationId = DeduplicationId,
-        LastHeartbeatAt = LastHeartbeatAt, BatchTotal = BatchTotal, BatchCompleted = BatchCompleted,
-        BatchFailed = BatchFailed
-    };
-
-    internal JobBatch ToJobBatchWithClient(IJobClientInternal client) => new(client)
-    {
-        Id = Id, JobName = JobName, Status = Status,
-        Total = BatchTotal ?? 0, Succeeded = BatchCompleted ?? 0, Failed = BatchFailed ?? 0,
-        CreatedAt = CreatedAt
+        Priority = Priority, DeduplicationId = DeduplicationId,
+        LastHeartbeatAt = LastHeartbeatAt, BatchId = BatchId
     };
 }
+

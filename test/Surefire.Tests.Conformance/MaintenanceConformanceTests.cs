@@ -86,30 +86,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelExpiredRuns_SkipsBatchCoordinators()
-    {
-        var jobName = $"CoordJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
-
-        var run = CreateRun(jobName, JobStatus.Running);
-        run.BatchTotal = 5;
-        run.BatchCompleted = 0;
-        run.BatchFailed = 0;
-        run.NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1);
-        run.NodeName = "batch";
-        run.Attempt = 1;
-        run.StartedAt = DateTimeOffset.UtcNow;
-        run.LastHeartbeatAt = DateTimeOffset.UtcNow;
-        await Store.CreateRunsAsync([run]);
-
-        await Store.CancelExpiredRunsAsync();
-
-        var loaded = await Store.GetRunAsync(run.Id);
-        Assert.NotNull(loaded);
-        Assert.Equal(JobStatus.Running, loaded.Status);
-    }
-
-    [Fact]
     public async Task CancelExpiredRuns_SkipsRunning()
     {
         var jobName = $"RunningExpired_{Guid.CreateVersion7():N}";
@@ -262,7 +238,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task PurgeAsync_DoesNotRemoveTerminalBatchChildren_WhenCoordinatorIsNotPurgeEligible()
+    public async Task PurgeAsync_DoesNotRemoveTerminalBatchChildren_WhenBatchIsNotPurgeEligible()
     {
         var jobName = $"PurgeBatchKeep_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
@@ -270,23 +246,24 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
 
-        var coordinator = CreateRun(jobName, JobStatus.Running);
-        coordinator.NodeName = "batch";
-        coordinator.Attempt = 1;
-        coordinator.StartedAt = now;
-        coordinator.LastHeartbeatAt = now;
-        coordinator.BatchTotal = 1;
-        coordinator.BatchCompleted = 1;
-        coordinator.BatchFailed = 0;
+        // Batch is still Running (not terminal) — children should not be purged
+        var batch = new BatchRecord
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            Status = JobStatus.Running,
+            Total = 1,
+            Succeeded = 0,
+            Failed = 0,
+            CreatedAt = old
+        };
 
         var child = CreateRun(jobName, JobStatus.Succeeded);
-        child.ParentRunId = coordinator.Id;
-        child.RootRunId = coordinator.Id;
+        child.BatchId = batch.Id;
         child.CompletedAt = old;
         child.StartedAt = old.AddMinutes(-1);
         child.Attempt = 1;
 
-        await Store.CreateRunsAsync([coordinator, child]);
+        await Store.CreateBatchAsync(batch, [child]);
 
         await Store.PurgeAsync(now);
 
@@ -295,7 +272,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task PurgeAsync_RemovesTerminalBatchChildren_AfterCoordinatorIsPurgeEligible()
+    public async Task PurgeAsync_RemovesTerminalBatchChildren_AfterBatchIsPurgeEligible()
     {
         var jobName = $"PurgeBatchRemove_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
@@ -303,28 +280,24 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
 
-        var coordinator = CreateRun(jobName, JobStatus.Running);
-        coordinator.NodeName = "batch";
-        coordinator.Attempt = 1;
-        coordinator.StartedAt = old.AddMinutes(-2);
-        coordinator.LastHeartbeatAt = old.AddMinutes(-2);
-        coordinator.BatchTotal = 1;
-        coordinator.BatchCompleted = 1;
-        coordinator.BatchFailed = 0;
+        var batch = new BatchRecord
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            Status = JobStatus.Succeeded,
+            Total = 1,
+            Succeeded = 1,
+            Failed = 0,
+            CreatedAt = old.AddMinutes(-2),
+            CompletedAt = old.AddMinutes(-1)
+        };
 
         var child = CreateRun(jobName, JobStatus.Succeeded);
-        child.ParentRunId = coordinator.Id;
-        child.RootRunId = coordinator.Id;
+        child.BatchId = batch.Id;
         child.CompletedAt = old;
         child.StartedAt = old.AddMinutes(-1);
         child.Attempt = 1;
 
-        await Store.CreateRunsAsync([coordinator, child]);
-
-        coordinator.Status = JobStatus.Succeeded;
-        coordinator.CompletedAt = old;
-        coordinator.Progress = 1;
-        Assert.True(await Store.TryTransitionRunAsync(Transition(coordinator, JobStatus.Running)));
+        await Store.CreateBatchAsync(batch, [child]);
 
         await Store.PurgeAsync(now);
 

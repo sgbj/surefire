@@ -96,9 +96,9 @@ internal sealed partial class SurefireMaintenanceService(
             await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
 
             var run = await store.GetRunAsync(runId, cancellationToken);
-            if (run?.ParentRunId is { } parentRunId)
+            if (run?.BatchId is { } batchId)
             {
-                await notifications.PublishAsync(NotificationChannels.RunEvent(parentRunId), runId,
+                await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId,
                     cancellationToken);
             }
         }
@@ -132,11 +132,6 @@ internal sealed partial class SurefireMaintenanceService(
 
             foreach (var run in page.Items)
             {
-                if (run.BatchTotal is { })
-                {
-                    continue;
-                }
-
                 var retryPolicy = await GetRetryPolicyForStaleRecoveryAsync(run.JobName, retryPolicyCache,
                     cancellationToken);
 
@@ -172,7 +167,7 @@ internal sealed partial class SurefireMaintenanceService(
 
                     await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                         cancellationToken);
-                    await batchCompletionHandler.MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, "Maintenance", cancellationToken);
+                    await batchCompletionHandler.MaybeCompleteBatchAsync(run.BatchId, run.Id, JobStatus.Failed, "Maintenance", cancellationToken);
                     continue;
                 }
 

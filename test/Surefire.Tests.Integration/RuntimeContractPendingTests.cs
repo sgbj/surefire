@@ -185,7 +185,7 @@ public sealed class RuntimeContractPendingTests
             claimedA.StartedAt,
             claimedA.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeA));
-        await store.TryIncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
 
         var claimedB = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimedB);
@@ -201,22 +201,9 @@ public sealed class RuntimeContractPendingTests
             claimedB.StartedAt,
             claimedB.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeB));
-        await store.TryIncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
 
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            DateTimeOffset.UtcNow,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
 
         var completedIds = await waitTask;
         Assert.Equal(2, completedIds.Count);
@@ -237,13 +224,12 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
 
         var batchId = await client.TriggerAllAsync(jobName, Array.Empty<object?>());
-        var coordinator = await store.GetRunAsync(batchId);
+        var batch = await store.GetBatchAsync(batchId);
 
-        Assert.NotNull(coordinator);
-        Assert.Equal(JobStatus.Succeeded, coordinator.Status);
-        Assert.Equal(0, coordinator.BatchTotal);
-        Assert.Equal(1, coordinator.Progress);
-        Assert.NotNull(coordinator.CompletedAt);
+        Assert.NotNull(batch);
+        Assert.Equal(JobStatus.Succeeded, batch.Status);
+        Assert.Equal(0, batch.Total);
+        Assert.NotNull(batch.CompletedAt);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var observed = new List<RunResult>();
@@ -256,7 +242,7 @@ public sealed class RuntimeContractPendingTests
     }
 
     [Fact]
-    public async Task RerunAsync_EmptyBatch_CompletesCoordinatorImmediately()
+    public async Task TriggerManyAsync_EmptyBatch_CompletesImmediately()
     {
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider();
@@ -265,23 +251,21 @@ public sealed class RuntimeContractPendingTests
             NullLogger<JobClient>.Instance);
 
         await store.UpsertQueueAsync(new() { Name = "default" });
-        var jobName = "EmptyBatchRerun_" + Guid.CreateVersion7().ToString("N");
+        var jobName = "EmptyBatch_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
 
-        var originalBatchId = await client.TriggerAllAsync(jobName, Array.Empty<object?>());
-        var rerunBatch = await client.RerunAsync(originalBatchId);
-        var rerunBatchId = rerunBatch.Id;
-        var coordinator = await store.GetRunAsync(rerunBatchId);
+        var newBatch = await ((IJobClient)client).TriggerManyAsync(jobName, Array.Empty<object?>());
+        var batchId = newBatch.Id;
+        var batch = await store.GetBatchAsync(batchId);
 
-        Assert.NotNull(coordinator);
-        Assert.Equal(JobStatus.Succeeded, coordinator.Status);
-        Assert.Equal(0, coordinator.BatchTotal);
-        Assert.Equal(1, coordinator.Progress);
-        Assert.NotNull(coordinator.CompletedAt);
+        Assert.NotNull(batch);
+        Assert.Equal(JobStatus.Succeeded, batch.Status);
+        Assert.Equal(0, batch.Total);
+        Assert.NotNull(batch.CompletedAt);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var observed = new List<RunResult>();
-        await foreach (var result in client.WaitEachAsync(rerunBatchId, cts.Token))
+        await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
         {
             observed.Add(result);
         }
@@ -335,23 +319,10 @@ public sealed class RuntimeContractPendingTests
                 claimed.StartedAt,
                 claimed.LastHeartbeatAt);
             Assert.True(await store.TryTransitionRunAsync(complete));
-            await store.TryIncrementBatchCounterAsync(batchId, false);
+            await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
         }
 
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            DateTimeOffset.UtcNow,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var completedIds = await waitTask.WaitAsync(cts.Token);
@@ -509,23 +480,10 @@ public sealed class RuntimeContractPendingTests
 
         Assert.True(await store.TryTransitionRunAsync(completeA));
         Assert.True(await store.TryTransitionRunAsync(completeB));
-        await store.TryIncrementBatchCounterAsync(batchId, false);
-        await store.TryIncrementBatchCounterAsync(batchId, false);
-
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            DateTimeOffset.UtcNow,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
         var resumeCursor = new BatchRunEventCursor
         {
@@ -594,22 +552,11 @@ public sealed class RuntimeContractPendingTests
             first.StartedAt,
             first.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeFirst));
-        await store.TryIncrementBatchCounterAsync(batchId, false);
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
 
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            DateTimeOffset.UtcNow,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        // Simulate batch completing early (before all children are observed).
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
         await Task.Delay(50);
 
@@ -627,7 +574,7 @@ public sealed class RuntimeContractPendingTests
                 run.StartedAt,
                 run.LastHeartbeatAt);
             Assert.True(await store.TryTransitionRunAsync(complete));
-            await store.TryIncrementBatchCounterAsync(batchId, false);
+            await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
         }
 
         var completedIds = await waitTask;
@@ -680,23 +627,11 @@ public sealed class RuntimeContractPendingTests
                 run.StartedAt,
                 run.LastHeartbeatAt);
             Assert.True(await store.TryTransitionRunAsync(complete));
-            await store.TryIncrementBatchCounterAsync(batchId, false);
+            await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
         }
 
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            baseTime.AddMilliseconds(40),
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, baseTime.AddMilliseconds(40)));
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var completedIds = new List<string>();
@@ -745,23 +680,12 @@ public sealed class RuntimeContractPendingTests
             claimedA.StartedAt,
             claimedA.LastHeartbeatAt);
         Assert.True(await store.TryTransitionRunAsync(completeA));
-        await store.TryIncrementBatchCounterAsync(batchId, false);
-        await store.TryIncrementBatchCounterAsync(batchId, false);
+        // Simulate counting 2 completions (testing counter-based termination, not all runs terminal).
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
 
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            completedAt.AddMilliseconds(10),
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, completedAt.AddMilliseconds(10)));
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var results = new List<RunResult>();
@@ -789,3 +713,4 @@ public sealed class RuntimeContractPendingTests
             "Timed out waiting for run creation.");
     }
 }
+

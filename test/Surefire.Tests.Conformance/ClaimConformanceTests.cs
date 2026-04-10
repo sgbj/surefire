@@ -244,20 +244,20 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task Claim_ExcludesBatchCoordinators()
+    public async Task Claim_BatchChildRuns_AreClaimable()
     {
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var coordinator = CreateRun(job.Name);
-        coordinator.BatchTotal = 5;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
-        await Store.CreateRunsAsync([coordinator]);
+        var batchId = Guid.CreateVersion7().ToString("N");
+        var child = CreateRun(job.Name);
+        child.BatchId = batchId;
+        await Store.CreateRunsAsync([child]);
 
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
 
-        Assert.Null(claimed);
+        Assert.NotNull(claimed);
+        Assert.Equal(child.Id, claimed.Id);
     }
 
     [Fact]

@@ -695,30 +695,25 @@ public sealed class JobClientContractTests
         var jobName = "WaitEachOrdering_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
-        var coordinator = new RunRecord
+        var batchId = "batch_ordering_coordinator";
+        var batch = new BatchRecord
         {
-            Id = "batch_ordering_coordinator",
-            JobName = jobName,
+            Id = batchId,
             Status = JobStatus.Succeeded,
+            Total = 3,
+            Succeeded = 3,
             CreatedAt = now,
-            NotBefore = now,
-            StartedAt = now,
-            CompletedAt = now,
-            Attempt = 0,
-            Progress = 1,
-            BatchTotal = 3,
-            BatchCompleted = 3,
-            BatchFailed = 0
+            CompletedAt = now
         };
 
         var completedAt = now.AddSeconds(1);
-        var children = new[]
+        var children = new List<RunRecord>
         {
             new RunRecord
             {
                 Id = "child-c",
-                ParentRunId = coordinator.Id,
-                RootRunId = coordinator.Id,
+                BatchId = batchId,
+                RootRunId = batchId,
                 JobName = jobName,
                 Status = JobStatus.Succeeded,
                 CreatedAt = now,
@@ -732,8 +727,8 @@ public sealed class JobClientContractTests
             new RunRecord
             {
                 Id = "child-a",
-                ParentRunId = coordinator.Id,
-                RootRunId = coordinator.Id,
+                BatchId = batchId,
+                RootRunId = batchId,
                 JobName = jobName,
                 Status = JobStatus.Succeeded,
                 CreatedAt = now,
@@ -747,8 +742,8 @@ public sealed class JobClientContractTests
             new RunRecord
             {
                 Id = "child-b",
-                ParentRunId = coordinator.Id,
-                RootRunId = coordinator.Id,
+                BatchId = batchId,
+                RootRunId = batchId,
                 JobName = jobName,
                 Status = JobStatus.Succeeded,
                 CreatedAt = now,
@@ -761,10 +756,10 @@ public sealed class JobClientContractTests
             }
         };
 
-        await store.CreateRunsAsync([coordinator, .. children]);
+        await store.CreateBatchAsync(batch, children);
 
         var orderedIds = new List<string>();
-        await foreach (var result in client.WaitEachAsync(coordinator.Id))
+        await foreach (var result in client.WaitEachAsync(batchId))
         {
             orderedIds.Add(result.RunId);
         }
@@ -848,23 +843,10 @@ public sealed class JobClientContractTests
         Assert.True(await store.TryTransitionRunAsync(completeA));
         Assert.True(await store.TryTransitionRunAsync(completeB));
 
-        await store.TryIncrementBatchCounterAsync(batchId, false);
-        await store.TryIncrementBatchCounterAsync(batchId, false);
-
-        var coordinator = await store.GetRunAsync(batchId);
-        Assert.NotNull(coordinator);
-        var completeCoordinator = RunStatusTransition.RunningToSucceeded(
-            batchId,
-            coordinator.Attempt,
-            DateTimeOffset.UtcNow,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            coordinator.LastHeartbeatAt);
-        Assert.True(await store.TryTransitionRunAsync(completeCoordinator));
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
         var resumeCursor = new BatchRunEventCursor
         {
@@ -908,38 +890,33 @@ public sealed class JobClientContractTests
         var batchId = Guid.CreateVersion7().ToString("N");
         var childId = Guid.CreateVersion7().ToString("N");
 
-        await store.CreateRunsAsync([
-            new RunRecord
-            {
-                Id = batchId,
-                JobName = jobName,
-                Status = JobStatus.Succeeded,
-                CreatedAt = now,
-                NotBefore = now,
-                StartedAt = now,
-                CompletedAt = now,
-                Attempt = 0,
-                Progress = 1,
-                BatchTotal = 1,
-                BatchCompleted = 1,
-                BatchFailed = 0
-            },
-            new RunRecord
-            {
-                Id = childId,
-                ParentRunId = batchId,
-                RootRunId = batchId,
-                JobName = jobName,
-                Status = JobStatus.Succeeded,
-                CreatedAt = now,
-                NotBefore = now,
-                StartedAt = now,
-                CompletedAt = now,
-                Attempt = 1,
-                Progress = 1,
-                Result = "42"
-            }
-        ]);
+        var batch = new BatchRecord
+        {
+            Id = batchId,
+            Status = JobStatus.Succeeded,
+            Total = 1,
+            Succeeded = 1,
+            CreatedAt = now,
+            CompletedAt = now
+        };
+
+        var childRun = new RunRecord
+        {
+            Id = childId,
+            BatchId = batchId,
+            RootRunId = batchId,
+            JobName = jobName,
+            Status = JobStatus.Succeeded,
+            CreatedAt = now,
+            NotBefore = now,
+            StartedAt = now,
+            CompletedAt = now,
+            Attempt = 1,
+            Progress = 1,
+            Result = "42"
+        };
+
+        await store.CreateBatchAsync(batch, [childRun]);
 
         var streamTask = Task.Run(async () =>
         {
@@ -1151,6 +1128,89 @@ public sealed class JobClientContractTests
         }
     }
 
+    [Fact]
+    public async Task TriggerManyAsync_PopulatesRunIds_OnReturnedBatch()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(store, notifications, TimeProvider.System, new SurefireOptions(), logger);
+
+        var jobName = "RunIdsBatch_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName });
+
+        var batch = await ((IJobClient)client).TriggerManyAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
+
+        Assert.Equal(3, batch.RunIds.Count);
+        Assert.All(batch.RunIds, id => Assert.False(string.IsNullOrEmpty(id)));
+        Assert.Equal(batch.RunIds.Distinct().Count(), batch.RunIds.Count);
+    }
+
+    [Fact]
+    public async Task GetBatchAsync_PopulatesRunIds_OnReturnedBatch()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(store, notifications, TimeProvider.System, new SurefireOptions(), logger);
+
+        var jobName = "RunIdsBatchGet_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName });
+
+        var triggered = await ((IJobClient)client).TriggerManyAsync(jobName, [new { x = 1 }, new { x = 2 }]);
+        var fetched = await ((IJobClient)client).GetBatchAsync(triggered.Id);
+
+        Assert.NotNull(fetched);
+        Assert.Equal(2, fetched.RunIds.Count);
+        Assert.Equal(triggered.RunIds.OrderBy(x => x), fetched.RunIds.OrderBy(x => x));
+    }
+
+    [Fact]
+    public void RunRecord_ToPublic_ConvertsTraceIdAndSpanId_ToActivityStructs()
+    {
+        var activity = new Activity("test");
+        activity.Start();
+        var expectedTraceId = activity.TraceId;
+        var expectedSpanId = activity.SpanId;
+        activity.Stop();
+
+        var record = new RunRecord
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "test",
+            Status = JobStatus.Succeeded,
+            CreatedAt = DateTimeOffset.UtcNow,
+            NotBefore = DateTimeOffset.UtcNow,
+            TraceId = expectedTraceId.ToString(),
+            SpanId = expectedSpanId.ToString()
+        };
+
+        var run = record.ToPublic();
+
+        Assert.Equal(expectedTraceId, run.TraceId);
+        Assert.Equal(expectedSpanId, run.SpanId);
+    }
+
+    [Fact]
+    public void RunRecord_ToPublic_NullTraceIdAndSpanId_ProducesDefaultStructs()
+    {
+        var record = new RunRecord
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "test",
+            Status = JobStatus.Pending,
+            CreatedAt = DateTimeOffset.UtcNow,
+            NotBefore = DateTimeOffset.UtcNow,
+            TraceId = null,
+            SpanId = null
+        };
+
+        var run = record.ToPublic();
+
+        Assert.Equal(default(ActivityTraceId), run.TraceId);
+        Assert.Equal(default(ActivitySpanId), run.SpanId);
+    }
+
     private static async Task<RunRecord> WaitForClaimAsync(InMemoryJobStore store, string jobName)
     {
         return await TestWait.PollUntilAsync(
@@ -1190,3 +1250,4 @@ public sealed class JobClientContractTests
         }
     }
 }
+

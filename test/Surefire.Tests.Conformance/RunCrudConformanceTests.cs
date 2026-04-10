@@ -422,9 +422,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var batchId = Guid.CreateVersion7().ToString("N");
         var batchRun = CreateRun();
         batchRun.BatchId = batchId;
-        batchRun.BatchTotal = 10;
-        batchRun.BatchCompleted = 0;
-        batchRun.BatchFailed = 0;
 
         var normal = CreateRun();
 
@@ -1070,16 +1067,14 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task GetRun_NonBatch_BatchFieldsAreNull()
+    public async Task GetRun_NonBatch_BatchIdIsNull()
     {
         var run = CreateRun();
         await Store.CreateRunsAsync([run]);
 
         var loaded = await Store.GetRunAsync(run.Id);
         Assert.NotNull(loaded);
-        Assert.Null(loaded.BatchTotal);
-        Assert.Null(loaded.BatchCompleted);
-        Assert.Null(loaded.BatchFailed);
+        Assert.Null(loaded.BatchId);
     }
 
     [Fact]

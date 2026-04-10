@@ -5,7 +5,7 @@ using Testcontainers.MsSql;
 
 namespace Surefire.Tests.SqlServer;
 
-internal sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
+public sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
 {
     private readonly MsSqlContainer _container = new MsSqlBuilder()
         .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
@@ -13,22 +13,22 @@ internal sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
 
     private SqlServerJobStore? _store;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
         _store = new(_container.GetConnectionString(), TimeProvider.System);
         await _store.MigrateAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _container.DisposeAsync();
     }
 
-    public Task<IJobStore> CreateStoreAsync()
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync()
         => Task.FromResult<IJobStore>(_store!);
 
-    public async Task CleanAsync()
+    async Task IStoreTestFixture.CleanAsync()
     {
         await using var conn = new SqlConnection(_container.GetConnectionString());
         await conn.OpenAsync();

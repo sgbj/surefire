@@ -130,23 +130,23 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        // Create a batch: coordinator + 3 children
-        var coordinator = CreateRun(job.Name);
-        coordinator.Status = JobStatus.Running;
-        coordinator.BatchTotal = 3;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
+        // Create a parent + 3 children (ParentRunId relationship)
+        var parent = CreateRun(job.Name, JobStatus.Running);
+        parent.Attempt = 1;
+        parent.NodeName = "node1";
+        parent.StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        parent.LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
 
         var child1 = CreateRun(job.Name);
-        child1.ParentRunId = coordinator.Id;
+        child1.ParentRunId = parent.Id;
 
         var child2 = CreateRun(job.Name);
-        child2.ParentRunId = coordinator.Id;
+        child2.ParentRunId = parent.Id;
 
         var child3 = CreateRun(job.Name);
-        child3.ParentRunId = coordinator.Id;
+        child3.ParentRunId = parent.Id;
 
-        await Store.CreateRunsAsync([coordinator, child1, child2, child3]);
+        await Store.CreateRunsAsync([parent, child1, child2, child3]);
 
         // Claim and complete one child so it's terminal (whichever the store picks first)
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
@@ -158,7 +158,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
             claimed.StartedAt, now)));
 
         // Cancel all children of coordinator
-        var cancelledIds = await Store.CancelChildRunsAsync(coordinator.Id);
+        var cancelledIds = await Store.CancelChildRunsAsync(parent.Id);
 
         // The completed child should not be cancelled; the other 2 should be
         Assert.Equal(2, cancelledIds.Count);
@@ -198,22 +198,22 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var coordinator = CreateRun(job.Name);
-        coordinator.Status = JobStatus.Running;
-        coordinator.BatchTotal = 1;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
+        var parent = CreateRun(job.Name, JobStatus.Running);
+        parent.Attempt = 1;
+        parent.NodeName = "node1";
+        parent.StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        parent.LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
 
         var child = CreateRun(job.Name);
-        child.ParentRunId = coordinator.Id;
+        child.ParentRunId = parent.Id;
 
-        await Store.CreateRunsAsync([coordinator, child]);
+        await Store.CreateRunsAsync([parent, child]);
 
         // Cancel the child first
         Assert.True(await Store.TryCancelRunAsync(child.Id));
 
         // Now CancelChildRuns should find nothing to cancel
-        var cancelledIds = await Store.CancelChildRunsAsync(coordinator.Id);
+        var cancelledIds = await Store.CancelChildRunsAsync(parent.Id);
         Assert.Empty(cancelledIds);
     }
 

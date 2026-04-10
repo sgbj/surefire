@@ -231,9 +231,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         var jobRun = await harness.Client.TriggerAsync(jobName);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-        var result = await jobRun.WaitAsync(cts.Token);
+        await jobRun.WaitAsync(cts.Token);
 
-        Assert.True(result.IsCancelled);
+        Assert.True(jobRun.IsCancelled);
 
         var run = await harness.Store.GetRunAsync(jobRun.Id, cts.Token);
         Assert.NotNull(run);

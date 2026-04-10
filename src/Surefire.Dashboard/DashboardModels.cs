@@ -54,9 +54,7 @@ public sealed class RunResponse
     public int QueuePriority { get; init; }
     public string? DeduplicationId { get; init; }
     public DateTimeOffset? LastHeartbeatAt { get; init; }
-    public int? BatchTotal { get; init; }
-    public int? BatchCompleted { get; init; }
-    public int? BatchFailed { get; init; }
+    public string? BatchId { get; init; }
 
     internal static RunResponse From(RunRecord run) => new()
     {
@@ -84,9 +82,7 @@ public sealed class RunResponse
         QueuePriority = run.QueuePriority,
         DeduplicationId = run.DeduplicationId,
         LastHeartbeatAt = run.LastHeartbeatAt,
-        BatchTotal = run.BatchTotal,
-        BatchCompleted = run.BatchCompleted,
-        BatchFailed = run.BatchFailed
+        BatchId = run.BatchId
     };
 }
 

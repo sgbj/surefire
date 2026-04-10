@@ -129,8 +129,10 @@ internal sealed partial class JobClient(
 
     public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
-        var run = await store.GetRunAsync(batchId, cancellationToken);
-        return run?.BatchTotal != null ? run.ToJobBatchWithClient(this) : null;
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null) return null;
+        var runIds = await store.GetBatchRunIdsAsync(batchId, cancellationToken);
+        return JobBatch.FromRecord(batch, this, runIds);
     }
 
     // Control
@@ -147,14 +149,15 @@ internal sealed partial class JobClient(
 
     public async Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
-        // Match previous behavior: missing batch is a no-op.
-        var coordinator = await store.GetRunAsync(batchId, cancellationToken);
-        if (coordinator is null)
-        {
-            return;
-        }
+        await store.CancelBatchRunsAsync(batchId, cancellationToken);
 
-        await CancelRunAndDescendantsAsync(batchId, new HashSet<string>(StringComparer.Ordinal), cancellationToken);
+        // Pending runs that were cancelled never go through the executor, so the batch won't
+        // be completed via MaybeCompleteBatchAsync. Complete it here as Cancelled.
+        var completedAt = timeProvider.GetUtcNow();
+        if (await store.TryCompleteBatchAsync(batchId, JobStatus.Cancelled, completedAt, cancellationToken))
+        {
+            await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
+        }
     }
 
     public async Task<JobRun> RerunAsync(string runId, CancellationToken cancellationToken = default)
@@ -165,59 +168,12 @@ internal sealed partial class JobClient(
             throw new RunNotFoundException(runId);
         }
 
-        // Batch rerun: rerun coordinator + all direct children.
-        if (run.BatchTotal is { } batchTotal)
+        // Batch rerun: not supported via RerunAsync — create a new batch using TriggerManyAsync instead.
+        var existingBatch = await store.GetBatchAsync(runId, cancellationToken);
+        if (existingBatch is { })
         {
-            var children = new List<RunRecord>(batchTotal);
-            await foreach (var child in EnumerateBatchChildrenAsync(runId, cancellationToken))
-            {
-                children.Add(child);
-            }
-
-            var now = timeProvider.GetUtcNow();
-            var coordinatorPriority = await ResolveRequestedPriorityAsync(run.JobName, null, cancellationToken);
-            var rerunCoordinatorId = CreateRunId();
-            var rerunCoordinator = CreateRun(run.JobName, null, new(), now, coordinatorPriority ?? 0,
-                rerunCoordinatorId, rerunOfRunId: run.Id);
-            rerunCoordinator.Status = JobStatus.Running;
-            rerunCoordinator.Attempt = 0;
-            rerunCoordinator.BatchTotal = children.Count;
-            rerunCoordinator.BatchCompleted = 0;
-            rerunCoordinator.BatchFailed = 0;
-
-            var newChildren = new List<RunRecord>(children.Count);
-            for (var i = 0; i < children.Count; i++)
-            {
-                var child = children[i];
-                var priority = await ResolveRequestedPriorityAsync(child.JobName, null, cancellationToken);
-                var newChild = CreateRun(child.JobName, child.Arguments, new(), now, priority ?? 0,
-                    rerunOfRunId: child.Id);
-                newChild.ParentRunId = rerunCoordinatorId;
-                newChild.RootRunId = rerunCoordinator.RootRunId ?? rerunCoordinatorId;
-                newChildren.Add(newChild);
-            }
-
-            var initialEvents = new List<RunEvent>(children.Count);
-            for (var i = 0; i < children.Count; i++)
-            {
-                var cloned = await BuildClonedRunScopedInputEventsAsync(children[i].Id, newChildren[i].Id,
-                    cancellationToken);
-                initialEvents.AddRange(cloned);
-            }
-
-            var runs = new List<RunRecord>(newChildren.Count + 1) { rerunCoordinator };
-            runs.AddRange(newChildren);
-
-            await store.CreateRunsAsync(runs, initialEvents, cancellationToken);
-
-            await notifications.PublishAsync(NotificationChannels.RunCreated, rerunCoordinatorId, cancellationToken);
-
-            if (children.Count == 0)
-            {
-                await TryCompleteEmptyBatchCoordinatorAsync(rerunCoordinatorId, cancellationToken);
-            }
-
-            return rerunCoordinator.ToPublicWithClient(this);
+            throw new InvalidOperationException(
+                $"'{runId}' is a batch ID. To rerun a batch, retrieve the runs with GetRunsAsync and call TriggerManyAsync.");
         }
 
         // Single-run rerun.
@@ -324,23 +280,18 @@ internal sealed partial class JobClient(
         }
 
         var now = timeProvider.GetUtcNow();
-        var coordinatorId = CreateRunId();
-        var coordinator = CreateRun(jobName, null, options, now, requestedPriority ?? 0, coordinatorId);
-        coordinator.Status = JobStatus.Running;
-        coordinator.Attempt = 0;
-        coordinator.BatchTotal = argsCount;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
+        var batchId = CreateRunId();
+        var batch = new BatchRecord { Id = batchId, Status = JobStatus.Pending, Total = argsCount, CreatedAt = now };
 
-        var runs = new List<RunRecord>(argsCount + 1) { coordinator };
+        var runs = new List<RunRecord>(argsCount);
         var streamPumps = new List<(string RunId, IReadOnlyList<StreamingArgumentSource> Streams,
             InputDeclarationEnvelope Declaration)>();
         foreach (var item in args)
         {
             var prepared = PrepareArguments(item);
             var child = CreateRun(jobName, prepared.SerializedArguments, options, now, requestedPriority ?? 0);
-            child.ParentRunId = coordinatorId;
-            child.RootRunId = coordinator.RootRunId ?? coordinatorId;
+            child.BatchId = batchId;
+            child.RootRunId ??= batchId;
             runs.Add(child);
 
             if (prepared.Streams.Count > 0)
@@ -355,26 +306,22 @@ internal sealed partial class JobClient(
             initialEvents.AddRange(BuildInitialEvents(runId, declaration));
         }
 
-        await store.CreateRunsAsync(
-            runs,
-            initialEvents,
-            cancellationToken);
-
-        await notifications.PublishAsync(NotificationChannels.RunCreated, coordinatorId, cancellationToken);
+        await store.CreateBatchAsync(batch, runs, initialEvents, cancellationToken);
 
         if (argsCount == 0)
         {
-            await TryCompleteEmptyBatchCoordinatorAsync(coordinatorId, cancellationToken);
-            return coordinatorId;
+            var completedAt = timeProvider.GetUtcNow();
+            if (await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, completedAt, cancellationToken))
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
+            return batchId;
         }
 
         foreach (var (runId, streams, _) in streamPumps)
         {
-            // Child input streams are part of accepted work and should not be tied to request lifetime.
             _ = PumpInputStreamsAsync(runId, streams, CancellationToken.None);
         }
 
-        return coordinatorId;
+        return batchId;
     }
 
     /// <inheritdoc />
@@ -383,16 +330,10 @@ internal sealed partial class JobClient(
     {
         var itemsList = items.ToList();
         var now = timeProvider.GetUtcNow();
-        var coordinatorId = CreateRunId();
-        var firstJobName = itemsList.Count > 0 ? itemsList[0].JobName : string.Empty;
-        var coordinator = CreateRun(firstJobName, null, new(), now, 0, coordinatorId);
-        coordinator.Status = JobStatus.Running;
-        coordinator.Attempt = 0;
-        coordinator.BatchTotal = itemsList.Count;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
+        var batchId = CreateRunId();
+        var batch = new BatchRecord { Id = batchId, Status = JobStatus.Pending, Total = itemsList.Count, CreatedAt = now };
 
-        var runs = new List<RunRecord>(itemsList.Count + 1) { coordinator };
+        var runs = new List<RunRecord>(itemsList.Count);
         var streamPumps = new List<(string RunId, IReadOnlyList<StreamingArgumentSource> Streams,
             InputDeclarationEnvelope Declaration)>();
         foreach (var item in itemsList)
@@ -402,8 +343,8 @@ internal sealed partial class JobClient(
             var prepared = PrepareArguments(item.Args);
             var child = CreateRun(item.JobName, prepared.SerializedArguments, item.Options ?? new(), now,
                 requestedPriority ?? 0);
-            child.ParentRunId = coordinatorId;
-            child.RootRunId = coordinator.RootRunId ?? coordinatorId;
+            child.BatchId = batchId;
+            child.RootRunId ??= batchId;
             runs.Add(child);
 
             if (prepared.Streams.Count > 0)
@@ -418,12 +359,13 @@ internal sealed partial class JobClient(
             initialEvents.AddRange(BuildInitialEvents(runId, declaration));
         }
 
-        await store.CreateRunsAsync(runs, initialEvents, cancellationToken);
-        await notifications.PublishAsync(NotificationChannels.RunCreated, coordinatorId, cancellationToken);
+        await store.CreateBatchAsync(batch, runs, initialEvents, cancellationToken);
 
         if (itemsList.Count == 0)
         {
-            await TryCompleteEmptyBatchCoordinatorAsync(coordinatorId, cancellationToken);
+            var completedAt = timeProvider.GetUtcNow();
+            if (await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, completedAt, cancellationToken))
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
         }
         else
         {
@@ -433,16 +375,7 @@ internal sealed partial class JobClient(
             }
         }
 
-        return new JobBatch(this)
-        {
-            Id = coordinatorId,
-            JobName = firstJobName,
-            Status = coordinator.Status,
-            Total = itemsList.Count,
-            Succeeded = 0,
-            Failed = 0,
-            CreatedAt = now,
-        };
+        return JobBatch.FromRecord(batch, this, runs.ConvertAll(r => r.Id));
     }
 
     /// <inheritdoc />
@@ -451,22 +384,9 @@ internal sealed partial class JobClient(
     {
         var batch = await TriggerBatchAsync(items, cancellationToken);
         await foreach (var _ in WaitEachAsync(batch.Id, cancellationToken)) { }
-        var coordinator = await store.GetRunAsync(batch.Id, cancellationToken);
-        if (coordinator is null)
-        {
-            return batch;
-        }
-
-        return new JobBatch(this)
-        {
-            Id = batch.Id,
-            JobName = batch.JobName,
-            Status = coordinator.Status,
-            Total = coordinator.BatchTotal ?? 0,
-            Succeeded = coordinator.BatchCompleted ?? 0,
-            Failed = coordinator.BatchFailed ?? 0,
-            CreatedAt = batch.CreatedAt,
-        };
+        var updated = await store.GetBatchAsync(batch.Id, cancellationToken);
+        var runIds = await store.GetBatchRunIdsAsync(batch.Id, cancellationToken);
+        return updated is null ? batch : JobBatch.FromRecord(updated, this, runIds);
     }
 
     private async Task<RunResult[]> RunAllAsync(string jobName, IEnumerable<object?> argsList,
@@ -544,7 +464,14 @@ internal sealed partial class JobClient(
 
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await TryCancelOwnedRunAsync(batchId);
+                try
+                {
+                    await CancelBatchAsync(batchId, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    Log.FailedToPropagateCancellation(logger, ex, batchId);
+                }
                 throw;
             }
 
@@ -578,7 +505,7 @@ internal sealed partial class JobClient(
         var result = await WaitAsync(runId, cancellationToken);
         if (!result.IsSuccess)
         {
-            throw new JobRunFailedException(result.RunId, result.Error);
+            throw new JobRunFailedException(result.RunId, result.Status, result.Error);
         }
 
         if (result.TryGetResult<T>(out var typed))
@@ -673,10 +600,10 @@ internal sealed partial class JobClient(
 
         while (true)
         {
-            var coordinator = await store.GetRunAsync(batchId, cancellationToken);
-            if (coordinator is null)
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch is null)
             {
-                throw new InvalidOperationException($"Batch run '{batchId}' was not found.");
+                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
             }
 
             var (emittedAny, batchItems) = await ReadBatchOutputEventsAsync();
@@ -685,7 +612,7 @@ internal sealed partial class JobClient(
                 yield return item;
             }
 
-            if (coordinator.Status.IsTerminal)
+            if (batch.Status.IsTerminal)
             {
                 var (terminalDrainEmitted, terminalDrainItems) = await ReadBatchOutputEventsAsync();
                 foreach (var item in terminalDrainItems)
@@ -722,7 +649,7 @@ internal sealed partial class JobClient(
     {
         using var wakeup = new SemaphoreSlim(0, 1);
         await using var subscription = await notifications.SubscribeAsync(
-            NotificationChannels.RunEvent(batchId),
+            NotificationChannels.BatchTerminated(batchId),
             _ => ReleaseWakeupAsync(wakeup),
             cancellationToken);
 
@@ -730,15 +657,12 @@ internal sealed partial class JobClient(
         var emittedChildIds = new HashSet<string>(StringComparer.Ordinal);
         while (true)
         {
-            var coordinator = await store.GetRunAsync(batchId, cancellationToken);
-            if (coordinator is null)
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch is null)
             {
-                throw new InvalidOperationException($"Batch run '{batchId}' was not found.");
+                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
             }
 
-            var progressed = false;
-
-            // Fetch only terminal children completed since the cursor, avoiding a full scan.
             var candidates = new List<RunRecord>();
             var skip = 0;
             const int pageSize = 200;
@@ -747,7 +671,7 @@ internal sealed partial class JobClient(
                 var page = await store.GetRunsAsync(
                     new()
                     {
-                        ParentRunId = batchId,
+                        BatchId = batchId,
                         IsTerminal = true,
                         CompletedAfter = cursorTime,
                         OrderBy = RunOrderBy.CompletedAt
@@ -775,22 +699,14 @@ internal sealed partial class JobClient(
                     continue;
                 }
 
-                progressed = true;
                 cursorTime = child.CompletedAt;
                 yield return ToRunResult(child);
             }
 
-            if (coordinator.Status.IsTerminal)
+            if (batch.Status.IsTerminal)
             {
-                if (coordinator.BatchTotal is { } batchTotal)
-                {
-                    var terminalChildren = (coordinator.BatchCompleted ?? 0) + (coordinator.BatchFailed ?? 0);
-                    if (terminalChildren >= batchTotal || emittedChildIds.Count >= batchTotal)
-                    {
-                        yield break;
-                    }
-                }
-                else if (!progressed)
+                var totalTerminal = batch.Succeeded + batch.Failed;
+                if (totalTerminal >= batch.Total || emittedChildIds.Count >= batch.Total)
                 {
                     yield break;
                 }
@@ -935,6 +851,136 @@ internal sealed partial class JobClient(
     IAsyncEnumerable<T> IJobClientInternal.StreamRunOutputAsync<T>(string runId, CancellationToken cancellationToken) =>
         WaitStreamAsync<T>(runId, cancellationToken);
 
+    async Task<JobBatch> IJobClientInternal.WaitForBatchAsync(string batchId, CancellationToken cancellationToken)
+    {
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var subscription = await notifications.SubscribeAsync(
+            NotificationChannels.BatchTerminated(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+
+        while (true)
+        {
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch is null)
+                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
+            if (batch.Status.IsTerminal)
+            {
+                var runIds = await store.GetBatchRunIdsAsync(batchId, cancellationToken);
+                return JobBatch.FromRecord(batch, this, runIds);
+            }
+            await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+        }
+    }
+
+    Task IJobClientInternal.CancelBatchAsync(string batchId, CancellationToken cancellationToken) =>
+        CancelBatchAsync(batchId, cancellationToken);
+
+    IAsyncEnumerable<RunEvent> IJobClientInternal.StreamRunEventsAsync(string runId, CancellationToken cancellationToken) =>
+        StreamRunEventsImpl(runId, cancellationToken);
+
+    private async IAsyncEnumerable<RunEvent> StreamRunEventsImpl(string runId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var obs in ObserveAsync(runId, cancellationToken))
+        {
+            if (obs.Event is { } e)
+                yield return e;
+            else if (obs.Run.Status.IsTerminal)
+                yield break;
+        }
+    }
+
+    Task IJobClientInternal.CancelRunAsync(string runId, CancellationToken cancellationToken) =>
+        CancelAsync(runId, cancellationToken);
+
+    Task<JobRun> IJobClientInternal.RerunRunAsync(string runId, CancellationToken cancellationToken) =>
+        RerunAsync(runId, cancellationToken);
+
+    async Task<IReadOnlyList<JobRun>> IJobClientInternal.GetBatchRunsAsync(string batchId, CancellationToken cancellationToken)
+    {
+        var runs = new List<JobRun>();
+        await foreach (var record in EnumerateBatchChildrenAsync(batchId, cancellationToken))
+            runs.Add(record.ToPublicWithClient(this));
+        return runs;
+    }
+
+    IAsyncEnumerable<JobRun> IJobClientInternal.StreamBatchRunsAsync(string batchId, CancellationToken cancellationToken) =>
+        StreamBatchRunsImpl(batchId, cancellationToken);
+
+    private async IAsyncEnumerable<JobRun> StreamBatchRunsImpl(string batchId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var result in WaitEachAsync(batchId, cancellationToken))
+        {
+            var record = await store.GetRunAsync(result.RunId, cancellationToken);
+            if (record is not null)
+                yield return record.ToPublicWithClient(this);
+        }
+    }
+
+    IAsyncEnumerable<T> IJobClientInternal.StreamBatchResultsAsync<T>(string batchId, CancellationToken cancellationToken) =>
+        StreamBatchResultsImpl<T>(batchId, cancellationToken);
+
+    private async IAsyncEnumerable<T> StreamBatchResultsImpl<T>(string batchId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var item in StreamEachAsync<T>(batchId, cancellationToken))
+            yield return item.Item;
+    }
+
+    async Task<T[]> IJobClientInternal.GetBatchResultsAsync<T>(string batchId, CancellationToken cancellationToken)
+    {
+        var results = new List<RunResult>();
+        await foreach (var result in WaitEachAsync(batchId, cancellationToken))
+            results.Add(result);
+        return ConvertBatchResults<T>(results);
+    }
+
+    IAsyncEnumerable<RunEvent> IJobClientInternal.StreamBatchEventsAsync(string batchId, CancellationToken cancellationToken) =>
+        StreamBatchEventsImpl(batchId, cancellationToken);
+
+    private async IAsyncEnumerable<RunEvent> StreamBatchEventsImpl(string batchId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var channel = System.Threading.Channels.Channel.CreateUnbounded<RunEvent>();
+        var runIds = new List<string>();
+        await foreach (var r in EnumerateBatchChildrenAsync(batchId, cancellationToken))
+            runIds.Add(r.Id);
+
+        if (runIds.Count == 0)
+        {
+            yield break;
+        }
+
+        var remaining = runIds.Count;
+        foreach (var runId in runIds)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (var obs in ObserveAsync(runId, cancellationToken))
+                    {
+                        if (obs.Event is { } e)
+                            channel.Writer.TryWrite(e);
+                        else if (obs.Run.Status.IsTerminal)
+                            break;
+                    }
+                }
+                catch (OperationCanceledException) { }
+                finally
+                {
+                    if (Interlocked.Decrement(ref remaining) == 0)
+                        channel.Writer.Complete();
+                }
+            }, cancellationToken);
+        }
+
+        await foreach (var e in channel.Reader.ReadAllAsync(cancellationToken))
+            yield return e;
+    }
+
     private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
     {
         try
@@ -960,7 +1006,7 @@ internal sealed partial class JobClient(
         const int pageSize = 200;
         while (true)
         {
-            var page = await store.GetRunsAsync(new() { ParentRunId = batchId }, skip, pageSize, cancellationToken);
+            var page = await store.GetRunsAsync(new() { BatchId = batchId }, skip, pageSize, cancellationToken);
             if (page.Items.Count == 0)
             {
                 yield break;
@@ -1005,7 +1051,7 @@ internal sealed partial class JobClient(
             {
                 if (observation.Run.Status == JobStatus.Failed)
                 {
-                    throw new JobRunFailedException(runId, observation.Run.Error);
+                    throw new JobRunFailedException(runId, observation.Run.Status, observation.Run.Error);
                 }
 
                 if (!emittedOutput && observation.Run.Result is { } resultJson
@@ -1042,7 +1088,7 @@ internal sealed partial class JobClient(
         {
             if (!result.IsSuccess)
             {
-                exceptions.Add(new JobRunFailedException(result.RunId, result.Error));
+                exceptions.Add(new JobRunFailedException(result.RunId, result.Status, result.Error));
                 continue;
             }
 
@@ -1464,38 +1510,6 @@ internal sealed partial class JobClient(
         ], cancellationToken);
 
         await notifications.PublishAsync(NotificationChannels.RunInput(runId), runId, cancellationToken);
-    }
-
-    private async Task TryCompleteEmptyBatchCoordinatorAsync(string coordinatorId, CancellationToken cancellationToken)
-    {
-        var coordinator = await store.GetRunAsync(coordinatorId, cancellationToken);
-        if (coordinator is null || coordinator.BatchTotal != 0)
-        {
-            return;
-        }
-
-        var completedAt = timeProvider.GetUtcNow();
-        var transition = RunStatusTransition.RunningToSucceeded(
-            coordinatorId,
-            coordinator.Attempt,
-            completedAt,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            completedAt);
-
-        if (!await store.TryTransitionRunAsync(transition, cancellationToken))
-        {
-            return;
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunTerminated(coordinatorId), coordinatorId,
-            cancellationToken);
-        await notifications.PublishAsync(NotificationChannels.RunEvent(coordinatorId), coordinatorId,
-            cancellationToken);
     }
 
     private async Task TryCancelOwnedRunAsync(string runId)

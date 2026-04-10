@@ -4,13 +4,13 @@ public abstract class StoreConformanceBase : IAsyncLifetime
 {
     internal IJobStore Store { get; private set; } = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Store = await CreateStoreAsync();
         await Store.MigrateAsync();
     }
 
-    public virtual Task DisposeAsync() => Task.CompletedTask;
+    public virtual ValueTask DisposeAsync() => ValueTask.CompletedTask;
     internal abstract Task<IJobStore> CreateStoreAsync();
 
     internal static RunRecord CreateRun(string? jobName = null, JobStatus status = JobStatus.Pending,
