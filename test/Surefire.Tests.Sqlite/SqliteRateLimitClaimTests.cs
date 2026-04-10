@@ -34,7 +34,7 @@ public sealed class SqliteRateLimitClaimTests
 
             var now = DateTimeOffset.UtcNow;
             await storeA.CreateRunsAsync([
-                new RunRecord
+                new JobRun
                 {
                     Id = Guid.CreateVersion7().ToString("N"),
                     JobName = jobName,
@@ -54,7 +54,7 @@ public sealed class SqliteRateLimitClaimTests
             var claims = await Task.WhenAll(claimTasks);
             Assert.Equal(1, claims.Count(c => c is not null));
 
-            var secondRun = new RunRecord
+            var secondRun = new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = jobName,
@@ -98,7 +98,7 @@ public sealed class SqliteRateLimitClaimTests
             var startGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var now = DateTimeOffset.UtcNow;
 
-            var runA = new RunRecord
+            var runA = new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = jobName,
@@ -109,7 +109,7 @@ public sealed class SqliteRateLimitClaimTests
                 Progress = 0
             };
 
-            var runB = new RunRecord
+            var runB = new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = jobName,

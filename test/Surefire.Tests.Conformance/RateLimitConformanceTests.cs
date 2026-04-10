@@ -30,8 +30,7 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var claimed1 = await Store.ClaimRunAsync("node1", [jobName], [queueName]);
         Assert.NotNull(claimed1);
 
-        claimed1.Status = JobStatus.Succeeded;
-        claimed1.CompletedAt = DateTimeOffset.UtcNow;
+        claimed1 = claimed1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(claimed1, JobStatus.Running));
 
         var claimed2 = await Store.ClaimRunAsync("node1", [jobName], [queueName]);

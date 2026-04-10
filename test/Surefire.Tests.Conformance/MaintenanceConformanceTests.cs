@@ -8,8 +8,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var jobName = $"ExpireJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName);
-        run.NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var run = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run]);
 
         var cancelled = await Store.CancelExpiredRunsAsync();
@@ -29,19 +28,19 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var expiredPending = CreateRun(jobName);
-        expiredPending.NotAfter = now.AddMinutes(-1);
+        var expiredPending = CreateRun(jobName) with { NotAfter = now.AddMinutes(-1) };
 
-        var expiredRetrying = CreateRun(jobName, JobStatus.Retrying);
-        expiredRetrying.NotAfter = now.AddMinutes(-1);
-        expiredRetrying.NodeName = "node-1";
-        expiredRetrying.Attempt = 1;
-        expiredRetrying.StartedAt = now;
-        expiredRetrying.LastHeartbeatAt = now;
-        expiredRetrying.Error = "test failure";
+        var expiredRetrying = CreateRun(jobName, JobStatus.Retrying) with
+        {
+            NotAfter = now.AddMinutes(-1),
+            NodeName = "node-1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now,
+            Error = "test failure"
+        };
 
-        var notExpired = CreateRun(jobName);
-        notExpired.NotAfter = now.AddMinutes(10);
+        var notExpired = CreateRun(jobName) with { NotAfter = now.AddMinutes(10) };
 
         await Store.CreateRunsAsync([expiredPending, expiredRetrying, notExpired]);
 
@@ -68,13 +67,15 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run = CreateRun(jobName, JobStatus.Succeeded);
-        run.NotAfter = now.AddMinutes(-1);
-        run.NodeName = "node1";
-        run.Attempt = 1;
-        run.StartedAt = now;
-        run.LastHeartbeatAt = now;
-        run.CompletedAt = now;
+        var run = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            NotAfter = now.AddMinutes(-1),
+            NodeName = "node1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now,
+            CompletedAt = now
+        };
         await Store.CreateRunsAsync([run]);
 
         var cancelled = await Store.CancelExpiredRunsAsync();
@@ -92,12 +93,14 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run = CreateRun(jobName, JobStatus.Running);
-        run.NotAfter = now.AddMinutes(-1);
-        run.NodeName = "node1";
-        run.Attempt = 1;
-        run.StartedAt = now;
-        run.LastHeartbeatAt = now;
+        var run = CreateRun(jobName, JobStatus.Running) with
+        {
+            NotAfter = now.AddMinutes(-1),
+            NodeName = "node1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now
+        };
         await Store.CreateRunsAsync([run]);
 
         await Store.CancelExpiredRunsAsync();
@@ -144,8 +147,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Succeeded;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
         var before = await Store.GetRunAsync(run.Id);
@@ -164,13 +166,15 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run = CreateRun(jobName, JobStatus.Retrying);
-        run.NotAfter = now.AddMinutes(-1);
-        run.NodeName = "node-1";
-        run.Attempt = 1;
-        run.StartedAt = now;
-        run.LastHeartbeatAt = now;
-        run.Error = "test failure";
+        var run = CreateRun(jobName, JobStatus.Retrying) with
+        {
+            NotAfter = now.AddMinutes(-1),
+            NodeName = "node-1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now,
+            Error = "test failure"
+        };
         await Store.CreateRunsAsync([run]);
 
         var count = await Store.CancelExpiredRunsAsync();
@@ -189,24 +193,23 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var past = now.AddMinutes(-10);
 
-        var run1 = CreateRun(jobName);
-        run1.NotAfter = past;
-        var run2 = CreateRun(jobName);
-        run2.NotAfter = past;
+        var run1 = CreateRun(jobName) with { NotAfter = past };
+        var run2 = CreateRun(jobName) with { NotAfter = past };
 
         // Create run3 directly as Retrying (can't claim with expired NotAfter)
-        var run3 = CreateRun(jobName, JobStatus.Retrying);
-        run3.NotAfter = past;
-        run3.NodeName = "node-1";
-        run3.Attempt = 1;
-        run3.StartedAt = now;
-        run3.LastHeartbeatAt = now;
-        run3.Error = "test failure";
+        var run3 = CreateRun(jobName, JobStatus.Retrying) with
+        {
+            NotAfter = past,
+            NodeName = "node-1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now,
+            Error = "test failure"
+        };
         await Store.CreateRunsAsync([run1, run2, run3]);
 
         // Create a run WITHOUT expired NotAfter (should not be cancelled)
-        var run4 = CreateRun(jobName);
-        run4.NotAfter = DateTimeOffset.UtcNow.AddHours(1);
+        var run4 = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddHours(1) };
         await Store.CreateRunsAsync([run4]);
 
         var cancelled = await Store.CancelExpiredRunsAsync();
@@ -223,8 +226,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var jobName = $"RetryAfterExpired_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName);
-        run.NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var run = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run]);
 
         // Claim transitions to Running - but since we fixed ClaimRunAsync to check NotAfter,
@@ -247,7 +249,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var old = now.AddHours(-3);
 
         // Batch is still Running (not terminal) — children should not be purged
-        var batch = new BatchRecord
+        var batch = new JobBatch
         {
             Id = Guid.CreateVersion7().ToString("N"),
             Status = JobStatus.Running,
@@ -257,11 +259,13 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
             CreatedAt = old
         };
 
-        var child = CreateRun(jobName, JobStatus.Succeeded);
-        child.BatchId = batch.Id;
-        child.CompletedAt = old;
-        child.StartedAt = old.AddMinutes(-1);
-        child.Attempt = 1;
+        var child = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            BatchId = batch.Id,
+            CompletedAt = old,
+            StartedAt = old.AddMinutes(-1),
+            Attempt = 1
+        };
 
         await Store.CreateBatchAsync(batch, [child]);
 
@@ -280,7 +284,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
 
-        var batch = new BatchRecord
+        var batch = new JobBatch
         {
             Id = Guid.CreateVersion7().ToString("N"),
             Status = JobStatus.Succeeded,
@@ -291,11 +295,13 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
             CompletedAt = old.AddMinutes(-1)
         };
 
-        var child = CreateRun(jobName, JobStatus.Succeeded);
-        child.BatchId = batch.Id;
-        child.CompletedAt = old;
-        child.StartedAt = old.AddMinutes(-1);
-        child.Attempt = 1;
+        var child = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            BatchId = batch.Id,
+            CompletedAt = old,
+            StartedAt = old.AddMinutes(-1),
+            Attempt = 1
+        };
 
         await Store.CreateBatchAsync(batch, [child]);
 

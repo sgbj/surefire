@@ -166,7 +166,7 @@ public sealed class DashboardEndpointsTests
         });
 
         await store.CreateRunsAsync([
-            new RunRecord
+            new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = "tests-job-stats-percent",
@@ -202,7 +202,7 @@ public sealed class DashboardEndpointsTests
         });
 
         await store.CreateRunsAsync([
-            new RunRecord
+            new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = "tests-stats-success-rate-ratio",
@@ -214,7 +214,7 @@ public sealed class DashboardEndpointsTests
                 Attempt = 1,
                 Progress = 1
             },
-            new RunRecord
+            new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = "tests-stats-success-rate-ratio",
@@ -254,7 +254,7 @@ public sealed class DashboardEndpointsTests
         var api = app.Services.GetRequiredService<IJobClient>();
         var run = await api.TriggerAsync("tests-cancel-terminal");
         var runId = run.Id;
-        await run.WaitAsync();
+        await api.WaitAsync(runId);
 
         using var client = app.GetTestClient();
         var response = await client.PostAsync($"/surefire/api/runs/{runId}/cancel", null);
@@ -280,7 +280,7 @@ public sealed class DashboardEndpointsTests
             a.AddJob("tests-batch", (int n) => n));
 
         var clientApi = app.Services.GetRequiredService<IJobClient>();
-        var batchId = (await clientApi.TriggerManyAsync("tests-batch", new object?[] { 1, 2, 3 })).Id;
+        var batchId = (await clientApi.TriggerBatchAsync("tests-batch", new object?[] { 1, 2, 3 })).Id;
 
         var store = app.Services.GetRequiredService<IJobStore>();
         var children = await store.GetRunsAsync(new RunFilter { BatchId = batchId }, take: 10);
@@ -307,7 +307,7 @@ public sealed class DashboardEndpointsTests
         var rootId = Guid.CreateVersion7().ToString("N");
         const int childCount = 1200;
 
-        var root = new RunRecord
+        var root = new JobRun
         {
             Id = rootId,
             JobName = "tests-trace-unbounded",
@@ -324,7 +324,7 @@ public sealed class DashboardEndpointsTests
             .Select(i =>
             {
                 var createdAt = now.AddMilliseconds(-(childCount - i));
-                return new RunRecord
+                return new JobRun
                 {
                     Id = Guid.CreateVersion7().ToString("N"),
                     JobName = "tests-trace-unbounded",
@@ -393,7 +393,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new RunRecord
+        var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -472,7 +472,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new RunRecord
+        var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -553,7 +553,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new RunRecord
+        var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -588,7 +588,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new RunRecord
+        var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -643,7 +643,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new RunRecord
+        var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -721,7 +721,7 @@ public sealed class DashboardEndpointsTests
         await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
 
         var now = DateTimeOffset.UtcNow;
-        var run = new RunRecord
+        var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,

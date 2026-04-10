@@ -26,8 +26,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var jobName = $"PriorityDefault_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(new() { Name = jobName, Priority = 42 });
 
-        var run = CreateRun(jobName);
-        run.Priority = 9;
+        var run = CreateRun(jobName) with { Priority = 9 };
 
         var created = await Store.TryCreateRunAsync(run);
 
@@ -41,8 +40,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     public async Task TryCreateRunAsync_UnknownJob_PersistsRunPriority()
     {
         var jobName = $"PriorityRequested_{Guid.CreateVersion7():N}";
-        var run = CreateRun(jobName);
-        run.Priority = 7;
+        var run = CreateRun(jobName) with { Priority = 7 };
 
         var created = await Store.TryCreateRunAsync(run);
 
@@ -58,10 +56,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var jobName = $"BatchPriorityDefault_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(new() { Name = jobName, Priority = 13 });
 
-        var runA = CreateRun(jobName);
-        var runB = CreateRun(jobName);
-        runA.Priority = 3;
-        runB.Priority = 11;
+        var runA = CreateRun(jobName) with { Priority = 3 };
+        var runB = CreateRun(jobName) with { Priority = 11 };
 
         await Store.CreateRunsAsync([runA, runB]);
 
@@ -149,14 +145,11 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         await Store.UpsertQueueAsync(new() { Name = queueName });
 
         var batchId = Guid.CreateVersion7().ToString("N");
-        var child1 = CreateRun(jobName);
-        child1.BatchId = batchId;
+        var child1 = CreateRun(jobName) with { BatchId = batchId };
 
-        var child2 = CreateRun(jobName);
-        child2.BatchId = batchId;
+        var child2 = CreateRun(jobName) with { BatchId = batchId };
 
-        var child3 = CreateRun(jobName);
-        child3.BatchId = batchId;
+        var child3 = CreateRun(jobName) with { BatchId = batchId };
 
         await Store.CreateRunsAsync([child1, child2, child3]);
 
@@ -209,7 +202,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         }
 
         // Claim concurrently from 10 threads — only 2 should succeed due to queue max_concurrency=2
-        var results = new ConcurrentBag<RunRecord?>();
+        var results = new ConcurrentBag<JobRun?>();
         var tasks = Enumerable.Range(0, 10).Select(t => Task.Run(async () =>
         {
             var claimed = await Store.ClaimRunAsync($"node-{t}", jobNames, [queueName]);
@@ -230,10 +223,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         await Store.UpsertQueueAsync(new() { Name = queueName });
 
         var batchId = Guid.CreateVersion7().ToString("N");
-        var child1 = CreateRun(jobName);
-        child1.BatchId = batchId;
-        var child2 = CreateRun(jobName);
-        child2.BatchId = batchId;
+        var child1 = CreateRun(jobName) with { BatchId = batchId };
+        var child2 = CreateRun(jobName) with { BatchId = batchId };
 
         // An unrelated run in the same queue
         var unrelated = CreateRun(jobName);
@@ -305,27 +296,30 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var past = now.AddMinutes(-10);
 
         // Create 1 expired pending run
-        var pending1 = CreateRun(jobName);
-        pending1.NotAfter = past;
+        var pending1 = CreateRun(jobName) with { NotAfter = past };
         await Store.CreateRunsAsync([pending1]);
 
         // Create a Running run with expired NotAfter (should NOT be cancelled)
-        var running = CreateRun(jobName, JobStatus.Running);
-        running.NotAfter = past;
-        running.NodeName = "node1";
-        running.Attempt = 1;
-        running.StartedAt = now;
-        running.LastHeartbeatAt = now;
+        var running = CreateRun(jobName, JobStatus.Running) with
+        {
+            NotAfter = past,
+            NodeName = "node1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now
+        };
         await Store.CreateRunsAsync([running]);
 
         // Create a Retrying run with expired NotAfter (SHOULD be cancelled)
-        var retrying = CreateRun(jobName, JobStatus.Retrying);
-        retrying.NotAfter = past;
-        retrying.NodeName = "node1";
-        retrying.Attempt = 1;
-        retrying.StartedAt = now;
-        retrying.LastHeartbeatAt = now;
-        retrying.Error = "temp failure";
+        var retrying = CreateRun(jobName, JobStatus.Retrying) with
+        {
+            NotAfter = past,
+            NodeName = "node1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now,
+            Error = "temp failure"
+        };
         await Store.CreateRunsAsync([retrying]);
 
         // 1 Pending + 1 Retrying = 2 should be cancelled

@@ -326,19 +326,19 @@ internal sealed class SqliteJobStore(
     }
 
     public Task CreateRunsAsync(
-        IReadOnlyList<RunRecord> runs,
+        IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
 
     public Task<bool> TryCreateRunAsync(
-        RunRecord run, int? maxActiveForJob = null,
+        JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
-    public async Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
@@ -349,7 +349,7 @@ internal sealed class SqliteJobStore(
         return await reader.ReadAsync(cancellationToken) ? ReadRun(reader) : null;
     }
 
-    public async Task<PagedResult<RunRecord>> GetRunsAsync(
+    public async Task<PagedResult<JobRun>> GetRunsAsync(
         RunFilter filter, int skip = 0, int take = 50, CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -462,7 +462,7 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@tk", take);
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        var items = new List<RunRecord>();
+        var items = new List<JobRun>();
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(ReadRun(reader));
@@ -472,7 +472,7 @@ internal sealed class SqliteJobStore(
         return new() { Items = items, TotalCount = totalCount };
     }
 
-    public async Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
+    public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
@@ -544,7 +544,7 @@ internal sealed class SqliteJobStore(
         return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
-    public async Task<RunRecord?> ClaimRunAsync(
+    public async Task<JobRun?> ClaimRunAsync(
         string nodeName,
         IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames,
@@ -715,7 +715,7 @@ internal sealed class SqliteJobStore(
             """,
             [new("@name", jobName)], now, tx, cancellationToken);
 
-        RunRecord? result;
+        JobRun? result;
         await using (var readCmd = CreateCommand(conn, """
                                                        SELECT * FROM surefire_runs WHERE id = @id
                                                        """, tx))
@@ -730,8 +730,8 @@ internal sealed class SqliteJobStore(
     }
 
     public async Task CreateBatchAsync(
-        BatchRecord batch,
-        IReadOnlyList<RunRecord> runs,
+        JobBatch batch,
+        IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
     {
@@ -764,7 +764,7 @@ internal sealed class SqliteJobStore(
         await tx.CommitAsync(cancellationToken);
     }
 
-    public async Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
@@ -870,6 +870,26 @@ internal sealed class SqliteJobStore(
 
         await tx.CommitAsync(cancellationToken);
         return cancelledIds;
+    }
+
+    public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = await CreateConnectionAsync(cancellationToken);
+        var result = new List<string>();
+        await using var cmd = CreateCommand(conn, """
+                                                  SELECT b.id FROM surefire_batches b
+                                                  WHERE b.status NOT IN (2, 4, 5)
+                                                  AND NOT EXISTS (
+                                                      SELECT 1 FROM surefire_runs r
+                                                      WHERE r.batch_id = b.id AND r.status NOT IN (2, 4, 5)
+                                                  )
+                                                  """);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(reader.GetString(0));
+        }
+        return result;
     }
 
     public async Task AppendEventsAsync(
@@ -1570,7 +1590,7 @@ internal sealed class SqliteJobStore(
     }
 
     private async Task CreateRunsCoreAsync(
-        IReadOnlyList<RunRecord> runs,
+        IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1592,7 +1612,7 @@ internal sealed class SqliteJobStore(
     }
 
     private async Task<bool> TryCreateRunCoreAsync(
-        RunRecord run, int? maxActiveForJob, DateTimeOffset? lastCronFireAt,
+        JobRun run, int? maxActiveForJob, DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1778,7 +1798,7 @@ internal sealed class SqliteJobStore(
 
     private static async Task InsertRunAsync(
         SqliteConnection conn,
-        RunRecord run,
+        JobRun run,
         CancellationToken cancellationToken,
         SqliteTransaction? tx = null)
     {
@@ -1886,7 +1906,7 @@ internal sealed class SqliteJobStore(
         LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at")
     };
 
-    private static RunRecord ReadRun(SqliteDataReader reader)
+    private static JobRun ReadRun(SqliteDataReader reader)
     {
         return new()
         {

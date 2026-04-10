@@ -20,15 +20,11 @@ public abstract class StatsConformanceTests : StoreConformanceBase
             CreateRun(jobName, JobStatus.Failed)
         };
 
-        foreach (var run in runs)
+        for (var i = 0; i < runs.Length; i++)
         {
-            run.CreatedAt = now;
-            run.NotBefore = now;
-            if (run.Status is JobStatus.Succeeded or JobStatus.Cancelled or JobStatus.Failed)
-            {
-                run.StartedAt = now;
-                run.CompletedAt = now;
-            }
+            runs[i] = runs[i].Status is JobStatus.Succeeded or JobStatus.Cancelled or JobStatus.Failed
+                ? runs[i] with { CreatedAt = now, NotBefore = now, StartedAt = now, CompletedAt = now }
+                : runs[i] with { CreatedAt = now, NotBefore = now };
         }
 
         await Store.CreateRunsAsync(runs);
@@ -72,17 +68,14 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([r1]);
         var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c1);
-        c1.Status = JobStatus.Succeeded;
-        c1.CompletedAt = DateTimeOffset.UtcNow;
+        c1 = c1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running));
 
         var r2 = CreateRun(jobName);
         await Store.CreateRunsAsync([r2]);
         var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c2);
-        c2.Status = JobStatus.Failed;
-        c2.CompletedAt = DateTimeOffset.UtcNow;
-        c2.Error = "permanent failure";
+        c2 = c2 with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow, Error = "permanent failure" };
         await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running));
 
         var r3 = CreateRun(jobName);
@@ -143,15 +136,18 @@ public abstract class StatsConformanceTests : StoreConformanceBase
 
         var now = DateTimeOffset.UtcNow;
 
-        // Create a completed run in the past (before "since")
-        var oldRun = CreateRun(jobName, JobStatus.Succeeded);
-        oldRun.CompletedAt = now.AddHours(-5);
-        oldRun.StartedAt = now.AddHours(-5);
+        var oldRun = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            CompletedAt = now.AddHours(-5),
+            StartedAt = now.AddHours(-5)
+        };
 
         // Create a completed run recently (after "since")
-        var recentRun = CreateRun(jobName, JobStatus.Succeeded);
-        recentRun.CompletedAt = now.AddMinutes(-30);
-        recentRun.StartedAt = now.AddMinutes(-30);
+        var recentRun = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            CompletedAt = now.AddMinutes(-30),
+            StartedAt = now.AddMinutes(-30)
+        };
 
         await Store.CreateRunsAsync([oldRun, recentRun]);
 
@@ -204,15 +200,12 @@ public abstract class StatsConformanceTests : StoreConformanceBase
 
         var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c1);
-        c1.Status = JobStatus.Succeeded;
-        c1.CompletedAt = DateTimeOffset.UtcNow;
+        c1 = c1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running));
 
         var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(c2);
-        c2.Status = JobStatus.Failed;
-        c2.CompletedAt = DateTimeOffset.UtcNow;
-        c2.Error = "permanent failure";
+        c2 = c2 with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow, Error = "permanent failure" };
         await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running));
 
         var since = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));

@@ -51,12 +51,11 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         Assert.NotNull(claimed);
         Assert.Equal(1, claimed.Attempt);
 
-        claimed.Status = JobStatus.Retrying;
+        claimed = claimed with { Status = JobStatus.Retrying };
         var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
         Assert.True(ok);
 
-        claimed.Status = JobStatus.Pending;
-        claimed.NotBefore = DateTimeOffset.UtcNow.AddSeconds(-1);
+        claimed = claimed with { Status = JobStatus.Pending, NotBefore = DateTimeOffset.UtcNow.AddSeconds(-1) };
         ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Retrying));
         Assert.True(ok);
 
@@ -142,8 +141,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var run = CreateRun(job.Name);
-        run.NotBefore = DateTimeOffset.UtcNow.AddHours(1);
+        var run = CreateRun(job.Name) with { NotBefore = DateTimeOffset.UtcNow.AddHours(1) };
         await Store.CreateRunsAsync([run]);
 
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
@@ -201,10 +199,8 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var lowPriority = CreateRun(job.Name);
-        lowPriority.Priority = 0;
-        var highPriority = CreateRun(job.Name);
-        highPriority.Priority = 10;
+        var lowPriority = CreateRun(job.Name) with { Priority = 0 };
+        var highPriority = CreateRun(job.Name) with { Priority = 10 };
 
         await Store.CreateRunsAsync([lowPriority]);
         await Store.CreateRunsAsync([highPriority]);
@@ -250,8 +246,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(job);
 
         var batchId = Guid.CreateVersion7().ToString("N");
-        var child = CreateRun(job.Name);
-        child.BatchId = batchId;
+        var child = CreateRun(job.Name) with { BatchId = batchId };
         await Store.CreateRunsAsync([child]);
 
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
@@ -273,7 +268,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
             var run = CreateRun(jobName);
             await Store.CreateRunsAsync([run]);
 
-            var results = new ConcurrentBag<RunRecord?>();
+            var results = new ConcurrentBag<JobRun?>();
 
             var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
             {
@@ -427,10 +422,8 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow).AddMinutes(-5);
-        var laterRun = CreateRun(jobName);
-        laterRun.NotBefore = baseTime.AddMinutes(2);
-        var earlierRun = CreateRun(jobName);
-        earlierRun.NotBefore = baseTime.AddMinutes(1);
+        var laterRun = CreateRun(jobName) with { NotBefore = baseTime.AddMinutes(2) };
+        var earlierRun = CreateRun(jobName) with { NotBefore = baseTime.AddMinutes(1) };
 
         await Store.CreateRunsAsync([laterRun, earlierRun]);
 
@@ -503,7 +496,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
                 await Store.CreateRunsAsync([run]);
             }
 
-            var results = new ConcurrentBag<RunRecord?>();
+            var results = new ConcurrentBag<JobRun?>();
 
             var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
             {
@@ -524,12 +517,9 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(job);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow).AddMinutes(-1);
-        var run1 = CreateRun(job.Name);
-        run1.NotBefore = now;
-        var run2 = CreateRun(job.Name);
-        run2.NotBefore = now;
-        var run3 = CreateRun(job.Name);
-        run3.NotBefore = now;
+        var run1 = CreateRun(job.Name) with { NotBefore = now };
+        var run2 = CreateRun(job.Name) with { NotBefore = now };
+        var run3 = CreateRun(job.Name) with { NotBefore = now };
 
         await Store.CreateRunsAsync([run1, run2, run3]);
 
@@ -553,8 +543,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var run = CreateRun(job.Name);
-        run.NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var run = CreateRun(job.Name) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run]);
 
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
@@ -568,8 +557,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var run = CreateRun(job.Name);
-        run.NotAfter = DateTimeOffset.UtcNow.AddHours(1);
+        var run = CreateRun(job.Name) with { NotAfter = DateTimeOffset.UtcNow.AddHours(1) };
         await Store.CreateRunsAsync([run]);
 
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
@@ -624,10 +612,8 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(jobA);
         await Store.UpsertJobAsync(jobB);
 
-        var lowerPriority = CreateRun(jobA.Name);
-        lowerPriority.Priority = 1;
-        var higherPriority = CreateRun(jobB.Name);
-        higherPriority.Priority = 100;
+        var lowerPriority = CreateRun(jobA.Name) with { Priority = 1 };
+        var higherPriority = CreateRun(jobB.Name) with { Priority = 100 };
 
         await Store.CreateRunsAsync([lowerPriority]);
         await Store.CreateRunsAsync([higherPriority]);

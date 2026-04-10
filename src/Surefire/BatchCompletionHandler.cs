@@ -47,7 +47,7 @@ internal sealed partial class BatchCompletionHandler(
         await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
     }
 
-    public async Task AppendFailureEventAsync(RunRecord run, RunFailureEnvelope envelope,
+    public async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
         CancellationToken cancellationToken)
     {
         try

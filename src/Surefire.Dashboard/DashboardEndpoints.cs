@@ -220,7 +220,7 @@ public static class DashboardEndpoints
 
                 var includeRoot = resolvedSkip == 0;
                 var remainingTake = resolvedTake - (includeRoot ? 1 : 0);
-                var descendants = new List<RunRecord>(Math.Max(remainingTake, 0));
+                var descendants = new List<JobRun>(Math.Max(remainingTake, 0));
 
                 var descendantsSkip = Math.Max(resolvedSkip - 1, 0);
 

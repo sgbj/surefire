@@ -141,7 +141,7 @@ app.AddJob("BigJob", async (IJobClient client, ILogger<Program> logger, Cancella
             logger.LogInformation("Iteration: {I}", i);
         }
 
-        var results = await client.RunManyAsync<AddRandomResult>("AddRandom", new object?[10000], cancellationToken: ct);
+        var results = await client.RunBatchAsync<AddRandomResult>("AddRandom", new object?[10000], cancellationToken: ct);
         return results.Sum(r => (long)r.Sum);
     });
 

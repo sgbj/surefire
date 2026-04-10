@@ -14,7 +14,7 @@ internal static class ContinuousRunSeeder
         for (var i = 0; i < desired; i++)
         {
             var now = timeProvider.GetUtcNow();
-            var run = new RunRecord
+            var run = new JobRun
             {
                 Id = Guid.CreateVersion7().ToString("N"),
                 JobName = definition.Name,

@@ -6,9 +6,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     public async Task CreateRuns_Persists()
     {
         var run = CreateRun();
-        run.Arguments = """{"key":"value"}""";
-        run.Priority = 5;
-        run.DeduplicationId = "dedup-1";
+        run = run with { Arguments = """{"key":"value"}""", Priority = 5, DeduplicationId = "dedup-1" };
 
         await Store.CreateRunsAsync([run]);
 
@@ -108,8 +106,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var originalRun = CreateRun(jobName);
-        var rerun = CreateRun(jobName);
-        rerun.RerunOfRunId = originalRun.Id;
+        var rerun = CreateRun(jobName) with { RerunOfRunId = originalRun.Id };
 
         await Store.CreateRunsAsync([originalRun, rerun]);
 
@@ -124,13 +121,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"Dedup_{Guid.CreateVersion7():N}";
         var dedupId = Guid.CreateVersion7().ToString("N");
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = dedupId;
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var result1 = await Store.TryCreateRunAsync(run1);
         Assert.True(result1);
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var result2 = await Store.TryCreateRunAsync(run2);
         Assert.False(result2);
     }
@@ -162,13 +157,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"InitialEventsReject_{Guid.CreateVersion7():N}";
         var dedupId = Guid.CreateVersion7().ToString("N");
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = dedupId;
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var ok = await Store.TryCreateRunAsync(run1);
         Assert.True(ok);
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var evt = new RunEvent
         {
             RunId = run2.Id,
@@ -193,13 +186,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var dedupId = Guid.CreateVersion7().ToString("N");
 
-        var run1 = CreateRun($"JobA_{Guid.CreateVersion7():N}");
-        run1.DeduplicationId = dedupId;
+        var run1 = CreateRun($"JobA_{Guid.CreateVersion7():N}") with { DeduplicationId = dedupId };
         var result1 = await Store.TryCreateRunAsync(run1);
         Assert.True(result1);
 
-        var run2 = CreateRun($"JobB_{Guid.CreateVersion7():N}");
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun($"JobB_{Guid.CreateVersion7():N}") with { DeduplicationId = dedupId };
         var result2 = await Store.TryCreateRunAsync(run2);
         Assert.True(result2);
     }
@@ -209,13 +200,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"NoDedup_{Guid.CreateVersion7():N}";
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = null;
+        var run1 = CreateRun(jobName) with { DeduplicationId = null };
         var result1 = await Store.TryCreateRunAsync(run1);
         Assert.True(result1);
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = null;
+        var run2 = CreateRun(jobName) with { DeduplicationId = null };
         var result2 = await Store.TryCreateRunAsync(run2);
         Assert.True(result2);
     }
@@ -227,20 +216,17 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var dedupId = Guid.CreateVersion7().ToString("N");
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = dedupId;
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var result1 = await Store.TryCreateRunAsync(run1);
         Assert.True(result1);
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Succeeded;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var result2 = await Store.TryCreateRunAsync(run2);
         Assert.True(result2);
     }
@@ -302,14 +288,12 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetRun_ReturnsIsolatedCopy()
     {
-        var run = CreateRun();
-        run.Arguments = """{"key":"value"}""";
+        var run = CreateRun() with { Arguments = """{"key":"value"}""" };
         await Store.CreateRunsAsync([run]);
 
         var copy1 = await Store.GetRunAsync(run.Id);
         Assert.NotNull(copy1);
-        copy1.Arguments = """{"mutated":true}""";
-        copy1.Progress = 0.99;
+        copy1 = copy1 with { Arguments = """{"mutated":true}""", Progress = 0.99 };
 
         var copy2 = await Store.GetRunAsync(run.Id);
         Assert.NotNull(copy2);
@@ -330,11 +314,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"StatusFilter_{Guid.CreateVersion7():N}";
 
         var pending = CreateRun(jobName);
-        var completed = CreateRun(jobName, JobStatus.Succeeded);
-        completed.CompletedAt = DateTimeOffset.UtcNow;
-        var cancelled = CreateRun(jobName, JobStatus.Cancelled);
-        cancelled.CompletedAt = DateTimeOffset.UtcNow;
-        cancelled.CancelledAt = DateTimeOffset.UtcNow;
+        var completed = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = DateTimeOffset.UtcNow };
+        var cancelled = CreateRun(jobName, JobStatus.Cancelled) with { CompletedAt = DateTimeOffset.UtcNow, CancelledAt = DateTimeOffset.UtcNow };
 
         await Store.CreateRunsAsync([pending, completed, cancelled]);
 
@@ -372,13 +353,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var parentId = Guid.CreateVersion7().ToString("N");
         var parent = CreateRun(id: parentId);
 
-        var child1 = CreateRun();
-        child1.ParentRunId = parentId;
-        child1.RootRunId = parentId;
+        var child1 = CreateRun() with { ParentRunId = parentId, RootRunId = parentId };
 
-        var child2 = CreateRun();
-        child2.ParentRunId = parentId;
-        child2.RootRunId = parentId;
+        var child2 = CreateRun() with { ParentRunId = parentId, RootRunId = parentId };
 
         var unrelated = CreateRun();
 
@@ -397,13 +374,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var rootId = Guid.CreateVersion7().ToString("N");
         var root = CreateRun(id: rootId);
 
-        var child = CreateRun();
-        child.ParentRunId = rootId;
-        child.RootRunId = rootId;
+        var child = CreateRun() with { ParentRunId = rootId, RootRunId = rootId };
 
-        var grandchild = CreateRun();
-        grandchild.ParentRunId = child.Id;
-        grandchild.RootRunId = rootId;
+        var grandchild = CreateRun() with { ParentRunId = child.Id, RootRunId = rootId };
 
         var unrelated = CreateRun();
 
@@ -420,8 +393,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     public async Task GetRuns_FilterByBatchId()
     {
         var batchId = Guid.CreateVersion7().ToString("N");
-        var batchRun = CreateRun();
-        batchRun.BatchId = batchId;
+        var batchRun = CreateRun() with { BatchId = batchId };
 
         var normal = CreateRun();
 
@@ -439,12 +411,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"Terminal_{Guid.CreateVersion7():N}";
 
         var pending = CreateRun(jobName);
-        var running = CreateRun(jobName, JobStatus.Running);
-        running.StartedAt = DateTimeOffset.UtcNow;
-        var completed = CreateRun(jobName, JobStatus.Succeeded);
-        completed.CompletedAt = DateTimeOffset.UtcNow;
-        var deadLetter = CreateRun(jobName, JobStatus.Failed);
-        deadLetter.CompletedAt = DateTimeOffset.UtcNow;
+        var running = CreateRun(jobName, JobStatus.Running) with { StartedAt = DateTimeOffset.UtcNow };
+        var completed = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = DateTimeOffset.UtcNow };
+        var deadLetter = CreateRun(jobName, JobStatus.Failed) with { CompletedAt = DateTimeOffset.UtcNow };
 
         await Store.CreateRunsAsync([pending, running, completed, deadLetter]);
 
@@ -475,12 +444,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"Paged_{Guid.CreateVersion7():N}";
         var runs = Enumerable.Range(0, 10)
-            .Select(i =>
-            {
-                var run = CreateRun(jobName);
-                run.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(i);
-                return run;
-            })
+            .Select(i => CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(i) })
             .ToList();
 
         await Store.CreateRunsAsync(runs);
@@ -510,10 +474,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var pendingRuns = Enumerable.Range(0, 9)
             .Select(i =>
             {
-                var run = CreateRun(jobName, JobStatus.Pending);
-                run.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(i);
-                run.NotBefore = run.CreatedAt;
-                return run;
+                var createdAt = DateTimeOffset.UtcNow.AddMinutes(i);
+                return CreateRun(jobName, JobStatus.Pending) with { CreatedAt = createdAt, NotBefore = createdAt };
             })
             .ToList();
 
@@ -562,14 +524,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"Ordered_{Guid.CreateVersion7():N}";
 
-        var early = CreateRun(jobName);
-        early.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-10);
-
-        var middle = CreateRun(jobName);
-        middle.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
-
-        var late = CreateRun(jobName);
-        late.CreatedAt = DateTimeOffset.UtcNow;
+        var early = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-10) };
+        var middle = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-5) };
+        var late = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow };
 
         await Store.CreateRunsAsync([early, middle, late]);
 
@@ -592,11 +549,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"Heartbeat_{Guid.CreateVersion7():N}";
         var cutoff = DateTimeOffset.UtcNow;
 
-        var stale = CreateRun(jobName);
-        stale.LastHeartbeatAt = cutoff.AddMinutes(-10);
+        var stale = CreateRun(jobName) with { LastHeartbeatAt = cutoff.AddMinutes(-10) };
 
-        var fresh = CreateRun(jobName);
-        fresh.LastHeartbeatAt = cutoff.AddMinutes(10);
+        var fresh = CreateRun(jobName) with { LastHeartbeatAt = cutoff.AddMinutes(10) };
 
         await Store.CreateRunsAsync([stale, fresh]);
 
@@ -614,19 +569,20 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     [Fact]
     public async Task UpdateRun_PersistsFields()
     {
-        var run = CreateRun();
-        run.NodeName = "node-1";
+        var run = CreateRun() with { NodeName = "node-1" };
         await Store.CreateRunsAsync([run]);
 
-        var updated = CreateRun(id: run.Id);
-        updated.JobName = run.JobName;
-        updated.NodeName = "node-1";
-        updated.Progress = 0.75;
-        updated.TraceId = "trace-abc";
-        updated.SpanId = "span-xyz";
-        updated.Result = """{"output":42}""";
-        updated.Error = "partial failure";
-        updated.LastHeartbeatAt = DateTimeOffset.UtcNow;
+        var updated = CreateRun(id: run.Id) with
+        {
+            JobName = run.JobName,
+            NodeName = "node-1",
+            Progress = 0.75,
+            TraceId = "trace-abc",
+            SpanId = "span-xyz",
+            Result = """{"output":42}""",
+            Error = "partial failure",
+            LastHeartbeatAt = DateTimeOffset.UtcNow
+        };
 
         await Store.UpdateRunAsync(updated);
 
@@ -643,17 +599,16 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     [Fact]
     public async Task UpdateRun_SkipsTerminalRuns()
     {
-        var run = CreateRun(status: JobStatus.Succeeded);
-        run.CompletedAt = DateTimeOffset.UtcNow;
-        run.Progress = 1.0;
-        run.NodeName = "node-1";
+        var run = CreateRun(status: JobStatus.Succeeded) with { CompletedAt = DateTimeOffset.UtcNow, Progress = 1.0, NodeName = "node-1" };
         await Store.CreateRunsAsync([run]);
 
-        var updated = CreateRun(id: run.Id);
-        updated.JobName = run.JobName;
-        updated.NodeName = "node-1";
-        updated.Progress = 0.5;
-        updated.Error = "should not persist";
+        var updated = CreateRun(id: run.Id) with
+        {
+            JobName = run.JobName,
+            NodeName = "node-1",
+            Progress = 0.5,
+            Error = "should not persist"
+        };
 
         await Store.UpdateRunAsync(updated);
 
@@ -668,14 +623,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"CreatedRange_{Guid.CreateVersion7():N}";
 
-        var early = CreateRun(jobName);
-        early.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30);
+        var early = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30) };
 
-        var middle = CreateRun(jobName);
-        middle.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-15);
+        var middle = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-15) };
 
-        var late = CreateRun(jobName);
-        late.CreatedAt = DateTimeOffset.UtcNow;
+        var late = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow };
 
         await Store.CreateRunsAsync([early, middle, late]);
 
@@ -696,17 +648,14 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"StatusCreatedRange_{Guid.CreateVersion7():N}";
 
-        var early = CreateRun(jobName, JobStatus.Succeeded);
-        early.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30);
-        early.CompletedAt = early.CreatedAt;
+        var earlyCreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30);
+        var early = CreateRun(jobName, JobStatus.Succeeded) with { CreatedAt = earlyCreatedAt, CompletedAt = earlyCreatedAt };
 
-        var middle = CreateRun(jobName, JobStatus.Succeeded);
-        middle.CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-15);
-        middle.CompletedAt = middle.CreatedAt;
+        var middleCreatedAt = DateTimeOffset.UtcNow.AddMinutes(-15);
+        var middle = CreateRun(jobName, JobStatus.Succeeded) with { CreatedAt = middleCreatedAt, CompletedAt = middleCreatedAt };
 
-        var late = CreateRun(jobName, JobStatus.Succeeded);
-        late.CreatedAt = DateTimeOffset.UtcNow;
-        late.CompletedAt = late.CreatedAt;
+        var lateCreatedAt = DateTimeOffset.UtcNow;
+        var late = CreateRun(jobName, JobStatus.Succeeded) with { CreatedAt = lateCreatedAt, CompletedAt = lateCreatedAt };
 
         await Store.CreateRunsAsync([early, middle, late]);
 
@@ -728,12 +677,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run1 = CreateRun(jobName, JobStatus.Running);
-        run1.StartedAt = baseTime.AddMinutes(-3);
-        var run2 = CreateRun(jobName, JobStatus.Running);
-        run2.StartedAt = baseTime.AddMinutes(-2);
-        var run3 = CreateRun(jobName, JobStatus.Running);
-        run3.StartedAt = baseTime.AddMinutes(-1);
+        var run1 = CreateRun(jobName, JobStatus.Running) with { StartedAt = baseTime.AddMinutes(-3) };
+        var run2 = CreateRun(jobName, JobStatus.Running) with { StartedAt = baseTime.AddMinutes(-2) };
+        var run3 = CreateRun(jobName, JobStatus.Running) with { StartedAt = baseTime.AddMinutes(-1) };
 
         await Store.CreateRunsAsync([run1, run2, run3]);
 
@@ -757,12 +703,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run1 = CreateRun(jobName, JobStatus.Succeeded);
-        run1.CompletedAt = baseTime.AddMinutes(-3);
-        var run2 = CreateRun(jobName, JobStatus.Succeeded);
-        run2.CompletedAt = baseTime.AddMinutes(-2);
-        var run3 = CreateRun(jobName, JobStatus.Succeeded);
-        run3.CompletedAt = baseTime.AddMinutes(-1);
+        var run1 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-3) };
+        var run2 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-2) };
+        var run3 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-1) };
 
         await Store.CreateRunsAsync([run1, run2, run3]);
 
@@ -786,19 +729,21 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));
-        var completedRuns = new List<RunRecord>(300);
+        var completedRuns = new List<JobRun>(300);
 
         for (var i = 0; i < 300; i++)
         {
-            var run = CreateRun(jobName, JobStatus.Succeeded);
             var timestamp = baseTime.AddSeconds(i);
-            run.CreatedAt = timestamp;
-            run.NotBefore = timestamp;
-            run.StartedAt = timestamp;
-            run.CompletedAt = timestamp;
-            run.NodeName = "node-1";
-            run.Attempt = 1;
-            run.Progress = 1;
+            var run = CreateRun(jobName, JobStatus.Succeeded) with
+            {
+                CreatedAt = timestamp,
+                NotBefore = timestamp,
+                StartedAt = timestamp,
+                CompletedAt = timestamp,
+                NodeName = "node-1",
+                Attempt = 1,
+                Progress = 1
+            };
             completedRuns.Add(run);
         }
 
@@ -840,8 +785,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.NodeName = "wrong-node";
-        claimed.Progress = 0.5;
+        claimed = claimed with { NodeName = "wrong-node", Progress = 0.5 };
         await Store.UpdateRunAsync(claimed);
 
         var after = await Store.GetRunAsync(run.Id);
@@ -854,10 +798,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"NodeFilter_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run1 = CreateRun(jobName, JobStatus.Running);
-        run1.NodeName = "node-a";
-        var run2 = CreateRun(jobName, JobStatus.Running);
-        run2.NodeName = "node-b";
+        var run1 = CreateRun(jobName, JobStatus.Running) with { NodeName = "node-a" };
+        var run2 = CreateRun(jobName, JobStatus.Running) with { NodeName = "node-b" };
 
         await Store.CreateRunsAsync([run1, run2]);
 
@@ -874,10 +816,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        var run1 = CreateRun(jobName, JobStatus.Succeeded);
-        run1.CompletedAt = baseTime.AddMinutes(-10);
-        var run2 = CreateRun(jobName, JobStatus.Succeeded);
-        run2.CompletedAt = baseTime.AddMinutes(-1);
+        var run1 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-10) };
+        var run2 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-1) };
 
         await Store.CreateRunsAsync([run1, run2]);
 
@@ -900,13 +840,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         job.MaxConcurrency = 5;
         await Store.UpsertJobAsync(job);
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = "unique-1";
+        var run1 = CreateRun(jobName) with { DeduplicationId = "unique-1" };
         var created1 = await Store.TryCreateRunAsync(run1, 5);
         Assert.True(created1);
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = "unique-1";
+        var run2 = CreateRun(jobName) with { DeduplicationId = "unique-1" };
         var created2 = await Store.TryCreateRunAsync(run2, 5);
         Assert.False(created2);
     }
@@ -923,8 +861,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
                 Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
                 {
                     await Task.Delay(1);
-                    var run = CreateRun("TestJob");
-                    run.DeduplicationId = dedupId;
+                    var run = CreateRun("TestJob") with { DeduplicationId = dedupId };
                     return await Store.TryCreateRunAsync(run);
                 })));
 
@@ -963,8 +900,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     [Fact]
     public async Task UpdateRun_NonExistent_IsNoOp()
     {
-        var run = CreateRun("TestJob");
-        run.Progress = 0.5;
+        var run = CreateRun("TestJob") with { Progress = 0.5 };
         // Should not throw
         await Store.UpdateRunAsync(run);
     }
@@ -1009,24 +945,20 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var dedupId = Guid.CreateVersion7().ToString("N");
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = dedupId;
-        run1.CreatedAt = DateTimeOffset.UtcNow.AddDays(-30);
-        run1.NotBefore = run1.CreatedAt;
+        var createdAt1 = DateTimeOffset.UtcNow.AddDays(-30);
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId, CreatedAt = createdAt1, NotBefore = createdAt1 };
         Assert.True(await Store.TryCreateRunAsync(run1));
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
-        claimed.Status = JobStatus.Succeeded;
-        claimed.CompletedAt = DateTimeOffset.UtcNow.AddDays(-30);
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow.AddDays(-30) };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
         await Store.PurgeAsync(DateTimeOffset.UtcNow.AddDays(-7));
 
         Assert.Null(await Store.GetRunAsync(run1.Id));
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.True(await Store.TryCreateRunAsync(run2));
     }
 
@@ -1038,20 +970,17 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
 
-        var oldPending = CreateRun(jobName);
-        oldPending.CreatedAt = now.AddHours(-2);
-        oldPending.NotBefore = oldPending.CreatedAt;
+        var oldPendingCreatedAt = now.AddHours(-2);
+        var oldPending = CreateRun(jobName) with { CreatedAt = oldPendingCreatedAt, NotBefore = oldPendingCreatedAt };
 
-        var recentPending = CreateRun(jobName);
-        recentPending.CreatedAt = now.AddMinutes(-5);
-        recentPending.NotBefore = recentPending.CreatedAt;
+        var recentPendingCreatedAt = now.AddMinutes(-5);
+        var recentPending = CreateRun(jobName) with { CreatedAt = recentPendingCreatedAt, NotBefore = recentPendingCreatedAt };
 
         await Store.CreateRunsAsync([oldPending, recentPending]);
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
-        claimed.Status = JobStatus.Succeeded;
-        claimed.CompletedAt = now;
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = now };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
         var result = await Store.GetRunsAsync(new()
@@ -1082,11 +1011,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var jobName = $"TermPage_{Guid.CreateVersion7():N}";
 
-        var runs = new List<RunRecord>();
+        var runs = new List<JobRun>();
         for (var i = 0; i < 5; i++)
         {
-            var r = CreateRun(jobName, JobStatus.Succeeded);
-            r.CompletedAt = DateTimeOffset.UtcNow;
+            var r = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = DateTimeOffset.UtcNow };
             runs.Add(r);
         }
 
@@ -1116,7 +1044,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([run]);
 
         // Update progress on a run that has no node assigned
-        run.Progress = 0.5;
+        run = run with { Progress = 0.5 };
         await Store.UpdateRunAsync(run);
 
         var loaded = await Store.GetRunAsync(run.Id);
@@ -1132,14 +1060,12 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var dedupId = Guid.CreateVersion7().ToString("N");
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = dedupId;
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.True(await Store.TryCreateRunAsync(run1));
 
         Assert.True(await Store.TryCancelRunAsync(run1.Id));
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.True(await Store.TryCreateRunAsync(run2));
     }
 
@@ -1150,12 +1076,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var dedupId = Guid.CreateVersion7().ToString("N");
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = dedupId;
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.True(await Store.TryCreateRunAsync(run1));
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = dedupId;
+        var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.False(await Store.TryCreateRunAsync(run2));
     }
 
@@ -1184,12 +1108,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"CronReject_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run1 = CreateRun(jobName);
-        run1.DeduplicationId = "same";
+        var run1 = CreateRun(jobName) with { DeduplicationId = "same" };
         Assert.True(await Store.TryCreateRunAsync(run1, lastCronFireAt: DateTimeOffset.UtcNow.AddMinutes(-5)));
 
-        var run2 = CreateRun(jobName);
-        run2.DeduplicationId = "same";
+        var run2 = CreateRun(jobName) with { DeduplicationId = "same" };
         var laterFireAt = DateTimeOffset.UtcNow;
         Assert.False(await Store.TryCreateRunAsync(run2, lastCronFireAt: laterFireAt));
 

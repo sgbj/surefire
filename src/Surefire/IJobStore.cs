@@ -4,7 +4,7 @@ namespace Surefire;
 ///     Defines the storage contract for Surefire job data. All implementations must provide
 ///     equivalent behavioral and atomicity guarantees as specified in the store contract.
 /// </summary>
-internal interface IJobStore
+public interface IJobStore
 {
     /// <summary>
     ///     Creates or updates the store schema. This is always the first method called on the store,
@@ -73,7 +73,7 @@ internal interface IJobStore
     /// <param name="runs">The runs to insert.</param>
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
+    Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default);
 
@@ -96,7 +96,7 @@ internal interface IJobStore
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>True if the run was created; false if it was rejected.</returns>
-    Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
+    Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default);
@@ -107,7 +107,7 @@ internal interface IJobStore
     /// <param name="id">The run ID.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching run, or null.</returns>
-    Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default);
+    Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns a page of runs matching the specified filter criteria.
@@ -121,7 +121,7 @@ internal interface IJobStore
     ///     <paramref name="skip" /> is less than 0, or <paramref name="take" /> is
     ///     less than or equal to 0.
     /// </exception>
-    Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -132,7 +132,7 @@ internal interface IJobStore
     /// </summary>
     /// <param name="run">The run with updated fields. <c>NodeName</c> is used as a fencing token.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default);
+    Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Atomically applies a run status transition using compare-and-swap. The transition succeeds only
@@ -199,7 +199,7 @@ internal interface IJobStore
     /// <param name="queueNames">The queue names this node is registered to process.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The claimed run with updated status, node, and attempt; or null if no eligible run was found.</returns>
-    Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -210,7 +210,7 @@ internal interface IJobStore
     /// <param name="runs">The child runs belonging to the batch.</param>
     /// <param name="initialEvents">Optional events to append atomically with batch and run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+    Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default);
 
@@ -220,7 +220,7 @@ internal interface IJobStore
     /// <param name="batchId">The batch ID.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching batch record, or null.</returns>
-    Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default);
+    Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns the IDs of all runs belonging to the specified batch.
@@ -451,4 +451,13 @@ internal interface IJobStore
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A dictionary of queue statistics keyed by queue name.</returns>
     Task<IReadOnlyDictionary<string, QueueStats>> GetQueueStatsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the IDs of non-terminal batches where all runs have completed
+    ///     but the batch has not yet been marked terminal. Used for stuck-batch recovery.
+    /// </summary>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>IDs of batches that can be completed.</returns>
+    Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 }

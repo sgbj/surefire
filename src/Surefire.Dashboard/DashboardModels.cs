@@ -15,7 +15,7 @@ public sealed class DashboardStatsResponse
     public IReadOnlyList<TimelineBucketResponse> Timeline { get; init; } = [];
     public IReadOnlyList<RunResponse> RecentRuns { get; init; } = [];
 
-    internal static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<RunRecord> recentRuns) => new()
+    internal static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<JobRun> recentRuns) => new()
     {
         TotalJobs = stats.TotalJobs,
         TotalRuns = stats.TotalRuns,
@@ -56,7 +56,7 @@ public sealed class RunResponse
     public DateTimeOffset? LastHeartbeatAt { get; init; }
     public string? BatchId { get; init; }
 
-    internal static RunResponse From(RunRecord run) => new()
+    internal static RunResponse From(JobRun run) => new()
     {
         Id = run.Id,
         JobName = run.JobName,

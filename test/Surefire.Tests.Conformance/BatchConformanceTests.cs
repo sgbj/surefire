@@ -2,10 +2,10 @@ namespace Surefire.Tests.Conformance;
 
 public abstract class BatchConformanceTests : StoreConformanceBase
 {
-    private BatchRecord CreateBatch(int total, string? id = null)
+    private JobBatch CreateBatch(int total, string? id = null)
     {
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        return new BatchRecord
+        return new JobBatch
         {
             Id = id ?? Guid.CreateVersion7().ToString("N"),
             Status = JobStatus.Running,
@@ -16,19 +16,14 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         };
     }
 
-    private async Task<(BatchRecord Batch, RunRecord[] Runs)> CreateBatchWithRunsAsync(int childCount)
+    private async Task<(JobBatch Batch, JobRun[] Runs)> CreateBatchWithRunsAsync(int childCount)
     {
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var batch = CreateBatch(childCount);
         var runs = Enumerable.Range(0, childCount)
-            .Select(_ =>
-            {
-                var run = CreateRun(jobName);
-                run.BatchId = batch.Id;
-                return run;
-            })
+            .Select(_ => CreateRun(jobName) with { BatchId = batch.Id })
             .ToArray();
 
         await Store.CreateBatchAsync(batch, runs);
@@ -38,7 +33,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     // ── CreateBatchAsync ──────────────────────────────────────────────────────
 
     [Fact]
-    public async Task CreateBatch_Persists_BatchRecord()
+    public async Task CreateBatch_Persists_JobBatch()
     {
         var (batch, _) = await CreateBatchWithRunsAsync(3);
 
@@ -70,8 +65,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var batch = CreateBatch(1);
-        var run = CreateRun(jobName);
-        run.BatchId = batch.Id;
+        var run = CreateRun(jobName) with { BatchId = batch.Id };
 
         var evt = new RunEvent
         {
@@ -327,20 +321,20 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
 
         var batch = CreateBatch(2);
-        var pendingRun = CreateRun(jobName);
-        pendingRun.BatchId = batch.Id;
+        var pendingRun = CreateRun(jobName) with { BatchId = batch.Id };
 
-        var succeededRun = CreateRun(jobName, JobStatus.Running);
-        succeededRun.BatchId = batch.Id;
-        succeededRun.Attempt = 1;
-        succeededRun.NodeName = "node1";
-        succeededRun.StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        succeededRun.LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var succeededRun = CreateRun(jobName, JobStatus.Running) with
+        {
+            BatchId = batch.Id,
+            Attempt = 1,
+            NodeName = "node1",
+            StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow),
+            LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow)
+        };
 
         await Store.CreateBatchAsync(batch, [pendingRun, succeededRun]);
 
-        succeededRun.Status = JobStatus.Succeeded;
-        succeededRun.CompletedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        succeededRun = succeededRun with { Status = JobStatus.Succeeded, CompletedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow) };
         await Store.TryTransitionRunAsync(Transition(succeededRun, JobStatus.Running));
 
         await Store.CancelBatchRunsAsync(batch.Id);

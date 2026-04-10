@@ -87,7 +87,7 @@ internal sealed partial class SurefireExecutorService(
         await WaitForActiveRunsAsync();
     }
 
-    private async Task ExecuteClaimedRunAsync(RunRecord run, CancellationToken stoppingToken)
+    private async Task ExecuteClaimedRunAsync(JobRun run, CancellationToken stoppingToken)
     {
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         _runCancellation[run.Id] = runCts;
@@ -227,7 +227,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task HandleRunFailureAsync(RunRecord run, Exception ex, CancellationToken stoppingToken)
+    private async Task HandleRunFailureAsync(JobRun run, Exception ex, CancellationToken stoppingToken)
     {
         using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
         var bestEffortToken = bestEffortCts.Token;
@@ -371,7 +371,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task<Activity?> StartRunActivityAsync(RunRecord run, CancellationToken cancellationToken)
+    private async Task<Activity?> StartRunActivityAsync(JobRun run, CancellationToken cancellationToken)
     {
         var parent = await ResolveParentActivityContextAsync(run, cancellationToken);
         var activity = parent is { } parentContext
@@ -393,17 +393,10 @@ internal sealed partial class SurefireExecutorService(
         if (!string.Equals(run.TraceId, traceId, StringComparison.Ordinal)
             || !string.Equals(run.SpanId, spanId, StringComparison.Ordinal))
         {
-            run.TraceId = traceId;
-            run.SpanId = spanId;
-
             try
             {
-                await store.UpdateRunAsync(new()
+                await store.UpdateRunAsync(run with
                 {
-                    Id = run.Id,
-                    JobName = run.JobName,
-                    NodeName = run.NodeName,
-                    Progress = run.Progress,
                     TraceId = traceId,
                     SpanId = spanId,
                     LastHeartbeatAt = timeProvider.GetUtcNow()
@@ -418,7 +411,7 @@ internal sealed partial class SurefireExecutorService(
         return activity;
     }
 
-    private async Task<ActivityContext?> ResolveParentActivityContextAsync(RunRecord run,
+    private async Task<ActivityContext?> ResolveParentActivityContextAsync(JobRun run,
         CancellationToken cancellationToken)
     {
         if (TryParseActivityContext(run.TraceId, run.SpanId, out var runContext))
@@ -465,7 +458,7 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private async Task<bool> TryTransitionToDeadLetterAsync(RunRecord run, string error,
+    private async Task<bool> TryTransitionToDeadLetterAsync(JobRun run, string error,
         CancellationToken cancellationToken)
     {
         var deadLetter = RunStatusTransition.RunningToFailed(
@@ -485,7 +478,7 @@ internal sealed partial class SurefireExecutorService(
 
     private static string BuildDeadLetterError(Exception exception) => exception.ToString();
 
-    private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, RunRecord run,
+    private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
         var allFilterTypes = new List<Type>(options.FilterTypes.Count + registration.FilterTypes.Count);
@@ -509,7 +502,7 @@ internal sealed partial class SurefireExecutorService(
         return invocation;
     }
 
-    private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, RunRecord run, JobContext context,
+    private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, JobRun run, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
         var parameters = registration.Handler.Method.GetParameters();
@@ -556,7 +549,7 @@ internal sealed partial class SurefireExecutorService(
             null);
     }
 
-    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, RunRecord run,
+    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
         using var doc = run.Arguments is null ? null : JsonDocument.Parse(run.Arguments);
@@ -982,7 +975,7 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, RunRecord run,
+    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, JobRun run,
         CancellationToken cancellationToken)
     {
         var items = new List<string>();
@@ -1000,7 +993,7 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
-        RunRecord run,
+        JobRun run,
         CancellationToken cancellationToken)
     {
         var items = new List<string>();
@@ -1016,7 +1009,7 @@ internal sealed partial class SurefireExecutorService(
         return items;
     }
 
-    private async Task AppendOutputEventAsync(RunRecord run, string payload,
+    private async Task AppendOutputEventAsync(JobRun run, string payload,
         CancellationToken cancellationToken)
     {
         await store.AppendEventsAsync(
@@ -1038,7 +1031,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task AppendOutputCompleteEventAsync(RunRecord run, CancellationToken cancellationToken)
+    private async Task AppendOutputCompleteEventAsync(JobRun run, CancellationToken cancellationToken)
     {
         await store.AppendEventsAsync(
         [
@@ -1122,7 +1115,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task TryCreateContinuousRunAsync(RegisteredJob job, RunRecord completedRun,
+    private async Task TryCreateContinuousRunAsync(RegisteredJob job, JobRun completedRun,
         CancellationToken cancellationToken)
     {
         if (!job.Definition.IsContinuous || completedRun.ParentRunId is { })
@@ -1131,7 +1124,7 @@ internal sealed partial class SurefireExecutorService(
         }
 
         var now = timeProvider.GetUtcNow();
-        var nextRun = new RunRecord
+        var nextRun = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = completedRun.JobName,
@@ -1158,7 +1151,7 @@ internal sealed partial class SurefireExecutorService(
         await notifications.PublishAsync(NotificationChannels.RunCreated, nextRun.Id, cancellationToken);
     }
 
-    private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, RunRecord run, JobContext context,
+    private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, JobRun run, JobContext context,
         IServiceProvider services, CancellationToken stoppingToken)
     {
         try
@@ -1202,7 +1195,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task AppendAttemptFailureEventAsync(RunRecord run, Exception exception,
+    private async Task AppendAttemptFailureEventAsync(JobRun run, Exception exception,
         CancellationToken cancellationToken)
         => await batchCompletionHandler.AppendFailureEventAsync(
             run,

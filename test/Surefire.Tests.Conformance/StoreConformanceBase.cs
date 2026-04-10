@@ -13,7 +13,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
     public virtual ValueTask DisposeAsync() => ValueTask.CompletedTask;
     internal abstract Task<IJobStore> CreateStoreAsync();
 
-    internal static RunRecord CreateRun(string? jobName = null, JobStatus status = JobStatus.Pending,
+    internal static JobRun CreateRun(string? jobName = null, JobStatus status = JobStatus.Pending,
         string? id = null)
     {
         // Truncate to milliseconds for cross-store compatibility (Redis uses millisecond precision).
@@ -32,7 +32,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
     protected static DateTimeOffset TruncateToMilliseconds(DateTimeOffset dt) =>
         new(dt.Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond, dt.Offset);
 
-    internal static RunStatusTransition Transition(RunRecord run, JobStatus expectedStatus) =>
+    internal static RunStatusTransition Transition(JobRun run, JobStatus expectedStatus) =>
         (expectedStatus, run.Status) switch
         {
             (JobStatus.Pending, JobStatus.Running) when run.StartedAt.HasValue && run.LastHeartbeatAt.HasValue &&
@@ -77,7 +77,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
                 $"No valid transition factory for {expectedStatus} -> {run.Status} in conformance helper.")
         };
 
-    internal static RunStatusTransition InvalidTransition(RunRecord run, JobStatus expectedStatus) => new()
+    internal static RunStatusTransition InvalidTransition(JobRun run, JobStatus expectedStatus) => new()
     {
         RunId = run.Id,
         ExpectedStatus = expectedStatus,

@@ -5,16 +5,16 @@ public interface IJobClient
 {
     // Primitives
     Task<JobRun> TriggerAsync(string job, object? args = null, RunOptions? options = null, CancellationToken cancellationToken = default);
-    Task<JobBatch> TriggerManyAsync(IEnumerable<BatchItem> runs, RunOptions? options = null, CancellationToken cancellationToken = default);
-    Task<JobBatch> TriggerManyAsync(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
+    Task<JobBatch> TriggerBatchAsync(IEnumerable<BatchItem> runs, RunOptions? options = null, CancellationToken cancellationToken = default);
+    Task<JobBatch> TriggerBatchAsync(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
 
     // Sugar
     Task<T> RunAsync<T>(string job, object? args = null, RunOptions? options = null, CancellationToken cancellationToken = default);
     Task RunAsync(string job, object? args = null, RunOptions? options = null, CancellationToken cancellationToken = default);
     IAsyncEnumerable<T> StreamAsync<T>(string job, object? args = null, RunOptions? options = null, CancellationToken cancellationToken = default);
-    Task<T[]> RunManyAsync<T>(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
-    Task RunManyAsync(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
-    IAsyncEnumerable<T> StreamManyAsync<T>(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
+    Task<T[]> RunBatchAsync<T>(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
+    Task RunBatchAsync(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<T> StreamBatchAsync<T>(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default);
 
     // Query
     Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default);
@@ -25,5 +25,24 @@ public interface IJobClient
     Task CancelAsync(string runId, CancellationToken cancellationToken = default);
     Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default);
     Task<JobRun> RerunAsync(string runId, CancellationToken cancellationToken = default);
+
+    // Wait / observe
+    Task<JobRun> WaitAsync(string runId, CancellationToken cancellationToken = default);
+    Task<T> WaitAsync<T>(string runId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<RunObservation> ObserveAsync(string runId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<RunObservation> ObserveAsync(string runId, RunEventCursor cursor, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, RunEventCursor cursor, CancellationToken cancellationToken = default);
+
+    // Batch wait / stream
+    Task<JobBatch> WaitBatchAsync(string batchId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<JobRun> WaitEachAsync(string batchId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId, BatchRunEventCursor cursor, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<JobRun>> GetBatchRunsAsync(string batchId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<JobRun> StreamBatchRunsAsync(string batchId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<T> StreamBatchResultsAsync<T>(string batchId, CancellationToken cancellationToken = default);
+    Task<T[]> GetBatchResultsAsync<T>(string batchId, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<RunEvent> StreamBatchEventsAsync(string batchId, CancellationToken cancellationToken = default);
 }
 

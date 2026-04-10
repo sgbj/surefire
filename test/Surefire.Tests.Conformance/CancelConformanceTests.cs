@@ -59,7 +59,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Retrying;
+        claimed = claimed with { Status = JobStatus.Retrying };
         var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
         Assert.True(ok);
 
@@ -107,8 +107,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Succeeded;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
         Assert.True(ok);
 
@@ -131,20 +130,17 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(job);
 
         // Create a parent + 3 children (ParentRunId relationship)
-        var parent = CreateRun(job.Name, JobStatus.Running);
-        parent.Attempt = 1;
-        parent.NodeName = "node1";
-        parent.StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        parent.LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var parent = CreateRun(job.Name, JobStatus.Running) with
+        {
+            Attempt = 1,
+            NodeName = "node1",
+            StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow),
+            LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow)
+        };
 
-        var child1 = CreateRun(job.Name);
-        child1.ParentRunId = parent.Id;
-
-        var child2 = CreateRun(job.Name);
-        child2.ParentRunId = parent.Id;
-
-        var child3 = CreateRun(job.Name);
-        child3.ParentRunId = parent.Id;
+        var child1 = CreateRun(job.Name) with { ParentRunId = parent.Id };
+        var child2 = CreateRun(job.Name) with { ParentRunId = parent.Id };
+        var child3 = CreateRun(job.Name) with { ParentRunId = parent.Id };
 
         await Store.CreateRunsAsync([parent, child1, child2, child3]);
 
@@ -198,14 +194,15 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobAsync(job);
 
-        var parent = CreateRun(job.Name, JobStatus.Running);
-        parent.Attempt = 1;
-        parent.NodeName = "node1";
-        parent.StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
-        parent.LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var parent = CreateRun(job.Name, JobStatus.Running) with
+        {
+            Attempt = 1,
+            NodeName = "node1",
+            StartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow),
+            LastHeartbeatAt = TruncateToMilliseconds(DateTimeOffset.UtcNow)
+        };
 
-        var child = CreateRun(job.Name);
-        child.ParentRunId = parent.Id;
+        var child = CreateRun(job.Name) with { ParentRunId = parent.Id };
 
         await Store.CreateRunsAsync([parent, child]);
 
@@ -246,7 +243,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
                 }
                 else
                 {
-                    var attempt = new RunRecord
+                    var attempt = new JobRun
                     {
                         Id = claimed.Id,
                         JobName = claimed.JobName,

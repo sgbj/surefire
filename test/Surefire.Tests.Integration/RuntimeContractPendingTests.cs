@@ -163,7 +163,7 @@ public sealed class RuntimeContractPendingTests
             var ids = new List<string>();
             await foreach (var result in client.WaitEachAsync(batchId))
             {
-                ids.Add(result.RunId);
+                ids.Add(result.Id);
             }
 
             return ids;
@@ -232,7 +232,7 @@ public sealed class RuntimeContractPendingTests
         Assert.NotNull(batch.CompletedAt);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        var observed = new List<RunResult>();
+        var observed = new List<JobRun>();
         await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
         {
             observed.Add(result);
@@ -254,7 +254,7 @@ public sealed class RuntimeContractPendingTests
         var jobName = "EmptyBatch_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
 
-        var newBatch = await ((IJobClient)client).TriggerManyAsync(jobName, Array.Empty<object?>());
+        var newBatch = await ((IJobClient)client).TriggerBatchAsync(jobName, Array.Empty<object?>());
         var batchId = newBatch.Id;
         var batch = await store.GetBatchAsync(batchId);
 
@@ -264,7 +264,7 @@ public sealed class RuntimeContractPendingTests
         Assert.NotNull(batch.CompletedAt);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        var observed = new List<RunResult>();
+        var observed = new List<JobRun>();
         await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
         {
             observed.Add(result);
@@ -294,7 +294,7 @@ public sealed class RuntimeContractPendingTests
             var ids = new List<string>();
             await foreach (var result in client.WaitEachAsync(batchId))
             {
-                ids.Add(result.RunId);
+                ids.Add(result.Id);
             }
 
             return ids;
@@ -519,7 +519,7 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
-        var claimed = new List<RunRecord>();
+        var claimed = new List<JobRun>();
         for (var i = 0; i < 3; i++)
         {
             var run = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
@@ -533,7 +533,7 @@ public sealed class RuntimeContractPendingTests
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
             {
-                ids.Add(result.RunId);
+                ids.Add(result.Id);
             }
 
             return ids;
@@ -597,7 +597,7 @@ public sealed class RuntimeContractPendingTests
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
 
-        var claimed = new List<RunRecord>();
+        var claimed = new List<JobRun>();
         for (var i = 0; i < 3; i++)
         {
             var run = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
@@ -637,7 +637,7 @@ public sealed class RuntimeContractPendingTests
         var completedIds = new List<string>();
         await foreach (var result in client.WaitEachAsync(batchId, cts.Token))
         {
-            completedIds.Add(result.RunId);
+            completedIds.Add(result.Id);
         }
 
         var expected = completionPlan
@@ -688,17 +688,17 @@ public sealed class RuntimeContractPendingTests
         await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        var results = new List<RunResult>();
+        var results = new List<JobRun>();
         await foreach (var item in client.WaitEachAsync(batchId, cts.Token))
         {
             results.Add(item);
         }
 
         Assert.Single(results);
-        Assert.Equal(claimedA.Id, results[0].RunId);
+        Assert.Equal(claimedA.Id, results[0].Id);
     }
 
-    private static async Task<RunRecord> WaitForRunAsync(IJobStore store, string jobName, string marker)
+    private static async Task<JobRun> WaitForRunAsync(IJobStore store, string jobName, string marker)
     {
         return await TestWait.PollUntilAsync(
             async _ =>

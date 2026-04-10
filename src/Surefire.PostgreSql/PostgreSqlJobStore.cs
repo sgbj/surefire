@@ -373,18 +373,18 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
+    public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
 
-    public Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
+    public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
-    public async Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -400,7 +400,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return ReadRun(reader);
     }
 
-    public async Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    public async Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -433,7 +433,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue("take", take);
         cmd.Parameters.AddWithValue("skip", skip);
 
-        var items = new List<RunRecord>();
+        var items = new List<JobRun>();
         var totalCount = 0;
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -448,7 +448,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return new() { Items = items, TotalCount = totalCount };
     }
 
-    public async Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
+    public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -546,7 +546,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return rows > 0;
     }
 
-    public async Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
@@ -679,7 +679,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue("queue_names", queueNames.ToArray());
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        RunRecord? claimed = null;
+        JobRun? claimed = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             claimed = ReadRun(reader);
@@ -713,7 +713,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return claimed;
     }
 
-    public async Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+    public async Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
     {
@@ -743,7 +743,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         await tx.CommitAsync(cancellationToken);
     }
 
-    public async Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
@@ -845,6 +845,27 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
 
         return cancelledIds;
+    }
+
+    public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                          SELECT b.id FROM surefire_batches b
+                          WHERE b.status NOT IN (2, 4, 5)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM surefire_runs r
+                              WHERE r.batch_id = b.id AND r.status NOT IN (2, 4, 5)
+                          )
+                          """;
+        var result = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(reader.GetString(0));
+        }
+        return result;
     }
 
     public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
@@ -1440,7 +1461,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return results;
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs,
+    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -1459,7 +1480,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
     }
 
     private static async Task CreateRunsCoreInTransactionAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        IReadOnlyList<RunRecord> runs, CancellationToken cancellationToken)
+        IReadOnlyList<JobRun> runs, CancellationToken cancellationToken)
     {
         if (runs.Count == 0)
         {
@@ -1516,7 +1537,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -1747,7 +1768,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         }
     }
 
-    private static void AddRunParams(NpgsqlCommand cmd, string prefix, RunRecord run)
+    private static void AddRunParams(NpgsqlCommand cmd, string prefix, JobRun run)
     {
         cmd.Parameters.AddWithValue($"{prefix}id", run.Id);
         cmd.Parameters.AddWithValue($"{prefix}job_name", run.JobName);
@@ -1778,141 +1799,46 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         cmd.Parameters.AddWithValue($"{prefix}batch_id", (object?)run.BatchId ?? DBNull.Value);
     }
 
-    private static RunRecord ReadRun(NpgsqlDataReader reader)
+    private static JobRun ReadRun(NpgsqlDataReader reader) => new JobRun
     {
-        var run = new RunRecord
-        {
-            Id = reader.GetString(reader.GetOrdinal("id")),
-            JobName = reader.GetString(reader.GetOrdinal("job_name")),
-            Status = (JobStatus)reader.GetInt32(reader.GetOrdinal("status")),
-            Progress = reader.GetDouble(reader.GetOrdinal("progress")),
-            CreatedAt = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("created_at")),
-            Attempt = reader.GetInt32(reader.GetOrdinal("attempt")),
-            NotBefore = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("not_before")),
-            Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-            QueuePriority = reader.GetInt32(reader.GetOrdinal("queue_priority"))
-        };
+        Id = reader.GetString(reader.GetOrdinal("id")),
+        JobName = reader.GetString(reader.GetOrdinal("job_name")),
+        Status = (JobStatus)reader.GetInt32(reader.GetOrdinal("status")),
+        Progress = reader.GetDouble(reader.GetOrdinal("progress")),
+        CreatedAt = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("created_at")),
+        Attempt = reader.GetInt32(reader.GetOrdinal("attempt")),
+        NotBefore = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("not_before")),
+        Priority = reader.GetInt32(reader.GetOrdinal("priority")),
+        QueuePriority = reader.GetInt32(reader.GetOrdinal("queue_priority")),
+        Arguments = reader.IsDBNull(reader.GetOrdinal("arguments")) ? null : reader.GetString(reader.GetOrdinal("arguments")),
+        Result = reader.IsDBNull(reader.GetOrdinal("result")) ? null : reader.GetString(reader.GetOrdinal("result")),
+        Error = reader.IsDBNull(reader.GetOrdinal("error")) ? null : reader.GetString(reader.GetOrdinal("error")),
+        StartedAt = reader.IsDBNull(reader.GetOrdinal("started_at")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("started_at")),
+        CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("completed_at")),
+        CancelledAt = reader.IsDBNull(reader.GetOrdinal("cancelled_at")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("cancelled_at")),
+        NodeName = reader.IsDBNull(reader.GetOrdinal("node_name")) ? null : reader.GetString(reader.GetOrdinal("node_name")),
+        TraceId = reader.IsDBNull(reader.GetOrdinal("trace_id")) ? null : reader.GetString(reader.GetOrdinal("trace_id")),
+        SpanId = reader.IsDBNull(reader.GetOrdinal("span_id")) ? null : reader.GetString(reader.GetOrdinal("span_id")),
+        ParentRunId = reader.IsDBNull(reader.GetOrdinal("parent_run_id")) ? null : reader.GetString(reader.GetOrdinal("parent_run_id")),
+        RootRunId = reader.IsDBNull(reader.GetOrdinal("root_run_id")) ? null : reader.GetString(reader.GetOrdinal("root_run_id")),
+        RerunOfRunId = reader.IsDBNull(reader.GetOrdinal("rerun_of_run_id")) ? null : reader.GetString(reader.GetOrdinal("rerun_of_run_id")),
+        NotAfter = reader.IsDBNull(reader.GetOrdinal("not_after")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("not_after")),
+        DeduplicationId = reader.IsDBNull(reader.GetOrdinal("deduplication_id")) ? null : reader.GetString(reader.GetOrdinal("deduplication_id")),
+        LastHeartbeatAt = reader.IsDBNull(reader.GetOrdinal("last_heartbeat_at")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("last_heartbeat_at")),
+        BatchId = reader.IsDBNull(reader.GetOrdinal("batch_id")) ? null : reader.GetString(reader.GetOrdinal("batch_id"))
+    };
 
-        var col = reader.GetOrdinal("arguments");
-        if (!reader.IsDBNull(col))
-        {
-            run.Arguments = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("result");
-        if (!reader.IsDBNull(col))
-        {
-            run.Result = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("error");
-        if (!reader.IsDBNull(col))
-        {
-            run.Error = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("started_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.StartedAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        col = reader.GetOrdinal("completed_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.CompletedAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        col = reader.GetOrdinal("cancelled_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.CancelledAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        col = reader.GetOrdinal("node_name");
-        if (!reader.IsDBNull(col))
-        {
-            run.NodeName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("trace_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.TraceId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("span_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.SpanId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("parent_run_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.ParentRunId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("root_run_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.RootRunId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("rerun_of_run_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.RerunOfRunId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("not_after");
-        if (!reader.IsDBNull(col))
-        {
-            run.NotAfter = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        col = reader.GetOrdinal("deduplication_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.DeduplicationId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.LastHeartbeatAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        col = reader.GetOrdinal("batch_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.BatchId = reader.GetString(col);
-        }
-
-        return run;
-    }
-
-    private static BatchRecord ReadBatch(NpgsqlDataReader reader)
+    private static JobBatch ReadBatch(NpgsqlDataReader reader) => new JobBatch
     {
-        var batch = new BatchRecord
-        {
-            Id = reader.GetString(reader.GetOrdinal("id")),
-            Status = (JobStatus)reader.GetInt16(reader.GetOrdinal("status")),
-            Total = reader.GetInt32(reader.GetOrdinal("total")),
-            Succeeded = reader.GetInt32(reader.GetOrdinal("succeeded")),
-            Failed = reader.GetInt32(reader.GetOrdinal("failed")),
-            Cancelled = reader.GetOrdinal("cancelled") is var cCol && !reader.IsDBNull(cCol) ? reader.GetInt32(cCol) : 0,
-            CreatedAt = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("created_at"))
-        };
-
-        var col = reader.GetOrdinal("completed_at");
-        if (!reader.IsDBNull(col))
-        {
-            batch.CompletedAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        return batch;
-    }
+        Id = reader.GetString(reader.GetOrdinal("id")),
+        Status = (JobStatus)reader.GetInt16(reader.GetOrdinal("status")),
+        Total = reader.GetInt32(reader.GetOrdinal("total")),
+        Succeeded = reader.GetInt32(reader.GetOrdinal("succeeded")),
+        Failed = reader.GetInt32(reader.GetOrdinal("failed")),
+        Cancelled = reader.GetOrdinal("cancelled") is var cCol && !reader.IsDBNull(cCol) ? reader.GetInt32(cCol) : 0,
+        CreatedAt = reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("created_at")),
+        CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at")) ? null : reader.GetFieldValue<DateTimeOffset>(reader.GetOrdinal("completed_at"))
+    };
 
     private static JobDefinition ReadJob(NpgsqlDataReader reader)
     {

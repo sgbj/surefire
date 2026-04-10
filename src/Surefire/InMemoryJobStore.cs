@@ -1,6 +1,6 @@
 namespace Surefire;
 
-internal sealed class InMemoryJobStore : IJobStore
+internal sealed class InMemoryJobStore : IJobStore, IDisposable
 {
     // Deduplication index scoped by (JobName, DeduplicationId) for non-terminal runs.
     private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
@@ -10,7 +10,7 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, NodeInfo> _nodes = new();
     private readonly Dictionary<string, int> _nonTerminalCountByJob = new();
     private readonly Dictionary<string, int> _pendingCountByQueue = new();
-    private readonly Dictionary<string, BatchRecord> _batches = new();
+    private readonly Dictionary<string, JobBatch> _batches = new();
 
     private readonly SortedSet<PendingRunKey> _pendingIndex = new();
     private readonly Dictionary<string, PendingRunKey> _pendingKeyByRunId = new();
@@ -20,7 +20,7 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, RateLimitWindowState> _rateLimitWindows = new();
     private readonly Dictionary<string, int> _runningCountByJob = new();
     private readonly Dictionary<string, int> _runningCountByQueue = new();
-    private readonly Dictionary<string, RunRecord> _runs = new();
+    private readonly Dictionary<string, JobRun> _runs = new();
     private readonly TimeProvider _timeProvider;
     private long _eventIdCounter;
 
@@ -136,26 +136,26 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    public Task CreateRunsAsync(IReadOnlyList<RunRecord> runs,
+    public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => CreateRunsCoreAsync(runs, initialEvents);
 
-    public Task<bool> TryCreateRunAsync(RunRecord run, int? maxActiveForJob = null,
+    public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
         => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents);
 
-    public Task<RunRecord?> GetRunAsync(string id, CancellationToken cancellationToken = default)
+    public Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
-            return Task.FromResult(_runs.TryGetValue(id, out var run) ? CopyRun(run) : null);
+            return Task.FromResult(_runs.TryGetValue(id, out var run) ? run : null);
         }
     }
 
-    public Task<PagedResult<RunRecord>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
+    public Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
         CancellationToken cancellationToken = default)
     {
         if (skip < 0)
@@ -169,11 +169,11 @@ internal sealed class InMemoryJobStore : IJobStore
         }
 
         int totalCount;
-        List<RunRecord> items;
+        List<JobRun> items;
 
         lock (_lock)
         {
-            IEnumerable<RunRecord> query = _runs.Values;
+            IEnumerable<JobRun> query = _runs.Values;
 
             if (filter.Status is { })
             {
@@ -246,7 +246,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
             totalCount = query.Count();
 
-            IEnumerable<RunRecord> ordered = filter.OrderBy switch
+            IEnumerable<JobRun> ordered = filter.OrderBy switch
             {
                 RunOrderBy.StartedAt => query
                     .OrderByDescending(r => r.StartedAt)
@@ -259,17 +259,17 @@ internal sealed class InMemoryJobStore : IJobStore
                     .ThenByDescending(r => r.Id)
             };
 
-            items = ordered.Skip(skip).Take(take).Select(CopyRun).ToList();
+            items = ordered.Skip(skip).Take(take).ToList();
         }
 
-        return Task.FromResult(new PagedResult<RunRecord>
+        return Task.FromResult(new PagedResult<JobRun>
         {
             Items = items,
             TotalCount = totalCount
         });
     }
 
-    public Task UpdateRunAsync(RunRecord run, CancellationToken cancellationToken = default)
+    public Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
@@ -288,12 +288,15 @@ internal sealed class InMemoryJobStore : IJobStore
                 return Task.CompletedTask;
             }
 
-            stored.Progress = run.Progress;
-            stored.Result = run.Result;
-            stored.Error = run.Error;
-            stored.TraceId = run.TraceId;
-            stored.SpanId = run.SpanId;
-            stored.LastHeartbeatAt = run.LastHeartbeatAt;
+            _runs[run.Id] = stored with
+            {
+                Progress = run.Progress,
+                Result = run.Result,
+                Error = run.Error,
+                TraceId = run.TraceId,
+                SpanId = run.SpanId,
+                LastHeartbeatAt = run.LastHeartbeatAt
+            };
         }
 
         return Task.CompletedTask;
@@ -327,22 +330,26 @@ internal sealed class InMemoryJobStore : IJobStore
                 return Task.FromResult(false);
             }
 
-            stored.Status = transition.NewStatus;
-            stored.NodeName = transition.NodeName;
-            stored.StartedAt = transition.StartedAt ?? stored.StartedAt;
-            stored.CompletedAt = transition.CompletedAt ?? stored.CompletedAt;
-            stored.CancelledAt = transition.CancelledAt ?? stored.CancelledAt;
-            stored.Error = transition.Error;
-            stored.Result = transition.Result;
-            stored.Progress = transition.Progress;
-            stored.NotBefore = transition.NotBefore;
-            stored.LastHeartbeatAt = transition.LastHeartbeatAt ?? stored.LastHeartbeatAt;
-
-            UpdateIndexes(stored, oldStatus, newStatus);
-
-            if (newStatus.IsTerminal && stored.DeduplicationId is { })
+            var newStored = stored with
             {
-                _dedupIndex.Remove((stored.JobName, stored.DeduplicationId));
+                Status = transition.NewStatus,
+                NodeName = transition.NodeName,
+                StartedAt = transition.StartedAt ?? stored.StartedAt,
+                CompletedAt = transition.CompletedAt ?? stored.CompletedAt,
+                CancelledAt = transition.CancelledAt ?? stored.CancelledAt,
+                Error = transition.Error,
+                Result = transition.Result,
+                Progress = transition.Progress,
+                NotBefore = transition.NotBefore,
+                LastHeartbeatAt = transition.LastHeartbeatAt ?? stored.LastHeartbeatAt
+            };
+            _runs[newStored.Id] = newStored;
+
+            UpdateIndexes(newStored, oldStatus, newStatus);
+
+            if (newStatus.IsTerminal && newStored.DeduplicationId is { })
+            {
+                _dedupIndex.Remove((newStored.JobName, newStored.DeduplicationId));
             }
 
             return Task.FromResult(true);
@@ -366,15 +373,14 @@ internal sealed class InMemoryJobStore : IJobStore
 
             var oldStatus = stored.Status;
             var cancelledAt = _timeProvider.GetUtcNow();
-            stored.Status = JobStatus.Cancelled;
-            stored.CancelledAt = cancelledAt;
-            stored.CompletedAt = cancelledAt;
+            var cancelled = stored with { Status = JobStatus.Cancelled, CancelledAt = cancelledAt, CompletedAt = cancelledAt };
+            _runs[runId] = cancelled;
 
-            UpdateIndexes(stored, oldStatus, JobStatus.Cancelled);
+            UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
 
-            if (stored.DeduplicationId is { })
+            if (cancelled.DeduplicationId is { })
             {
-                _dedupIndex.Remove((stored.JobName, stored.DeduplicationId));
+                _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
             }
 
             return Task.FromResult(true);
@@ -389,7 +395,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         lock (_lock)
         {
-            foreach (var run in _runs.Values)
+            foreach (var run in _runs.Values.ToList())
             {
                 if (run.ParentRunId != parentRunId || run.Status.IsTerminal)
                 {
@@ -397,15 +403,14 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
 
                 var oldStatus = run.Status;
-                run.Status = JobStatus.Cancelled;
-                run.CancelledAt = now;
-                run.CompletedAt = now;
+                var cancelled = run with { Status = JobStatus.Cancelled, CancelledAt = now, CompletedAt = now };
+                _runs[run.Id] = cancelled;
 
-                UpdateIndexes(run, oldStatus, JobStatus.Cancelled);
+                UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
 
-                if (run.DeduplicationId is { })
+                if (cancelled.DeduplicationId is { })
                 {
-                    _dedupIndex.Remove((run.JobName, run.DeduplicationId));
+                    _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
                 }
 
                 cancelledIds.Add(run.Id);
@@ -415,7 +420,7 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
     }
 
-    public Task<RunRecord?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         lock (_lock)
@@ -505,55 +510,57 @@ internal sealed class InMemoryJobStore : IJobStore
 
                 RemoveFromPendingIndex(run.Id);
                 DecrementCount(_pendingCountByQueue, queueName);
-                run.Status = JobStatus.Running;
-                run.NodeName = nodeName;
-                run.StartedAt = now;
-                run.LastHeartbeatAt = now;
-                run.Attempt++;
+                var claimed = run with
+                {
+                    Status = JobStatus.Running,
+                    NodeName = nodeName,
+                    StartedAt = now,
+                    LastHeartbeatAt = now,
+                    Attempt = run.Attempt + 1
+                };
+                _runs[run.Id] = claimed;
 
-                IncrementCount(_runningCountByJob, run.JobName);
+                IncrementCount(_runningCountByJob, claimed.JobName);
                 IncrementCount(_runningCountByQueue, queueName);
 
-                return Task.FromResult<RunRecord?>(CopyRun(run));
+                return Task.FromResult<JobRun?>(claimed);
             }
 
-            return Task.FromResult<RunRecord?>(null);
+            return Task.FromResult<JobRun?>(null);
         }
     }
 
-    public Task CreateBatchAsync(BatchRecord batch, IReadOnlyList<RunRecord> runs,
+    public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
-            var batchCopy = CopyBatch(batch);
-            _batches[batchCopy.Id] = batchCopy;
+            _batches[batch.Id] = batch;
 
-            var copies = new List<RunRecord>(runs.Count);
+            var copies = new List<JobRun>(runs.Count);
             foreach (var run in runs)
             {
-                var copy = CopyRun(run);
-                if (_runs.ContainsKey(copy.Id))
-                    throw new InvalidOperationException($"Run '{copy.Id}' already exists.");
-                copies.Add(copy);
+                if (_runs.ContainsKey(run.Id))
+                    throw new InvalidOperationException($"Run '{run.Id}' already exists.");
+                copies.Add(run);
             }
 
-            foreach (var copy in copies)
+            foreach (var run in copies)
             {
-                copy.QueuePriority = GetQueuePriority(copy.JobName);
-                _runs[copy.Id] = copy;
+                var stored = run with { QueuePriority = GetQueuePriority(run.JobName) };
+                _runs[stored.Id] = stored;
 
-                if (copy.Status == JobStatus.Pending)
+                if (stored.Status == JobStatus.Pending)
                 {
-                    AddToPendingIndex(copy);
-                    IncrementCount(_pendingCountByQueue, GetQueueName(copy.JobName));
+                    AddToPendingIndex(stored);
+                    IncrementCount(_pendingCountByQueue, GetQueueName(stored.JobName));
                 }
 
-                if (!copy.Status.IsTerminal)
-                    IncrementCount(_nonTerminalCountByJob, copy.JobName);
+                if (!stored.Status.IsTerminal)
+                    IncrementCount(_nonTerminalCountByJob, stored.JobName);
 
-                if (copy.DeduplicationId is { })
-                    _dedupIndex.Add((copy.JobName, copy.DeduplicationId));
+                if (stored.DeduplicationId is { })
+                    _dedupIndex.Add((stored.JobName, stored.DeduplicationId));
             }
 
             if (initialEvents?.Count > 0)
@@ -563,11 +570,11 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    public Task<BatchRecord?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    public Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
-            return Task.FromResult(_batches.TryGetValue(batchId, out var batch) ? CopyBatch(batch) : null);
+            return Task.FromResult(_batches.TryGetValue(batchId, out var batch) ? batch : null);
         }
     }
 
@@ -585,17 +592,18 @@ internal sealed class InMemoryJobStore : IJobStore
             switch (terminalStatus)
             {
                 case JobStatus.Failed:
-                    batch.Failed++;
+                    _batches[batchId] = batch with { Failed = batch.Failed + 1 };
                     break;
                 case JobStatus.Cancelled:
-                    batch.Cancelled++;
+                    _batches[batchId] = batch with { Cancelled = batch.Cancelled + 1 };
                     break;
                 default:
-                    batch.Succeeded++;
+                    _batches[batchId] = batch with { Succeeded = batch.Succeeded + 1 };
                     break;
             }
 
-            return Task.FromResult<BatchCounters?>(new BatchCounters(batch.Total, batch.Succeeded, batch.Failed, batch.Cancelled));
+            var updated = _batches[batchId];
+            return Task.FromResult<BatchCounters?>(new BatchCounters(updated.Total, updated.Succeeded, updated.Failed, updated.Cancelled));
         }
     }
 
@@ -607,8 +615,7 @@ internal sealed class InMemoryJobStore : IJobStore
             if (!_batches.TryGetValue(batchId, out var batch) || batch.Status.IsTerminal)
                 return Task.FromResult(false);
 
-            batch.Status = status;
-            batch.CompletedAt = completedAt;
+            _batches[batchId] = batch with { Status = status, CompletedAt = completedAt };
             return Task.FromResult(true);
         }
     }
@@ -721,7 +728,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 if (_runs.TryGetValue(runId, out var run) && !run.Status.IsTerminal
                                                           && run.NodeName == nodeName)
                 {
-                    run.LastHeartbeatAt = now;
+                    _runs[runId] = run with { LastHeartbeatAt = now };
                 }
             }
         }
@@ -822,7 +829,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         lock (_lock)
         {
-            foreach (var run in _runs.Values)
+            foreach (var run in _runs.Values.ToList())
             {
                 if (run.Status is not (JobStatus.Pending or JobStatus.Retrying))
                 {
@@ -835,16 +842,15 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
 
                 var oldStatus = run.Status;
-                run.Status = JobStatus.Cancelled;
-                run.CancelledAt = now;
-                run.CompletedAt = now;
+                var cancelled = run with { Status = JobStatus.Cancelled, CancelledAt = now, CompletedAt = now };
+                _runs[run.Id] = cancelled;
 
-                if (run.DeduplicationId is { })
+                if (cancelled.DeduplicationId is { })
                 {
-                    _dedupIndex.Remove((run.JobName, run.DeduplicationId));
+                    _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
                 }
 
-                UpdateIndexes(run, oldStatus, JobStatus.Cancelled);
+                UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
                 cancelledIds.Add(run.Id);
             }
         }
@@ -1078,7 +1084,7 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.FromResult(stats);
     }
 
-    private static DateTimeOffset GetTimelineBucketTimestamp(RunRecord run) => run.Status switch
+    private static DateTimeOffset GetTimelineBucketTimestamp(JobRun run) => run.Status switch
     {
         JobStatus.Running => run.StartedAt ?? run.CreatedAt,
         JobStatus.Succeeded => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
@@ -1188,47 +1194,46 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.FromResult<IReadOnlyDictionary<string, QueueStats>>(result);
     }
 
-    private Task CreateRunsCoreAsync(IReadOnlyList<RunRecord> runs, IReadOnlyList<RunEvent>? initialEvents)
+    private Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs, IReadOnlyList<RunEvent>? initialEvents)
     {
         lock (_lock)
         {
-            var copies = new List<RunRecord>(runs.Count);
+            var copies = new List<JobRun>(runs.Count);
             var seenIds = new HashSet<string>(runs.Count);
             foreach (var run in runs)
             {
-                var copy = CopyRun(run);
-                if (_runs.ContainsKey(copy.Id) || !seenIds.Add(copy.Id))
+                if (_runs.ContainsKey(run.Id) || !seenIds.Add(run.Id))
                 {
-                    throw new InvalidOperationException($"Run '{copy.Id}' already exists.");
+                    throw new InvalidOperationException($"Run '{run.Id}' already exists.");
                 }
 
-                copies.Add(copy);
+                copies.Add(run);
             }
 
-            foreach (var copy in copies)
+            foreach (var run in copies)
             {
-                copy.QueuePriority = GetQueuePriority(copy.JobName);
-                _runs[copy.Id] = copy;
+                var stored = run with { QueuePriority = GetQueuePriority(run.JobName) };
+                _runs[stored.Id] = stored;
 
-                if (copy.Status == JobStatus.Pending)
+                if (stored.Status == JobStatus.Pending)
                 {
-                    AddToPendingIndex(copy);
-                    IncrementCount(_pendingCountByQueue, GetQueueName(copy.JobName));
+                    AddToPendingIndex(stored);
+                    IncrementCount(_pendingCountByQueue, GetQueueName(stored.JobName));
                 }
-                else if (copy.Status == JobStatus.Running)
+                else if (stored.Status == JobStatus.Running)
                 {
-                    IncrementCount(_runningCountByJob, copy.JobName);
-                    IncrementCount(_runningCountByQueue, GetQueueName(copy.JobName));
-                }
-
-                if (copy.DeduplicationId is { })
-                {
-                    _dedupIndex.Add((copy.JobName, copy.DeduplicationId));
+                    IncrementCount(_runningCountByJob, stored.JobName);
+                    IncrementCount(_runningCountByQueue, GetQueueName(stored.JobName));
                 }
 
-                if (!copy.Status.IsTerminal)
+                if (stored.DeduplicationId is { })
                 {
-                    IncrementCount(_nonTerminalCountByJob, copy.JobName);
+                    _dedupIndex.Add((stored.JobName, stored.DeduplicationId));
+                }
+
+                if (!stored.Status.IsTerminal)
+                {
+                    IncrementCount(_nonTerminalCountByJob, stored.JobName);
                 }
             }
 
@@ -1238,7 +1243,7 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    private Task<bool> TryCreateRunCoreAsync(RunRecord run, int? maxActiveForJob,
+    private Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents)
     {
@@ -1267,34 +1272,33 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
             }
 
-            var copy = CopyRun(run);
-            if (_runs.ContainsKey(copy.Id))
+            var stored = run with { QueuePriority = GetQueuePriority(run.JobName) };
+            if (_runs.ContainsKey(stored.Id))
             {
                 return Task.FromResult(false);
             }
 
-            copy.QueuePriority = GetQueuePriority(copy.JobName);
-            _runs[copy.Id] = copy;
+            _runs[stored.Id] = stored;
 
-            if (copy.Status == JobStatus.Pending)
+            if (stored.Status == JobStatus.Pending)
             {
-                AddToPendingIndex(copy);
-                IncrementCount(_pendingCountByQueue, GetQueueName(copy.JobName));
+                AddToPendingIndex(stored);
+                IncrementCount(_pendingCountByQueue, GetQueueName(stored.JobName));
             }
-            else if (copy.Status == JobStatus.Running)
+            else if (stored.Status == JobStatus.Running)
             {
-                IncrementCount(_runningCountByJob, copy.JobName);
-                IncrementCount(_runningCountByQueue, GetQueueName(copy.JobName));
-            }
-
-            if (copy.DeduplicationId is { })
-            {
-                _dedupIndex.Add((copy.JobName, copy.DeduplicationId));
+                IncrementCount(_runningCountByJob, stored.JobName);
+                IncrementCount(_runningCountByQueue, GetQueueName(stored.JobName));
             }
 
-            if (!copy.Status.IsTerminal)
+            if (stored.DeduplicationId is { })
             {
-                IncrementCount(_nonTerminalCountByJob, copy.JobName);
+                _dedupIndex.Add((stored.JobName, stored.DeduplicationId));
+            }
+
+            if (!stored.Status.IsTerminal)
+            {
+                IncrementCount(_nonTerminalCountByJob, stored.JobName);
             }
 
             if (lastCronFireAt is { } fireAt && _jobs.TryGetValue(run.JobName, out var jobDef))
@@ -1329,7 +1333,7 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    private bool CanPurgeTerminalRun(RunRecord run, DateTimeOffset threshold)
+    private bool CanPurgeTerminalRun(JobRun run, DateTimeOffset threshold)
     {
         if (!run.Status.IsTerminal || run.CompletedAt is null)
         {
@@ -1351,9 +1355,8 @@ internal sealed class InMemoryJobStore : IJobStore
                && batchCompletedAt < threshold;
     }
 
-    private void AddToPendingIndex(RunRecord run)
+    private void AddToPendingIndex(JobRun run)
     {
-        run.QueuePriority = GetQueuePriority(run.JobName);
         var key = new PendingRunKey(run.QueuePriority, run.Priority, run.NotBefore, run.Id);
         _pendingIndex.Add(key);
         _pendingKeyByRunId[run.Id] = key;
@@ -1382,14 +1385,15 @@ internal sealed class InMemoryJobStore : IJobStore
         {
             _pendingIndex.Remove(oldKey);
             var run = _runs[runId];
+            var updated = run with { QueuePriority = newPriority };
+            _runs[runId] = updated;
             var newKey = new PendingRunKey(newPriority, run.Priority, run.NotBefore, run.Id);
             _pendingIndex.Add(newKey);
             _pendingKeyByRunId[runId] = newKey;
-            run.QueuePriority = newPriority;
         }
     }
 
-    private void UpdateIndexes(RunRecord run, JobStatus oldStatus, JobStatus newStatus)
+    private void UpdateIndexes(JobRun run, JobStatus oldStatus, JobStatus newStatus)
     {
         if (oldStatus == newStatus)
         {
@@ -1569,46 +1573,24 @@ internal sealed class InMemoryJobStore : IJobStore
         Attempt = e.Attempt
     };
 
-    private static BatchRecord CopyBatch(BatchRecord batch) => new()
+    public Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
     {
-        Id = batch.Id,
-        Status = batch.Status,
-        Total = batch.Total,
-        Succeeded = batch.Succeeded,
-        Failed = batch.Failed,
-        Cancelled = batch.Cancelled,
-        CreatedAt = batch.CreatedAt,
-        CompletedAt = batch.CompletedAt
-    };
+        lock (_lock)
+        {
+            var result = new List<string>();
+            foreach (var (batchId, batch) in _batches)
+            {
+                if (batch.Status.IsTerminal)
+                    continue;
+                var allTerminal = !_runs.Values.Any(r => r.BatchId == batchId && !r.Status.IsTerminal);
+                if (allTerminal)
+                    result.Add(batchId);
+            }
+            return Task.FromResult<IReadOnlyList<string>>(result);
+        }
+    }
 
-    private static RunRecord CopyRun(RunRecord run) => new()
-    {
-        Id = run.Id,
-        JobName = run.JobName,
-        Status = run.Status,
-        Arguments = run.Arguments,
-        Result = run.Result,
-        Error = run.Error,
-        Progress = run.Progress,
-        CreatedAt = run.CreatedAt,
-        StartedAt = run.StartedAt,
-        CompletedAt = run.CompletedAt,
-        CancelledAt = run.CancelledAt,
-        NodeName = run.NodeName,
-        Attempt = run.Attempt,
-        TraceId = run.TraceId,
-        SpanId = run.SpanId,
-        ParentRunId = run.ParentRunId,
-        RootRunId = run.RootRunId,
-        RerunOfRunId = run.RerunOfRunId,
-        NotBefore = run.NotBefore,
-        NotAfter = run.NotAfter,
-        Priority = run.Priority,
-        QueuePriority = run.QueuePriority,
-        DeduplicationId = run.DeduplicationId,
-        LastHeartbeatAt = run.LastHeartbeatAt,
-        BatchId = run.BatchId
-    };
+    public void Dispose() { }
 
     private static JobDefinition CopyJob(JobDefinition job) => new()
     {

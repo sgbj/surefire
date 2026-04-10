@@ -65,7 +65,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         await harness.StartAsync();
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
-        var stale = new RunRecord
+        var stale = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -110,7 +110,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         await harness.StartAsync();
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
-        var stale = new RunRecord
+        var stale = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = jobName,
@@ -231,7 +231,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
 
         var jobRun = await harness.Client.TriggerAsync(jobName);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-        await jobRun.WaitAsync(cts.Token);
+        jobRun = await harness.Client.WaitAsync(jobRun.Id, cts.Token);
 
         Assert.True(jobRun.IsCancelled);
 

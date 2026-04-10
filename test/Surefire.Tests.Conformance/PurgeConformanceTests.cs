@@ -12,16 +12,13 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"PurgeJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName);
-        run.CreatedAt = OldTime;
-        run.NotBefore = OldTime;
+        var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run]);
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Succeeded;
-        claimed.CompletedAt = OldTime;
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = OldTime };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
 
         await Store.AppendEventsAsync([
@@ -113,9 +110,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"AbandonedJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName);
-        run.CreatedAt = OldTime;
-        run.NotBefore = OldTime;
+        var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run]);
 
         await Store.PurgeAsync(Threshold);
@@ -130,8 +125,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"PurgeRetrying_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName, JobStatus.Retrying);
-        run.NotBefore = OldTime;
+        var run = CreateRun(jobName, JobStatus.Retrying) with { NotBefore = OldTime };
         await Store.CreateRunsAsync([run]);
 
         await Store.PurgeAsync(Threshold);
@@ -146,8 +140,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"FutureJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName);
-        run.NotBefore = DateTimeOffset.UtcNow.AddHours(1);
+        var run = CreateRun(jobName) with { NotBefore = DateTimeOffset.UtcNow.AddHours(1) };
         await Store.CreateRunsAsync([run]);
 
         await Store.PurgeAsync(Threshold);
@@ -162,9 +155,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"RunningJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName));
 
-        var run = CreateRun(jobName);
-        run.CreatedAt = OldTime;
-        run.NotBefore = OldTime;
+        var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run]);
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
@@ -251,9 +242,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(jobName));
         await Store.UpsertQueueAsync(new() { Name = "default" });
 
-        var run = CreateRun(jobName);
-        run.CreatedAt = OldTime;
-        run.NotBefore = OldTime;
+        var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run]);
 
         var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
