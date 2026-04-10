@@ -31,13 +31,10 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
             await using var checkCmd = conn.CreateCommand();
             checkCmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM surefire_schema_migrations";
             var currentVersion = Convert.ToInt32(await checkCmd.ExecuteScalarAsync(cancellationToken));;
-            if (currentVersion >= 2)
+            if (currentVersion >= 1)
             {
                 return;
             }
-
-            if (currentVersion < 1)
-            {
 
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
@@ -131,6 +128,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                                   total INT NOT NULL DEFAULT 0,
                                   succeeded INT NOT NULL DEFAULT 0,
                                   failed INT NOT NULL DEFAULT 0,
+                                  cancelled INT NOT NULL DEFAULT 0,
                                   created_at TIMESTAMPTZ NOT NULL,
                                   completed_at TIMESTAMPTZ
                               );
@@ -180,15 +178,6 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                               INSERT INTO surefire_schema_migrations (version) VALUES (1) ON CONFLICT DO NOTHING;
                               """;
             await cmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            // v2: add cancelled column to batches
-            await using var v2Cmd = conn.CreateCommand();
-            v2Cmd.CommandText = """
-                                ALTER TABLE surefire_batches ADD COLUMN IF NOT EXISTS cancelled INT NOT NULL DEFAULT 0;
-                                INSERT INTO surefire_schema_migrations (version) VALUES (2) ON CONFLICT DO NOTHING;
-                                """;
-            await v2Cmd.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
         {
@@ -382,7 +371,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => RetryAsync(() => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken), cancellationToken);
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -546,14 +535,21 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return rows > 0;
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
-            return null;
+            return Task.FromResult<JobRun?>(null);
         }
 
+        return RetryAsync(() => ClaimRunCoreAsync(nodeName, jobNames, queueNames, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task<JobRun?> ClaimRunCoreAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken)
+    {
         await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
@@ -2067,4 +2063,25 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
     private static string EscapeLike(string input) =>
         input.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
+
+    private static async Task<T> RetryAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken,
+        int maxAttempts = 3)
+    {
+        var delay = 50;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception ex) when (attempt < maxAttempts && IsTransientError(ex))
+            {
+                await Task.Delay(delay, cancellationToken);
+                delay *= 2;
+            }
+        }
+    }
+
+    private static bool IsTransientError(Exception ex) =>
+        ex is PostgresException { SqlState: "40001" or "40P01" };
 }

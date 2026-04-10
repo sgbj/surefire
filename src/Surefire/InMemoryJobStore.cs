@@ -6,7 +6,7 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
     private readonly Dictionary<string, List<RunEvent>> _eventsByRunId = new();
     private readonly Dictionary<string, JobDefinition> _jobs = new();
-    private readonly Lock _lock = new();
+    private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.NoRecursion);
     private readonly Dictionary<string, NodeInfo> _nodes = new();
     private readonly Dictionary<string, int> _nonTerminalCountByJob = new();
     private readonly Dictionary<string, int> _pendingCountByQueue = new();
@@ -34,7 +34,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     {
         var now = _timeProvider.GetUtcNow();
 
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_jobs.TryGetValue(job.Name, out var existing))
             {
@@ -62,22 +63,32 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 _jobs[job.Name] = copy;
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
 
     public Task<JobDefinition?> GetJobAsync(string name, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             return Task.FromResult(_jobs.TryGetValue(name, out var job) ? CopyJob(job) : null);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
     public Task<IReadOnlyList<JobDefinition>> GetJobsAsync(JobListFilter? filter = null,
         CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             IEnumerable<JobDefinition> query = _jobs.Values;
 
@@ -107,16 +118,25 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             IReadOnlyList<JobDefinition> result = query.Select(CopyJob).OrderBy(j => j.Name).ToList();
             return Task.FromResult(result);
         }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
     }
 
     public Task SetJobEnabledAsync(string name, bool enabled, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_jobs.TryGetValue(name, out var job))
             {
                 job.IsEnabled = enabled;
             }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
 
         return Task.CompletedTask;
@@ -125,12 +145,17 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     public Task UpdateLastCronFireAtAsync(string jobName, DateTimeOffset fireAt,
         CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_jobs.TryGetValue(jobName, out var job))
             {
                 job.LastCronFireAt = fireAt;
             }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
 
         return Task.CompletedTask;
@@ -149,9 +174,14 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
     public Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             return Task.FromResult(_runs.TryGetValue(id, out var run) ? run : null);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
@@ -171,7 +201,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         int totalCount;
         List<JobRun> items;
 
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             IEnumerable<JobRun> query = _runs.Values;
 
@@ -244,22 +275,27 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 query = query.Where(r => r.LastHeartbeatAt < filter.LastHeartbeatBefore.Value);
             }
 
-            totalCount = query.Count();
+            var all = query.ToList();
+            totalCount = all.Count;
 
             IEnumerable<JobRun> ordered = filter.OrderBy switch
             {
-                RunOrderBy.StartedAt => query
+                RunOrderBy.StartedAt => all
                     .OrderByDescending(r => r.StartedAt)
                     .ThenByDescending(r => r.Id),
-                RunOrderBy.CompletedAt => query
+                RunOrderBy.CompletedAt => all
                     .OrderByDescending(r => r.CompletedAt)
                     .ThenByDescending(r => r.Id),
-                _ => query
+                _ => all
                     .OrderByDescending(r => r.CreatedAt)
                     .ThenByDescending(r => r.Id)
             };
 
             items = ordered.Skip(skip).Take(take).ToList();
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
 
         return Task.FromResult(new PagedResult<JobRun>
@@ -271,7 +307,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
     public Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (!_runs.TryGetValue(run.Id, out var stored))
             {
@@ -298,6 +335,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 LastHeartbeatAt = run.LastHeartbeatAt
             };
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
@@ -305,7 +346,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     public Task<bool> TryTransitionRunAsync(RunStatusTransition transition,
         CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (!_runs.TryGetValue(transition.RunId, out var stored))
             {
@@ -354,12 +396,17 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
             return Task.FromResult(true);
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
     }
 
     public Task<bool> TryCancelRunAsync(string runId,
         CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (!_runs.TryGetValue(runId, out var stored))
             {
@@ -385,6 +432,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
             return Task.FromResult(true);
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
     }
 
     public Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
@@ -393,7 +444,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         var cancelledIds = new List<string>();
         var now = _timeProvider.GetUtcNow();
 
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             foreach (var run in _runs.Values.ToList())
             {
@@ -416,6 +468,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 cancelledIds.Add(run.Id);
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
     }
@@ -423,7 +479,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             var now = _timeProvider.GetUtcNow();
             var jobNameSet = jobNames as ISet<string> ?? new HashSet<string>(jobNames);
@@ -528,12 +585,17 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
             return Task.FromResult<JobRun?>(null);
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
     }
 
     public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             _batches[batch.Id] = batch;
 
@@ -566,22 +628,32 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             if (initialEvents?.Count > 0)
                 AppendEventsCore(initialEvents);
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
 
     public Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             return Task.FromResult(_batches.TryGetValue(batchId, out var batch) ? batch : null);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
     public Task<BatchCounters?> TryIncrementBatchProgressAsync(string batchId, JobStatus terminalStatus,
         CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (!_batches.TryGetValue(batchId, out var batch))
                 return Task.FromResult<BatchCounters?>(null);
@@ -605,12 +677,17 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             var updated = _batches[batchId];
             return Task.FromResult<BatchCounters?>(new BatchCounters(updated.Total, updated.Succeeded, updated.Failed, updated.Cancelled));
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
     }
 
     public Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
         CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (!_batches.TryGetValue(batchId, out var batch) || batch.Status.IsTerminal)
                 return Task.FromResult(false);
@@ -618,13 +695,22 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             _batches[batchId] = batch with { Status = status, CompletedAt = completedAt };
             return Task.FromResult(true);
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
     }
 
     public Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             AppendEventsCore(events);
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
 
         return Task.CompletedTask;
@@ -633,7 +719,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     public Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null,
         int? attempt = null, int? take = null, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             if (!_eventsByRunId.TryGetValue(runId, out var list))
             {
@@ -661,12 +748,17 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             IReadOnlyList<RunEvent> result = query.Select(CopyEvent).ToList();
             return Task.FromResult(result);
         }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
     }
 
     public Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             if (take <= 0)
             {
@@ -693,6 +785,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 .ToList();
             return Task.FromResult(result);
         }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
     }
 
     public Task HeartbeatAsync(string nodeName, IReadOnlyCollection<string> jobNames,
@@ -701,14 +797,18 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     {
         var now = _timeProvider.GetUtcNow();
 
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_nodes.TryGetValue(nodeName, out var existing))
             {
-                existing.LastHeartbeatAt = now;
-                existing.RunningCount = activeRunIds.Count;
-                existing.RegisteredJobNames = jobNames.ToList();
-                existing.RegisteredQueueNames = queueNames.ToList();
+                _nodes[nodeName] = existing with
+                {
+                    LastHeartbeatAt = now,
+                    RunningCount = activeRunIds.Count,
+                    RegisteredJobNames = jobNames.ToList(),
+                    RegisteredQueueNames = queueNames.ToList()
+                };
             }
             else
             {
@@ -732,24 +832,38 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 }
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             IReadOnlyList<NodeInfo> result = _nodes.Values.Select(CopyNode).ToList();
             return Task.FromResult(result);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
     public Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             return Task.FromResult(_nodes.TryGetValue(name, out var node) ? CopyNode(node) : null);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
@@ -757,7 +871,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     {
         var now = _timeProvider.GetUtcNow();
 
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_queues.TryGetValue(queue.Name, out var existing))
             {
@@ -779,27 +894,41 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 _queues[queue.Name] = copy;
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             IReadOnlyList<QueueDefinition> result = _queues.Values.Select(CopyQueue).ToList();
             return Task.FromResult(result);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
     public Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (_queues.TryGetValue(name, out var queue))
             {
                 queue.IsPaused = isPaused;
             }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
 
         return Task.CompletedTask;
@@ -809,11 +938,16 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     {
         var now = _timeProvider.GetUtcNow();
 
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             var copy = CopyRateLimit(rateLimit);
             copy.LastHeartbeatAt = now;
             _rateLimitDefinitions[rateLimit.Name] = copy;
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
 
         return Task.CompletedTask;
@@ -827,7 +961,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         var now = _timeProvider.GetUtcNow();
         var cancelledIds = new List<string>();
 
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             foreach (var run in _runs.Values.ToList())
             {
@@ -854,13 +989,18 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 cancelledIds.Add(run.Id);
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
     }
 
     public Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             var runsToRemove = _runs.Values
                 .Where(r =>
@@ -954,6 +1094,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 _batches.Remove(id);
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
@@ -994,7 +1138,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         int jobCount;
         int nodeCount;
 
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             totalRuns = _runs.Count;
             jobCount = _jobs.Count;
@@ -1050,6 +1195,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 }
             }
         }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
 
         var successRate = terminalCount > 0 ? completedCount / (double)terminalCount : 0.0;
 
@@ -1103,7 +1252,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         var durationCount = 0;
         DateTimeOffset? lastRunAt = null;
 
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             foreach (var run in _runs.Values)
             {
@@ -1141,6 +1291,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 }
             }
         }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
 
         var successRate = terminalCount > 0 ? completedCount / (double)terminalCount : 0.0;
         var avgDuration = durationCount > 0
@@ -1165,7 +1319,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
     {
         var result = new Dictionary<string, QueueStats>();
 
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             var queueNames = new HashSet<string>(_queues.Keys);
             foreach (var name in _pendingCountByQueue.Keys)
@@ -1190,13 +1345,18 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 };
             }
         }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
 
         return Task.FromResult<IReadOnlyDictionary<string, QueueStats>>(result);
     }
 
     private Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs, IReadOnlyList<RunEvent>? initialEvents)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             var copies = new List<JobRun>(runs.Count);
             var seenIds = new HashSet<string>(runs.Count);
@@ -1239,6 +1399,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
             AppendEventsCore(initialEvents);
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return Task.CompletedTask;
     }
@@ -1247,7 +1411,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents)
     {
-        lock (_lock)
+        _rwLock.EnterWriteLock();
+        try
         {
             if (run.DeduplicationId is { })
             {
@@ -1309,6 +1474,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             AppendEventsCore(initialEvents);
 
             return Task.FromResult(true);
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
         }
     }
 
@@ -1575,7 +1744,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
     public Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
     {
-        lock (_lock)
+        _rwLock.EnterReadLock();
+        try
         {
             var result = new List<string>();
             foreach (var (batchId, batch) in _batches)
@@ -1587,6 +1757,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                     result.Add(batchId);
             }
             return Task.FromResult<IReadOnlyList<string>>(result);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
         }
     }
 
@@ -1624,12 +1798,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         LastHeartbeatAt = queue.LastHeartbeatAt
     };
 
-    private static NodeInfo CopyNode(NodeInfo node) => new()
+    private static NodeInfo CopyNode(NodeInfo node) => node with
     {
-        Name = node.Name,
-        StartedAt = node.StartedAt,
-        LastHeartbeatAt = node.LastHeartbeatAt,
-        RunningCount = node.RunningCount,
         RegisteredJobNames = node.RegisteredJobNames.ToList(),
         RegisteredQueueNames = node.RegisteredQueueNames.ToList()
     };

@@ -489,7 +489,7 @@ internal sealed partial class JobClient(
 
     public async Task<T> WaitAsync<T>(string runId, CancellationToken cancellationToken = default)
     {
-        if (TryGetAsyncEnumerableElementType(typeof(T), out var streamItemType))
+        if (TypeHelpers.TryGetAsyncEnumerableElementType(typeof(T), out var streamItemType))
         {
             var streamMethod = typeof(JobClient)
                 .GetMethod(nameof(BuildObserverRunStreamResult), BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -503,9 +503,9 @@ internal sealed partial class JobClient(
             throw new JobRunFailedException(result.Id, result.Status, result.Error);
         }
 
-        if (result.TryGetResult<T>(out var typed))
+        if (result.Result is { } resultJson)
         {
-            return typed!;
+            return System.Text.Json.JsonSerializer.Deserialize<T>(resultJson, options.SerializerOptions)!;
         }
 
         if (await TryBuildResultFromOutputEventsAsync<T>(result.Id, cancellationToken) is { } fromEvents)
@@ -513,7 +513,7 @@ internal sealed partial class JobClient(
             return fromEvents;
         }
 
-        return result.GetResult<T>();
+        throw new InvalidOperationException("Run did not produce a result.");
     }
 
     /// <inheritdoc />
@@ -1090,8 +1090,7 @@ internal sealed partial class JobClient(
             return (T?)stream;
         }
 
-        var itemType = TryGetCollectionElementType(target);
-        if (itemType is null)
+        if (!TypeHelpers.TryGetCollectionElementType(target, out var itemType, out var asArray))
         {
             return default;
         }
@@ -1103,6 +1102,14 @@ internal sealed partial class JobClient(
         if (materialized is null)
         {
             return default;
+        }
+
+        if (asArray && materialized is System.Collections.IEnumerable enumerable)
+        {
+            var toArray = typeof(Enumerable)
+                .GetMethod(nameof(Enumerable.ToArray))!
+                .MakeGenericMethod(itemType);
+            materialized = toArray.Invoke(null, [enumerable])!;
         }
 
         return (T)materialized;
@@ -1157,23 +1164,6 @@ internal sealed partial class JobClient(
         }
 
         return list.Count == 0 ? null : list;
-    }
-
-    private static Type? TryGetCollectionElementType(Type targetType)
-    {
-        if (targetType.IsGenericType)
-        {
-            var genericDefinition = targetType.GetGenericTypeDefinition();
-            if (genericDefinition == typeof(List<>)
-                || genericDefinition == typeof(IReadOnlyList<>)
-                || genericDefinition == typeof(IList<>)
-                || genericDefinition == typeof(IEnumerable<>))
-            {
-                return targetType.GetGenericArguments()[0];
-            }
-        }
-
-        return null;
     }
 
     private bool TryDeserializeList<T>(string json, out List<T>? items)
@@ -1319,7 +1309,7 @@ internal sealed partial class JobClient(
     private static bool TryCreateStreamSource(string argumentName, object? value,
         out StreamingArgumentSource? source)
     {
-        if (value is { } && TryGetAsyncEnumerableElementType(value.GetType(), out var elementType))
+        if (value is { } && TypeHelpers.TryGetAsyncEnumerableElementType(value.GetType(), out var elementType))
         {
             var boxMethod = typeof(JobClient)
                 .GetMethod(nameof(BoxAsyncEnumerable), BindingFlags.Static | BindingFlags.NonPublic)!
@@ -1330,26 +1320,6 @@ internal sealed partial class JobClient(
         }
 
         source = null;
-        return false;
-    }
-
-    private static bool TryGetAsyncEnumerableElementType(Type type, out Type elementType)
-    {
-        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            elementType = type.GetGenericArguments()[0];
-            return true;
-        }
-
-        var asyncEnumerable = type.GetInterfaces().FirstOrDefault(i =>
-            i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>));
-        if (asyncEnumerable is { })
-        {
-            elementType = asyncEnumerable.GetGenericArguments()[0];
-            return true;
-        }
-
-        elementType = null!;
         return false;
     }
 

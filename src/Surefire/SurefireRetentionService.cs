@@ -19,11 +19,7 @@ internal sealed partial class SurefireRetentionService(
             {
                 try
                 {
-                    if (options.RetentionPeriod is { } retention)
-                    {
-                        var threshold = timeProvider.GetUtcNow() - retention;
-                        await store.PurgeAsync(threshold, stoppingToken);
-                    }
+                    await RunRetentionAsync(stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -37,6 +33,15 @@ internal sealed partial class SurefireRetentionService(
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+        }
+    }
+
+    internal async Task RunRetentionAsync(CancellationToken cancellationToken)
+    {
+        if (options.RetentionPeriod is { } retention)
+        {
+            var threshold = timeProvider.GetUtcNow() - retention;
+            await store.PurgeAsync(threshold, cancellationToken);
         }
     }
 

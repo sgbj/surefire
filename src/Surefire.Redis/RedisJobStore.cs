@@ -27,6 +27,7 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                                             if batch_arg and batch_arg ~= '' then
                                                 local batch = cjson.decode(batch_arg)
                                                 redis.call('SET', '{surefire}:batch:' .. batch.id, batch_arg)
+                                                redis.call('SADD', '{surefire}:batches:active', batch.id)
                                             end
 
                                             local function append_events(events)
@@ -1457,7 +1458,8 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
                               b.status = tonumber(ARGV[2])
                               b.completed_at = tonumber(ARGV[3])
                               redis.call('SET', key, cjson.encode(b))
-                              -- Track in {surefire}:batches with completed_at score for purge
+                              -- Remove from active set and track in completed set for purge
+                              redis.call('SREM', '{surefire}:batches:active', ARGV[1])
                               redis.call('ZADD', '{surefire}:batches', tonumber(ARGV[3]), ARGV[1])
                               return 1
                               """;
@@ -1471,6 +1473,50 @@ internal sealed class RedisJobStore(RedisOptions options, TimeProvider timeProvi
             ]);
 
         return (int)result == 1;
+    }
+
+    public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        const string script = """
+                              local active = redis.call('SMEMBERS', '{surefire}:batches:active')
+                              local result = {}
+                              for _, batch_id in ipairs(active) do
+                                  local bdata = redis.call('GET', '{surefire}:batch:' .. batch_id)
+                                  if bdata then
+                                      local b = cjson.decode(bdata)
+                                      local bstatus = tonumber(b.status)
+                                      if bstatus ~= 2 and bstatus ~= 4 and bstatus ~= 5 then
+                                          local run_ids = redis.call('SMEMBERS', '{surefire}:batch_runs:' .. batch_id)
+                                          local has_nonterminal = false
+                                          for _, run_id in ipairs(run_ids) do
+                                              local rdata = redis.call('GET', '{surefire}:run:' .. run_id)
+                                              if rdata then
+                                                  local r = cjson.decode(rdata)
+                                                  local s = tonumber(r.status)
+                                                  if s ~= 2 and s ~= 4 and s ~= 5 then
+                                                      has_nonterminal = true
+                                                      break
+                                                  end
+                                              end
+                                          end
+                                          if not has_nonterminal then
+                                              result[#result + 1] = batch_id
+                                          end
+                                      end
+                                  end
+                              end
+                              if #result == 0 then return nil end
+                              return cjson.encode(result)
+                              """;
+
+        var raw = await EvaluateScriptAsync(script, [RoutingKey], []);
+        if (raw.IsNull)
+        {
+            return [];
+        }
+
+        return JsonSerializer.Deserialize<string[]>(raw.ToString()!) ?? [];
     }
 
     public async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,

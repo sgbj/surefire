@@ -155,6 +155,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                       total INT NOT NULL DEFAULT 0,
                                       succeeded INT NOT NULL DEFAULT 0,
                                       failed INT NOT NULL DEFAULT 0,
+                                      cancelled INT NOT NULL DEFAULT 0,
                                       created_at DATETIMEOFFSET NOT NULL,
                                       completed_at DATETIMEOFFSET
                                   );
@@ -210,19 +211,6 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                   SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_schema_migrations WHERE version = 1);
                                   """;
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            if (currentVersion < 2)
-            {
-                await using var v2Cmd = conn.CreateCommand();
-                v2Cmd.CommandText = """
-                                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.surefire_batches') AND name = 'cancelled')
-                                    ALTER TABLE dbo.surefire_batches ADD cancelled INT NOT NULL DEFAULT 0;
-
-                                    INSERT INTO dbo.surefire_schema_migrations (version)
-                                    SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_schema_migrations WHERE version = 2);
-                                    """;
-                await v2Cmd.ExecuteNonQueryAsync(cancellationToken);
             }
         }
         finally
@@ -387,7 +375,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => RetryAsync(() => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken), cancellationToken);
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -559,14 +547,21 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return rows > 0;
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
-            return null;
+            return Task.FromResult<JobRun?>(null);
         }
 
+        return RetryAsync(() => ClaimRunCoreAsync(nodeName, jobNames, queueNames, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task<JobRun?> ClaimRunCoreAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken)
+    {
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
@@ -2272,6 +2267,27 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     private static string EscapeLike(string input) =>
         input.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
+
+    private static async Task<T> RetryAsync<T>(Func<Task<T>> operation, CancellationToken cancellationToken,
+        int maxAttempts = 3)
+    {
+        var delay = 50;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Exception ex) when (attempt < maxAttempts && IsTransientError(ex))
+            {
+                await Task.Delay(delay, cancellationToken);
+                delay *= 2;
+            }
+        }
+    }
+
+    private static bool IsTransientError(Exception ex) =>
+        ex is SqlException { Number: 1205 }; // deadlock victim
 }
 
 

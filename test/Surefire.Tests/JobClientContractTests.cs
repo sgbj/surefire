@@ -1167,6 +1167,42 @@ public sealed class JobClientContractTests
         Assert.Equal(2, runsPage.TotalCount);
     }
 
+    [Fact]
+    public async Task WaitAsync_ReturnsArrayResult_WhenOutputEventsEmittedAndNoJsonResult()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(store, notifications, TimeProvider.System, new SurefireOptions(), logger);
+
+        var jobName = "ArrayResult_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
+
+        var claimed = await WaitForClaimAsync(store, jobName);
+        var now = DateTimeOffset.UtcNow;
+        await store.AppendEventsAsync([
+            new RunEvent { RunId = runId, EventType = RunEventType.Output, Payload = JsonSerializer.Serialize(10), CreatedAt = now, Attempt = claimed.Attempt },
+            new RunEvent { RunId = runId, EventType = RunEventType.Output, Payload = JsonSerializer.Serialize(20), CreatedAt = now, Attempt = claimed.Attempt },
+            new RunEvent { RunId = runId, EventType = RunEventType.Output, Payload = JsonSerializer.Serialize(30), CreatedAt = now, Attempt = claimed.Attempt }
+        ]);
+
+        // Succeed the run with null result — output events must be used to reconstruct the result.
+        var succeeded = RunStatusTransition.RunningToSucceeded(
+            runId, claimed.Attempt, DateTimeOffset.UtcNow, claimed.NotBefore,
+            claimed.NodeName, 1, result: null, error: null,
+            claimed.StartedAt, claimed.LastHeartbeatAt);
+        Assert.True(await store.TryTransitionRunAsync(succeeded));
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId);
+
+        var result = await client.WaitAsync<int[]>(runId);
+
+        Assert.IsType<int[]>(result);
+        Assert.Equal([10, 20, 30], result);
+    }
+
     private static async Task<JobRun> WaitForClaimAsync(InMemoryJobStore store, string jobName)
     {
         return await TestWait.PollUntilAsync(

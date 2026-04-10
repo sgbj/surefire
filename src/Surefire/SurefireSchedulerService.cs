@@ -38,7 +38,7 @@ internal sealed partial class SurefireSchedulerService(
         }
     }
 
-    private async Task ScheduleDueJobsAsync(CancellationToken cancellationToken)
+    internal async Task ScheduleDueJobsAsync(CancellationToken cancellationToken)
     {
         var jobs = await store.GetJobsAsync(new() { IsEnabled = true }, cancellationToken);
         var now = timeProvider.GetUtcNow();

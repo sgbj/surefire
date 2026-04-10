@@ -34,17 +34,13 @@ internal sealed class SqliteJobStore(
         }
 
         var hasV1 = await HasMigrationVersionAsync(conn, 1, cancellationToken);
-        var hasV2 = await HasMigrationVersionAsync(conn, 2, cancellationToken);
-        var hasV3 = await HasMigrationVersionAsync(conn, 3, cancellationToken);
 
-        if (hasV1 && hasV2 && hasV3)
+        if (hasV1)
         {
             return;
         }
 
-        if (!hasV1)
-        {
-            await using var ddlCmd = CreateCommand(conn, """
+        await using var ddlCmd = CreateCommand(conn, """
                                                      CREATE TABLE IF NOT EXISTS surefire_jobs (
                                                          name TEXT PRIMARY KEY,
                                                          description TEXT,
@@ -162,54 +158,8 @@ internal sealed class SqliteJobStore(
                                                          last_heartbeat_at TEXT
                                                      );
                                                      INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (1);
-                                                     INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (2);
-                                                     INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (3);
                                                      """);
-            await ddlCmd.ExecuteNonQueryAsync(cancellationToken);
-            return;
-        }
-
-        if (!hasV2)
-        {
-            var hasTimeoutTicks = await HasColumnAsync(conn, "surefire_jobs", "timeout_ticks", cancellationToken);
-            if (!hasTimeoutTicks)
-            {
-                await using var alterCmd = CreateCommand(conn,
-                    "ALTER TABLE surefire_jobs ADD COLUMN timeout_ticks INTEGER;");
-                await alterCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await using (var migrateDataCmd = CreateCommand(conn, """
-                                                                  UPDATE surefire_jobs
-                                                                  SET timeout_ticks = CASE
-                                                                      WHEN timeout_ticks IS NOT NULL THEN timeout_ticks
-                                                                      WHEN timeout_ms IS NULL THEN NULL
-                                                                      ELSE CAST(ROUND(timeout_ms * 10000.0) AS INTEGER)
-                                                                  END
-                                                                  """))
-            {
-                await migrateDataCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await using var versionCmd = CreateCommand(conn,
-                "INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (2);");
-            await versionCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        if (!hasV3)
-        {
-            var hasCancelled = await HasColumnAsync(conn, "surefire_batches", "cancelled", cancellationToken);
-            if (!hasCancelled)
-            {
-                await using var alterCmd = CreateCommand(conn,
-                    "ALTER TABLE surefire_batches ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0;");
-                await alterCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await using var versionCmd = CreateCommand(conn,
-                "INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (3);");
-            await versionCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
+        await ddlCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)

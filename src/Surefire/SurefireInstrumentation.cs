@@ -19,6 +19,7 @@ internal sealed class SurefireInstrumentation : IDisposable
         RunsFailed = _meter.CreateCounter<long>("surefire.runs.failed");
         RunsCancelled = _meter.CreateCounter<long>("surefire.runs.cancelled");
         RunDurationMs = _meter.CreateHistogram<double>("surefire.runs.duration.ms");
+        StoreOperationDurationMs = _meter.CreateHistogram<double>("surefire.store.operation.ms");
         LogEntriesDropped = _meter.CreateCounter<long>("surefire.log_entries.dropped");
     }
 
@@ -33,6 +34,8 @@ internal sealed class SurefireInstrumentation : IDisposable
     public Counter<long> RunsCancelled { get; }
 
     public Histogram<double> RunDurationMs { get; }
+
+    public Histogram<double> StoreOperationDurationMs { get; }
 
     public Counter<long> LogEntriesDropped { get; }
 
@@ -79,4 +82,10 @@ internal sealed class SurefireInstrumentation : IDisposable
     }
 
     public void RecordLogEntryDropped() => LogEntriesDropped.Add(1);
+
+    public void RecordStoreOperation(string operation, double elapsedMs)
+    {
+        var tags = new TagList { { "surefire.store.operation", operation } };
+        StoreOperationDurationMs.Record(elapsedMs, tags);
+    }
 }

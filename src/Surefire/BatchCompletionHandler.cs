@@ -47,6 +47,33 @@ internal sealed partial class BatchCompletionHandler(
         await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
     }
 
+    public async Task RecoverBatchAsync(string batchId, CancellationToken cancellationToken)
+    {
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null || batch.IsTerminal)
+        {
+            return;
+        }
+
+        if (batch.Succeeded + batch.Failed + batch.Cancelled < batch.Total)
+        {
+            return;
+        }
+
+        var completedAt = timeProvider.GetUtcNow();
+        var batchStatus = batch.Failed > 0 ? JobStatus.Failed
+            : batch.Cancelled > 0 ? JobStatus.Cancelled
+            : JobStatus.Succeeded;
+
+        if (!await store.TryCompleteBatchAsync(batchId, batchStatus, completedAt, cancellationToken))
+        {
+            return;
+        }
+
+        Log.BatchRecovered(logger, batchId);
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId, cancellationToken);
+    }
+
     public async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
         CancellationToken cancellationToken)
     {
@@ -87,6 +114,9 @@ internal sealed partial class BatchCompletionHandler(
         [LoggerMessage(EventId = 1501, Level = LogLevel.Warning,
             Message = "Failed to append attempt failure event for run '{RunId}'.")]
         public static partial void FailedToAppendAttemptFailure(ILogger logger, Exception exception, string runId);
+        [LoggerMessage(EventId = 1502, Level = LogLevel.Information,
+            Message = "Recovered stuck batch '{BatchId}' during maintenance sweep.")]
+        public static partial void BatchRecovered(ILogger logger, string batchId);
     }
 }
 

@@ -19,8 +19,9 @@ internal sealed class JobRegistry
                 || (serviceChecker?.IsService(parameterType) ?? false));
 
         var builder = new JobBuilder(definition);
+        var metadata = HandlerMetadata.Build(handler);
         var registration = new RegisteredJob(name, handler, definition, builder.FilterTypes,
-            builder.OnSuccessCallbacks, builder.OnRetryCallbacks, builder.OnDeadLetterCallbacks);
+            builder.OnSuccessCallbacks, builder.OnRetryCallbacks, builder.OnDeadLetterCallbacks, metadata);
 
         _jobs[name] = registration;
         return builder;
@@ -52,4 +53,5 @@ internal sealed record RegisteredJob(
     IReadOnlyList<Type> FilterTypes,
     IReadOnlyList<Delegate> OnSuccessCallbacks,
     IReadOnlyList<Delegate> OnRetryCallbacks,
-    IReadOnlyList<Delegate> OnDeadLetterCallbacks);
+    IReadOnlyList<Delegate> OnDeadLetterCallbacks,
+    HandlerMetadata Metadata);

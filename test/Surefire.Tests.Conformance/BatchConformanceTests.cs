@@ -352,4 +352,55 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         // Should complete without throwing
         await Store.CancelBatchRunsAsync(Guid.CreateVersion7().ToString("N"));
     }
+
+    // ── GetCompletableBatchIdsAsync ───────────────────────────────────────────
+
+    [Fact]
+    public async Task GetCompletableBatchIds_AllRunsTerminal_BatchNotYetCompleted_ReturnsBatchId()
+    {
+        var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName));
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var batch = CreateBatch(2);
+        // Create runs directly in Running state (avoids Pending→Running attempt mismatch)
+        var run1 = CreateRun(jobName, JobStatus.Running) with { BatchId = batch.Id, Attempt = 1, NodeName = "node1", StartedAt = now, LastHeartbeatAt = now };
+        var run2 = CreateRun(jobName, JobStatus.Running) with { BatchId = batch.Id, Attempt = 1, NodeName = "node1", StartedAt = now, LastHeartbeatAt = now };
+        await Store.CreateBatchAsync(batch, [run1, run2]);
+
+        // Transition both runs to Succeeded without calling TryIncrementBatchProgressAsync,
+        // simulating the stuck-batch scenario where progress counting was lost.
+        var run1Succeeded = run1 with { Status = JobStatus.Succeeded, CompletedAt = now };
+        await Store.TryTransitionRunAsync(Transition(run1Succeeded, JobStatus.Running));
+        var run2Succeeded = run2 with { Status = JobStatus.Succeeded, CompletedAt = now };
+        await Store.TryTransitionRunAsync(Transition(run2Succeeded, JobStatus.Running));
+
+        var ids = await Store.GetCompletableBatchIdsAsync();
+
+        Assert.Contains(batch.Id, ids);
+    }
+
+    [Fact]
+    public async Task GetCompletableBatchIds_BatchAlreadyTerminal_NotReturned()
+    {
+        var (batch, _) = await CreateBatchWithRunsAsync(2);
+        var completedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+
+        await Store.TryCompleteBatchAsync(batch.Id, JobStatus.Succeeded, completedAt);
+
+        var ids = await Store.GetCompletableBatchIdsAsync();
+
+        Assert.DoesNotContain(batch.Id, ids);
+    }
+
+    [Fact]
+    public async Task GetCompletableBatchIds_BatchWithNonTerminalRun_NotReturned()
+    {
+        var (batch, _) = await CreateBatchWithRunsAsync(2);
+
+        // No runs are terminal — batch should not appear
+        var ids = await Store.GetCompletableBatchIdsAsync();
+
+        Assert.DoesNotContain(batch.Id, ids);
+    }
 }

@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
@@ -46,11 +45,13 @@ internal sealed partial class SurefireExecutorService(
                     continue;
                 }
 
+                var sw = Stopwatch.StartNew();
                 var claimed = await store.ClaimRunAsync(
                     options.NodeName,
                     registry.GetJobNames(),
                     registry.GetQueueNames(),
                     stoppingToken);
+                instrumentation.RecordStoreOperation("claim", sw.Elapsed.TotalMilliseconds);
 
                 if (claimed is null)
                 {
@@ -505,21 +506,12 @@ internal sealed partial class SurefireExecutorService(
     private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, JobRun run, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
-        var parameters = registration.Handler.Method.GetParameters();
-        var args = await BindParametersAsync(parameters, run, context, services, cancellationToken);
+        var metadata = registration.Metadata;
+        var args = await BindParametersAsync(metadata, run, context, services, cancellationToken);
 
-        object? invocationResult;
-        try
-        {
-            invocationResult = registration.Handler.DynamicInvoke(args);
-        }
-        catch (TargetInvocationException ex) when (ex.InnerException is { })
-        {
-            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-            throw;
-        }
+        var invocationResult = metadata.Invoke(args);
 
-        var (hasResult, value) = await AwaitResultAsync(invocationResult, registration.Handler.Method.ReturnType);
+        var (hasResult, value) = await AwaitResultAsync(invocationResult, metadata);
         if (!hasResult)
         {
             return InvocationResult.Empty;
@@ -533,9 +525,9 @@ internal sealed partial class SurefireExecutorService(
                 null);
         }
 
-        if (TryGetAsyncEnumerableElementType(value.GetType(), out _))
+        if (metadata.AsyncEnumerableElementType is not null)
         {
-            var items = await MaterializeAsyncEnumerableAsync(value, run, cancellationToken);
+            var items = await metadata.Materializer!(this, value, run, cancellationToken);
             var resultJson = $"[{string.Join(',', items)}]";
             return new(
                 resultJson,
@@ -549,9 +541,10 @@ internal sealed partial class SurefireExecutorService(
             null);
     }
 
-    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, JobRun run,
+    private async Task<object?[]> BindParametersAsync(HandlerMetadata metadata, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
+        var parameters = metadata.Parameters;
         using var doc = run.Arguments is null ? null : JsonDocument.Parse(run.Arguments);
         var root = doc?.RootElement;
         var declaredInputArguments = await GetDeclaredInputArgumentsAsync(run.Id, cancellationToken);
@@ -586,7 +579,7 @@ internal sealed partial class SurefireExecutorService(
                 continue;
             }
 
-            if (CanBindFromInputStream(parameter.ParameterType))
+            if (metadata.StreamBinders[i] is { } binder)
             {
                 if (TryGetDeclaredInputArgumentName(
                         parameters,
@@ -595,11 +588,7 @@ internal sealed partial class SurefireExecutorService(
                         declaredInputArguments,
                         out var argumentName))
                 {
-                    values[i] = await BindStreamInputParameterAsync(
-                        run.Id,
-                        argumentName,
-                        parameter.ParameterType,
-                        cancellationToken);
+                    values[i] = await binder(this, run.Id, argumentName, cancellationToken);
                     continue;
                 }
             }
@@ -686,109 +675,11 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private static bool CanBindFromInputStream(Type targetType)
-    {
-        if (targetType.IsGenericType
-            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            return true;
-        }
-
-        return TryGetCollectionElementType(targetType, out _, out _);
-    }
-
-    private async Task<object?> BindStreamInputParameterAsync(string runId, string argumentName,
-        Type targetType, CancellationToken cancellationToken)
-    {
-        if (targetType.IsGenericType
-            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            var itemType = targetType.GetGenericArguments()[0];
-            var method = typeof(SurefireExecutorService)
-                .GetMethod(nameof(CreateInputStreamAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(itemType);
-            return method.Invoke(this, [runId, argumentName, cancellationToken]);
-        }
-
-        if (TryGetCollectionElementType(targetType, out var elementType, out var asArray))
-        {
-            var method = typeof(SurefireExecutorService)
-                .GetMethod(nameof(MaterializeInputStreamAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(elementType);
-            var list = (IList)await (Task<object>)method.Invoke(this,
-                [runId, argumentName, cancellationToken])!;
-
-            if (asArray)
-            {
-                var toArrayMethod = typeof(SurefireExecutorService)
-                    .GetMethod(nameof(ToArray), BindingFlags.Static | BindingFlags.NonPublic)!
-                    .MakeGenericMethod(elementType);
-                return toArrayMethod.Invoke(null, [list]);
-            }
-
-            return list;
-        }
-
-        throw new InvalidOperationException(
-            $"Parameter type '{targetType.Name}' cannot bind streamed input argument '{argumentName}'.");
-    }
-
-    private static bool TryGetCollectionElementType(Type targetType, out Type elementType, out bool asArray)
-    {
-        if (targetType.IsArray)
-        {
-            elementType = targetType.GetElementType()!;
-            asArray = true;
-            return true;
-        }
-
-        if (targetType.IsGenericType)
-        {
-            var definition = targetType.GetGenericTypeDefinition();
-            if (definition == typeof(List<>)
-                || definition == typeof(IReadOnlyList<>)
-                || definition == typeof(IList<>)
-                || definition == typeof(IEnumerable<>))
-            {
-                elementType = targetType.GetGenericArguments()[0];
-                asArray = false;
-                return true;
-            }
-        }
-
-        elementType = null!;
-        asArray = false;
-        return false;
-    }
-
-    private static T[] ToArray<T>(IList values)
-    {
-        var result = new T[values.Count];
-        for (var i = 0; i < values.Count; i++)
-        {
-            result[i] = (T)values[i]!;
-        }
-
-        return result;
-    }
-
-    private object CreateInputStreamAsync<T>(string runId, string argumentName,
+    internal IAsyncEnumerable<T> CreateInputStreamAsync<T>(string runId, string argumentName,
         CancellationToken cancellationToken) =>
         ReadInputStreamAsync<T>(runId, argumentName, cancellationToken);
 
-    private async Task<object> MaterializeInputStreamAsync<T>(string runId, string argumentName,
-        CancellationToken cancellationToken)
-    {
-        var items = new List<T>();
-        await foreach (var item in ReadInputStreamAsync<T>(runId, argumentName, cancellationToken))
-        {
-            items.Add(item);
-        }
-
-        return items;
-    }
-
-    private async IAsyncEnumerable<T> ReadInputStreamAsync<T>(string runId, string argumentName,
+    internal async IAsyncEnumerable<T> ReadInputStreamAsync<T>(string runId, string argumentName,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         using var wakeup = new SemaphoreSlim(0, 1);
@@ -900,21 +791,14 @@ internal sealed partial class SurefireExecutorService(
 
     private static async Task<(bool HasResult, object? Value)> AwaitResultAsync(
         object? invocationResult,
-        Type declaredReturnType)
+        HandlerMetadata metadata)
     {
-        if (declaredReturnType == typeof(void)
-            || declaredReturnType == typeof(Task)
-            || declaredReturnType == typeof(ValueTask))
+        if (!metadata.HasResult)
         {
             if (invocationResult is Task noResultTask)
-            {
                 await noResultTask;
-            }
             else if (invocationResult is ValueTask noResultValueTask)
-            {
                 await noResultValueTask;
-            }
-
             return (false, null);
         }
 
@@ -924,75 +808,23 @@ internal sealed partial class SurefireExecutorService(
                 return (true, null);
             case Task task:
                 await task;
-                return (true, GetTaskResult(task));
-            case ValueTask valueTask:
-                await valueTask;
+                return (true, metadata.ExtractTaskResult!(task));
+            case ValueTask:
                 return (false, null);
             default:
             {
-                var type = invocationResult.GetType();
-                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
+                if (metadata.AsTaskDelegate is { } asTask)
                 {
-                    var asTaskMethod = type.GetMethod("AsTask")!;
-                    var task = (Task)asTaskMethod.Invoke(invocationResult, null)!;
+                    var task = asTask(invocationResult);
                     await task;
-                    return (true, GetTaskResult(task));
+                    return (true, metadata.ExtractTaskResult!(task));
                 }
-
                 return (true, invocationResult);
             }
         }
     }
 
-    private static object? GetTaskResult(Task task)
-    {
-        var taskType = task.GetType();
-        if (!taskType.IsGenericType)
-        {
-            return null;
-        }
-
-        return taskType.GetProperty("Result")?.GetValue(task);
-    }
-
-    private static bool TryGetAsyncEnumerableElementType(Type type, out Type elementType)
-    {
-        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            elementType = type.GetGenericArguments()[0];
-            return true;
-        }
-
-        var asyncEnumerable = type.GetInterfaces().FirstOrDefault(i =>
-            i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>));
-        if (asyncEnumerable is { })
-        {
-            elementType = asyncEnumerable.GetGenericArguments()[0];
-            return true;
-        }
-
-        elementType = null!;
-        return false;
-    }
-
-    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, JobRun run,
-        CancellationToken cancellationToken)
-    {
-        var items = new List<string>();
-        var streamType = stream.GetType();
-        var elementType = streamType.GetInterfaces()
-            .First(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-            .GetGenericArguments()[0];
-        var method = typeof(SurefireExecutorService)
-            .GetMethod(nameof(MaterializeCoreAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-            .MakeGenericMethod(elementType);
-        var task = (Task<List<string>>)method.Invoke(this, [stream, run, cancellationToken])!;
-        var serialized = await task;
-        items.AddRange(serialized);
-        return items;
-    }
-
-    private async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
+    internal async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
         JobRun run,
         CancellationToken cancellationToken)
     {

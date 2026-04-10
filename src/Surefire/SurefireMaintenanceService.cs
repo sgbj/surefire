@@ -80,6 +80,8 @@ internal sealed partial class SurefireMaintenanceService(
 
         var cancelledExpiredRunIds = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
         await PublishExpiredCancellationNotificationsAsync(cancelledExpiredRunIds, cancellationToken);
+
+        await RecoverStuckBatchesAsync(cancellationToken);
     }
 
     private async Task PublishExpiredCancellationNotificationsAsync(IReadOnlyList<string> runIds,
@@ -101,6 +103,15 @@ internal sealed partial class SurefireMaintenanceService(
                 await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId,
                     cancellationToken);
             }
+        }
+    }
+
+    private async Task RecoverStuckBatchesAsync(CancellationToken cancellationToken)
+    {
+        var batchIds = await store.GetCompletableBatchIdsAsync(cancellationToken);
+        foreach (var batchId in batchIds)
+        {
+            await batchCompletionHandler.RecoverBatchAsync(batchId, cancellationToken);
         }
     }
 
