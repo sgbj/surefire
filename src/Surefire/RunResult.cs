@@ -41,6 +41,7 @@ public sealed record RunResult
     /// <typeparam name="T">The type to deserialize the result as.</typeparam>
     /// <returns>The deserialized result.</returns>
     /// <exception cref="InvalidOperationException">The run did not produce a result.</exception>
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public T GetResult<T>()
     {
         if (ResultJson is null)
@@ -49,7 +50,7 @@ public sealed record RunResult
                 "Run did not produce a result. Check IsSuccess before calling GetResult<T>().");
         }
 
-        return JsonSerializer.Deserialize<T>(ResultJson, SerializerOptions)!;
+        return ResultSerializer.Deserialize<T>(ResultJson, SerializerOptions);
     }
 
     /// <summary>
@@ -58,11 +59,12 @@ public sealed record RunResult
     /// <typeparam name="T">The type to deserialize the result as.</typeparam>
     /// <param name="result">The deserialized result, if available.</param>
     /// <returns>True if the result was successfully deserialized; otherwise, false.</returns>
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public bool TryGetResult<T>([MaybeNullWhen(false)] out T result)
     {
         if (ResultJson is { } && Status is JobStatus.Succeeded)
         {
-            result = JsonSerializer.Deserialize<T>(ResultJson, SerializerOptions)!;
+            result = ResultSerializer.Deserialize<T>(ResultJson, SerializerOptions);
             return true;
         }
 

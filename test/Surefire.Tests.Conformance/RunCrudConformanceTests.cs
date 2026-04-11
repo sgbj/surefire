@@ -817,9 +817,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run1 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-10) };
-        var run2 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-1) };
+        var run2 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-5) };
+        var run3 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-1) };
 
-        await Store.CreateRunsAsync([run1, run2]);
+        await Store.CreateRunsAsync([run1, run2, run3]);
 
         var results = await Store.GetRunsAsync(new()
         {
@@ -829,7 +830,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         });
 
         Assert.Single(results.Items);
-        Assert.Equal(run2.Id, results.Items[0].Id);
+        Assert.Equal(run3.Id, results.Items[0].Id);
     }
 
     [Fact]

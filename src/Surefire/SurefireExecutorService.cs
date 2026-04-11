@@ -109,7 +109,7 @@ internal sealed partial class SurefireExecutorService(
             RootRunId = run.RootRunId ?? run.Id,
             JobName = run.JobName,
             Attempt = run.Attempt,
-            BatchRunId = run.BatchId,
+            BatchId = run.BatchId,
             CancellationToken = runCts.Token,
             Store = store,
             Notifications = notifications,
@@ -290,7 +290,7 @@ internal sealed partial class SurefireExecutorService(
                             RootRunId = run.RootRunId ?? run.Id,
                             JobName = run.JobName,
                             Attempt = run.Attempt,
-                            BatchRunId = run.BatchId,
+                            BatchId = run.BatchId,
                             CancellationToken = bestEffortToken,
                             Store = store,
                             Notifications = notifications,
@@ -337,7 +337,7 @@ internal sealed partial class SurefireExecutorService(
                 RootRunId = run.RootRunId ?? run.Id,
                 JobName = run.JobName,
                 Attempt = run.Attempt,
-                BatchRunId = run.BatchId,
+                BatchId = run.BatchId,
                 CancellationToken = bestEffortToken,
                 Store = store,
                 Notifications = notifications,
@@ -1129,26 +1129,11 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
-    {
-        try
-        {
-            wakeup.Release();
-        }
-        catch (SemaphoreFullException)
-        {
-        }
-        catch (ObjectDisposedException)
-        {
-            // Notification callbacks can race with monitor teardown; no wakeup is needed after disposal.
-        }
-
-        return Task.CompletedTask;
-    }
+    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup) => WakeupSignal.ReleaseAsync(wakeup);
 
     private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
     {
-        await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+        await WakeupSignal.WaitAsync(wakeup, options.PollingInterval, cancellationToken);
     }
 
     private CancellationTokenSource CreateBestEffortWorkCts(CancellationToken stoppingToken)

@@ -5,7 +5,14 @@ namespace Surefire;
 /// </summary>
 public sealed class JobBuilder
 {
-    internal JobBuilder(JobDefinition definition) => Definition = definition;
+    private readonly Action _sync;
+
+    internal JobBuilder(JobDefinition definition, Action sync)
+    {
+        Definition = definition;
+        _sync = sync;
+    }
+
     internal JobDefinition Definition { get; }
     internal List<Type> FilterTypes { get; } = [];
     internal List<Delegate> OnSuccessCallbacks { get; } = [];
@@ -27,6 +34,7 @@ public sealed class JobBuilder
 
         Definition.CronExpression = cronExpression;
         Definition.TimeZoneId = timeZoneId;
+        _sync();
         return this;
     }
 
@@ -39,6 +47,7 @@ public sealed class JobBuilder
     {
         ArgumentNullException.ThrowIfNull(description);
         Definition.Description = description;
+        _sync();
         return this;
     }
 
@@ -56,6 +65,7 @@ public sealed class JobBuilder
         }
 
         Definition.Tags = tags;
+        _sync();
         return this;
     }
 
@@ -72,6 +82,7 @@ public sealed class JobBuilder
         }
 
         Definition.Timeout = timeout;
+        _sync();
         return this;
     }
 
@@ -84,6 +95,7 @@ public sealed class JobBuilder
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxConcurrency, 1);
         Definition.MaxConcurrency = maxConcurrency;
+        _sync();
         return this;
     }
 
@@ -96,6 +108,7 @@ public sealed class JobBuilder
     {
         Definition.IsContinuous = true;
         Definition.MaxConcurrency ??= 1;
+        _sync();
         return this;
     }
 
@@ -107,6 +120,7 @@ public sealed class JobBuilder
     public JobBuilder WithPriority(int priority)
     {
         Definition.Priority = priority;
+        _sync();
         return this;
     }
 
@@ -123,6 +137,7 @@ public sealed class JobBuilder
         }
 
         Definition.Queue = queue;
+        _sync();
         return this;
     }
 
@@ -139,6 +154,7 @@ public sealed class JobBuilder
         }
 
         Definition.RateLimitName = rateLimitName;
+        _sync();
         return this;
     }
 
@@ -151,6 +167,7 @@ public sealed class JobBuilder
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxRetries);
         Definition.RetryPolicy = new() { MaxRetries = maxRetries };
+        _sync();
         return this;
     }
 
@@ -165,6 +182,7 @@ public sealed class JobBuilder
         var policyBuilder = new RetryPolicyBuilder();
         configure(policyBuilder);
         Definition.RetryPolicy = policyBuilder.Build();
+        _sync();
         return this;
     }
 
@@ -193,6 +211,7 @@ public sealed class JobBuilder
 
         Definition.MisfirePolicy = policy;
         Definition.FireAllLimit = policy == MisfirePolicy.FireAll ? fireAllLimit : null;
+        _sync();
         return this;
     }
 
@@ -204,6 +223,7 @@ public sealed class JobBuilder
     public JobBuilder UseFilter<T>() where T : class, IJobFilter
     {
         FilterTypes.Add(typeof(T));
+        _sync();
         return this;
     }
 
@@ -214,7 +234,9 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder OnSuccess(Delegate callback)
     {
+        ArgumentNullException.ThrowIfNull(callback);
         OnSuccessCallbacks.Add(callback);
+        _sync();
         return this;
     }
 
@@ -225,7 +247,9 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder OnRetry(Delegate callback)
     {
+        ArgumentNullException.ThrowIfNull(callback);
         OnRetryCallbacks.Add(callback);
+        _sync();
         return this;
     }
 
@@ -236,7 +260,9 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder OnDeadLetter(Delegate callback)
     {
+        ArgumentNullException.ThrowIfNull(callback);
         OnDeadLetterCallbacks.Add(callback);
+        _sync();
         return this;
     }
 }

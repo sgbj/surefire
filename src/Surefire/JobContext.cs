@@ -37,9 +37,9 @@ public sealed class JobContext
     public int Attempt { get; init; }
 
     /// <summary>
-    ///     Gets the run ID of the batch coordinator, if this run is part of a batch.
+    ///     Gets the batch ID if this run is part of a batch.
     /// </summary>
-    public string? BatchRunId { get; init; }
+    public string? BatchId { get; init; }
 
     /// <summary>
     ///     Gets or sets the result produced by the job handler. Populated before lifecycle callbacks.

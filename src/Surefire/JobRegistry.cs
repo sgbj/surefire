@@ -18,12 +18,24 @@ internal sealed class JobRegistry
                 parameterType == typeof(IServiceProvider)
                 || (serviceChecker?.IsService(parameterType) ?? false));
 
-        var builder = new JobBuilder(definition);
         var metadata = HandlerMetadata.Build(handler);
-        var registration = new RegisteredJob(name, handler, definition, builder.FilterTypes,
-            builder.OnSuccessCallbacks, builder.OnRetryCallbacks, builder.OnDeadLetterCallbacks, metadata);
+        JobBuilder? builder = null;
 
-        _jobs[name] = registration;
+        void SyncRegistration()
+        {
+            _jobs[name] = new RegisteredJob(
+                name,
+                handler,
+                definition.Clone(),
+                [.. builder!.FilterTypes],
+                [.. builder.OnSuccessCallbacks],
+                [.. builder.OnRetryCallbacks],
+                [.. builder.OnDeadLetterCallbacks],
+                metadata);
+        }
+
+        builder = new JobBuilder(definition, SyncRegistration);
+        SyncRegistration();
         return builder;
     }
 

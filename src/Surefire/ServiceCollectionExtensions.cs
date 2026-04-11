@@ -22,10 +22,12 @@ public static class ServiceCollectionExtensions
         var options = new SurefireOptions();
         configure?.Invoke(options);
         options.Validate();
+        var frozenOptions = options.Freeze();
 
         services.TryAddSingleton(TimeProvider.System);
+        services.AddLogging();
         services.AddMetrics();
-        services.AddSingleton(options);
+        services.AddSingleton(frozenOptions);
         services.TryAddSingleton<JobRegistry>();
         services.TryAddSingleton<ActiveRunTracker>();
         services.TryAddSingleton<SurefireInstrumentation>();

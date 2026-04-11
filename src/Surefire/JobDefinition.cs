@@ -96,4 +96,26 @@ public sealed class JobDefinition
     ///     Gets or sets the time of the last cron fire for this job.
     /// </summary>
     public DateTimeOffset? LastCronFireAt { get; set; }
+
+    internal JobDefinition Clone() => new()
+    {
+        Name = Name,
+        Description = Description,
+        Tags = [.. Tags],
+        CronExpression = CronExpression,
+        TimeZoneId = TimeZoneId,
+        Timeout = Timeout,
+        MaxConcurrency = MaxConcurrency,
+        Priority = Priority,
+        RetryPolicy = RetryPolicy with { },
+        IsContinuous = IsContinuous,
+        Queue = Queue,
+        RateLimitName = RateLimitName,
+        IsEnabled = IsEnabled,
+        MisfirePolicy = MisfirePolicy,
+        FireAllLimit = FireAllLimit,
+        ArgumentsSchema = ArgumentsSchema,
+        LastHeartbeatAt = LastHeartbeatAt,
+        LastCronFireAt = LastCronFireAt
+    };
 }

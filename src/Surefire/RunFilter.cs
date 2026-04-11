@@ -29,7 +29,7 @@ public sealed record RunFilter
     /// <summary>Filters runs created before the specified time.</summary>
     public DateTimeOffset? CreatedBefore { get; init; }
 
-    /// <summary>Filters runs completed after the specified time.</summary>
+    /// <summary>Filters runs completed strictly after the specified time.</summary>
     public DateTimeOffset? CompletedAfter { get; init; }
 
     /// <summary>Filters runs whose last heartbeat is before the specified time.</summary>

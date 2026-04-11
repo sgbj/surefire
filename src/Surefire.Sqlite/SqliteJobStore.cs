@@ -9,7 +9,9 @@ internal sealed class SqliteJobStore(
     SqliteOptions sqliteOptions,
     TimeProvider timeProvider) : IJobStore
 {
-    private readonly string _connectionString = sqliteOptions.ConnectionString;
+    private readonly string _connectionString = BuildConnectionString(sqliteOptions);
+    internal int? CommandTimeoutSeconds { get; } = CommandTimeouts.ToSeconds(sqliteOptions.CommandTimeout,
+        nameof(sqliteOptions.CommandTimeout));
 
     public async Task PingAsync(CancellationToken cancellationToken = default)
     {
@@ -370,7 +372,7 @@ internal sealed class SqliteJobStore(
 
         if (filter.CompletedAfter is { })
         {
-            where += " AND completed_at >= @coa";
+            where += " AND completed_at > @coa";
             cmd.Parameters.AddWithValue("@coa", FormatTimestamp(filter.CompletedAfter.Value));
         }
 
@@ -918,7 +920,7 @@ internal sealed class SqliteJobStore(
         return result;
     }
 
-    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0,
+    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
     {
         if (take <= 0)
@@ -937,7 +939,7 @@ internal sealed class SqliteJobStore(
                                                   ORDER BY e.id
                                                   LIMIT @take
                                                   """);
-        cmd.Parameters.AddWithValue("@batch_id", batchRunId);
+        cmd.Parameters.AddWithValue("@batch_id", batchId);
         cmd.Parameters.AddWithValue("@event_type", (int)RunEventType.Output);
         cmd.Parameters.AddWithValue("@since_id", sinceEventId);
         cmd.Parameters.AddWithValue("@take", take);
@@ -955,6 +957,94 @@ internal sealed class SqliteJobStore(
                 CreatedAt = ParseTimestamp(reader.GetString(4)),
                 Attempt = reader.GetInt32(5)
             });
+        }
+
+        return result;
+    }
+
+    public async Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0,
+        int take = 200, CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = await CreateConnectionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn, """
+                                                  SELECT e.id, e.run_id, e.event_type, e.payload, e.created_at, e.attempt
+                                                  FROM surefire_events e
+                                                  JOIN surefire_runs r ON r.id = e.run_id
+                                                  WHERE r.batch_id = @batch_id
+                                                      AND e.id > @since_id
+                                                  ORDER BY e.id
+                                                  LIMIT @take
+                                                  """);
+        cmd.Parameters.AddWithValue("@batch_id", batchId);
+        cmd.Parameters.AddWithValue("@since_id", sinceEventId);
+        cmd.Parameters.AddWithValue("@take", take);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        var result = new List<RunEvent>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new()
+            {
+                Id = reader.GetInt64(0),
+                RunId = reader.GetString(1),
+                EventType = (RunEventType)reader.GetInt16(2),
+                Payload = reader.GetString(3),
+                CreatedAt = ParseTimestamp(reader.GetString(4)),
+                Attempt = reader.GetInt32(5)
+            });
+        }
+
+        return result;
+    }
+
+    public async Task<IReadOnlyList<JobRun>> GetBatchTerminalRunsAsync(string batchId,
+        DateTimeOffset? completedAfter = null, string? afterRunId = null, int take = 200,
+        CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = await CreateConnectionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn, """
+                                                  SELECT *
+                                                  FROM surefire_runs
+                                                  WHERE batch_id = @batch_id
+                                                      AND status IN (2, 4, 5)
+                                                      AND completed_at IS NOT NULL
+                                                  """);
+        cmd.Parameters.AddWithValue("@batch_id", batchId);
+
+        if (completedAfter is { } cursorCompletedAt)
+        {
+            cmd.CommandText += """
+                               AND (
+                                   completed_at > @completed_after
+                                   OR (completed_at = @completed_after AND id > @after_run_id)
+                               )
+                               """;
+            cmd.Parameters.AddWithValue("@completed_after", FormatTimestamp(cursorCompletedAt));
+            cmd.Parameters.AddWithValue("@after_run_id", afterRunId ?? string.Empty);
+        }
+
+        cmd.CommandText += """
+                           
+                           ORDER BY completed_at ASC, id ASC
+                           LIMIT @take
+                           """;
+        cmd.Parameters.AddWithValue("@take", take);
+
+        var result = new List<JobRun>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadRun(reader));
         }
 
         return result;
@@ -1687,6 +1777,17 @@ internal sealed class SqliteJobStore(
 
     private static SqliteCommand CreateCommand(SqliteConnection conn, string sql, SqliteTransaction? tx = null) =>
         new(sql, conn) { Transaction = tx };
+
+    private static string BuildConnectionString(SqliteOptions sqliteOptions)
+    {
+        var builder = new SqliteConnectionStringBuilder(sqliteOptions.ConnectionString);
+        if (CommandTimeouts.ToSeconds(sqliteOptions.CommandTimeout, nameof(sqliteOptions.CommandTimeout)) is { } timeoutSeconds)
+        {
+            builder.DefaultTimeout = timeoutSeconds;
+        }
+
+        return builder.ToString();
+    }
 
     private static async Task<bool> HasMigrationVersionAsync(SqliteConnection conn, int version,
         CancellationToken cancellationToken)

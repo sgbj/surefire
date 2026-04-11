@@ -8,23 +8,27 @@ namespace Surefire.SqlServer;
 /// <summary>
 ///     SQL Server implementation of <see cref="IJobStore" />.
 /// </summary>
-internal sealed class SqlServerJobStore(string connectionString, TimeProvider timeProvider) : IJobStore
+internal sealed class SqlServerJobStore(SqlServerOptions options, TimeProvider timeProvider) : IJobStore
 {
+    private readonly string _connectionString = options.ConnectionString;
+    internal int? CommandTimeoutSeconds { get; } = CommandTimeouts.ToSeconds(options.CommandTimeout,
+        nameof(options.CommandTimeout));
+
     public async Task PingAsync(CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT 1";
         _ = await cmd.ExecuteScalarAsync(cancellationToken);
     }
 
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
-        await using var lockCmd = conn.CreateCommand();
+        await using var lockCmd = CreateCommand(conn);
         lockCmd.CommandText = """
                               DECLARE @result INT;
                               EXEC @result = sp_getapplock
@@ -39,20 +43,20 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
         try
         {
-            await using var migCmd = conn.CreateCommand();
+            await using var migCmd = CreateCommand(conn);
             migCmd.CommandText = """
                                  IF OBJECT_ID('dbo.surefire_schema_migrations', 'U') IS NULL
                                  CREATE TABLE dbo.surefire_schema_migrations (version INT NOT NULL PRIMARY KEY);
                                  """;
             await migCmd.ExecuteNonQueryAsync(cancellationToken);
 
-            await using var checkCmd = conn.CreateCommand();
+            await using var checkCmd = CreateCommand(conn);
             checkCmd.CommandText = "SELECT ISNULL(MAX(version), 0) FROM dbo.surefire_schema_migrations";
             var currentVersion = (int)(await checkCmd.ExecuteScalarAsync(cancellationToken))!;
 
             if (currentVersion < 1)
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = CreateCommand(conn);
                 cmd.CommandText = """
                                   IF OBJECT_ID('dbo.surefire_jobs', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_jobs (
@@ -215,7 +219,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         }
         finally
         {
-            await using var unlockCmd = conn.CreateCommand();
+            await using var unlockCmd = CreateCommand(conn);
             unlockCmd.CommandText = "EXEC sp_releaseapplock @Resource = 'surefire_migrate', @LockOwner = 'Session'";
             await unlockCmd.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -223,9 +227,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           MERGE dbo.surefire_jobs WITH (HOLDLOCK) AS target
                           USING (SELECT @name AS name) AS source ON target.name = source.name
@@ -282,9 +286,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<JobDefinition?> GetJobAsync(string name, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", name));
 
@@ -300,9 +304,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<IReadOnlyList<JobDefinition>> GetJobsAsync(JobListFilter? filter = null,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
 
         var sb = new StringBuilder("SELECT * FROM dbo.surefire_jobs WHERE 1=1");
 
@@ -345,9 +349,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task SetJobEnabledAsync(string name, bool enabled, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "UPDATE dbo.surefire_jobs SET is_enabled = @enabled WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", name));
         cmd.Parameters.Add(CreateParameter("@enabled", enabled));
@@ -357,9 +361,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task UpdateLastCronFireAtAsync(string jobName, DateTimeOffset fireAt,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "UPDATE dbo.surefire_jobs SET last_cron_fire_at = @fire_at WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", jobName));
         cmd.Parameters.Add(CreateParameter("@fire_at", fireAt));
@@ -379,9 +383,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_runs WHERE id = @id";
         cmd.Parameters.Add(CreateParameter("@id", id));
 
@@ -407,11 +411,11 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             throw new ArgumentOutOfRangeException(nameof(take));
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
         var whereParts = new List<string>();
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
 
         BuildRunFilterWhere(filter, whereParts, cmd);
         var whereClause = whereParts.Count > 0 ? "WHERE " + string.Join(" AND ", whereParts) : "";
@@ -446,9 +450,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           UPDATE dbo.surefire_runs SET
                               progress = @progress,
@@ -482,9 +486,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             return false;
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           UPDATE dbo.surefire_runs SET
                               status = @new_status,
@@ -528,9 +532,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<bool> TryCancelRunAsync(string runId,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
@@ -562,7 +566,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     private async Task<JobRun?> ClaimRunCoreAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
@@ -573,7 +577,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         var queueParams = new List<string>();
 
         // Lock rate limit rows to serialize concurrent claims
-        await using var lockRlCmd = conn.CreateCommand();
+        await using var lockRlCmd = CreateCommand(conn);
         lockRlCmd.Transaction = tx;
         for (var i = 0; i < jobNamesArr.Count; i++)
         {
@@ -604,7 +608,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                                  """;
         await lockRlCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
         for (var i = 0; i < jobNamesArr.Count; i++)
@@ -745,11 +749,11 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
-        await using var batchCmd = conn.CreateCommand();
+        await using var batchCmd = CreateCommand(conn);
         batchCmd.Transaction = tx;
         batchCmd.CommandText = """
                                INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, cancelled, created_at, completed_at)
@@ -784,7 +788,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                       ) VALUES
                       """);
 
-            await using var runCmd = conn.CreateCommand();
+            await using var runCmd = CreateCommand(conn);
             runCmd.Transaction = tx;
 
             for (var i = 0; i < chunk.Count; i++)
@@ -814,9 +818,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_batches WHERE id = @id";
         cmd.Parameters.Add(CreateParameter("@id", batchId));
 
@@ -832,9 +836,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<BatchCounters?> TryIncrementBatchProgressAsync(string batchId, JobStatus terminalStatus,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           UPDATE dbo.surefire_batches
                           SET succeeded = succeeded + CASE WHEN @status = 2 THEN 1 ELSE 0 END,
@@ -858,7 +862,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
         await reader.CloseAsync();
 
-        await using var fallback = conn.CreateCommand();
+        await using var fallback = CreateCommand(conn);
         fallback.CommandText = "SELECT total, succeeded, failed, cancelled FROM dbo.surefire_batches WHERE id = @id";
         fallback.Parameters.Add(CreateParameter("@id", batchId));
 
@@ -878,9 +882,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           UPDATE dbo.surefire_batches
                           SET status = @status, completed_at = @completed_at
@@ -898,9 +902,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL);
 
@@ -927,9 +931,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           SELECT b.id FROM dbo.surefire_batches b
                           WHERE b.status NOT IN (2, 4, 5)
@@ -954,7 +958,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             return;
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
@@ -966,9 +970,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
         RunEventType[]? types = null, int? attempt = null, int? take = null, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
 
         var sb = new StringBuilder("SELECT * FROM dbo.surefire_events WHERE run_id = @run_id AND id > @since_id");
         cmd.Parameters.Add(CreateParameter("@run_id", runId));
@@ -1011,7 +1015,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return results;
     }
 
-    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0,
+    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
     {
         if (take <= 0)
@@ -1019,19 +1023,19 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             return [];
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           SELECT TOP (@take) e.*
                           FROM dbo.surefire_events e
                           INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
-                          WHERE r.batch_id = @batch_run_id
+                          WHERE r.batch_id = @batch_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
                           ORDER BY e.id ASC
                           """;
-        cmd.Parameters.Add(CreateParameter("@batch_run_id", batchRunId));
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
         cmd.Parameters.Add(CreateParameter("@event_type", (short)RunEventType.Output));
         cmd.Parameters.Add(CreateParameter("@since_event_id", sinceEventId));
         cmd.Parameters.Add(CreateParameter("@take", take));
@@ -1046,15 +1050,97 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         return results;
     }
 
+    public async Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0,
+        int take = 200, CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          SELECT TOP (@take) e.*
+                          FROM dbo.surefire_events e
+                          INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
+                          WHERE r.batch_id = @batch_id
+                              AND e.id > @since_event_id
+                          ORDER BY e.id ASC
+                          """;
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
+        cmd.Parameters.Add(CreateParameter("@since_event_id", sinceEventId));
+        cmd.Parameters.Add(CreateParameter("@take", take));
+
+        var results = new List<RunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadEvent(reader));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<JobRun>> GetBatchTerminalRunsAsync(string batchId,
+        DateTimeOffset? completedAfter = null, string? afterRunId = null, int take = 200,
+        CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          SELECT TOP (@take) *
+                          FROM dbo.surefire_runs
+                          WHERE batch_id = @batch_id
+                              AND status IN (2, 4, 5)
+                              AND completed_at IS NOT NULL
+                          """;
+        cmd.Parameters.Add(CreateParameter("@take", take));
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
+
+        if (completedAfter is { } cursorCompletedAt)
+        {
+            cmd.CommandText += """
+                               AND (
+                                   completed_at > @completed_after
+                                   OR (completed_at = @completed_after AND id > @after_run_id)
+                               )
+                               """;
+            cmd.Parameters.Add(CreateParameter("@completed_after", cursorCompletedAt));
+            cmd.Parameters.Add(CreateParameter("@after_run_id", afterRunId ?? string.Empty));
+        }
+
+        cmd.CommandText += """
+                           
+                           ORDER BY completed_at ASC, id ASC
+                           """;
+
+        var results = new List<JobRun>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadRun(reader));
+        }
+
+        return results;
+    }
+
     public async Task HeartbeatAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, IReadOnlyCollection<string> activeRunIds,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
-        await using var nodeCmd = conn.CreateCommand();
+        await using var nodeCmd = CreateCommand(conn);
         nodeCmd.Transaction = tx;
         nodeCmd.CommandText = """
                               MERGE dbo.surefire_nodes WITH (HOLDLOCK) AS target
@@ -1080,7 +1166,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
             foreach (var chunk in activeRunIdsList.Chunk(maxRunIdsPerBatch))
             {
-                await using var runCmd = conn.CreateCommand();
+                await using var runCmd = CreateCommand(conn);
                 runCmd.Transaction = tx;
                 var idList = string.Join(", ", chunk.Select((_, i) => $"@rid_{i}"));
                 runCmd.CommandText = $"""
@@ -1102,9 +1188,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_nodes";
 
         var results = new List<NodeInfo>();
@@ -1119,9 +1205,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT TOP (1) * FROM dbo.surefire_nodes WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", name));
 
@@ -1136,10 +1222,10 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
                           MERGE dbo.surefire_queues WITH (HOLDLOCK) AS target
@@ -1171,9 +1257,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_queues";
 
         var results = new List<QueueDefinition>();
@@ -1188,9 +1274,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "UPDATE dbo.surefire_queues SET is_paused = @is_paused WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", name));
         cmd.Parameters.Add(CreateParameter("@is_paused", isPaused));
@@ -1199,9 +1285,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           MERGE dbo.surefire_rate_limits WITH (HOLDLOCK) AS target
                           USING (SELECT @name AS name) AS source ON target.name = source.name
@@ -1228,9 +1314,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
                           DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL);
@@ -1259,12 +1345,12 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
         while (true)
         {
-            await using var runCmd = conn.CreateCommand();
+            await using var runCmd = CreateCommand(conn);
             runCmd.CommandText = """
                                  DELETE TOP (1000) FROM dbo.surefire_runs
                                  WHERE (status IN (2, 4, 5)
@@ -1285,7 +1371,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             }
         }
 
-        await using var jobCmd = conn.CreateCommand();
+        await using var jobCmd = CreateCommand(conn);
         jobCmd.CommandText = """
                              DELETE FROM dbo.surefire_jobs
                              WHERE last_heartbeat_at < @threshold
@@ -1294,22 +1380,22 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         jobCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await jobCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var queueCmd = conn.CreateCommand();
+        await using var queueCmd = CreateCommand(conn);
         queueCmd.CommandText = "DELETE FROM dbo.surefire_queues WHERE last_heartbeat_at < @threshold";
         queueCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await queueCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var rlCmd = conn.CreateCommand();
+        await using var rlCmd = CreateCommand(conn);
         rlCmd.CommandText = "DELETE FROM dbo.surefire_rate_limits WHERE last_heartbeat_at < @threshold";
         rlCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await rlCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var batchCmd = conn.CreateCommand();
+        await using var batchCmd = CreateCommand(conn);
         batchCmd.CommandText = "DELETE FROM dbo.surefire_batches WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold";
         batchCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await batchCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var nodeCmd = conn.CreateCommand();
+        await using var nodeCmd = CreateCommand(conn);
         nodeCmd.CommandText = "DELETE FROM dbo.surefire_nodes WHERE last_heartbeat_at < @threshold";
         nodeCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -1318,7 +1404,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<DashboardStats> GetDashboardStatsAsync(DateTimeOffset? since = null, int bucketMinutes = 60,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
         var now = timeProvider.GetUtcNow();
@@ -1331,7 +1417,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         var sinceTime = new DateTimeOffset(rawSince.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute,
             rawSince.Offset);
 
-        await using var statsCmd = conn.CreateCommand();
+        await using var statsCmd = CreateCommand(conn);
         statsCmd.CommandText = """
                                SELECT
                                    (SELECT COUNT(*) FROM dbo.surefire_jobs) AS total_jobs,
@@ -1404,7 +1490,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             }
         }
 
-        await using var bucketCmd = conn.CreateCommand();
+        await using var bucketCmd = CreateCommand(conn);
         bucketCmd.CommandText = """
                                 SELECT
                                     DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since) AS bucket_start,
@@ -1473,9 +1559,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     public async Task<JobStats> GetJobStatsAsync(string jobName, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           SELECT
                               COUNT(*) AS total_runs,
@@ -1515,9 +1601,9 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     public async Task<IReadOnlyDictionary<string, QueueStats>> GetQueueStatsAsync(
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           WITH queue_names AS (
                               SELECT name FROM dbo.surefire_queues
@@ -1579,7 +1665,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             return;
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
@@ -1601,7 +1687,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
                       ) VALUES
                       """);
 
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = CreateCommand(conn);
             cmd.Transaction = tx;
 
             for (var i = 0; i < chunk.Count; i++)
@@ -1641,15 +1727,15 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
         if (maxActiveForJob is { })
         {
-            await using var lockCmd = conn.CreateCommand();
+            await using var lockCmd = CreateCommand(conn);
             lockCmd.Transaction = tx;
             lockCmd.CommandText = "SELECT 1 FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK) WHERE name = @name";
             lockCmd.Parameters.Add(CreateParameter("@name", run.JobName));
@@ -1737,7 +1823,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
             if (rows > 0 && lastCronFireAt is { } fireAt)
             {
-                await using var fireCmd = conn.CreateCommand();
+                await using var fireCmd = CreateCommand(conn);
                 fireCmd.Transaction = tx;
                 fireCmd.CommandText =
                     "UPDATE dbo.surefire_jobs SET last_cron_fire_at = @last_cron_fire_at WHERE name = @job_name";
@@ -1755,7 +1841,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
         }
     }
 
-    private static async Task InsertEventsAsync(SqlConnection conn, SqlTransaction tx,
+    private async Task InsertEventsAsync(SqlConnection conn, SqlTransaction tx,
         IReadOnlyList<RunEvent>? events, CancellationToken cancellationToken)
     {
         if (events is null || events.Count == 0)
@@ -1772,7 +1858,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             var sb = new StringBuilder();
             sb.Append("INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt) VALUES ");
 
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = CreateCommand(conn);
             cmd.Transaction = tx;
             for (var i = 0; i < chunk.Count; i++)
             {
@@ -1848,7 +1934,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
         if (filter.CompletedAfter is { })
         {
-            parts.Add("completed_at >= @filter_completed_after");
+            parts.Add("completed_at > @filter_completed_after");
             cmd.Parameters.Add(CreateParameter("@filter_completed_after", filter.CompletedAfter.Value));
         }
 
@@ -1946,119 +2032,57 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
 
     private static JobDefinition ReadJob(SqlDataReader reader)
     {
-        var job = new JobDefinition
+        var limitCol = reader.GetOrdinal("fire_all_limit");
+        var descriptionCol = reader.GetOrdinal("description");
+        var cronCol = reader.GetOrdinal("cron_expression");
+        var timeZoneCol = reader.GetOrdinal("time_zone_id");
+        var timeoutCol = reader.GetOrdinal("timeout");
+        var maxConcurrencyCol = reader.GetOrdinal("max_concurrency");
+        var retryPolicyCol = reader.GetOrdinal("retry_policy");
+        var queueCol = reader.GetOrdinal("queue");
+        var rateLimitCol = reader.GetOrdinal("rate_limit_name");
+        var schemaCol = reader.GetOrdinal("arguments_schema");
+        var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
+        var cronFireCol = reader.GetOrdinal("last_cron_fire_at");
+
+        return new JobDefinition
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Tags = JsonSerializer.Deserialize<string[]>(reader.GetString(reader.GetOrdinal("tags"))) ?? [],
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
             IsContinuous = reader.GetBoolean(reader.GetOrdinal("is_continuous")),
             IsEnabled = reader.GetBoolean(reader.GetOrdinal("is_enabled")),
-            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy"))
+            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy")),
+            FireAllLimit = reader.IsDBNull(limitCol) ? null : reader.GetInt32(limitCol),
+            Description = reader.IsDBNull(descriptionCol) ? null : reader.GetString(descriptionCol),
+            CronExpression = reader.IsDBNull(cronCol) ? null : reader.GetString(cronCol),
+            TimeZoneId = reader.IsDBNull(timeZoneCol) ? null : reader.GetString(timeZoneCol),
+            Timeout = reader.IsDBNull(timeoutCol) ? null : TimeSpan.FromTicks(reader.GetInt64(timeoutCol)),
+            MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
+            RetryPolicy = reader.IsDBNull(retryPolicyCol) ? new() : DeserializeRetryPolicy(reader.GetString(retryPolicyCol)),
+            Queue = reader.IsDBNull(queueCol) ? null : reader.GetString(queueCol),
+            RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
+            ArgumentsSchema = reader.IsDBNull(schemaCol) ? null : reader.GetString(schemaCol),
+            LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetDateTimeOffset(heartbeatCol),
+            LastCronFireAt = reader.IsDBNull(cronFireCol) ? null : reader.GetDateTimeOffset(cronFireCol)
         };
-
-        var limitCol = reader.GetOrdinal("fire_all_limit");
-        if (!reader.IsDBNull(limitCol))
-        {
-            job.FireAllLimit = reader.GetInt32(limitCol);
-        }
-
-        var col = reader.GetOrdinal("description");
-        if (!reader.IsDBNull(col))
-        {
-            job.Description = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("cron_expression");
-        if (!reader.IsDBNull(col))
-        {
-            job.CronExpression = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("time_zone_id");
-        if (!reader.IsDBNull(col))
-        {
-            job.TimeZoneId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("timeout");
-        if (!reader.IsDBNull(col))
-        {
-            job.Timeout = TimeSpan.FromTicks(reader.GetInt64(col));
-        }
-
-        col = reader.GetOrdinal("max_concurrency");
-        if (!reader.IsDBNull(col))
-        {
-            job.MaxConcurrency = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("retry_policy");
-        if (!reader.IsDBNull(col))
-        {
-            job.RetryPolicy = DeserializeRetryPolicy(reader.GetString(col));
-        }
-
-        col = reader.GetOrdinal("queue");
-        if (!reader.IsDBNull(col))
-        {
-            job.Queue = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("rate_limit_name");
-        if (!reader.IsDBNull(col))
-        {
-            job.RateLimitName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("arguments_schema");
-        if (!reader.IsDBNull(col))
-        {
-            job.ArgumentsSchema = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            job.LastHeartbeatAt = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("last_cron_fire_at");
-        if (!reader.IsDBNull(col))
-        {
-            job.LastCronFireAt = reader.GetDateTimeOffset(col);
-        }
-
-        return job;
     }
 
     private static QueueDefinition ReadQueue(SqlDataReader reader)
     {
-        var queue = new QueueDefinition
+        var maxConcurrencyCol = reader.GetOrdinal("max_concurrency");
+        var rateLimitCol = reader.GetOrdinal("rate_limit_name");
+        var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
+
+        return new QueueDefinition
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-            IsPaused = reader.GetBoolean(reader.GetOrdinal("is_paused"))
+            IsPaused = reader.GetBoolean(reader.GetOrdinal("is_paused")),
+            MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
+            RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
+            LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetDateTimeOffset(heartbeatCol)
         };
-
-        var col = reader.GetOrdinal("max_concurrency");
-        if (!reader.IsDBNull(col))
-        {
-            queue.MaxConcurrency = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("rate_limit_name");
-        if (!reader.IsDBNull(col))
-        {
-            queue.RateLimitName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            queue.LastHeartbeatAt = reader.GetDateTimeOffset(col);
-        }
-
-        return queue;
     }
 
     private static NodeInfo ReadNode(SqlDataReader reader) => new()
@@ -2086,7 +2110,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     private async Task<JobDefinition?> GetJobInternalAsync(SqlConnection conn, SqlTransaction tx,
         string name, CancellationToken cancellationToken)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", name));
@@ -2102,7 +2126,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     private async Task<QueueDefinition?> GetQueueInternalAsync(SqlConnection conn, SqlTransaction tx,
         string name, CancellationToken cancellationToken)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT * FROM dbo.surefire_queues WHERE name = @name";
         cmd.Parameters.Add(CreateParameter("@name", name));
@@ -2118,7 +2142,7 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     private async Task AcquireRateLimitAsync(SqlConnection conn, SqlTransaction tx,
         string rateLimitName, CancellationToken cancellationToken)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
@@ -2173,6 +2197,17 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
             MaxDelay = TimeSpan.FromTicks(root.GetProperty("maxDelay").GetInt64()),
             Jitter = root.GetProperty("jitter").GetBoolean()
         };
+    }
+
+    private SqlCommand CreateCommand(SqlConnection conn)
+    {
+        var command = conn.CreateCommand();
+        if (CommandTimeoutSeconds is { } timeoutSeconds)
+        {
+            command.CommandTimeout = timeoutSeconds;
+        }
+
+        return command;
     }
 
     private static SqlParameter CreateParameter(string name, object? value)
@@ -2289,5 +2324,6 @@ internal sealed class SqlServerJobStore(string connectionString, TimeProvider ti
     private static bool IsTransientError(Exception ex) =>
         ex is SqlException { Number: 1205 }; // deadlock victim
 }
+
 
 

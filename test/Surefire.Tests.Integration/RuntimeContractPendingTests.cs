@@ -407,6 +407,225 @@ public sealed class RuntimeContractPendingTests
     }
 
     [Fact]
+    public async Task StreamBatchEventsAsync_PreservesGlobalBatchEventOrder()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var client = new JobClient(store, notifications, TimeProvider.System,
+            new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
+            NullLogger<JobClient>.Instance);
+
+        await store.UpsertQueueAsync(new() { Name = "default" });
+        var jobName = "BatchEventOrder_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
+
+        var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }]);
+        var childA = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
+        var childB = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
+        Assert.NotNull(childA);
+        Assert.NotNull(childB);
+
+        var streamTask = Task.Run(async () =>
+        {
+            var events = new List<(string RunId, RunEventType EventType, string Payload)>();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var @event in client.StreamBatchEventsAsync(batchId, cts.Token))
+            {
+                events.Add((@event.RunId, @event.EventType, @event.Payload));
+                if (events.Count == 4)
+                {
+                    break;
+                }
+            }
+
+            return events;
+        });
+
+        await store.AppendEventsAsync([
+            new()
+            {
+                RunId = childB!.Id,
+                EventType = RunEventType.Output,
+                Payload = "200",
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = childB.Attempt
+            },
+            new()
+            {
+                RunId = childA!.Id,
+                EventType = RunEventType.Log,
+                Payload = "\"a-log\"",
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = childA.Attempt
+            },
+            new()
+            {
+                RunId = childB.Id,
+                EventType = RunEventType.OutputComplete,
+                Payload = "null",
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = childB.Attempt
+            },
+            new()
+            {
+                RunId = childA.Id,
+                EventType = RunEventType.Progress,
+                Payload = "0.5",
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = childA.Attempt
+            }
+        ]);
+
+        await notifications.PublishAsync(NotificationChannels.RunEvent(batchId));
+
+        var events = await streamTask;
+        Assert.Equal(
+            [
+                (childB.Id, RunEventType.Output, "200"),
+                (childA.Id, RunEventType.Log, "\"a-log\""),
+                (childB.Id, RunEventType.OutputComplete, "null"),
+                (childA.Id, RunEventType.Progress, "0.5")
+            ],
+            events);
+    }
+
+    [Fact]
+    public async Task StreamBatchEventsAsync_LargeBatch_HighVolume_DoesNotMissOrDuplicateEvents()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var client = new JobClient(store, notifications, TimeProvider.System,
+            new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
+            NullLogger<JobClient>.Instance);
+
+        await store.UpsertQueueAsync(new() { Name = "default" });
+        var jobName = "BatchEventStress_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
+
+        const int childCount = 96;
+        const int eventsPerChild = 4;
+        var batchId = await client.TriggerAllAsync(jobName, Enumerable.Range(0, childCount).Select(i => new { x = i }).ToArray());
+
+        var claimed = new List<JobRun>(childCount);
+        for (var i = 0; i < childCount; i++)
+        {
+            var run = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
+            Assert.NotNull(run);
+            claimed.Add(run);
+        }
+
+        var expected = new List<(string RunId, string Payload)>(childCount * eventsPerChild);
+        var streamTask = Task.Run(async () =>
+        {
+            var received = new List<(string RunId, string Payload)>(childCount * eventsPerChild);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var @event in client.StreamBatchEventsAsync(batchId, cts.Token))
+            {
+                if (@event.EventType != RunEventType.Output)
+                {
+                    continue;
+                }
+
+                received.Add((@event.RunId, @event.Payload));
+                if (received.Count == childCount * eventsPerChild)
+                {
+                    break;
+                }
+            }
+
+            return received;
+        });
+
+        var appended = new List<RunEvent>(childCount * eventsPerChild);
+        for (var round = 0; round < eventsPerChild; round++)
+        {
+            for (var i = 0; i < claimed.Count; i++)
+            {
+                var payload = $"{round:D2}-{i:D3}";
+                appended.Add(new()
+                {
+                    RunId = claimed[i].Id,
+                    EventType = RunEventType.Output,
+                    Payload = payload,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    Attempt = claimed[i].Attempt
+                });
+                expected.Add((claimed[i].Id, payload));
+            }
+        }
+
+        await store.AppendEventsAsync(appended);
+        await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), batchId);
+
+        var received = await streamTask;
+        Assert.Equal(expected.Count, received.Count);
+        Assert.Equal(expected, received);
+        Assert.Equal(expected.Count, received.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task StreamBatchEventsAsync_GracePoll_CapturesLateEventsAfterBatchTerminal()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var client = new JobClient(store, notifications, TimeProvider.System,
+            new() { PollingInterval = TimeSpan.FromMilliseconds(25) },
+            NullLogger<JobClient>.Instance);
+
+        await store.UpsertQueueAsync(new() { Name = "default" });
+        var jobName = "BatchEventGrace_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" });
+
+        var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }]);
+        var child = await store.ClaimRunAsync("node-1", [jobName], ["default"]);
+        Assert.NotNull(child);
+
+        var streamTask = Task.Run(async () =>
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var @event in client.StreamBatchEventsAsync(batchId, cts.Token))
+            {
+                return @event;
+            }
+
+            throw new Xunit.Sdk.XunitException("Expected a late batch event.");
+        });
+
+        var completedAt = DateTimeOffset.UtcNow;
+        var transition = RunStatusTransition.RunningToSucceeded(
+            child!.Id,
+            child.Attempt,
+            completedAt,
+            child.NotBefore,
+            nodeName: "node-1",
+            startedAt: child.StartedAt ?? completedAt,
+            lastHeartbeatAt: child.LastHeartbeatAt);
+        Assert.True(await store.TryTransitionRunAsync(transition));
+        await store.TryIncrementBatchProgressAsync(batchId, JobStatus.Succeeded);
+        Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, completedAt));
+        await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
+
+        await Task.Delay(10);
+
+        await store.AppendEventsAsync([
+            new()
+            {
+                RunId = child.Id,
+                EventType = RunEventType.Output,
+                Payload = "123",
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = child.Attempt
+            }
+        ]);
+        await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), child.Id);
+
+        var @event = await streamTask;
+        Assert.Equal(child.Id, @event.RunId);
+        Assert.Equal(RunEventType.Output, @event.EventType);
+        Assert.Equal("123", @event.Payload);
+    }
+
+    [Fact]
     public async Task StreamEachAsync_ResumesWithoutSkippingOtherChildren_AfterCoordinatorTerminal()
     {
         var store = new InMemoryJobStore(TimeProvider.System);
@@ -485,7 +704,7 @@ public sealed class RuntimeContractPendingTests
         Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
         await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
-        var resumeCursor = new BatchRunEventCursor
+        var resumeCursor = new BatchEventCursor
         {
             SinceEventId = 0,
             ChildSinceEventIds = new Dictionary<string, long>(StringComparer.Ordinal)

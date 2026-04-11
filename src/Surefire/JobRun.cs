@@ -1,6 +1,7 @@
 namespace Surefire;
 
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 
 /// <summary>
 ///     Immutable snapshot of a job run's state.
@@ -90,6 +91,8 @@ public sealed record JobRun
     /// <summary>Gets the name of the node that claimed this run.</summary>
     public string? NodeName { get; init; }
 
+    internal JsonSerializerOptions? SerializerOptions { get; init; }
+
     // ------------------------------------------------------------------
     // Derived state
     // ------------------------------------------------------------------
@@ -115,7 +118,7 @@ public sealed record JobRun
     public T GetResult<T>() =>
         Result is null
             ? throw new InvalidOperationException("Run did not produce a result.")
-            : System.Text.Json.JsonSerializer.Deserialize<T>(Result)!;
+            : ResultSerializer.Deserialize<T>(Result, SerializerOptions);
 
     /// <summary>Attempts to deserialize and return the typed result. Returns false if no result is present.</summary>
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
@@ -126,7 +129,7 @@ public sealed record JobRun
             value = default;
             return false;
         }
-        value = System.Text.Json.JsonSerializer.Deserialize<T>(Result);
+        value = ResultSerializer.Deserialize<T>(Result, SerializerOptions);
         return true;
     }
 }

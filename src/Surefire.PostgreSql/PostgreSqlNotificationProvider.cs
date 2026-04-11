@@ -11,7 +11,7 @@ namespace Surefire.PostgreSql;
 ///     PostgreSQL notification provider using LISTEN/NOTIFY.
 /// </summary>
 internal sealed class PostgreSqlNotificationProvider(
-    PostgreSqlOptions options,
+    PostgreSqlRuntimeOptions options,
     ILogger<PostgreSqlNotificationProvider> logger)
     : INotificationProvider, IAsyncDisposable
 {

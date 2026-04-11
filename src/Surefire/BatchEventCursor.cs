@@ -3,7 +3,7 @@ namespace Surefire;
 /// <summary>
 ///     Represents resumable cursor state for batch child output streams.
 /// </summary>
-public sealed record BatchRunEventCursor
+public sealed record BatchEventCursor
 {
     /// <summary>
     ///     The last seen batch child output event ID in global event order.
@@ -18,7 +18,7 @@ public sealed record BatchRunEventCursor
     /// <summary>
     ///     The start cursor that includes all child output events from the beginning.
     /// </summary>
-    public static BatchRunEventCursor Start { get; } = new()
+    public static BatchEventCursor Start { get; } = new()
     {
         SinceEventId = 0,
         ChildSinceEventIds = new Dictionary<string, long>(StringComparer.Ordinal)

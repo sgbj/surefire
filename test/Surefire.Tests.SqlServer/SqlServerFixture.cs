@@ -16,7 +16,7 @@ public sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
     public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
-        _store = new(_container.GetConnectionString(), TimeProvider.System);
+        _store = new(new SqlServerOptions { ConnectionString = _container.GetConnectionString() }, TimeProvider.System);
         await _store.MigrateAsync();
     }
 

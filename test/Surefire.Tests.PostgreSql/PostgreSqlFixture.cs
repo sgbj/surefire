@@ -11,7 +11,7 @@ public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
         .WithImage("postgres:17-alpine")
         .Build();
 
-    private PostgreSqlOptions? _options;
+    private PostgreSqlRuntimeOptions? _options;
     private PostgreSqlJobStore? _store;
     private string _connectionString = null!;
 
@@ -25,7 +25,7 @@ public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
         };
         _connectionString = csb.ConnectionString;
 
-        _options = new(_connectionString);
+        _options = new(new PostgreSqlOptions { ConnectionString = _connectionString });
         _store = new(_options, TimeProvider.System);
         await _store.MigrateAsync();
     }

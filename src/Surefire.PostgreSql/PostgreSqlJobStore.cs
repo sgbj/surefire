@@ -7,11 +7,13 @@ namespace Surefire.PostgreSql;
 /// <summary>
 ///     PostgreSQL implementation of <see cref="IJobStore" />.
 /// </summary>
-internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider timeProvider)
+internal sealed class PostgreSqlJobStore(PostgreSqlRuntimeOptions options, TimeProvider timeProvider)
     : IJobStore, IAsyncDisposable
 {
     private static readonly TimeSpan MigrationLockRetryDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MigrationLockWaitTimeout = TimeSpan.FromSeconds(30);
+
+    internal int? CommandTimeoutSeconds => options.CommandTimeoutSeconds;
 
     public ValueTask DisposeAsync() => options.DisposeAsync();
 
@@ -921,7 +923,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         return results;
     }
 
-    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0,
+    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
     {
         if (take <= 0)
@@ -935,13 +937,13 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
                           SELECT e.*
                           FROM surefire_events e
                           JOIN surefire_runs r ON r.id = e.run_id
-                          WHERE r.batch_id = @batch_run_id
+                          WHERE r.batch_id = @batch_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
                           ORDER BY e.id
                           LIMIT @take
                           """;
-        cmd.Parameters.AddWithValue("batch_run_id", batchRunId);
+        cmd.Parameters.AddWithValue("batch_id", batchId);
         cmd.Parameters.AddWithValue("event_type", (short)RunEventType.Output);
         cmd.Parameters.AddWithValue("since_event_id", sinceEventId);
         cmd.Parameters.AddWithValue("take", take);
@@ -951,6 +953,88 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
         while (await reader.ReadAsync(cancellationToken))
         {
             results.Add(ReadEvent(reader));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0,
+        int take = 200, CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                          SELECT e.*
+                          FROM surefire_events e
+                          JOIN surefire_runs r ON r.id = e.run_id
+                          WHERE r.batch_id = @batch_id
+                              AND e.id > @since_event_id
+                          ORDER BY e.id
+                          LIMIT @take
+                          """;
+        cmd.Parameters.AddWithValue("batch_id", batchId);
+        cmd.Parameters.AddWithValue("since_event_id", sinceEventId);
+        cmd.Parameters.AddWithValue("take", take);
+
+        var results = new List<RunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadEvent(reader));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<JobRun>> GetBatchTerminalRunsAsync(string batchId,
+        DateTimeOffset? completedAfter = null, string? afterRunId = null, int take = 200,
+        CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+                          SELECT *
+                          FROM surefire_runs
+                          WHERE batch_id = @batch_id
+                              AND status IN (2, 4, 5)
+                              AND completed_at IS NOT NULL
+                          """;
+        cmd.Parameters.AddWithValue("batch_id", batchId);
+
+        if (completedAfter is { } cursorCompletedAt)
+        {
+            cmd.CommandText += """
+                               AND (
+                                   completed_at > @completed_after
+                                   OR (completed_at = @completed_after AND id > @after_run_id)
+                               )
+                               """;
+            cmd.Parameters.AddWithValue("completed_after", cursorCompletedAt);
+            cmd.Parameters.AddWithValue("after_run_id", afterRunId ?? string.Empty);
+        }
+
+        cmd.CommandText += """
+                           
+                           ORDER BY completed_at ASC, id ASC
+                           LIMIT @take
+                           """;
+        cmd.Parameters.AddWithValue("take", take);
+
+        var results = new List<JobRun>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadRun(reader));
         }
 
         return results;
@@ -1740,7 +1824,7 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
         if (filter.CompletedAfter is { })
         {
-            parts.Add("completed_at >= @filter_completed_after");
+            parts.Add("completed_at > @filter_completed_after");
             cmd.Parameters.AddWithValue("filter_completed_after", filter.CompletedAfter.Value);
         }
 
@@ -1838,119 +1922,57 @@ internal sealed class PostgreSqlJobStore(PostgreSqlOptions options, TimeProvider
 
     private static JobDefinition ReadJob(NpgsqlDataReader reader)
     {
-        var job = new JobDefinition
+        var limitCol = reader.GetOrdinal("fire_all_limit");
+        var descriptionCol = reader.GetOrdinal("description");
+        var cronCol = reader.GetOrdinal("cron_expression");
+        var timeZoneCol = reader.GetOrdinal("time_zone_id");
+        var timeoutCol = reader.GetOrdinal("timeout");
+        var maxConcurrencyCol = reader.GetOrdinal("max_concurrency");
+        var retryPolicyCol = reader.GetOrdinal("retry_policy");
+        var queueCol = reader.GetOrdinal("queue");
+        var rateLimitCol = reader.GetOrdinal("rate_limit_name");
+        var schemaCol = reader.GetOrdinal("arguments_schema");
+        var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
+        var cronFireCol = reader.GetOrdinal("last_cron_fire_at");
+
+        return new JobDefinition
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Tags = reader.GetFieldValue<string[]>(reader.GetOrdinal("tags")),
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
             IsContinuous = reader.GetBoolean(reader.GetOrdinal("is_continuous")),
             IsEnabled = reader.GetBoolean(reader.GetOrdinal("is_enabled")),
-            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy"))
+            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy")),
+            FireAllLimit = reader.IsDBNull(limitCol) ? null : reader.GetInt32(limitCol),
+            Description = reader.IsDBNull(descriptionCol) ? null : reader.GetString(descriptionCol),
+            CronExpression = reader.IsDBNull(cronCol) ? null : reader.GetString(cronCol),
+            TimeZoneId = reader.IsDBNull(timeZoneCol) ? null : reader.GetString(timeZoneCol),
+            Timeout = reader.IsDBNull(timeoutCol) ? null : TimeSpan.FromTicks(reader.GetInt64(timeoutCol)),
+            MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
+            RetryPolicy = reader.IsDBNull(retryPolicyCol) ? new() : DeserializeRetryPolicy(reader.GetString(retryPolicyCol)),
+            Queue = reader.IsDBNull(queueCol) ? null : reader.GetString(queueCol),
+            RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
+            ArgumentsSchema = reader.IsDBNull(schemaCol) ? null : reader.GetString(schemaCol),
+            LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetFieldValue<DateTimeOffset>(heartbeatCol),
+            LastCronFireAt = reader.IsDBNull(cronFireCol) ? null : reader.GetFieldValue<DateTimeOffset>(cronFireCol)
         };
-
-        var limitCol = reader.GetOrdinal("fire_all_limit");
-        if (!reader.IsDBNull(limitCol))
-        {
-            job.FireAllLimit = reader.GetInt32(limitCol);
-        }
-
-        var col = reader.GetOrdinal("description");
-        if (!reader.IsDBNull(col))
-        {
-            job.Description = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("cron_expression");
-        if (!reader.IsDBNull(col))
-        {
-            job.CronExpression = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("time_zone_id");
-        if (!reader.IsDBNull(col))
-        {
-            job.TimeZoneId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("timeout");
-        if (!reader.IsDBNull(col))
-        {
-            job.Timeout = TimeSpan.FromTicks(reader.GetInt64(col));
-        }
-
-        col = reader.GetOrdinal("max_concurrency");
-        if (!reader.IsDBNull(col))
-        {
-            job.MaxConcurrency = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("retry_policy");
-        if (!reader.IsDBNull(col))
-        {
-            job.RetryPolicy = DeserializeRetryPolicy(reader.GetString(col));
-        }
-
-        col = reader.GetOrdinal("queue");
-        if (!reader.IsDBNull(col))
-        {
-            job.Queue = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("rate_limit_name");
-        if (!reader.IsDBNull(col))
-        {
-            job.RateLimitName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("arguments_schema");
-        if (!reader.IsDBNull(col))
-        {
-            job.ArgumentsSchema = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            job.LastHeartbeatAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        col = reader.GetOrdinal("last_cron_fire_at");
-        if (!reader.IsDBNull(col))
-        {
-            job.LastCronFireAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        return job;
     }
 
     private static QueueDefinition ReadQueue(NpgsqlDataReader reader)
     {
-        var queue = new QueueDefinition
+        var maxConcurrencyCol = reader.GetOrdinal("max_concurrency");
+        var rateLimitCol = reader.GetOrdinal("rate_limit_name");
+        var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
+
+        return new QueueDefinition
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-            IsPaused = reader.GetBoolean(reader.GetOrdinal("is_paused"))
+            IsPaused = reader.GetBoolean(reader.GetOrdinal("is_paused")),
+            MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
+            RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
+            LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetFieldValue<DateTimeOffset>(heartbeatCol)
         };
-
-        var col = reader.GetOrdinal("max_concurrency");
-        if (!reader.IsDBNull(col))
-        {
-            queue.MaxConcurrency = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("rate_limit_name");
-        if (!reader.IsDBNull(col))
-        {
-            queue.RateLimitName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            queue.LastHeartbeatAt = reader.GetFieldValue<DateTimeOffset>(col);
-        }
-
-        return queue;
     }
 
     private static NodeInfo ReadNode(NpgsqlDataReader reader) => new()

@@ -336,6 +336,32 @@ public sealed class SurefireOptions
         }
     }
 
+    internal SurefireOptions Freeze()
+    {
+        var clone = new SurefireOptions
+        {
+            NodeName = NodeName,
+            PollingInterval = PollingInterval,
+            HeartbeatInterval = HeartbeatInterval,
+            InactiveThreshold = InactiveThreshold,
+            RetentionPeriod = RetentionPeriod,
+            RetentionCheckInterval = RetentionCheckInterval,
+            ShutdownTimeout = ShutdownTimeout,
+            SerializerOptions = new JsonSerializerOptions(SerializerOptions),
+            MaxNodeConcurrency = MaxNodeConcurrency,
+            AutoMigrate = AutoMigrate
+        };
+
+        clone.OnSuccessCallbacks.AddRange(OnSuccessCallbacks);
+        clone.OnRetryCallbacks.AddRange(OnRetryCallbacks);
+        clone.OnDeadLetterCallbacks.AddRange(OnDeadLetterCallbacks);
+        clone.FilterTypes.AddRange(FilterTypes);
+        clone.Queues.AddRange(Queues.Select(queue => queue.Clone()));
+        clone.RateLimits.AddRange(RateLimits.Select(rateLimit => rateLimit.Clone()));
+        clone.ServiceConfigurators.AddRange(ServiceConfigurators);
+        return clone;
+    }
+
     private static void ValidateRateLimitArguments(string name, int maxPermits, TimeSpan window)
     {
         ValidateName(name, nameof(name), "Rate limit name");

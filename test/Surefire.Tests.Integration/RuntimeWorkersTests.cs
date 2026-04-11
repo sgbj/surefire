@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.DependencyInjection;
@@ -31,6 +32,31 @@ public sealed class RuntimeWorkersTests
 
         Assert.True(run.IsSuccess);
         Assert.Equal("ok", run.GetResult<string>());
+    }
+
+    [Fact]
+    public async Task Waited_Run_Uses_Configured_SerializerOptions_For_GetResult()
+    {
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(50);
+            options.RetentionPeriod = null;
+            options.SerializerOptions = new(JsonSerializerDefaults.Web)
+            {
+                Converters = { new JsonStringEnumConverter() }
+            };
+        });
+
+        harness.Host.AddJob("EnumEcho", () => DayOfWeek.Wednesday);
+        await harness.StartAsync();
+
+        var run = await harness.Client.TriggerAsync("EnumEcho");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
+
+        Assert.True(run.IsSuccess);
+        Assert.Equal(DayOfWeek.Wednesday, run.GetResult<DayOfWeek>());
     }
 
     [Fact]
@@ -1311,7 +1337,13 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("RetryFrameworkLogs",
                 () => { throw new InvalidOperationException("retry-framework-logs"); })
-            .WithRetry(1);
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 1;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(25);
+                policy.MaxDelay = TimeSpan.FromMilliseconds(25);
+                policy.Jitter = false;
+            });
 
         await harness.StartAsync();
 
@@ -1351,7 +1383,13 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("RetryFailureEvents",
                 () => { throw new InvalidOperationException("retry-failure-events"); })
-            .WithRetry(1);
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 1;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(25);
+                policy.MaxDelay = TimeSpan.FromMilliseconds(25);
+                policy.Jitter = false;
+            });
 
         await harness.StartAsync();
 

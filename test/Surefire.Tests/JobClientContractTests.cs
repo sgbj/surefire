@@ -244,6 +244,73 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
+    public async Task ObserveAsync_GracePoll_CapturesLateEventsAfterRunTerminal()
+    {
+        var store = new InMemoryJobStore(TimeProvider.System);
+        var notifications = new InMemoryNotificationProvider();
+        var logger = new CollectingLogger<JobClient>();
+        var client = new JobClient(
+            store,
+            notifications,
+            TimeProvider.System,
+            new SurefireOptions { PollingInterval = TimeSpan.FromMilliseconds(20) },
+            logger);
+
+        var jobName = "ObserveLate_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobAsync(new JobDefinition { Name = jobName, Queue = "default" });
+
+        var triggered = await client.TriggerAsync(jobName);
+        var runId = triggered.Id;
+        var observedTask = Task.Run(async () =>
+        {
+            var observations = new List<RunObservation>();
+            await foreach (var observation in client.ObserveAsync(runId))
+            {
+                observations.Add(observation);
+                if (observation.Run.Status.IsTerminal)
+                {
+                    break;
+                }
+            }
+
+            return observations;
+        });
+
+        var claimed = await WaitForClaimAsync(store, jobName);
+        var completed = RunStatusTransition.RunningToSucceeded(
+            runId,
+            claimed.Attempt,
+            DateTimeOffset.UtcNow,
+            claimed.NotBefore,
+            claimed.NodeName,
+            1,
+            JsonSerializer.Serialize(7),
+            null,
+            claimed.StartedAt,
+            claimed.LastHeartbeatAt);
+        Assert.True(await store.TryTransitionRunAsync(completed));
+        await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId);
+
+        await Task.Delay(10);
+
+        await store.AppendEventsAsync([
+            new RunEvent
+            {
+                RunId = runId,
+                EventType = RunEventType.Output,
+                Payload = "7",
+                CreatedAt = DateTimeOffset.UtcNow,
+                Attempt = claimed.Attempt
+            }
+        ]);
+        await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId);
+
+        var observations = await observedTask;
+        Assert.Contains(observations, o => o.Event?.EventType == RunEventType.Output && o.Event.Payload == "7");
+        Assert.Equal(JobStatus.Succeeded, observations[^1].Run.Status);
+    }
+
+    [Fact]
     public async Task ObserveAsync_MissingRun_ThrowsRunNotFoundException()
     {
         var store = new InMemoryJobStore(TimeProvider.System);
@@ -848,7 +915,7 @@ public sealed class JobClientContractTests
         Assert.True(await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, DateTimeOffset.UtcNow));
         await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId);
 
-        var resumeCursor = new BatchRunEventCursor
+        var resumeCursor = new BatchEventCursor
         {
             SinceEventId = 0,
             ChildSinceEventIds = new Dictionary<string, long>(StringComparer.Ordinal)

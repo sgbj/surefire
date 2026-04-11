@@ -86,14 +86,37 @@ public sealed class ConfigurationValidationTests
         });
     }
 
+    [Fact]
+    public void AddSurefire_CopiesSerializerOptionsSnapshot()
+    {
+        var services = new ServiceCollection();
+        SurefireOptions? configured = null;
+
+        services.AddSurefire(options =>
+        {
+            configured = options;
+            options.SerializerOptions.PropertyNameCaseInsensitive = false;
+        });
+
+        using var provider = services.BuildServiceProvider();
+        var runtimeOptions = provider.GetRequiredService<SurefireOptions>();
+
+        Assert.NotNull(configured);
+        Assert.NotSame(configured!.SerializerOptions, runtimeOptions.SerializerOptions);
+        Assert.False(runtimeOptions.SerializerOptions.PropertyNameCaseInsensitive);
+
+        configured.SerializerOptions.PropertyNameCaseInsensitive = true;
+        Assert.False(runtimeOptions.SerializerOptions.PropertyNameCaseInsensitive);
+    }
+
     private static JobBuilder CreateJobBuilder()
     {
         var ctor = typeof(JobBuilder).GetConstructor(
             BindingFlags.Instance | BindingFlags.NonPublic,
             binder: null,
-            [typeof(JobDefinition)],
+            [typeof(JobDefinition), typeof(Action)],
             modifiers: null)!;
 
-        return (JobBuilder)ctor.Invoke([new JobDefinition { Name = "validation-job" }]);
+        return (JobBuilder)ctor.Invoke([new JobDefinition { Name = "validation-job" }, () => { }]);
     }
 }

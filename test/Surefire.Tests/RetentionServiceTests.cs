@@ -83,7 +83,9 @@ public sealed class RetentionServiceTests
         public Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt, CancellationToken ct = default) => throw new NotImplementedException();
         public Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null, int? attempt = null, int? take = null, CancellationToken ct = default) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0, int take = 200, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0, int take = 200, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0, int take = 200, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<IReadOnlyList<JobRun>> GetBatchTerminalRunsAsync(string batchId, DateTimeOffset? completedAfter = null, string? afterRunId = null, int take = 200, CancellationToken ct = default) => throw new NotImplementedException();
         public Task HeartbeatAsync(string nodeName, IReadOnlyCollection<string> jobNames, IReadOnlyCollection<string> queueNames, IReadOnlyCollection<string> activeRunIds, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task UpsertQueueAsync(QueueDefinition queue, CancellationToken ct = default) => throw new NotImplementedException();

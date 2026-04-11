@@ -1,4 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Description>SQL Server storage provider for Surefire.</Description>
+    </PropertyGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="Surefire.Tests.SqlServer"/>
         <ProjectReference Include="..\Surefire\Surefire.csproj"/>

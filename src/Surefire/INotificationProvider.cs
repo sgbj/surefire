@@ -1,9 +1,12 @@
+using System.ComponentModel;
+
 namespace Surefire;
 
 /// <summary>
 ///     Provides pub/sub notifications for inter-node communication. Used to wake claim loops
 ///     when runs are created and to deliver run events to waiting callers.
 /// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
 public interface INotificationProvider
 {
     /// <summary>

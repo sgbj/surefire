@@ -39,12 +39,24 @@ app.Run();
 dotnet add package Surefire
 dotnet add package Surefire.Dashboard
 
-# Optional storage provider (defaults to in-memory)
+# Optional provider packages (defaults to in-memory store + in-memory notifications)
 dotnet add package Surefire.PostgreSql
 dotnet add package Surefire.SqlServer
 dotnet add package Surefire.Redis
 dotnet add package Surefire.Sqlite
 ```
+
+### Provider capabilities
+
+| Package | Store | Notifications | Notes |
+|---|---|---|---|
+| `Surefire` | In-memory | In-memory | Best for local development and tests |
+| `Surefire.PostgreSql` | Yes | Yes | Best all-around production backend |
+| `Surefire.SqlServer` | Yes | No | Use when SQL Server is your system of record |
+| `Surefire.Sqlite` | Yes | No | Good for single-node apps, local tools, and development |
+| `Surefire.Redis` | Yes | Yes | Best when Redis is already a core dependency |
+
+PostgreSQL and Redis provide cross-node notifications. SQL Server and SQLite currently provide durable storage only, so wakeups fall back to polling behavior.
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -76,6 +88,19 @@ app.AddJob("GenerateReport", async (IReportService reportService, CancellationTo
 app.MapSurefireDashboard();
 
 app.Run();
+```
+
+Provider packages expose strongly typed options, including command timeout configuration:
+
+```csharp
+builder.Services.AddSurefire(options =>
+{
+    options.UsePostgreSql(new PostgreSqlOptions
+    {
+        ConnectionString = builder.Configuration.GetConnectionString("surefire-postgres")!,
+        CommandTimeout = TimeSpan.FromSeconds(30)
+    });
+});
 ```
 
 ## Observability and health

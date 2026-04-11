@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -17,6 +19,7 @@ internal sealed partial class JobClient(
     ILogger<JobClient> logger) : IJobClient
 {
     private readonly JsonSerializerOptions _serializerOptions = options.SerializerOptions;
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _inputPumpTokens = new(StringComparer.Ordinal);
 
     // Primitives
     public async Task<JobRun> TriggerAsync(string job, object? args = null, RunOptions? options = null, CancellationToken cancellationToken = default)
@@ -31,8 +34,8 @@ internal sealed partial class JobClient(
             throw new RunConflictException(run.Id, $"Run creation for job '{job}' was rejected.");
         await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
         if (prepared.Streams.Count > 0)
-            _ = PumpInputStreamsAsync(run.Id, prepared.Streams, CancellationToken.None);
-        return run;
+            StartInputPump(run.Id, prepared.Streams);
+        return AttachSerializerOptions(run);
     }
 
     public async Task<JobBatch> TriggerBatchAsync(IEnumerable<BatchItem> runs, RunOptions? options = null, CancellationToken cancellationToken = default)
@@ -49,6 +52,7 @@ internal sealed partial class JobClient(
     }
 
     // Sugar
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public async Task<T> RunAsync<T>(string job, object? args = null, RunOptions? options = null, CancellationToken cancellationToken = default)
     {
         var run = await TriggerAsync(job, args, options, cancellationToken);
@@ -77,6 +81,7 @@ internal sealed partial class JobClient(
         }
     }
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public async IAsyncEnumerable<T> StreamAsync<T>(string job, object? args = null, RunOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var run = await TriggerAsync(job, args, options, cancellationToken);
@@ -84,12 +89,14 @@ internal sealed partial class JobClient(
             yield return item;
     }
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public async Task<T[]> RunBatchAsync<T>(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default)
         => await RunAllAsync<T>(job, args, options ?? new(), cancellationToken);
 
     public async Task RunBatchAsync(string job, IEnumerable<object?> args, RunOptions? options = null, CancellationToken cancellationToken = default)
         => await RunAllAsync(job, args, options ?? new(), cancellationToken);
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public async IAsyncEnumerable<T> StreamBatchAsync<T>(string job, IEnumerable<object?> args, RunOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var batch = await TriggerBatchAsync(job, args, options, cancellationToken);
@@ -101,7 +108,7 @@ internal sealed partial class JobClient(
     public async Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default)
     {
         var record = await store.GetRunAsync(runId, cancellationToken);
-        return record;
+        return record is null ? null : AttachSerializerOptions(record);
     }
 
     public async IAsyncEnumerable<JobRun> GetRunsAsync(RunFilter filter,
@@ -120,7 +127,7 @@ internal sealed partial class JobClient(
 
             foreach (var run in page.Items)
             {
-                yield return run;
+                yield return AttachSerializerOptions(run);
             }
 
             skip += page.Items.Count;
@@ -196,7 +203,7 @@ internal sealed partial class JobClient(
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCreated, rerun.Id, cancellationToken);
-        return rerun;
+        return AttachSerializerOptions(rerun);
     }
 
     public IAsyncEnumerable<RunObservation> ObserveAsync(string runId,
@@ -231,7 +238,7 @@ internal sealed partial class JobClient(
                 sinceId = @event.Id;
                 yield return new()
                 {
-                    Run = run,
+                    Run = AttachSerializerOptions(run),
                     Event = @event,
                     Cursor = new() { SinceEventId = sinceId }
                 };
@@ -239,9 +246,66 @@ internal sealed partial class JobClient(
 
             if (run.Status.IsTerminal)
             {
+                var terminalDrainEmitted = false;
+                while (true)
+                {
+                    var terminalEvents = await store.GetEventsAsync(runId, sinceId, cancellationToken: cancellationToken);
+                    if (terminalEvents.Count == 0)
+                    {
+                        break;
+                    }
+
+                    terminalDrainEmitted = true;
+                    foreach (var @event in terminalEvents)
+                    {
+                        sinceId = @event.Id;
+                        yield return new()
+                        {
+                            Run = AttachSerializerOptions(run),
+                            Event = @event,
+                            Cursor = new() { SinceEventId = sinceId }
+                        };
+                    }
+                }
+
+                if (!terminalDrainEmitted)
+                {
+                    var graceDeadline = timeProvider.GetUtcNow() + GetTerminalEventGracePeriod();
+                    while (timeProvider.GetUtcNow() < graceDeadline)
+                    {
+                        var remaining = graceDeadline - timeProvider.GetUtcNow();
+                        if (remaining <= TimeSpan.Zero)
+                        {
+                            break;
+                        }
+
+                        await WaitForWakeupAsync(wakeup, remaining, cancellationToken);
+
+                        while (true)
+                        {
+                            var graceEvents = await store.GetEventsAsync(runId, sinceId, cancellationToken: cancellationToken);
+                            if (graceEvents.Count == 0)
+                            {
+                                break;
+                            }
+
+                            foreach (var @event in graceEvents)
+                            {
+                                sinceId = @event.Id;
+                                yield return new()
+                                {
+                                    Run = AttachSerializerOptions(run),
+                                    Event = @event,
+                                    Cursor = new() { SinceEventId = sinceId }
+                                };
+                            }
+                        }
+                    }
+                }
+
                 yield return new()
                 {
-                    Run = run,
+                    Run = AttachSerializerOptions(run),
                     Event = null,
                     Cursor = new() { SinceEventId = sinceId }
                 };
@@ -315,7 +379,7 @@ internal sealed partial class JobClient(
 
         foreach (var (runId, streams, _) in streamPumps)
         {
-            _ = PumpInputStreamsAsync(runId, streams, CancellationToken.None);
+            StartInputPump(runId, streams);
         }
 
         return batchId;
@@ -367,7 +431,7 @@ internal sealed partial class JobClient(
         {
             foreach (var (runId, streams, _) in streamPumps)
             {
-                _ = PumpInputStreamsAsync(runId, streams, CancellationToken.None);
+                StartInputPump(runId, streams);
             }
         }
 
@@ -487,6 +551,7 @@ internal sealed partial class JobClient(
         throw new InvalidOperationException($"Run '{runId}' observation ended before terminal state.");
     }
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public async Task<T> WaitAsync<T>(string runId, CancellationToken cancellationToken = default)
     {
         if (TypeHelpers.TryGetAsyncEnumerableElementType(typeof(T), out var streamItemType))
@@ -505,7 +570,7 @@ internal sealed partial class JobClient(
 
         if (result.Result is { } resultJson)
         {
-            return System.Text.Json.JsonSerializer.Deserialize<T>(resultJson, options.SerializerOptions)!;
+            return ResultSerializer.Deserialize<T>(resultJson, options.SerializerOptions);
         }
 
         if (await TryBuildResultFromOutputEventsAsync<T>(result.Id, cancellationToken) is { } fromEvents)
@@ -517,20 +582,24 @@ internal sealed partial class JobClient(
     }
 
     /// <inheritdoc />
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, CancellationToken cancellationToken = default) =>
         WaitStreamAsync<T>(runId, RunEventCursor.Start, cancellationToken);
 
     /// <inheritdoc />
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, RunEventCursor cursor,
         CancellationToken cancellationToken = default) =>
         StreamRunAsync<T>(runId, cursor, cancellationToken);
 
     /// <inheritdoc />
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId,
         CancellationToken cancellationToken = default) =>
-        StreamEachAsync<T>(batchId, BatchRunEventCursor.Start, cancellationToken);
+        StreamEachAsync<T>(batchId, BatchEventCursor.Start, cancellationToken);
 
-    public async IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId, BatchRunEventCursor cursor,
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId, BatchEventCursor cursor,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         using var wakeup = new SemaphoreSlim(0, 1);
@@ -617,16 +686,25 @@ internal sealed partial class JobClient(
 
                 if (!emittedAny && !terminalDrainEmitted)
                 {
-                    // Give one poll interval for any late output events committed right after terminal transition.
-                    await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
-
-                    var (graceDrainEmitted, graceDrainItems) = await ReadBatchOutputEventsAsync();
-                    foreach (var item in graceDrainItems)
+                    var graceDeadline = timeProvider.GetUtcNow() + GetTerminalEventGracePeriod();
+                    while (timeProvider.GetUtcNow() < graceDeadline)
                     {
-                        yield return item;
-                    }
+                        var remaining = graceDeadline - timeProvider.GetUtcNow();
+                        if (remaining <= TimeSpan.Zero)
+                        {
+                            break;
+                        }
 
-                    terminalDrainEmitted = graceDrainEmitted;
+                        await WaitForWakeupAsync(wakeup, remaining, cancellationToken);
+
+                        var (graceDrainEmitted, graceDrainItems) = await ReadBatchOutputEventsAsync();
+                        foreach (var item in graceDrainItems)
+                        {
+                            yield return item;
+                        }
+
+                        terminalDrainEmitted |= graceDrainEmitted;
+                    }
 
                     if (!terminalDrainEmitted)
                     {
@@ -635,7 +713,7 @@ internal sealed partial class JobClient(
                 }
             }
 
-            await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+            await WaitForWakeupAsync(wakeup, cancellationToken);
         }
     }
 
@@ -643,13 +721,18 @@ internal sealed partial class JobClient(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         using var wakeup = new SemaphoreSlim(0, 1);
-        await using var subscription = await notifications.SubscribeAsync(
+        await using var batchEventSubscription = await notifications.SubscribeAsync(
+            NotificationChannels.RunEvent(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+        await using var batchTerminatedSubscription = await notifications.SubscribeAsync(
             NotificationChannels.BatchTerminated(batchId),
             _ => ReleaseWakeupAsync(wakeup),
             cancellationToken);
 
-        var cursorTime = (DateTimeOffset?)null;
-        var emittedChildIds = new HashSet<string>(StringComparer.Ordinal);
+        DateTimeOffset? completedAfter = null;
+        string? afterRunId = null;
+        var observedTerminalRuns = 0;
         while (true)
         {
             var batch = await store.GetBatchAsync(batchId, cancellationToken);
@@ -658,56 +741,41 @@ internal sealed partial class JobClient(
                 throw new InvalidOperationException($"Batch '{batchId}' was not found.");
             }
 
-            var candidates = new List<JobRun>();
-            var skip = 0;
-            const int pageSize = 200;
+            var emittedAny = false;
             while (true)
             {
-                var page = await store.GetRunsAsync(
-                    new()
-                    {
-                        BatchId = batchId,
-                        IsTerminal = true,
-                        CompletedAfter = cursorTime,
-                        OrderBy = RunOrderBy.CompletedAt
-                    },
-                    skip,
-                    pageSize,
+                var runs = await store.GetBatchTerminalRunsAsync(batchId, completedAfter, afterRunId, 200,
                     cancellationToken);
-
-                if (page.Items.Count == 0)
+                if (runs.Count == 0)
                 {
                     break;
                 }
 
-                candidates.AddRange(page.Items);
-                skip += page.Items.Count;
-            }
-
-            // Deterministic ordering contract: completion time first, then run id as stable tie-breaker.
-            foreach (var child in candidates
-                         .OrderBy(c => c.CompletedAt ?? DateTimeOffset.MinValue)
-                         .ThenBy(c => c.Id, StringComparer.Ordinal))
-            {
-                if (child.CompletedAt is null || !emittedChildIds.Add(child.Id))
+                emittedAny = true;
+                foreach (var child in runs)
                 {
-                    continue;
-                }
+                    if (child.CompletedAt is null)
+                    {
+                        continue;
+                    }
 
-                cursorTime = child.CompletedAt;
-                yield return child;
+                    completedAfter = child.CompletedAt;
+                    afterRunId = child.Id;
+                    observedTerminalRuns++;
+                    yield return AttachSerializerOptions(child);
+                }
             }
 
             if (batch.Status.IsTerminal)
             {
-                var totalTerminal = batch.Succeeded + batch.Failed;
-                if (totalTerminal >= batch.Total || emittedChildIds.Count >= batch.Total)
+                var totalTerminal = batch.Succeeded + batch.Failed + batch.Cancelled;
+                if ((observedTerminalRuns >= batch.Total || totalTerminal >= batch.Total) && !emittedAny)
                 {
                     yield break;
                 }
             }
 
-            await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+            await WaitForWakeupAsync(wakeup, cancellationToken);
         }
     }
 
@@ -752,7 +820,7 @@ internal sealed partial class JobClient(
         }
     }
 
-    private static BatchRunEventCursor CreateBatchCursorSnapshot(long sinceEventId,
+    private static BatchEventCursor CreateBatchCursorSnapshot(long sinceEventId,
         IReadOnlyDictionary<string, long> childSinceEventIds) =>
         new()
         {
@@ -801,6 +869,8 @@ internal sealed partial class JobClient(
     }
 
     private static string CreateRunId() => Guid.CreateVersion7().ToString("N");
+
+    private JobRun AttachSerializerOptions(JobRun run) => run with { SerializerOptions = _serializerOptions };
 
     private RunResult ToRunResult(JobRun run) => new()
     {
@@ -862,15 +932,15 @@ internal sealed partial class JobClient(
     {
         await foreach (var result in WaitEachAsync(batchId, cancellationToken))
         {
-            var record = await store.GetRunAsync(result.Id, cancellationToken);
-            if (record is not null)
-                yield return record;
+            yield return result;
         }
     }
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public IAsyncEnumerable<T> StreamBatchResultsAsync<T>(string batchId, CancellationToken cancellationToken = default) =>
         StreamBatchResultsImpl<T>(batchId, cancellationToken);
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     private async IAsyncEnumerable<T> StreamBatchResultsImpl<T>(string batchId,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -878,6 +948,7 @@ internal sealed partial class JobClient(
             yield return item.Item;
     }
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
     public async Task<T[]> GetBatchResultsAsync<T>(string batchId, CancellationToken cancellationToken = default)
     {
         var results = new List<RunResult>();
@@ -891,61 +962,116 @@ internal sealed partial class JobClient(
     private async IAsyncEnumerable<RunEvent> StreamBatchEventsImpl(string batchId,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var channel = System.Threading.Channels.Channel.CreateUnbounded<RunEvent>();
-        var runIds = new List<string>();
-        await foreach (var r in EnumerateBatchChildrenAsync(batchId, cancellationToken))
-            runIds.Add(r.Id);
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var batchEventSubscription = await notifications.SubscribeAsync(
+            NotificationChannels.RunEvent(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+        await using var batchTerminatedSubscription = await notifications.SubscribeAsync(
+            NotificationChannels.BatchTerminated(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
 
-        if (runIds.Count == 0)
+        var sinceEventId = 0L;
+        while (true)
         {
-            yield break;
-        }
-
-        var remaining = runIds.Count;
-        foreach (var runId in runIds)
-        {
-            _ = Task.Run(async () =>
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch is null)
             {
-                try
+                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
+            }
+
+            var emittedAny = false;
+            while (true)
+            {
+                var events = await store.GetBatchEventsAsync(batchId, sinceEventId, 200, cancellationToken);
+                if (events.Count == 0)
                 {
-                    await foreach (var obs in ObserveAsync(runId, cancellationToken))
+                    break;
+                }
+
+                emittedAny = true;
+                foreach (var @event in events)
+                {
+                    sinceEventId = @event.Id;
+                    yield return @event;
+                }
+            }
+
+            if (batch.Status.IsTerminal)
+            {
+                var terminalDrainEmitted = false;
+                while (true)
+                {
+                    var events = await store.GetBatchEventsAsync(batchId, sinceEventId, 200, cancellationToken);
+                    if (events.Count == 0)
                     {
-                        if (obs.Event is { } e)
-                            channel.Writer.TryWrite(e);
-                        else if (obs.Run.Status.IsTerminal)
-                            break;
+                        break;
+                    }
+
+                    terminalDrainEmitted = true;
+                    foreach (var @event in events)
+                    {
+                        sinceEventId = @event.Id;
+                        yield return @event;
                     }
                 }
-                catch (OperationCanceledException) { }
-                finally
+
+                if (!emittedAny && !terminalDrainEmitted)
                 {
-                    if (Interlocked.Decrement(ref remaining) == 0)
-                        channel.Writer.Complete();
+                    var graceDeadline = timeProvider.GetUtcNow() + GetTerminalEventGracePeriod();
+                    while (timeProvider.GetUtcNow() < graceDeadline)
+                    {
+                        var remaining = graceDeadline - timeProvider.GetUtcNow();
+                        if (remaining <= TimeSpan.Zero)
+                        {
+                            break;
+                        }
+
+                        await WaitForWakeupAsync(wakeup, remaining, cancellationToken);
+
+                        while (true)
+                        {
+                            var events = await store.GetBatchEventsAsync(batchId, sinceEventId, 200, cancellationToken);
+                            if (events.Count == 0)
+                            {
+                                break;
+                            }
+
+                            terminalDrainEmitted = true;
+                            foreach (var @event in events)
+                            {
+                                sinceEventId = @event.Id;
+                                yield return @event;
+                            }
+                        }
+                    }
+
+                    if (!terminalDrainEmitted)
+                    {
+                        yield break;
+                    }
                 }
-            }, cancellationToken);
-        }
+            }
 
-        await foreach (var e in channel.Reader.ReadAllAsync(cancellationToken))
-            yield return e;
+            await WaitForWakeupAsync(wakeup, cancellationToken);
+        }
     }
 
-    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
-    {
-        try
-        {
-            wakeup.Release();
-        }
-        catch (SemaphoreFullException)
-        {
-        }
-
-        return Task.CompletedTask;
-    }
+    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup) => WakeupSignal.ReleaseAsync(wakeup);
 
     private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
     {
-        await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+        await WakeupSignal.WaitAsync(wakeup, options.PollingInterval, cancellationToken);
     }
+
+    private static TimeSpan GetTerminalEventGracePeriod(TimeSpan pollingInterval) =>
+        pollingInterval <= TimeSpan.FromMilliseconds(100) ? pollingInterval : TimeSpan.FromMilliseconds(100);
+
+    private TimeSpan GetTerminalEventGracePeriod() => GetTerminalEventGracePeriod(options.PollingInterval);
+
+    private static Task WaitForWakeupAsync(SemaphoreSlim wakeup, TimeSpan timeout, CancellationToken cancellationToken) =>
+        WakeupSignal.WaitAsync(wakeup, timeout, cancellationToken);
 
     private async IAsyncEnumerable<JobRun> EnumerateBatchChildrenAsync(string batchId,
         [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -962,7 +1088,7 @@ internal sealed partial class JobClient(
 
             foreach (var child in page.Items)
             {
-                yield return child;
+                yield return AttachSerializerOptions(child);
             }
 
             skip += page.Items.Count;
@@ -1331,6 +1457,60 @@ internal sealed partial class JobClient(
         }
     }
 
+    private void StartInputPump(string runId, IReadOnlyList<StreamingArgumentSource> streams)
+    {
+        var pumpCts = new CancellationTokenSource();
+        if (!_inputPumpTokens.TryAdd(runId, pumpCts))
+        {
+            pumpCts.Dispose();
+            throw new InvalidOperationException($"An input pump is already active for run '{runId}'.");
+        }
+
+        _ = MonitorInputPumpAsync(runId, streams, pumpCts);
+    }
+
+    private async Task MonitorInputPumpAsync(string runId, IReadOnlyList<StreamingArgumentSource> streams,
+        CancellationTokenSource pumpCts)
+    {
+        try
+        {
+            await using var terminatedSubscription = await notifications.SubscribeAsync(
+                NotificationChannels.RunTerminated(runId),
+                _ =>
+                {
+                    pumpCts.Cancel();
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None);
+            await using var cancelSubscription = await notifications.SubscribeAsync(
+                NotificationChannels.RunCancel(runId),
+                _ =>
+                {
+                    pumpCts.Cancel();
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None);
+
+            await PumpInputStreamsAsync(runId, streams, pumpCts.Token);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
+        {
+            Log.InputStreamingFailed(logger, ex, runId);
+            await TryCancelRunBestEffortAsync(runId);
+        }
+        finally
+        {
+            if (_inputPumpTokens.TryRemove(runId, out var activePump))
+            {
+                activePump.Dispose();
+            }
+            else
+            {
+                pumpCts.Dispose();
+            }
+        }
+    }
+
     private async Task PumpInputStreamsAsync(string runId, IReadOnlyList<StreamingArgumentSource> streams,
         CancellationToken cancellationToken)
     {
@@ -1340,11 +1520,6 @@ internal sealed partial class JobClient(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-        }
-        catch (Exception ex)
-        {
-            Log.InputStreamingFailed(logger, ex, runId);
-            await TryCancelRunBestEffortAsync(runId);
         }
     }
 

@@ -1,74 +1,77 @@
+using System.ComponentModel;
+
 namespace Surefire;
 
 /// <summary>
 ///     Represents a compare-and-swap run status transition request.
 /// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
 public sealed class RunStatusTransition
 {
     /// <summary>
     ///     Gets or sets the run ID being transitioned.
     /// </summary>
-    public required string RunId { get; set; }
+    public required string RunId { get; init; }
 
     /// <summary>
     ///     Gets or sets the status the run must currently have for the transition to apply.
     /// </summary>
-    public JobStatus ExpectedStatus { get; set; }
+    public JobStatus ExpectedStatus { get; init; }
 
     /// <summary>
     ///     Gets or sets the attempt value that must match for the transition to apply.
     /// </summary>
-    public int ExpectedAttempt { get; set; }
+    public int ExpectedAttempt { get; init; }
 
     /// <summary>
     ///     Gets or sets the destination status.
     /// </summary>
-    public JobStatus NewStatus { get; set; }
+    public JobStatus NewStatus { get; init; }
 
     /// <summary>
     ///     Gets or sets the node ownership value for the transitioned run.
     /// </summary>
-    public string? NodeName { get; set; }
+    public string? NodeName { get; init; }
 
     /// <summary>
     ///     Gets or sets the started-at timestamp to apply. Null preserves existing value.
     /// </summary>
-    public DateTimeOffset? StartedAt { get; set; }
+    public DateTimeOffset? StartedAt { get; init; }
 
     /// <summary>
     ///     Gets or sets the completed-at timestamp to apply. Null preserves existing value.
     /// </summary>
-    public DateTimeOffset? CompletedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; init; }
 
     /// <summary>
     ///     Gets or sets the cancelled-at timestamp to apply. Null preserves existing value.
     /// </summary>
-    public DateTimeOffset? CancelledAt { get; set; }
+    public DateTimeOffset? CancelledAt { get; init; }
 
     /// <summary>
     ///     Gets or sets the error payload.
     /// </summary>
-    public string? Error { get; set; }
+    public string? Error { get; init; }
 
     /// <summary>
     ///     Gets or sets the result payload.
     /// </summary>
-    public string? Result { get; set; }
+    public string? Result { get; init; }
 
     /// <summary>
     ///     Gets or sets the progress value.
     /// </summary>
-    public double Progress { get; set; }
+    public double Progress { get; init; }
 
     /// <summary>
     ///     Gets or sets the not-before timestamp to apply.
     /// </summary>
-    public DateTimeOffset NotBefore { get; set; }
+    public DateTimeOffset NotBefore { get; init; }
 
     /// <summary>
     ///     Gets or sets the heartbeat timestamp to apply. Null preserves existing value.
     /// </summary>
-    public DateTimeOffset? LastHeartbeatAt { get; set; }
+    public DateTimeOffset? LastHeartbeatAt { get; init; }
 
     /// <summary>
     ///     Creates a Pending -> Running transition.

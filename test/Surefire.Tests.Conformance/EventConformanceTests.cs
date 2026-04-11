@@ -12,6 +12,27 @@ public abstract class EventConformanceTests : StoreConformanceBase
         return run.Id;
     }
 
+    private async Task<(string BatchId, JobRun ChildA, JobRun ChildB)> CreateBatchForEventsAsync()
+    {
+        var jobName = $"BatchEventJob_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName));
+
+        var batchId = Guid.CreateVersion7().ToString("N");
+        var createdAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var batch = new JobBatch
+        {
+            Id = batchId,
+            CreatedAt = createdAt,
+            Total = 2,
+            Status = JobStatus.Pending
+        };
+
+        var childA = CreateRun(jobName) with { BatchId = batchId, RootRunId = batchId };
+        var childB = CreateRun(jobName) with { BatchId = batchId, RootRunId = batchId };
+        await Store.CreateBatchAsync(batch, [childA, childB]);
+        return (batchId, childA, childB);
+    }
+
     [Fact]
     public async Task AppendEvents_AssignsSequentialIds()
     {
@@ -378,5 +399,47 @@ public abstract class EventConformanceTests : StoreConformanceBase
         var result = await Store.GetEventsAsync(run.Id, take: 100);
 
         Assert.Equal(3, result.Count);
+    }
+
+    [Fact]
+    public async Task GetBatchEvents_ReturnsGlobalOrderAcrossChildren()
+    {
+        var (batchId, childA, childB) = await CreateBatchForEventsAsync();
+
+        await Store.AppendEventsAsync([
+            new() { RunId = childB.Id, EventType = RunEventType.Progress, Payload = "0.5", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = childA.Id, EventType = RunEventType.Output, Payload = "a-1", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = childB.Id, EventType = RunEventType.Output, Payload = "b-1", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 }
+        ]);
+
+        var events = await Store.GetBatchEventsAsync(batchId);
+
+        Assert.Equal(3, events.Count);
+        Assert.True(events[0].Id < events[1].Id && events[1].Id < events[2].Id);
+        Assert.Equal([childB.Id, childA.Id, childB.Id], events.Select(e => e.RunId).ToArray());
+    }
+
+    [Fact]
+    public async Task GetBatchOutputEvents_FiltersAndResumesBatchWide()
+    {
+        var (batchId, childA, childB) = await CreateBatchForEventsAsync();
+
+        await Store.AppendEventsAsync([
+            new() { RunId = childA.Id, EventType = RunEventType.Log, Payload = "log-a", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = childA.Id, EventType = RunEventType.Output, Payload = "a-1", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = childB.Id, EventType = RunEventType.Output, Payload = "b-1", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 },
+            new() { RunId = childB.Id, EventType = RunEventType.OutputComplete, Payload = "null", CreatedAt = DateTimeOffset.UtcNow, Attempt = 1 }
+        ]);
+
+        var firstPage = await Store.GetBatchOutputEventsAsync(batchId, take: 1);
+        Assert.Single(firstPage);
+        Assert.Equal(RunEventType.Output, firstPage[0].EventType);
+
+        var resumed = await Store.GetBatchOutputEventsAsync(batchId, firstPage[0].Id);
+
+        Assert.Single(resumed);
+        Assert.All(resumed, e => Assert.Equal(RunEventType.Output, e.EventType));
+        Assert.DoesNotContain(resumed, e => e.Id <= firstPage[0].Id);
+        Assert.Equal([childB.Id], resumed.Select(e => e.RunId).ToArray());
     }
 }

@@ -19,5 +19,5 @@ public sealed record BatchStreamItem<T>
     /// <summary>
     ///     The next batch stream resume cursor after this item.
     /// </summary>
-    public required BatchRunEventCursor Cursor { get; init; }
+    public required BatchEventCursor Cursor { get; init; }
 }

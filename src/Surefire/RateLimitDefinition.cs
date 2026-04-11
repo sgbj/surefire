@@ -29,4 +29,13 @@ public sealed class RateLimitDefinition
     ///     Gets or sets the time of the last heartbeat from a node registering this rate limit.
     /// </summary>
     public DateTimeOffset? LastHeartbeatAt { get; set; }
+
+    internal RateLimitDefinition Clone() => new()
+    {
+        Name = Name,
+        Type = Type,
+        MaxPermits = MaxPermits,
+        Window = Window,
+        LastHeartbeatAt = LastHeartbeatAt
+    };
 }

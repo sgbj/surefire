@@ -1,9 +1,12 @@
+using System.ComponentModel;
+
 namespace Surefire;
 
 /// <summary>
 ///     Defines the storage contract for Surefire job data. All implementations must provide
 ///     equivalent behavioral and atomicity guarantees as specified in the store contract.
 /// </summary>
+[EditorBrowsable(EditorBrowsableState.Never)]
 public interface IJobStore
 {
     /// <summary>
@@ -247,6 +250,20 @@ public interface IJobStore
     }
 
     /// <summary>
+    ///     Returns terminal runs for the specified batch ordered by completion time ascending, then run ID ascending.
+    ///     When <paramref name="completedAfter" /> is supplied, only runs strictly after that cursor are returned.
+    ///     If multiple runs share the same completion time, <paramref name="afterRunId" /> acts as a stable tie-breaker.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="completedAfter">The exclusive completion-time cursor.</param>
+    /// <param name="afterRunId">The exclusive run ID tie-breaker for the completion-time cursor.</param>
+    /// <param name="take">The maximum number of runs to return. Must be greater than 0.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching terminal runs ordered for incremental consumption.</returns>
+    Task<IReadOnlyList<JobRun>> GetBatchTerminalRunsAsync(string batchId, DateTimeOffset? completedAfter = null,
+        string? afterRunId = null, int take = 200, CancellationToken cancellationToken = default);
+
+    /// <summary>
     ///     Atomically increments the batch progress counters and returns the post-increment values.
     ///     Returns <c>null</c> when the batch does not exist. The increment is skipped (returning
     ///     current values) if the batch is already in a terminal status.
@@ -321,15 +338,27 @@ public interface IJobStore
         int? attempt = null, int? take = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Returns output events across all direct child runs of a batch coordinator, ordered by
+    ///     Returns events across all direct child runs of a batch, ordered by event ID ascending
+    ///     for global cross-child event ordering.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="sinceEventId">Only return events with an ID greater than this value.</param>
+    /// <param name="take">The maximum number of events to return.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching events ordered by ID ascending.</returns>
+    Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0, int take = 200,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns output events across all direct child runs of a batch, ordered by
     ///     event ID ascending for global cross-child event ordering.
     /// </summary>
-    /// <param name="batchRunId">The batch coordinator run ID.</param>
+    /// <param name="batchId">The batch ID.</param>
     /// <param name="sinceEventId">Only return events with an ID greater than this value.</param>
     /// <param name="take">The maximum number of events to return.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching output events ordered by ID ascending.</returns>
-    Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0, int take = 200,
+    Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0, int take = 200,
         CancellationToken cancellationToken = default);
 
     /// <summary>

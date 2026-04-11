@@ -3,6 +3,8 @@ namespace Surefire;
 internal sealed class InMemoryJobStore : IJobStore, IDisposable
 {
     // Deduplication index scoped by (JobName, DeduplicationId) for non-terminal runs.
+    private readonly Dictionary<string, List<RunEvent>> _batchEventsByBatchId = new();
+    private readonly Dictionary<string, List<RunEvent>> _batchOutputEventsByBatchId = new();
     private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
     private readonly Dictionary<string, List<RunEvent>> _eventsByRunId = new();
     private readonly Dictionary<string, JobDefinition> _jobs = new();
@@ -39,28 +41,18 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         {
             if (_jobs.TryGetValue(job.Name, out var existing))
             {
-                existing.Description = job.Description;
-                existing.Tags = [.. job.Tags];
-                existing.CronExpression = job.CronExpression;
-                existing.TimeZoneId = job.TimeZoneId;
-                existing.Timeout = job.Timeout;
-                existing.MaxConcurrency = job.MaxConcurrency;
-                existing.Priority = job.Priority;
-                existing.RetryPolicy = job.RetryPolicy with { };
-                existing.IsContinuous = job.IsContinuous;
-                existing.Queue = job.Queue;
-                existing.RateLimitName = job.RateLimitName;
-                existing.MisfirePolicy = job.MisfirePolicy;
-                existing.FireAllLimit = job.FireAllLimit;
-                existing.ArgumentsSchema = job.ArgumentsSchema;
-                existing.LastHeartbeatAt = now;
+                var updated = CopyJob(job);
+                updated.IsEnabled = existing.IsEnabled;
+                updated.LastHeartbeatAt = now;
+                updated.LastCronFireAt = existing.LastCronFireAt;
+                _jobs[job.Name] = updated;
             }
             else
             {
-                var copy = CopyJob(job);
-                copy.LastHeartbeatAt = now;
-                copy.LastCronFireAt = null;
-                _jobs[job.Name] = copy;
+                var updated = CopyJob(job);
+                updated.LastHeartbeatAt = now;
+                updated.LastCronFireAt = null;
+                _jobs[job.Name] = updated;
             }
         }
         finally
@@ -267,7 +259,7 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
 
             if (filter.CompletedAfter is { })
             {
-                query = query.Where(r => r.CompletedAt >= filter.CompletedAfter.Value);
+                query = query.Where(r => r.CompletedAt > filter.CompletedAfter.Value);
             }
 
             if (filter.LastHeartbeatBefore is { })
@@ -754,7 +746,7 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         }
     }
 
-    public Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0,
+    public Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
     {
         _rwLock.EnterReadLock();
@@ -765,24 +757,83 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 return Task.FromResult<IReadOnlyList<RunEvent>>([]);
             }
 
-            var childIds = _runs.Values
-                .Where(r => string.Equals(r.BatchId, batchRunId, StringComparison.Ordinal))
-                .Select(r => r.Id)
-                .ToHashSet(StringComparer.Ordinal);
-
-            if (childIds.Count == 0)
+            if (!_batchOutputEventsByBatchId.TryGetValue(batchId, out var events))
             {
                 return Task.FromResult<IReadOnlyList<RunEvent>>([]);
             }
 
-            IReadOnlyList<RunEvent> result = _eventsByRunId
-                .Where(kvp => childIds.Contains(kvp.Key))
-                .SelectMany(kvp => kvp.Value)
-                .Where(e => e.Id > sinceEventId && e.EventType == RunEventType.Output)
-                .OrderBy(e => e.Id)
+            IReadOnlyList<RunEvent> result = events
+                .Where(e => e.Id > sinceEventId)
                 .Take(take)
                 .Select(CopyEvent)
                 .ToList();
+            return Task.FromResult(result);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
+    }
+
+    public Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0, int take = 200,
+        CancellationToken cancellationToken = default)
+    {
+        _rwLock.EnterReadLock();
+        try
+        {
+            if (take <= 0)
+            {
+                return Task.FromResult<IReadOnlyList<RunEvent>>([]);
+            }
+
+            if (!_batchEventsByBatchId.TryGetValue(batchId, out var events))
+            {
+                return Task.FromResult<IReadOnlyList<RunEvent>>([]);
+            }
+
+            IReadOnlyList<RunEvent> result = events
+                .Where(e => e.Id > sinceEventId)
+                .Take(take)
+                .Select(CopyEvent)
+                .ToList();
+            return Task.FromResult(result);
+        }
+        finally
+        {
+            _rwLock.ExitReadLock();
+        }
+    }
+
+    public Task<IReadOnlyList<JobRun>> GetBatchTerminalRunsAsync(string batchId, DateTimeOffset? completedAfter = null,
+        string? afterRunId = null, int take = 200, CancellationToken cancellationToken = default)
+    {
+        _rwLock.EnterReadLock();
+        try
+        {
+            if (take <= 0)
+            {
+                return Task.FromResult<IReadOnlyList<JobRun>>([]);
+            }
+
+            IEnumerable<JobRun> query = _runs.Values.Where(r =>
+                string.Equals(r.BatchId, batchId, StringComparison.Ordinal)
+                && r.Status.IsTerminal
+                && r.CompletedAt is { });
+
+            if (completedAfter is { } cursorCompletedAt)
+            {
+                query = query.Where(r => r.CompletedAt > cursorCompletedAt
+                                         || (r.CompletedAt == cursorCompletedAt
+                                             && string.CompareOrdinal(r.Id, afterRunId ?? string.Empty) > 0));
+            }
+
+            IReadOnlyList<JobRun> result = query
+                .OrderBy(r => r.CompletedAt)
+                .ThenBy(r => r.Id, StringComparer.Ordinal)
+                .Take(take)
+                .Select(CopyRun)
+                .ToList();
+
             return Task.FromResult(result);
         }
         finally
@@ -889,9 +940,9 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             }
             else
             {
-                var copy = CopyQueue(queue);
-                copy.LastHeartbeatAt = now;
-                _queues[queue.Name] = copy;
+                var updated = CopyQueue(queue);
+                updated.LastHeartbeatAt = now;
+                _queues[queue.Name] = updated;
             }
         }
         finally
@@ -1014,7 +1065,10 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
                 if (_runs.Remove(id, out var removed))
                 {
                     RemoveFromPendingIndex(id);
-                    _eventsByRunId.Remove(id);
+                    if (_eventsByRunId.Remove(id, out var removedEvents))
+                    {
+                        RemoveBatchEventIndexes(removed, removedEvents);
+                    }
                     var queueName = GetQueueName(removed.JobName);
 
                     if (removed.Status == JobStatus.Pending)
@@ -1092,6 +1146,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             foreach (var id in batchesToRemove)
             {
                 _batches.Remove(id);
+                _batchEventsByBatchId.Remove(id);
+                _batchOutputEventsByBatchId.Remove(id);
             }
         }
         finally
@@ -1499,6 +1555,16 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
             }
 
             list.Add(copy);
+
+            if (_runs.TryGetValue(copy.RunId, out var run) && run.BatchId is { } batchId)
+            {
+                AppendBatchEvent(_batchEventsByBatchId, batchId, copy);
+
+                if (copy.EventType == RunEventType.Output)
+                {
+                    AppendBatchEvent(_batchOutputEventsByBatchId, batchId, copy);
+                }
+            }
         }
     }
 
@@ -1798,6 +1864,8 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         LastHeartbeatAt = queue.LastHeartbeatAt
     };
 
+    private static JobRun CopyRun(JobRun run) => run with { };
+
     private static NodeInfo CopyNode(NodeInfo node) => node with
     {
         RegisteredJobNames = node.RegisteredJobNames.ToList(),
@@ -1812,6 +1880,46 @@ internal sealed class InMemoryJobStore : IJobStore, IDisposable
         Window = def.Window,
         LastHeartbeatAt = def.LastHeartbeatAt
     };
+
+    private static void AppendBatchEvent(Dictionary<string, List<RunEvent>> index, string batchId, RunEvent @event)
+    {
+        if (!index.TryGetValue(batchId, out var list))
+        {
+            list = [];
+            index[batchId] = list;
+        }
+
+        list.Add(@event);
+    }
+
+    private void RemoveBatchEventIndexes(JobRun run, List<RunEvent> removedEvents)
+    {
+        if (run.BatchId is not { } batchId || removedEvents.Count == 0)
+        {
+            return;
+        }
+
+        RemoveBatchEventIndexEntries(_batchEventsByBatchId, batchId, removedEvents);
+        RemoveBatchEventIndexEntries(_batchOutputEventsByBatchId, batchId,
+            removedEvents.Where(e => e.EventType == RunEventType.Output).ToList());
+    }
+
+    private static void RemoveBatchEventIndexEntries(Dictionary<string, List<RunEvent>> index, string batchId,
+        List<RunEvent> removedEvents)
+    {
+        if (removedEvents.Count == 0 || !index.TryGetValue(batchId, out var list))
+        {
+            return;
+        }
+
+        var removedIds = removedEvents.Select(e => e.Id).ToHashSet();
+        list.RemoveAll(e => removedIds.Contains(e.Id));
+
+        if (list.Count == 0)
+        {
+            index.Remove(batchId);
+        }
+    }
 
     private sealed class RateLimitWindowState
     {
