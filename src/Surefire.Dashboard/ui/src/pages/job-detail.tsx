@@ -8,13 +8,13 @@ import { type PaginationState } from "@tanstack/react-table";
 import { useParams } from "react-router";
 import { useState, useMemo } from "react";
 import { Pause, CirclePlay, CircleAlert } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { api, JobStatusLabels } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataTable } from "@/components/data-table";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { formatDate, formatTimeSpan } from "@/lib/format";
 import { DtDd } from "@/components/dt-dd";
 import { TriggerDialog } from "@/components/trigger-dialog";
@@ -107,10 +107,15 @@ export function JobDetailPage() {
 
   if (isError)
     return (
-      <Alert variant="destructive">
-        <CircleAlert />
-        <AlertDescription>Failed to load job</AlertDescription>
-      </Alert>
+      <div className="space-y-6">
+        <h2 className="text-xl font-semibold tracking-tight truncate">
+          {name}
+        </h2>
+        <Alert variant="destructive">
+          <CircleAlert />
+          <AlertDescription>Failed to load job</AlertDescription>
+        </Alert>
+      </div>
     );
 
   if (!job)

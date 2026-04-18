@@ -22,19 +22,26 @@ public static class ServiceCollectionExtensions
         var options = new SurefireOptions();
         configure?.Invoke(options);
         options.Validate();
+        var frozenOptions = options.Freeze();
 
         services.TryAddSingleton(TimeProvider.System);
-        services.AddSingleton(options);
+        services.AddLogging();
+        services.AddMetrics();
+        services.TryAddSingleton(frozenOptions);
         services.TryAddSingleton<JobRegistry>();
         services.TryAddSingleton<ActiveRunTracker>();
         services.TryAddSingleton<SurefireInstrumentation>();
         services.TryAddSingleton<SurefireLogEventPump>();
-        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<SurefireLogEventPump>());
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IHostedService, SurefireLogEventPump>(sp =>
+                sp.GetRequiredService<SurefireLogEventPump>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<ILoggerProvider, SurefireLoggerProvider>());
         services.AddHealthChecks().AddCheck<SurefireHealthCheck>("surefire");
+        services.TryAddSingleton<Backoff>();
         services.TryAddSingleton<IJobStore, InMemoryJobStore>();
         services.TryAddSingleton<INotificationProvider, InMemoryNotificationProvider>();
         services.TryAddSingleton<IJobClient, JobClient>();
+        services.TryAddSingleton<BatchCompletionHandler>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, SurefireInitializationService>());
         services.TryAddEnumerable(

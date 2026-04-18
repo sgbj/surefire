@@ -5,4 +5,8 @@
         <Using Include="Xunit"/>
         <Using Include="Surefire"/>
     </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="xunit.analyzers"/>
+    </ItemGroup>
 </Project>

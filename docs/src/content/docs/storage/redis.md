@@ -42,3 +42,13 @@ Redis is a good fit for:
 
 The Redis provider supports all Surefire features.
 
+## Notification behavior
+
+Redis Pub/Sub is the low-latency wakeup path, not the source of truth. The durable source of truth is still the Redis job store.
+
+- **Normal case** — workers pick up new work quickly through Pub/Sub notifications.
+- **Redis notification outage or disconnect** — wakeups can be delayed until the next polling interval, but workers still recover from the durable store.
+- **Health checks** — Surefire degrades health when the notification transport is unhealthy, even if the store is still reachable.
+
+If low wakeup latency matters during transient Redis outages, tune `PollingInterval` accordingly.
+

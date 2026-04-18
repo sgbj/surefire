@@ -9,19 +9,26 @@ internal sealed partial class SurefireSchedulerService(
     INotificationProvider notifications,
     SurefireOptions options,
     TimeProvider timeProvider,
+    SurefireInstrumentation instrumentation,
+    Backoff backoff,
     ILogger<SurefireSchedulerService> logger) : BackgroundService
 {
+    private static readonly TimeSpan BackoffInitial = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(options.PollingInterval);
+        using var timer = new PeriodicTimer(options.PollingInterval, timeProvider);
 
         try
         {
+            var backoffAttempt = 0;
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
                 try
                 {
                     await ScheduleDueJobsAsync(stoppingToken);
+                    backoffAttempt = 0;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -29,7 +36,20 @@ internal sealed partial class SurefireSchedulerService(
                 }
                 catch (Exception ex)
                 {
+                    if (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
                     Log.SchedulerTickFailed(logger, ex);
+                    if (!store.IsTransientException(ex))
+                    {
+                        throw;
+                    }
+
+                    instrumentation.RecordStoreRetry("scheduler");
+                    await Task.Delay(backoff.NextDelay(backoffAttempt++, BackoffInitial, BackoffMax), timeProvider,
+                        stoppingToken);
                 }
             }
         }
@@ -38,7 +58,7 @@ internal sealed partial class SurefireSchedulerService(
         }
     }
 
-    private async Task ScheduleDueJobsAsync(CancellationToken cancellationToken)
+    internal async Task ScheduleDueJobsAsync(CancellationToken cancellationToken)
     {
         var jobs = await store.GetJobsAsync(new() { IsEnabled = true }, cancellationToken);
         var now = timeProvider.GetUtcNow();
@@ -50,7 +70,7 @@ internal sealed partial class SurefireSchedulerService(
                 continue;
             }
 
-            if (!TryGetCron(job.CronExpression, out var cron))
+            if (!CronScheduleValidation.TryParseCron(job.CronExpression, out var cron))
             {
                 Log.SkippingJobDueToInvalidCronExpression(
                     logger,
@@ -59,31 +79,55 @@ internal sealed partial class SurefireSchedulerService(
                 continue;
             }
 
-            var timeZone = ResolveTimeZone(job.TimeZoneId);
+            if (!CronScheduleValidation.TryResolveTimeZone(job.TimeZoneId, out var timeZone))
+            {
+                Log.SkippingJobDueToInvalidTimeZone(logger, job.Name, job.TimeZoneId);
+                continue;
+            }
+
             if (job.LastCronFireAt is null)
             {
                 await store.UpdateLastCronFireAtAsync(job.Name, now, cancellationToken);
                 continue;
             }
 
-            var fireTimes = GetMissedFireTimes(cron, timeZone, job.LastCronFireAt, now);
-            if (fireTimes.Count == 0)
-            {
-                continue;
-            }
-
             switch (job.MisfirePolicy)
             {
                 case MisfirePolicy.Skip:
-                    await store.UpdateLastCronFireAtAsync(job.Name, fireTimes[^1], cancellationToken);
+                    // Advance LastCronFireAt to the most recent missed occurrence so the dashboard
+                    // reflects the actual last fire and the next tick resumes from the right place.
+                    // Iterate without allocating a list — we only keep the latest.
+                    if (FindLatestMissedOccurrence(cron, timeZone, job.LastCronFireAt.Value, now) is { } skipTo)
+                    {
+                        await store.UpdateLastCronFireAtAsync(job.Name, skipTo, cancellationToken);
+                    }
+
                     break;
 
                 case MisfirePolicy.FireOnce:
-                    await TryCreateScheduledRunAsync(job, now, fireTimes[^1], cancellationToken);
+                    // Need the latest missed occurrence — the dedup ID is derived from it and
+                    // must be deterministic across nodes.
+                    if (FindLatestMissedOccurrence(cron, timeZone, job.LastCronFireAt.Value, now) is { } fireAt)
+                    {
+                        await TryCreateScheduledRunAsync(job, now, fireAt, cancellationToken);
+                    }
+
                     break;
 
                 case MisfirePolicy.FireAll:
-                    foreach (var fireTime in fireTimes)
+                    var fireTimesResult = GetMissedFireTimes(cron, timeZone, job.LastCronFireAt.Value,
+                        now, job.FireAllLimit);
+                    if (fireTimesResult.FireTimes.Count == 0)
+                    {
+                        break;
+                    }
+
+                    if (fireTimesResult.IsTruncated)
+                    {
+                        Log.FireAllLimited(logger, job.Name, job.FireAllLimit!.Value);
+                    }
+
+                    foreach (var fireTime in fireTimesResult.FireTimes)
                     {
                         await TryCreateScheduledRunAsync(job, fireTime, fireTime, cancellationToken);
                     }
@@ -91,7 +135,8 @@ internal sealed partial class SurefireSchedulerService(
                     break;
 
                 default:
-                    throw new ArgumentOutOfRangeException();
+                    throw new ArgumentOutOfRangeException(nameof(job.MisfirePolicy), job.MisfirePolicy,
+                        "Unknown misfire policy.");
             }
         }
     }
@@ -130,54 +175,28 @@ internal sealed partial class SurefireSchedulerService(
     private static string BuildCronDeduplicationId(string jobName, DateTimeOffset fireTime) =>
         $"cron:{jobName}:{fireTime.UtcTicks}";
 
-    private static bool TryGetCron(string cronExpression, out CronExpression cron)
+    private static DateTimeOffset? FindLatestMissedOccurrence(CronExpression cron,
+        TimeZoneInfo timeZone, DateTimeOffset lastCronFireAt, DateTimeOffset now)
     {
-        try
+        var cursor = lastCronFireAt;
+        DateTimeOffset? latest = null;
+        while (cron.GetNextOccurrence(cursor, timeZone) is { } next && next <= now)
         {
-            var fields = cronExpression.Split(' ',
-                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            cron = fields.Length == 6
-                ? CronExpression.Parse(cronExpression, CronFormat.IncludeSeconds)
-                : CronExpression.Parse(cronExpression, CronFormat.Standard);
-            return true;
+            latest = next;
+            cursor = next;
         }
-        catch
-        {
-            cron = null!;
-            return false;
-        }
+
+        return latest;
     }
 
-    private TimeZoneInfo ResolveTimeZone(string? timeZoneId)
-    {
-        if (string.IsNullOrWhiteSpace(timeZoneId))
-        {
-            return TimeZoneInfo.Utc;
-        }
-
-        try
-        {
-            return TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
-        }
-        catch
-        {
-            Log.TimeZoneNotFoundFallingBackToUtc(logger, timeZoneId);
-            return TimeZoneInfo.Utc;
-        }
-    }
-
-    private static IReadOnlyList<DateTimeOffset> GetMissedFireTimes(CronExpression cron,
+    private static MissedFireTimesResult GetMissedFireTimes(CronExpression cron,
         TimeZoneInfo timeZone,
-        DateTimeOffset? lastCronFireAt,
-        DateTimeOffset now)
+        DateTimeOffset lastCronFireAt,
+        DateTimeOffset now,
+        int? maxOccurrences)
     {
-        if (lastCronFireAt is null)
-        {
-            return [];
-        }
-
         var fireTimes = new List<DateTimeOffset>();
-        var cursor = lastCronFireAt.Value;
+        var cursor = lastCronFireAt;
         while (true)
         {
             var next = cron.GetNextOccurrence(cursor, timeZone);
@@ -186,12 +205,19 @@ internal sealed partial class SurefireSchedulerService(
                 break;
             }
 
+            if (maxOccurrences is { } max && fireTimes.Count >= max)
+            {
+                return new(fireTimes, true);
+            }
+
             fireTimes.Add(next.Value);
             cursor = next.Value;
         }
 
-        return fireTimes;
+        return new(fireTimes, false);
     }
+
+    private readonly record struct MissedFireTimesResult(IReadOnlyList<DateTimeOffset> FireTimes, bool IsTruncated);
 
     private static partial class Log
     {
@@ -204,7 +230,12 @@ internal sealed partial class SurefireSchedulerService(
             string? cronExpression);
 
         [LoggerMessage(EventId = 1203, Level = LogLevel.Warning,
-            Message = "Time zone '{TimeZoneId}' not found. Falling back to UTC.")]
-        public static partial void TimeZoneNotFoundFallingBackToUtc(ILogger logger, string? timeZoneId);
+            Message = "Skipping job '{JobName}' due to invalid time zone '{TimeZoneId}'.")]
+        public static partial void SkippingJobDueToInvalidTimeZone(ILogger logger, string jobName, string? timeZoneId);
+
+        [LoggerMessage(EventId = 1204, Level = LogLevel.Warning,
+            Message =
+                "Job '{JobName}' reached FireAllLimit={FireAllLimit}. Remaining missed fires will be scheduled on subsequent ticks.")]
+        public static partial void FireAllLimited(ILogger logger, string jobName, int fireAllLimit);
     }
 }

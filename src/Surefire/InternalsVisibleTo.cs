@@ -1,0 +1,16 @@
+using System.Runtime.CompilerServices;
+
+[assembly: InternalsVisibleTo("Surefire.Dashboard")]
+[assembly: InternalsVisibleTo("Surefire.PostgreSql")]
+[assembly: InternalsVisibleTo("Surefire.Redis")]
+[assembly: InternalsVisibleTo("Surefire.Sqlite")]
+[assembly: InternalsVisibleTo("Surefire.SqlServer")]
+[assembly: InternalsVisibleTo("Surefire.Tests.Conformance")]
+[assembly: InternalsVisibleTo("Surefire.Tests")]
+[assembly: InternalsVisibleTo("Surefire.Tests.Dashboard")]
+[assembly: InternalsVisibleTo("Surefire.Tests.InMemory")]
+[assembly: InternalsVisibleTo("Surefire.Tests.Integration")]
+[assembly: InternalsVisibleTo("Surefire.Tests.Sqlite")]
+[assembly: InternalsVisibleTo("Surefire.Tests.Redis")]
+[assembly: InternalsVisibleTo("Surefire.Tests.PostgreSql")]
+[assembly: InternalsVisibleTo("Surefire.Tests.SqlServer")]

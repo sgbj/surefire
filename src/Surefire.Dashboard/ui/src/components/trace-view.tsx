@@ -1,59 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type RefObject,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "react-router";
-import type { JobRun } from "@/lib/api";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ChevronDown, ChevronRight, ChevronUp } from "lucide-react";
+import { JobStatus, type JobRun } from "@/lib/api";
 import { formatMs } from "@/lib/format";
 
-interface TreeNode {
-  run: JobRun;
-  children: TreeNode[];
-  depth: number;
-}
-
-const barColors: Record<number, string> = {
-  0: "bg-amber-400 dark:bg-amber-500",
-  1: "bg-sky-400 dark:bg-sky-500",
-  2: "bg-emerald-400 dark:bg-emerald-500",
-  3: "bg-rose-400 dark:bg-rose-500",
-  4: "bg-slate-400 dark:bg-slate-500",
-  5: "bg-violet-400 dark:bg-violet-500",
-  6: "bg-gray-400 dark:bg-gray-500",
+const statusColorVar: Record<number, string> = {
+  [JobStatus.Pending]: "var(--status-pending)",
+  [JobStatus.Running]: "var(--status-running)",
+  [JobStatus.Succeeded]: "var(--status-succeeded)",
+  [JobStatus.Cancelled]: "var(--status-cancelled)",
+  [JobStatus.Failed]: "var(--status-failed)",
 };
-
-function buildTree(runs: JobRun[]): TreeNode[] {
-  const byId = new Map<string, TreeNode>();
-  for (const run of runs) {
-    byId.set(run.id, { run, children: [], depth: 0 });
-  }
-
-  const roots: TreeNode[] = [];
-  for (const node of byId.values()) {
-    if (node.run.parentRunId && byId.has(node.run.parentRunId)) {
-      byId.get(node.run.parentRunId)!.children.push(node);
-    } else {
-      roots.push(node);
-    }
-  }
-
-  for (const node of byId.values()) {
-    node.children.sort(
-      (a, b) =>
-        new Date(a.run.createdAt).getTime() -
-        new Date(b.run.createdAt).getTime(),
-    );
-  }
-
-  return roots;
-}
-
-function flattenDfs(nodes: TreeNode[], depth = 0): TreeNode[] {
-  const result: TreeNode[] = [];
-  for (const node of nodes) {
-    node.depth = depth;
-    result.push(node);
-    result.push(...flattenDfs(node.children, depth + 1));
-  }
-  return result;
-}
 
 function computeTicks(rangeMs: number): number[] {
   if (rangeMs <= 0) return [0];
@@ -71,20 +35,60 @@ function computeTicks(rangeMs: number): number[] {
   return ticks;
 }
 
-// Bars and ticks occupy 0–SCALE of the timeline width,
-// leaving room for trailing duration labels.
+// Bars and ticks occupy 0–SCALE of the timeline width, leaving 10% for trailing
+// duration labels.
 const SCALE = 0.9;
 
+export const TRACE_ROW_HEIGHT = 28;
+const ROW_HEIGHT = TRACE_ROW_HEIGHT;
+
+export type TraceItem = { kind: "run" } & JobRun;
+
 export function TraceView({
-  runs,
+  items,
   currentRunId,
+  ancestorIds,
+  expandedNodes,
+  knownEmptyNodes,
+  loadingNodes,
+  onToggle,
+  scrollContainerRef,
+  header,
+  loadEarlierSiblings,
+  loadMoreLaterSiblings,
+  extraSiblingsBeforeCount = 0,
 }: {
-  runs: JobRun[];
+  items: TraceItem[];
   currentRunId: string;
+  ancestorIds: Set<string>;
+  expandedNodes: Set<string>;
+  /** Nodes we've expanded and confirmed to have zero children — hide their caret. */
+  knownEmptyNodes: Set<string>;
+  /** Nodes with an in-flight children fetch (first page or load-more). */
+  loadingNodes: Set<string>;
+  /** Toggles a node's expansion; no-op for focus and ancestors. */
+  onToggle: (nodeId: string) => void;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
+  header?: React.ReactNode;
+  /** Count-pill row at top: click to load the next chunk of earlier siblings. */
+  loadEarlierSiblings?: { onClick: () => void; isLoading: boolean };
+  /** Count-pill row at bottom: click to load the next chunk of later siblings. */
+  loadMoreLaterSiblings?: { onClick: () => void; isLoading: boolean };
+  /**
+   * Number of extra earlier-siblings the parent has loaded so far. An increase
+   * signals a user-initiated prepend (load-more-earlier click) — at which
+   * point we stop trying to auto-center, so the user's scroll stays at the
+   * top where the newly-loaded rows are visible.
+   */
+  extraSiblingsBeforeCount?: number;
 }) {
   const hasActiveRuns = useMemo(
-    () => runs.some((run) => run.status === 0 || run.status === 1),
-    [runs],
+    () =>
+      items.some(
+        (run) =>
+          run.status === JobStatus.Pending || run.status === JobStatus.Running,
+      ),
+    [items],
   );
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -94,17 +98,12 @@ export function TraceView({
     return () => window.clearInterval(timer);
   }, [hasActiveRuns]);
 
-  const { flatNodes, timeStart, timeRange, ticks } = useMemo(() => {
-    const roots = buildTree(runs);
-    const flat = flattenDfs(roots);
-
+  const { timeStart, timeRange, ticks } = useMemo(() => {
     let earliest = Infinity;
     let latest = -Infinity;
-
-    for (const { run } of flat) {
+    for (const run of items) {
       const created = new Date(run.createdAt).getTime();
       if (created < earliest) earliest = created;
-
       const end = run.completedAt
         ? new Date(run.completedAt).getTime()
         : run.startedAt
@@ -112,56 +111,134 @@ export function TraceView({
           : created;
       if (end > latest) latest = end;
     }
-
+    if (!Number.isFinite(earliest)) earliest = nowMs;
+    if (!Number.isFinite(latest)) latest = earliest;
     const range = Math.max(latest - earliest, 1);
     return {
-      flatNodes: flat,
       timeStart: earliest,
       timeRange: range,
       ticks: computeTicks(range),
     };
-  }, [runs, nowMs]);
+  }, [items, nowMs]);
 
-  const currentRef = useRef<HTMLAnchorElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const hasScrolled = useRef(false);
+  const rowVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 20,
+  });
 
-  // Only scroll once on mount or when navigating to a different run
+  const focusIdx = useMemo(
+    () => items.findIndex((item) => item.id === currentRunId),
+    [items, currentRunId],
+  );
+
+  // Centering strategy: render an invisible sentinel at the focus row's
+  // exact Y position (inside the virtualizer's rows wrapper) and directly
+  // set scrollTop on the scroll container based on the sentinel's actual
+  // bounding rect. We:
+  //
+  //   1. Run in useEffect (post-paint), not useLayoutEffect, so that any
+  //      sync re-render the virtualizer triggers from its observer callbacks
+  //      has already committed before we measure. This matters — scrolling
+  //      during layout-effect phase kept landing on stale scrollHeight.
+  //   2. Wrap the whole thing in requestAnimationFrame so any layout the
+  //      virtualizer does on its own rAF has completed too.
+  //   3. Set scrollTop directly (not scrollIntoView) to avoid the browser
+  //      also scrolling the document body — scrollIntoView walks the
+  //      scrollable-ancestor chain, which on this page would jump the main
+  //      content scroll and interact badly with the other cards loading.
+  //
+  //   • hasCenteredRef gates centering to once per currentRunId. Subsequent
+  //     items changes (polling, background child pagination) don't scroll.
+  //
+  //   • User-initiated prepend (load-earlier-siblings) shifts scrollTop by
+  //     the height of the newly-inserted rows so the content under the
+  //     user's eyes stays put.
+  const hasCenteredRef = useRef(false);
+  const prevExtraCountRef = useRef(extraSiblingsBeforeCount);
+  const focusSentinelRef = useRef<HTMLDivElement>(null);
+  // Belt-and-suspenders: reset hasCenteredRef when focus changes, even if
+  // TraceView somehow stayed mounted across the transition.
+  const lastCenteredRunIdRef = useRef<string>("");
+
   useEffect(() => {
-    hasScrolled.current = false;
-  }, [currentRunId]);
+    const prevCount = prevExtraCountRef.current;
+    const userPrepended = extraSiblingsBeforeCount > prevCount;
+    prevExtraCountRef.current = extraSiblingsBeforeCount;
 
-  useEffect(() => {
-    if (currentRef.current && !hasScrolled.current) {
-      // Only scroll if the container actually overflows
-      const viewport = containerRef.current;
-      if (viewport && viewport.scrollHeight > viewport.clientHeight) {
-        currentRef.current.scrollIntoView({ block: "center" });
-      }
-      hasScrolled.current = true;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    if (lastCenteredRunIdRef.current !== currentRunId) {
+      hasCenteredRef.current = false;
+      lastCenteredRunIdRef.current = currentRunId;
     }
-  }, [flatNodes]);
 
-  if (flatNodes.length === 0) return null;
+    if (userPrepended) {
+      hasCenteredRef.current = true;
+      const delta = extraSiblingsBeforeCount - prevCount;
+      el.scrollTop += delta * ROW_HEIGHT;
+      return;
+    }
+
+    if (hasCenteredRef.current) return;
+    if (focusIdx < 0) return;
+
+    const rafId = requestAnimationFrame(() => {
+      const sentinel = focusSentinelRef.current;
+      const scrollEl = scrollContainerRef.current;
+      if (!sentinel || !scrollEl) return;
+      if (scrollEl.clientHeight === 0) return;
+
+      // Sentinel's top position in the scroll container's scroll coordinates.
+      const sentinelRect = sentinel.getBoundingClientRect();
+      const containerRect = scrollEl.getBoundingClientRect();
+      const sentinelTopInScroll =
+        sentinelRect.top - containerRect.top + scrollEl.scrollTop;
+      const sentinelCenter = sentinelTopInScroll + ROW_HEIGHT / 2;
+
+      // The sticky header (~44px = 2.75rem, matching scroll-padding-top on
+      // the container) visually hides the top of the scrollport. Center the
+      // sentinel inside the unobstructed area below the header.
+      const HEADER_OFFSET = 44;
+      const viewportCenter =
+        HEADER_OFFSET + (scrollEl.clientHeight - HEADER_OFFSET) / 2;
+      const target = sentinelCenter - viewportCenter;
+
+      scrollEl.scrollTop = Math.max(0, target);
+      hasCenteredRef.current = true;
+    });
+
+    return () => cancelAnimationFrame(rafId);
+  }, [focusIdx, currentRunId, extraSiblingsBeforeCount, scrollContainerRef]);
+
+  if (items.length === 0) return null;
 
   const pct = (ms: number) => (ms / timeRange) * 100 * SCALE;
 
   return (
-    <div
-      ref={containerRef}
-      className="w-full max-h-[26rem] min-h-0 rounded-md border overflow-y-auto"
-    >
-      <div className="grid grid-cols-[auto_1fr]">
-        {/* Time axis header */}
-        <div className="col-span-2 grid grid-cols-subgrid items-stretch sticky top-0 z-10 h-10 border-b bg-muted/30 backdrop-blur-sm px-2">
-          <span className="text-sm text-muted-foreground pr-3 self-center">
-            Trace
-          </span>
-          <div className="relative overflow-visible">
+    // min-w forces horizontal overflow on viewports narrower than 640px so the
+    // timeline keeps a usable width; the scroll container (outer) handles both
+    // axes. Sticky top-0 still sticks to the outer scroll container because
+    // the sticky element has no horizontal sticky offset.
+    // --trace-name-col keeps the header/row separator aligned.
+    <div className="min-w-[768px] [--trace-name-col:13.75rem]">
+        <div
+          className="sticky top-0 z-10 py-2.5 border-b bg-muted/30 backdrop-blur-sm px-2"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "var(--trace-name-col) 1fr",
+          }}
+        >
+          <div className="flex items-center text-sm text-muted-foreground pr-3">
+            {header}
+          </div>
+          <div className="relative h-full overflow-hidden">
             {ticks.map((t, i) => (
               <span
                 key={i}
-                className="absolute top-1/2 text-[11px] text-muted-foreground/60 tabular-nums -translate-x-1/2 -translate-y-1/2"
+                className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/60 tabular-nums"
                 style={{ left: `${pct(t)}%` }}
               >
                 {formatMs(t)}
@@ -170,87 +247,191 @@ export function TraceView({
           </div>
         </div>
 
-        {/* Trace rows */}
-        {flatNodes.map(({ run, depth }) => {
-          const created = new Date(run.createdAt).getTime();
-          const started = run.startedAt
-            ? new Date(run.startedAt).getTime()
-            : created;
-          const end = run.completedAt
-            ? new Date(run.completedAt).getTime()
-            : run.startedAt
-              ? nowMs
+        {loadEarlierSiblings && (
+          <SiblingPillRow
+            direction="earlier"
+            onClick={loadEarlierSiblings.onClick}
+            isLoading={loadEarlierSiblings.isLoading}
+          />
+        )}
+
+        <div
+          className="relative w-full"
+          style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+        >
+          {focusIdx >= 0 && (
+            <div
+              ref={focusSentinelRef}
+              aria-hidden="true"
+              className="pointer-events-none invisible absolute left-0 w-px"
+              style={{
+                top: `${focusIdx * ROW_HEIGHT}px`,
+                height: `${ROW_HEIGHT}px`,
+              }}
+            />
+          )}
+          {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+            const run = items[virtualItem.index];
+            const rowStyle = {
+              height: `${virtualItem.size}px`,
+              transform: `translateY(${virtualItem.start}px)`,
+            };
+            const depth = run.depth ?? 0;
+            const created = new Date(run.createdAt).getTime();
+            const started = run.startedAt
+              ? new Date(run.startedAt).getTime()
               : created;
+            const end = run.completedAt
+              ? new Date(run.completedAt).getTime()
+              : run.startedAt
+                ? nowMs
+                : created;
 
-          const leftPct = pct(started - timeStart);
-          const widthPct = Math.max(
-            Math.min(pct(end - started), 100 * SCALE - leftPct),
-            0.3,
-          );
-          const durationMs = end - started;
-          const isCurrent = run.id === currentRunId;
+            const leftPct = pct(started - timeStart);
+            const widthPct = Math.max(
+              Math.min(pct(end - started), 100 * SCALE - leftPct),
+              0.3,
+            );
+            const durationMs = end - started;
+            const isCurrent = run.id === currentRunId;
+            const barColor =
+              statusColorVar[run.status] ?? "var(--muted-foreground)";
 
-          return (
-            <Link
-              key={run.id}
-              ref={isCurrent ? currentRef : undefined}
-              to={`/runs/${run.id}`}
-              className={`col-span-2 grid grid-cols-subgrid items-center transition-colors border-b border-border/20 last:border-b-0 ${
-                isCurrent
-                  ? "bg-primary/5 hover:bg-primary/10"
-                  : "hover:bg-muted/50"
-              }`}
-            >
-              {/* Name */}
+            // Ancestors and confirmed-leaf nodes don't show a caret. The focus is
+            // always conceptually expanded — its caret toggles back to collapsed
+            // (which in practice would hide descendants but focus is never hidden
+            // entirely); we omit it to avoid confusing state.
+            const isAncestor = ancestorIds.has(run.id);
+            const isFocus = run.id === currentRunId;
+            const canToggle =
+              !isAncestor && !isFocus && !knownEmptyNodes.has(run.id);
+            const isExpanded = expandedNodes.has(run.id);
+            const isLoading = loadingNodes.has(run.id);
+
+            return (
               <div
-                className="flex items-center gap-1.5 min-w-0 max-w-[200px] pr-3 py-1.5"
+                key={run.id}
+                data-run-id={run.id}
+                className={`absolute top-0 left-0 w-full items-center transition-colors border-b border-border/50 ${
+                  isCurrent
+                    ? "bg-primary/5 hover:bg-primary/10"
+                    : "hover:bg-muted/50"
+                }`}
                 style={{
-                  paddingLeft: `calc(0.75rem + ${depth * 0.875}rem)`,
+                  display: "grid",
+                  gridTemplateColumns: "var(--trace-name-col) 1fr",
+                  ...rowStyle,
                 }}
               >
-                <span
-                  className={`size-1.5 rounded-full shrink-0 ${isCurrent ? "bg-primary" : ""}`}
-                />
-                <span className="text-[13px] truncate" title={run.jobName}>
-                  {run.jobName}
-                </span>
-              </div>
-
-              {/* Timeline */}
-              <div className="relative h-7 border-l border-border/40">
-                {/* Gridlines (skip first — border-l covers position 0) */}
-                {ticks.slice(1).map((t, i) => (
-                  <div
-                    key={i}
-                    className="absolute top-0 bottom-0 w-px bg-border/10"
-                    style={{ left: `${pct(t)}%` }}
-                  />
-                ))}
-                {/* Bar */}
                 <div
-                  className={`absolute top-1/2 -translate-y-1/2 h-[10px] rounded-sm ${
-                    barColors[run.status] ?? "bg-slate-400"
-                  } ${isCurrent ? "ring-1 ring-primary" : ""}`}
+                  className="flex items-center gap-1 min-w-0 pr-3 py-1.5"
                   style={{
-                    left: `${leftPct}%`,
-                    width: `${widthPct}%`,
-                    minWidth: "3px",
+                    paddingLeft: `calc(0.25rem + ${depth * 0.875}rem)`,
                   }}
-                />
-                {/* Duration trailing the bar */}
-                {durationMs > 0 && (
+                >
+                  {canToggle ? (
+                    <button
+                      type="button"
+                      aria-label={isExpanded ? "Collapse" : "Expand"}
+                      aria-expanded={isExpanded}
+                      disabled={isLoading}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onToggle(run.id);
+                      }}
+                      className="inline-flex items-center justify-center size-4 shrink-0 rounded hover:bg-muted disabled:opacity-50 disabled:cursor-wait cursor-pointer text-muted-foreground"
+                    >
+                      {isExpanded ? (
+                        <ChevronDown className="size-3" />
+                      ) : (
+                        <ChevronRight className="size-3" />
+                      )}
+                    </button>
+                  ) : (
+                    <span className="inline-block size-4 shrink-0" />
+                  )}
                   <span
-                    className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums whitespace-nowrap"
-                    style={{ left: `calc(${leftPct + widthPct}% + 6px)` }}
+                    className={`size-1.5 rounded-full shrink-0 ${
+                      isCurrent ? "bg-primary" : ""
+                    }`}
+                  />
+                  <Link
+                    to={`/runs/${run.id}`}
+                    className="text-[13px] leading-none truncate hover:underline"
+                    title={run.jobName}
                   >
-                    {formatMs(durationMs)}
-                  </span>
-                )}
+                    {run.jobName}
+                  </Link>
+                </div>
+
+                <div className="relative h-7 border-l border-border/40 overflow-hidden">
+                  {ticks.slice(1).map((t, i) => (
+                    <div
+                      key={i}
+                      className="absolute top-0 bottom-0 w-px bg-border/10"
+                      style={{ left: `${pct(t)}%` }}
+                    />
+                  ))}
+                  <div
+                    className="absolute top-1/2 -translate-y-1/2 h-[10px] rounded-sm"
+                    style={{
+                      left: `${leftPct}%`,
+                      width: `${widthPct}%`,
+                      minWidth: "3px",
+                      backgroundColor: barColor,
+                    }}
+                  />
+                  {durationMs > 0 && (
+                    <span
+                      className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums whitespace-nowrap"
+                      style={{ left: `calc(${leftPct + widthPct}% + 6px)` }}
+                    >
+                      {formatMs(durationMs)}
+                    </span>
+                  )}
+                </div>
               </div>
-            </Link>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+
+        {loadMoreLaterSiblings && (
+          <SiblingPillRow
+            direction="later"
+            onClick={loadMoreLaterSiblings.onClick}
+            isLoading={loadMoreLaterSiblings.isLoading}
+          />
+        )}
     </div>
+  );
+}
+
+/**
+ * Sibling-navigation row rendered at the top or bottom of the trace list.
+ * Consistent styling across both directions — same height as a trace row,
+ * same indent (aligned with focus-depth siblings), chevron + label, click to
+ * load the next chunk in that direction.
+ */
+function SiblingPillRow({
+  direction,
+  onClick,
+  isLoading,
+}: {
+  direction: "earlier" | "later";
+  onClick: () => void;
+  isLoading: boolean;
+}) {
+  const Icon = direction === "earlier" ? ChevronUp : ChevronDown;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={isLoading}
+      className="flex items-center justify-center gap-1.5 w-full border-b border-border/50 bg-muted/30 backdrop-blur-sm px-3 py-1.5 text-[13px] text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50 disabled:cursor-wait cursor-pointer transition-colors"
+    >
+      <Icon className="size-3.5 shrink-0" />
+      <span>{isLoading ? "Loading…" : "Load more"}</span>
+    </button>
   );
 }

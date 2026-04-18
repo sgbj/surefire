@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,10 +29,9 @@ import {
 const chartConfig = {
   pending: { label: "Pending", color: "var(--status-pending)" },
   running: { label: "Running", color: "var(--status-running)" },
-  completed: { label: "Completed", color: "var(--status-completed)" },
-  retrying: { label: "Retrying", color: "var(--status-retrying)" },
+  succeeded: { label: "Succeeded", color: "var(--status-succeeded)" },
   cancelled: { label: "Cancelled", color: "var(--status-cancelled)" },
-  deadLetter: { label: "Dead letter", color: "var(--status-dead-letter)" },
+  failed: { label: "Failed", color: "var(--status-failed)" },
 } satisfies ChartConfig;
 
 const PERIODS: Record<string, { hours: number; bucketMinutes: number }> = {
@@ -65,6 +64,8 @@ export function DashboardPage() {
     },
     refetchInterval: 5000,
   });
+
+  const timeline = useMemo(() => stats?.timeline ?? [], [stats?.timeline]);
 
   return (
     <div className="space-y-6">
@@ -106,13 +107,13 @@ export function DashboardPage() {
           </div>
           <div className="space-y-6">
             <Card className="pt-0 gap-0">
-              <CardHeader className="border-b py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm">
+              <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
                 <Skeleton className="h-4 w-28" />
               </CardHeader>
               <CardContent className="pt-4 h-[300px]" />
             </Card>
             <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
-              <CardHeader className="py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm">
+              <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
                 <Skeleton className="h-4 w-24" />
               </CardHeader>
               <CardContent className="px-0">
@@ -157,21 +158,18 @@ export function DashboardPage() {
 
           <div className="space-y-6">
             <Card className="pt-0 gap-0">
-              <CardHeader className="border-b py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm">
-                <CardTitle className="text-sm font-medium">
+              <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
+                <CardTitle className="text-sm font-normal text-muted-foreground">
                   Runs over time
                 </CardTitle>
               </CardHeader>
               <CardContent className="pt-4 px-0">
-                {stats.timeline.length > 0 ? (
+                {timeline.length > 0 ? (
                   <ChartContainer
                     config={chartConfig}
                     className="aspect-auto h-[300px] w-full"
                   >
-                    <AreaChart
-                      data={stats.timeline}
-                      margin={{ left: 0, right: 0 }}
-                    >
+                    <AreaChart data={timeline} margin={{ left: 0, right: 0 }}>
                       <defs>
                         {Object.entries(chartConfig).map(([key, { color }]) => (
                           <linearGradient
@@ -254,17 +252,10 @@ export function DashboardPage() {
                       />
                       <Area
                         type="monotone"
-                        dataKey="completed"
+                        dataKey="succeeded"
                         stackId="1"
-                        stroke="var(--color-completed)"
-                        fill="url(#gradient-completed)"
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="retrying"
-                        stackId="1"
-                        stroke="var(--color-retrying)"
-                        fill="url(#gradient-retrying)"
+                        stroke="var(--color-succeeded)"
+                        fill="url(#gradient-succeeded)"
                       />
                       <Area
                         type="monotone"
@@ -275,10 +266,10 @@ export function DashboardPage() {
                       />
                       <Area
                         type="monotone"
-                        dataKey="deadLetter"
+                        dataKey="failed"
                         stackId="1"
-                        stroke="var(--color-deadLetter)"
-                        fill="url(#gradient-deadLetter)"
+                        stroke="var(--color-failed)"
+                        fill="url(#gradient-failed)"
                       />
                     </AreaChart>
                   </ChartContainer>
@@ -291,19 +282,19 @@ export function DashboardPage() {
             </Card>
 
             <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
-              <CardHeader className="py-3! gap-0! grid-rows-none! rounded-t-xl bg-muted/30 backdrop-blur-sm">
-                <CardTitle className="text-sm font-medium">
+              <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
+                <CardTitle className="text-sm font-normal text-muted-foreground">
                   Recent runs
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-0">
                 {stats.recentRuns.length > 0 ? (
                   <div>
-                    {stats.recentRuns.slice(0, 15).map((run, i, rows) => (
+                    {stats.recentRuns.slice(0, 15).map((run) => (
                       <Link
                         key={run.id}
                         to={`/runs/${run.id}`}
-                        className={`flex items-center justify-between gap-4 px-6 py-2.5 border-t hover:bg-muted/50 transition-colors text-sm${i === rows.length - 1 ? " rounded-b-xl" : ""}`}
+                        className="flex items-center justify-between gap-4 px-6 py-2.5 border-t hover:bg-muted/50 transition-colors text-sm"
                       >
                         <span
                           className="font-medium truncate"

@@ -2,7 +2,7 @@ using Surefire.Tests.Conformance;
 
 namespace Surefire.Tests.Sqlite;
 
-[CollectionDefinition("Sqlite")]
+[CollectionDefinition("Sqlite", DisableParallelization = true)]
 public class SqliteCollection : ICollectionFixture<SqliteFixture>;
 
 [Collection("Sqlite")]
@@ -72,3 +72,7 @@ public sealed class SqliteQueueStatsParityTests(SqliteFixture fixture)
 [Collection("Sqlite")]
 public sealed class SqliteRuntimeReliabilityTests(SqliteFixture fixture)
     : FixtureBackedRuntimeReliabilityConformanceTests<SqliteFixture>(fixture);
+
+[Collection("Sqlite")]
+public sealed class SqliteTraceTests(SqliteFixture fixture)
+    : FixtureBackedTraceConformanceTests<SqliteFixture>(fixture);

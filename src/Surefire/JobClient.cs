@@ -1,7 +1,11 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace Surefire;
@@ -9,160 +13,193 @@ namespace Surefire;
 /// <summary>
 ///     Default implementation of <see cref="IJobClient" /> built on top of the store and notification contracts.
 /// </summary>
-public sealed partial class JobClient(
+internal sealed partial class JobClient(
     IJobStore store,
     INotificationProvider notifications,
     TimeProvider timeProvider,
     SurefireOptions options,
     ILogger<JobClient> logger) : IJobClient
 {
+    // Batch bulk-fetch window sizing: amortize per-child round trips to the store
+    // into ~O(total_children / _batchFetchWindowSize) bulk calls.
+    private const int BatchFetchWindowSize = 64;
+    private static readonly TimeSpan BatchFetchWindowDelay = TimeSpan.FromMilliseconds(10);
+
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _inputPumpTokens =
+        new(StringComparer.Ordinal);
+
     private readonly JsonSerializerOptions _serializerOptions = options.SerializerOptions;
 
-    /// <inheritdoc />
-    public Task<string> TriggerAsync(string jobName, CancellationToken cancellationToken = default) =>
-        TriggerAsync(jobName, null, new(), cancellationToken);
+    // =========================================================================
+    // Trigger primitives
+    // =========================================================================
 
-    /// <inheritdoc />
-    public Task<string> TriggerAsync(string jobName, object? args, CancellationToken cancellationToken = default) =>
-        TriggerAsync(jobName, args, new(), cancellationToken);
-
-    /// <inheritdoc />
-    public async Task<string> TriggerAsync(string jobName, object? args, RunOptions options,
+    public async Task<JobRun> TriggerAsync(string job, object? args = null, RunOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        var runOptions = options ?? new();
         var prepared = PrepareArguments(args);
-        var requestedPriority = await ResolveRequestedPriorityAsync(jobName, options.Priority, cancellationToken);
-        var run = CreateRun(jobName, prepared.SerializedArguments, options, timeProvider.GetUtcNow(),
+        var requestedPriority = await ResolveRequestedPriorityAsync(job, runOptions.Priority, cancellationToken);
+        var run = CreateRun(job, prepared.SerializedArguments, runOptions, timeProvider.GetUtcNow(),
             requestedPriority ?? 0);
         var initialEvents = BuildInitialEvents(run.Id, prepared.StreamDeclaration);
-        var created = await store.TryCreateRunAsync(
-            run,
-            initialEvents: initialEvents,
+        var created = await store.TryCreateRunAsync(run, initialEvents: initialEvents,
             cancellationToken: cancellationToken);
         if (!created)
         {
-            throw new InvalidOperationException($"Run creation for job '{jobName}' was rejected.");
+            throw new RunConflictException(run.Id, $"Run creation for job '{job}' was rejected.");
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
-
         if (prepared.Streams.Count > 0)
         {
-            // Input pumping must continue after acceptance even if the caller/request token is canceled.
-            _ = PumpInputStreamsAsync(run.Id, prepared.Streams, CancellationToken.None);
+            StartInputPump(run.Id, prepared.Streams);
         }
 
-        return run.Id;
+        return AttachSerializerOptions(run);
     }
 
-    /// <inheritdoc />
-    public Task<RunResult> RunAsync(string jobName, CancellationToken cancellationToken = default) =>
-        RunAsync(jobName, null, new(), cancellationToken);
+    public Task<JobBatch> TriggerBatchAsync(IEnumerable<BatchItem> runs, CancellationToken cancellationToken = default)
+        => TriggerBatchCoreAsync(runs, cancellationToken);
 
-    /// <inheritdoc />
-    public Task<RunResult> RunAsync(string jobName, object? args, CancellationToken cancellationToken = default) =>
-        RunAsync(jobName, args, new(), cancellationToken);
-
-    /// <inheritdoc />
-    public async Task<RunResult> RunAsync(string jobName, object? args, RunOptions options,
+    public Task<JobBatch> TriggerBatchAsync(string job, IEnumerable<object?> args, RunOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var runId = await TriggerAsync(jobName, args, options, cancellationToken);
-        try
-        {
-            return await WaitAsync(runId, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            await TryCancelOwnedRunAsync(runId);
-            throw;
-        }
+        var items = args.Select(a => new BatchItem(job, a, options));
+        return TriggerBatchCoreAsync(items, cancellationToken);
     }
 
-    /// <inheritdoc />
-    public Task<T> RunAsync<T>(string jobName, CancellationToken cancellationToken = default) =>
-        RunAsync<T>(jobName, null, new(), cancellationToken);
+    // =========================================================================
+    // Query
+    // =========================================================================
 
-    /// <inheritdoc />
-    public Task<T> RunAsync<T>(string jobName, object? args, CancellationToken cancellationToken = default) =>
-        RunAsync<T>(jobName, args, new(), cancellationToken);
-
-    /// <inheritdoc />
-    public async Task<T> RunAsync<T>(string jobName, object? args, RunOptions options,
-        CancellationToken cancellationToken = default)
+    public async Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var runId = await TriggerAsync(jobName, args, options, cancellationToken);
-        if (TryGetAsyncEnumerableElementType(typeof(T), out var streamItemType))
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                await TryCancelOwnedRunAsync(runId);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-
-            var streamMethod = typeof(JobClient)
-                .GetMethod(nameof(BuildOwnedRunStreamResult), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(streamItemType);
-            return (T)streamMethod.Invoke(this, [runId, cancellationToken])!;
-        }
-
-        try
-        {
-            return await WaitAsync<T>(runId, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            await TryCancelOwnedRunAsync(runId);
-            throw;
-        }
+        var record = await store.GetRunAsync(runId, cancellationToken);
+        return record is null ? null : AttachSerializerOptions(record);
     }
 
-    /// <inheritdoc />
-    public IAsyncEnumerable<T> StreamAsync<T>(string jobName, CancellationToken cancellationToken = default) =>
-        StreamAsync<T>(jobName, null, new(), cancellationToken);
-
-    /// <inheritdoc />
-    public IAsyncEnumerable<T> StreamAsync<T>(string jobName, object? args,
-        CancellationToken cancellationToken = default) =>
-        StreamAsync<T>(jobName, args, new(), cancellationToken);
-
-    /// <inheritdoc />
-    public async IAsyncEnumerable<T> StreamAsync<T>(string jobName, object? args, RunOptions options,
+    public async IAsyncEnumerable<JobRun> GetRunsAsync(RunFilter filter,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var runId = await TriggerAsync(jobName, args, options, cancellationToken);
-        await using var enumerator = WaitStreamAsync<T>(runId, cancellationToken)
-            .GetAsyncEnumerator(cancellationToken);
+        // Snapshot the upper bound so concurrent inserts don't shift our pagination window
+        // and cause silent duplicates or skips. AddTicks(1) keeps runs created at the
+        // current instant in scope.
+        var snapshotCreatedBefore = filter.CreatedBefore ?? timeProvider.GetUtcNow().AddTicks(1);
+        var stableFilter = filter with { CreatedBefore = snapshotCreatedBefore };
+
+        var skip = 0;
+        const int pageSize = 200;
 
         while (true)
         {
-            T item;
-            try
+            var page = await store.GetRunsAsync(stableFilter, skip, pageSize, cancellationToken);
+            if (page.Items.Count == 0)
             {
-                if (!await enumerator.MoveNextAsync())
-                {
-                    break;
-                }
-
-                item = enumerator.Current;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await TryCancelOwnedRunAsync(runId);
-                throw;
+                yield break;
             }
 
-            yield return item;
+            foreach (var run in page.Items)
+            {
+                yield return AttachSerializerOptions(run);
+            }
+
+            skip += page.Items.Count;
         }
     }
 
-    /// <inheritdoc />
-    public IAsyncEnumerable<RunObservation> ObserveAsync(string runId,
-        CancellationToken cancellationToken = default) =>
-        ObserveAsync(runId, RunEventCursor.Start, cancellationToken);
+    public Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+        => store.GetBatchAsync(batchId, cancellationToken);
 
-    /// <inheritdoc />
-    public async IAsyncEnumerable<RunObservation> ObserveAsync(string runId, RunEventCursor cursor,
+    // =========================================================================
+    // Control
+    // =========================================================================
+
+    public async Task CancelAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        await CancelRunAndDescendantsAsync(runId, new HashSet<string>(StringComparer.Ordinal), cancellationToken);
+    }
+
+    public async Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    {
+        var cancelledRunIds = await store.CancelBatchRunsAsync(batchId, "Cancelled by client request.",
+            cancellationToken);
+        foreach (var runId in cancelledRunIds.Distinct(StringComparer.Ordinal))
+        {
+            await PublishCancellationNotificationsAsync(runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId, cancellationToken);
+        }
+
+        if (cancelledRunIds.Count == 0)
+        {
+            return;
+        }
+
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null)
+        {
+            return;
+        }
+
+        var batchStatus = batch.Failed > 0 ? JobStatus.Failed : JobStatus.Cancelled;
+        var completedAt = timeProvider.GetUtcNow();
+        if (await store.TryCompleteBatchAsync(batchId, batchStatus, completedAt, cancellationToken))
+        {
+            await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId,
+                cancellationToken);
+        }
+    }
+
+    public async Task<JobRun> RerunAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        var existingBatch = await store.GetBatchAsync(runId, cancellationToken);
+        if (existingBatch is { })
+        {
+            throw new InvalidOperationException(
+                $"'{runId}' is a batch ID. To rerun a batch, retrieve the runs with GetRunsAsync and call TriggerBatchAsync.");
+        }
+
+        var requestedPriority = await ResolveRequestedPriorityAsync(run.JobName, null, cancellationToken);
+        var rerun = CreateRun(
+            run.JobName,
+            run.Arguments,
+            new(),
+            timeProvider.GetUtcNow(),
+            requestedPriority ?? 0,
+            rerunOfRunId: run.Id);
+
+        var clonedInputEvents = await BuildClonedRunScopedInputEventsAsync(runId, rerun.Id, cancellationToken);
+
+        var created = await store.TryCreateRunAsync(
+            rerun,
+            initialEvents: clonedInputEvents,
+            cancellationToken: cancellationToken);
+        if (!created)
+        {
+            throw new RunConflictException(runId, $"Run creation for rerun of '{runId}' was rejected.");
+        }
+
+        await notifications.PublishAsync(NotificationChannels.RunCreated, rerun.Id, cancellationToken);
+        return AttachSerializerOptions(rerun);
+    }
+
+    // =========================================================================
+    // Observation primitives — raw events, no hydration, no interpretation
+    // =========================================================================
+
+    public async IAsyncEnumerable<RunEvent> ObserveRunEventsAsync(string runId, long sinceEventId = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         using var wakeup = new SemaphoreSlim(0, 1);
@@ -171,39 +208,36 @@ public sealed partial class JobClient(
             _ => ReleaseWakeupAsync(wakeup),
             cancellationToken);
         await using var completionSub = await notifications.SubscribeAsync(
-            NotificationChannels.RunCompleted(runId),
+            NotificationChannels.RunTerminated(runId),
             _ => ReleaseWakeupAsync(wakeup),
             cancellationToken);
 
-        var sinceId = cursor.SinceEventId;
         while (true)
         {
             var run = await store.GetRunAsync(runId, cancellationToken);
             if (run is null)
             {
-                throw new InvalidOperationException($"Run '{runId}' was not found.");
+                throw new RunNotFoundException(runId);
             }
 
-            var events = await store.GetEventsAsync(runId, sinceId, null, null, cancellationToken);
-            foreach (var @event in events)
+            while (true)
             {
-                sinceId = @event.Id;
-                yield return new()
+                var events = await store.GetEventsAsync(runId, sinceEventId,
+                    cancellationToken: cancellationToken);
+                if (events.Count == 0)
                 {
-                    Run = run,
-                    Event = @event,
-                    Cursor = new() { SinceEventId = sinceId }
-                };
+                    break;
+                }
+
+                foreach (var @event in events)
+                {
+                    sinceEventId = @event.Id;
+                    yield return @event;
+                }
             }
 
             if (run.Status.IsTerminal)
             {
-                yield return new()
-                {
-                    Run = run,
-                    Event = null,
-                    Cursor = new() { SinceEventId = sinceId }
-                };
                 yield break;
             }
 
@@ -211,43 +245,451 @@ public sealed partial class JobClient(
         }
     }
 
-    /// <inheritdoc />
-    public Task<string> TriggerAllAsync(string jobName, IEnumerable<object?> argsList,
+    public async IAsyncEnumerable<RunEvent> ObserveBatchEventsAsync(string batchId, long sinceEventId = 0,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var batchEventSub = await notifications.SubscribeAsync(
+            NotificationChannels.RunEvent(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+        await using var batchTerminatedSub = await notifications.SubscribeAsync(
+            NotificationChannels.BatchTerminated(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+
+        while (true)
+        {
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch is null)
+            {
+                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
+            }
+
+            while (true)
+            {
+                var events = await store.GetBatchEventsAsync(batchId, sinceEventId, 200, cancellationToken);
+                if (events.Count == 0)
+                {
+                    break;
+                }
+
+                foreach (var @event in events)
+                {
+                    sinceEventId = @event.Id;
+                    yield return @event;
+                }
+            }
+
+            if (batch.Status.IsTerminal)
+            {
+                yield break;
+            }
+
+            await WaitForWakeupAsync(wakeup, cancellationToken);
+        }
+    }
+
+    // =========================================================================
+    // Single-run wait — observation overloads
+    // =========================================================================
+
+    public async Task<JobRun> WaitAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        await foreach (var _ in ObserveRunEventsAsync(runId, 0, cancellationToken))
+        {
+            // Drain — we just need to reach the terminal signal. The yield loop exits when the
+            // run is terminal; we then return the final snapshot.
+        }
+
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        return AttachSerializerOptions(run);
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async Task<T> WaitAsync<T>(string runId, CancellationToken cancellationToken = default)
+    {
+        // Stream-shape hydration is a live concept — return immediately, yield items as they arrive.
+        if (typeof(T).IsGenericType && typeof(T).GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            var elementType = typeof(T).GetGenericArguments()[0];
+            var buildMethod = typeof(JobClient)
+                .GetMethod(nameof(BuildHydratedLiveStream), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(elementType);
+            return (T)buildMethod.Invoke(this, [runId, cancellationToken])!;
+        }
+
+        var run = await WaitAsync(runId, cancellationToken);
+        return await HydrateRunAsync<T>(run, cancellationToken);
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, CancellationToken cancellationToken = default)
+        => StreamRunHydratedAsync<T>(runId, cancellationToken);
+
+    // =========================================================================
+    // Single-run trigger + sugar (job name, own-the-run)
+    // =========================================================================
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async Task<T> RunAsync<T>(string job, object? args = null, RunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var run = await TriggerAsync(job, args, options, cancellationToken);
+        try
+        {
+            return await WaitAsync<T>(run.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await TryCancelOwnedRunAsync(run.Id);
+            throw;
+        }
+    }
+
+    public async Task RunAsync(string job, object? args = null, RunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var run = await TriggerAsync(job, args, options, cancellationToken);
+        try
+        {
+            var final = await WaitAsync(run.Id, cancellationToken);
+            await ThrowIfNonSuccessTerminalAsync(final, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await TryCancelOwnedRunAsync(run.Id);
+            throw;
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async IAsyncEnumerable<T> StreamAsync<T>(string job, object? args = null, RunOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var run = await TriggerAsync(job, args, options, cancellationToken);
+        await foreach (var item in OwnedRunStreamAsync<T>(run.Id, cancellationToken))
+        {
+            yield return item;
+        }
+    }
+
+    // =========================================================================
+    // Batch wait — observation overloads
+    // =========================================================================
+
+    public async Task<JobBatch> WaitBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    {
+        using var wakeup = new SemaphoreSlim(0, 1);
+        await using var subscription = await notifications.SubscribeAsync(
+            NotificationChannels.BatchTerminated(batchId),
+            _ => ReleaseWakeupAsync(wakeup),
+            cancellationToken);
+
+        while (true)
+        {
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch is null)
+            {
+                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
+            }
+
+            if (batch.Status.IsTerminal)
+            {
+                return batch;
+            }
+
+            await WaitForWakeupAsync(wakeup, cancellationToken);
+        }
+    }
+
+    public async IAsyncEnumerable<JobRun> WaitEachAsync(string batchId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // Non-throwing metadata stream: yield child snapshots as each becomes terminal,
+        // regardless of outcome. Uses ObserveBatchEventsAsync to pick up terminal status
+        // events, then bulk-fetches snapshots in windows (amortizes round trips).
+        //
+        // Invariant relied upon: `batch.Status.IsTerminal` is set atomically with the
+        // transition that marks the last child terminal, so when ObserveBatchEventsAsync
+        // exits (batch terminal), every child's terminal event has already been drained.
+        var pendingIds = new List<string>(BatchFetchWindowSize);
+        DateTimeOffset? windowDeadline = null;
+
+        async Task<IReadOnlyList<JobRun>> FlushAsync()
+        {
+            if (pendingIds.Count == 0)
+            {
+                return [];
+            }
+
+            var fetched = await store.GetRunsByIdsAsync(pendingIds.ToArray(), cancellationToken);
+            pendingIds.Clear();
+            windowDeadline = null;
+            return fetched;
+        }
+
+        await foreach (var @event in ObserveBatchEventsAsync(batchId, 0, cancellationToken))
+        {
+            if (!RunStatusEvents.IsTerminal(@event))
+            {
+                continue;
+            }
+
+            pendingIds.Add(@event.RunId);
+            windowDeadline ??= timeProvider.GetUtcNow() + BatchFetchWindowDelay;
+
+            if (pendingIds.Count >= BatchFetchWindowSize
+                || timeProvider.GetUtcNow() >= windowDeadline)
+            {
+                foreach (var run in await FlushAsync())
+                {
+                    yield return AttachSerializerOptions(run);
+                }
+            }
+        }
+
+        foreach (var run in await FlushAsync())
+        {
+            yield return AttachSerializerOptions(run);
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async Task<IReadOnlyList<T>> WaitBatchAsync<T>(string batchId,
+        CancellationToken cancellationToken = default)
+    {
+        var results = new List<T>();
+        var failures = new List<Exception>();
+
+        await foreach (var item in StreamBatchHydratedAsync<T>(batchId, false,
+                           cancellationToken))
+        {
+            if (item.Exception is { } ex)
+            {
+                failures.Add(ex);
+                continue;
+            }
+
+            results.Add(item.Value!);
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(failures);
+        }
+
+        return results;
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public IAsyncEnumerable<T> WaitEachAsync<T>(string batchId,
+        CancellationToken cancellationToken = default)
+        => StreamBatchHydratedValuesAsync<T>(batchId, cancellationToken);
+
+    // =========================================================================
+    // Batch trigger + sugar (job name / items, own-the-batch)
+    // =========================================================================
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async Task<IReadOnlyList<T>> RunBatchAsync<T>(string job, IEnumerable<object?> args,
+        RunOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        var batch = await TriggerBatchAsync(job, args, options, cancellationToken);
+        try
+        {
+            return await WaitBatchAsync<T>(batch.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await TryCancelOwnedBatchAsync(batch.Id);
+            throw;
+        }
+    }
+
+    public async Task RunBatchAsync(string job, IEnumerable<object?> args, RunOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        var batch = await TriggerBatchAsync(job, args, options, cancellationToken);
+        try
+        {
+            await WaitBatchNonGenericAsync(batch.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await TryCancelOwnedBatchAsync(batch.Id);
+            throw;
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async Task<IReadOnlyList<T>> RunBatchAsync<T>(IEnumerable<BatchItem> items,
+        CancellationToken cancellationToken = default)
+    {
+        var batch = await TriggerBatchAsync(items, cancellationToken);
+        try
+        {
+            return await WaitBatchAsync<T>(batch.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await TryCancelOwnedBatchAsync(batch.Id);
+            throw;
+        }
+    }
+
+    public async Task RunBatchAsync(IEnumerable<BatchItem> items, CancellationToken cancellationToken = default)
+    {
+        var batch = await TriggerBatchAsync(items, cancellationToken);
+        try
+        {
+            await WaitBatchNonGenericAsync(batch.Id, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await TryCancelOwnedBatchAsync(batch.Id);
+            throw;
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async IAsyncEnumerable<T> StreamBatchAsync<T>(string job, IEnumerable<object?> args,
+        RunOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var batch = await TriggerBatchAsync(job, args, options, cancellationToken);
+        await foreach (var item in OwnedStreamBatchAsync<T>(batch.Id, cancellationToken))
+        {
+            yield return item;
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    public async IAsyncEnumerable<T> StreamBatchAsync<T>(IEnumerable<BatchItem> items,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var batch = await TriggerBatchAsync(items, cancellationToken);
+        await foreach (var item in OwnedStreamBatchAsync<T>(batch.Id, cancellationToken))
+        {
+            yield return item;
+        }
+    }
+
+    private async IAsyncEnumerable<T> OwnedStreamBatchAsync<T>(string batchId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await using var enumerator = WaitEachAsync<T>(batchId, cancellationToken)
+            .GetAsyncEnumerator(cancellationToken);
+        while (true)
+        {
+            T item;
+            try
+            {
+                if (!await enumerator.MoveNextAsync())
+                {
+                    yield break;
+                }
+
+                item = enumerator.Current;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await TryCancelOwnedBatchAsync(batchId);
+                throw;
+            }
+
+            yield return item;
+        }
+    }
+
+    private async Task WaitBatchNonGenericAsync(string batchId, CancellationToken cancellationToken)
+    {
+        var failures = new List<Exception>();
+        await foreach (var child in WaitEachAsync(batchId, cancellationToken))
+        {
+            if (child.Status is JobStatus.Failed or JobStatus.Cancelled)
+            {
+                failures.Add(await BuildJobRunExceptionAsync(child, cancellationToken));
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(failures);
+        }
+    }
+
+    // =========================================================================
+    // Batch trigger core
+    // =========================================================================
+
+    /// <summary>
+    ///     Internal homogeneous-batch trigger that returns the raw batch ID. Delegates to
+    ///     <see cref="TriggerBatchCoreAsync" /> with a <see cref="BatchItem" /> projection so there is a
+    ///     single authoritative trigger implementation. Kept as <c>internal</c> for test harnesses and
+    ///     private batch plumbing that only need the ID.
+    /// </summary>
+    internal Task<string> TriggerAllAsync(string jobName, IEnumerable<object?> argsList,
         CancellationToken cancellationToken = default) =>
         TriggerAllAsync(jobName, argsList, new(), cancellationToken);
 
-    /// <inheritdoc />
-    public async Task<string> TriggerAllAsync(string jobName, IEnumerable<object?> argsList, RunOptions options,
+    internal async Task<string> TriggerAllAsync(string jobName, IEnumerable<object?> argsList, RunOptions options,
         CancellationToken cancellationToken = default)
     {
-        var requestedPriority = await ResolveRequestedPriorityAsync(jobName, options.Priority, cancellationToken);
-
-        var args = argsList;
-        if (!args.TryGetNonEnumeratedCount(out var argsCount))
+        if (options.DeduplicationId is { })
         {
-            var materializedArgs = argsList.ToArray();
-            args = materializedArgs;
-            argsCount = materializedArgs.Length;
+            throw new ArgumentException(
+                "DeduplicationId is not supported with batch operations. " +
+                "Use TriggerAsync for deduplication-controlled runs.",
+                nameof(options));
         }
 
-        var now = timeProvider.GetUtcNow();
-        var coordinatorId = CreateRunId();
-        var coordinator = CreateRun(jobName, null, options, now, requestedPriority ?? 0, coordinatorId);
-        coordinator.Status = JobStatus.Running;
-        coordinator.Attempt = 0;
-        coordinator.BatchTotal = argsCount;
-        coordinator.BatchCompleted = 0;
-        coordinator.BatchFailed = 0;
+        var batch = await TriggerBatchCoreAsync(argsList.Select(a => new BatchItem(jobName, a, options)),
+            cancellationToken);
+        return batch.Id;
+    }
 
-        var runs = new List<JobRun>(argsCount + 1) { coordinator };
+    private async Task<JobBatch> TriggerBatchCoreAsync(IEnumerable<BatchItem> items,
+        CancellationToken cancellationToken = default)
+    {
+        var itemsList = items as IReadOnlyList<BatchItem> ?? items.ToList();
+        var now = timeProvider.GetUtcNow();
+        var batchId = CreateRunId();
+        var batch = new JobBatch
+        {
+            Id = batchId, Status = JobStatus.Pending, Total = itemsList.Count, CreatedAt = now
+        };
+
+        // Cache job-definition priority lookups so a homogeneous N-item batch does exactly ONE
+        // GetJobAsync round trip instead of N. Caveat: covers only the common homogeneous shape —
+        // heterogeneous batches with mixed jobNames still pay one lookup per distinct jobName.
+        var priorityByJob = new Dictionary<string, int?>(StringComparer.Ordinal);
+
+        var runs = new List<JobRun>(itemsList.Count);
         var streamPumps = new List<(string RunId, IReadOnlyList<StreamingArgumentSource> Streams,
             InputDeclarationEnvelope Declaration)>();
-        foreach (var item in args)
+        foreach (var item in itemsList)
         {
-            var prepared = PrepareArguments(item);
-            var child = CreateRun(jobName, prepared.SerializedArguments, options, now, requestedPriority ?? 0);
-            child.ParentRunId = coordinatorId;
-            child.RootRunId = coordinator.RootRunId ?? coordinatorId;
+            if (!priorityByJob.TryGetValue(item.JobName, out var jobDefaultPriority))
+            {
+                jobDefaultPriority = (await store.GetJobAsync(item.JobName, cancellationToken))?.Priority;
+                if (jobDefaultPriority is null)
+                {
+                    Log.TriggerRequestedForUnknownJob(logger, item.JobName);
+                }
+
+                priorityByJob[item.JobName] = jobDefaultPriority;
+            }
+
+            var requestedPriority = item.Options?.Priority ?? jobDefaultPriority;
+            var prepared = PrepareArguments(item.Args);
+            var child = CreateRun(item.JobName, prepared.SerializedArguments, item.Options ?? new(), now,
+                requestedPriority ?? 0);
+            child = child with { BatchId = batchId, RootRunId = child.RootRunId ?? batchId };
             runs.Add(child);
 
             if (prepared.Streams.Count > 0)
@@ -262,498 +704,724 @@ public sealed partial class JobClient(
             initialEvents.AddRange(BuildInitialEvents(runId, declaration));
         }
 
-        await store.CreateRunsAsync(
-            runs,
-            initialEvents,
-            cancellationToken);
+        await store.CreateBatchAsync(batch, runs, initialEvents, cancellationToken);
 
-        await notifications.PublishAsync(NotificationChannels.RunCreated, coordinatorId, cancellationToken);
-
-        if (argsCount == 0)
+        if (itemsList.Count == 0)
         {
-            await TryCompleteEmptyBatchCoordinatorAsync(coordinatorId, cancellationToken);
-            return coordinatorId;
-        }
-
-        foreach (var (runId, streams, _) in streamPumps)
-        {
-            // Child input streams are part of accepted work and should not be tied to request lifetime.
-            _ = PumpInputStreamsAsync(runId, streams, CancellationToken.None);
-        }
-
-        return coordinatorId;
-    }
-
-    /// <inheritdoc />
-    public async Task<RunResult[]> RunAllAsync(string jobName, IEnumerable<object?> argsList,
-        CancellationToken cancellationToken = default)
-    {
-        var results = new List<RunResult>();
-        await foreach (var result in RunEachAsync(jobName, argsList, cancellationToken))
-        {
-            results.Add(result);
-        }
-
-        return results.ToArray();
-    }
-
-    /// <inheritdoc />
-    public async Task<RunResult[]> RunAllAsync(string jobName, IEnumerable<object?> argsList, RunOptions options,
-        CancellationToken cancellationToken = default)
-    {
-        var results = new List<RunResult>();
-        await foreach (var result in RunEachAsync(jobName, argsList, options, cancellationToken))
-        {
-            results.Add(result);
-        }
-
-        return results.ToArray();
-    }
-
-    /// <inheritdoc />
-    public async Task<T[]> RunAllAsync<T>(string jobName, IEnumerable<object?> argsList,
-        CancellationToken cancellationToken = default)
-    {
-        var results = await RunAllAsync(jobName, argsList, cancellationToken);
-        return ConvertBatchResults<T>(results);
-    }
-
-    /// <inheritdoc />
-    public async Task<T[]> RunAllAsync<T>(string jobName, IEnumerable<object?> argsList, RunOptions options,
-        CancellationToken cancellationToken = default)
-    {
-        var results = await RunAllAsync(jobName, argsList, options, cancellationToken);
-        return ConvertBatchResults<T>(results);
-    }
-
-    /// <inheritdoc />
-    public async IAsyncEnumerable<RunResult> RunEachAsync(string jobName, IEnumerable<object?> argsList,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var batchId = await TriggerAllAsync(jobName, argsList, cancellationToken);
-        await using var enumerator = WaitEachAsync(batchId, cancellationToken)
-            .GetAsyncEnumerator(cancellationToken);
-
-        while (true)
-        {
-            RunResult result;
-            try
+            var completedAt = timeProvider.GetUtcNow();
+            if (await store.TryCompleteBatchAsync(batchId, JobStatus.Succeeded, completedAt, cancellationToken))
             {
-                if (!await enumerator.MoveNextAsync())
-                {
-                    break;
-                }
-
-                result = enumerator.Current;
-            }
-
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await TryCancelOwnedRunAsync(batchId);
-                throw;
-            }
-
-            yield return result;
-        }
-    }
-
-    /// <inheritdoc />
-    public async IAsyncEnumerable<RunResult> RunEachAsync(string jobName, IEnumerable<object?> argsList,
-        RunOptions options,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var batchId = await TriggerAllAsync(jobName, argsList, options, cancellationToken);
-        await using var enumerator = WaitEachAsync(batchId, cancellationToken)
-            .GetAsyncEnumerator(cancellationToken);
-
-        while (true)
-        {
-            RunResult result;
-            try
-            {
-                if (!await enumerator.MoveNextAsync())
-                {
-                    break;
-                }
-
-                result = enumerator.Current;
-            }
-
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await TryCancelOwnedRunAsync(batchId);
-                throw;
-            }
-
-            yield return result;
-        }
-    }
-
-    /// <inheritdoc />
-    public async Task<RunResult> WaitAsync(string runId, CancellationToken cancellationToken = default)
-    {
-        await foreach (var observation in ObserveAsync(runId, cancellationToken))
-        {
-            if (observation.Run.Status.IsTerminal)
-            {
-                return ToRunResult(observation.Run);
-            }
-        }
-
-        throw new InvalidOperationException($"Run '{runId}' observation ended before terminal state.");
-    }
-
-    /// <inheritdoc />
-    public async Task<T> WaitAsync<T>(string runId, CancellationToken cancellationToken = default)
-    {
-        if (TryGetAsyncEnumerableElementType(typeof(T), out var streamItemType))
-        {
-            var streamMethod = typeof(JobClient)
-                .GetMethod(nameof(BuildObserverRunStreamResult), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(streamItemType);
-            return (T)streamMethod.Invoke(this, [runId, cancellationToken])!;
-        }
-
-        var result = await WaitAsync(runId, cancellationToken);
-        if (!result.IsSuccess)
-        {
-            throw new JobRunFailedException(result.RunId, result.Error);
-        }
-
-        if (result.TryGetResult<T>(out var typed))
-        {
-            return typed;
-        }
-
-        if (await TryBuildResultFromOutputEventsAsync<T>(result.RunId, cancellationToken) is { } fromEvents)
-        {
-            return fromEvents;
-        }
-
-        return result.GetResult<T>();
-    }
-
-    /// <inheritdoc />
-    public IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, CancellationToken cancellationToken = default) =>
-        WaitStreamAsync<T>(runId, RunEventCursor.Start, cancellationToken);
-
-    /// <inheritdoc />
-    public IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, RunEventCursor cursor,
-        CancellationToken cancellationToken = default) =>
-        StreamRunAsync<T>(runId, cursor, cancellationToken);
-
-    /// <inheritdoc />
-    public IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId,
-        CancellationToken cancellationToken = default) =>
-        StreamEachAsync<T>(batchId, BatchRunEventCursor.Start, cancellationToken);
-
-    /// <inheritdoc />
-    public async IAsyncEnumerable<BatchStreamItem<T>> StreamEachAsync<T>(string batchId, BatchRunEventCursor cursor,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        using var wakeup = new SemaphoreSlim(0, 1);
-        await using var subscription = await notifications.SubscribeAsync(
-            NotificationChannels.RunEvent(batchId),
-            _ => ReleaseWakeupAsync(wakeup),
-            cancellationToken);
-
-        var sinceEventId = cursor.SinceEventId;
-        var childSinceEventIds = new Dictionary<string, long>(cursor.ChildSinceEventIds, StringComparer.Ordinal);
-
-        while (true)
-        {
-            var coordinator = await store.GetRunAsync(batchId, cancellationToken);
-            if (coordinator is null)
-            {
-                throw new InvalidOperationException($"Batch run '{batchId}' was not found.");
-            }
-
-            var emittedAny = false;
-            while (true)
-            {
-                var events = await store.GetBatchOutputEventsAsync(batchId, sinceEventId, 200, cancellationToken);
-                if (events.Count == 0)
-                {
-                    break;
-                }
-
-                foreach (var @event in events)
-                {
-                    if (@event.EventType != RunEventType.Output)
-                    {
-                        continue;
-                    }
-
-                    if (childSinceEventIds.TryGetValue(@event.RunId, out var childSinceId)
-                        && @event.Id <= childSinceId)
-                    {
-                        continue;
-                    }
-
-                    sinceEventId = @event.Id;
-                    childSinceEventIds[@event.RunId] = @event.Id;
-                    emittedAny = true;
-                    if (!TryDeserializeJson(
-                            @event.Payload,
-                            out T? item,
-                            @event.RunId,
-                            @event.Id,
-                            @event.EventType,
-                            "batch stream output"))
-                    {
-                        continue;
-                    }
-
-                    yield return new()
-                    {
-                        RunId = @event.RunId,
-                        Item = item!,
-                        Cursor = CreateBatchCursorSnapshot(sinceEventId, childSinceEventIds)
-                    };
-                }
-            }
-
-            if (coordinator.Status.IsTerminal)
-            {
-                if (!coordinator.BatchTotal.HasValue || !emittedAny)
-                {
-                    yield break;
-                }
-            }
-
-            await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
-        }
-    }
-
-    /// <inheritdoc />
-    public async IAsyncEnumerable<RunResult> WaitEachAsync(string batchId,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        using var wakeup = new SemaphoreSlim(0, 1);
-        await using var subscription = await notifications.SubscribeAsync(
-            NotificationChannels.RunEvent(batchId),
-            _ => ReleaseWakeupAsync(wakeup),
-            cancellationToken);
-
-        var cursorTime = (DateTimeOffset?)null;
-        var cursorId = (string?)null;
-        var emittedChildIds = new HashSet<string>(StringComparer.Ordinal);
-        while (true)
-        {
-            var coordinator = await store.GetRunAsync(batchId, cancellationToken);
-            if (coordinator is null)
-            {
-                throw new InvalidOperationException($"Batch run '{batchId}' was not found.");
-            }
-
-            var progressed = false;
-            var candidates = new List<JobRun>();
-            await foreach (var child in EnumerateBatchChildrenAsync(batchId, cancellationToken))
-            {
-                if (!child.Status.IsTerminal || child.CompletedAt is null)
-                {
-                    continue;
-                }
-
-                candidates.Add(child);
-            }
-
-            // Deterministic ordering contract: completion time first, then run id as stable tie-breaker.
-            foreach (var child in candidates
-                         .OrderBy(c => c.CompletedAt ?? DateTimeOffset.MinValue)
-                         .ThenBy(c => c.Id, StringComparer.Ordinal))
-            {
-                if (cursorTime == child.CompletedAt
-                    && cursorId is { } && string.CompareOrdinal(child.Id, cursorId) <= 0)
-                {
-                    continue;
-                }
-
-                if (!emittedChildIds.Add(child.Id))
-                {
-                    continue;
-                }
-
-                progressed = true;
-                cursorTime = child.CompletedAt;
-                cursorId = child.Id;
-                yield return ToRunResult(child);
-            }
-
-            if (coordinator.Status.IsTerminal)
-            {
-                if (coordinator.BatchTotal is { } batchTotal)
-                {
-                    var terminalChildren = (coordinator.BatchCompleted ?? 0) + (coordinator.BatchFailed ?? 0);
-                    if (terminalChildren >= batchTotal || emittedChildIds.Count >= batchTotal)
-                    {
-                        yield break;
-                    }
-                }
-                else if (!progressed)
-                {
-                    yield break;
-                }
-            }
-
-            await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
-        }
-    }
-
-    /// <inheritdoc />
-    public async Task CancelAsync(string runId, CancellationToken cancellationToken = default)
-    {
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
-        {
-            throw new RunNotFoundException(runId);
-        }
-
-        if (run.Status.IsTerminal)
-        {
-            throw new RunConflictException($"Run '{runId}' is already in a terminal state.");
-        }
-
-        await CancelRunAndDescendantsAsync(runId, new HashSet<string>(StringComparer.Ordinal), cancellationToken);
-    }
-
-    /// <inheritdoc />
-    public async Task<string> RerunAsync(string runId, CancellationToken cancellationToken = default)
-    {
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
-        {
-            throw new RunNotFoundException(runId);
-        }
-
-        if (run.BatchTotal.HasValue)
-        {
-            var children = new List<JobRun>();
-            await foreach (var child in EnumerateBatchChildrenAsync(runId, cancellationToken))
-            {
-                children.Add(child);
-            }
-
-            var now = timeProvider.GetUtcNow();
-            var requestedPriority = await ResolveRequestedPriorityAsync(run.JobName, null, cancellationToken);
-
-            var rerunCoordinatorId = CreateRunId();
-            var rerunCoordinator = CreateRun(run.JobName, null, new(), now, requestedPriority ?? 0,
-                rerunCoordinatorId);
-            rerunCoordinator.Status = JobStatus.Running;
-            rerunCoordinator.Attempt = 0;
-            rerunCoordinator.BatchTotal = children.Count;
-            rerunCoordinator.BatchCompleted = 0;
-            rerunCoordinator.BatchFailed = 0;
-
-            var newChildren = new List<JobRun>(children.Count);
-            foreach (var originalRun in children)
-            {
-                var child = CreateRun(
-                    run.JobName,
-                    originalRun.Arguments,
-                    new(),
-                    now,
-                    requestedPriority ?? 0);
-                child.ParentRunId = rerunCoordinatorId;
-                child.RootRunId = rerunCoordinator.RootRunId ?? rerunCoordinatorId;
-                newChildren.Add(child);
-            }
-
-            var initialEvents = new List<RunEvent>();
-            for (var i = 0; i < children.Count; i++)
-            {
-                var cloned = await BuildClonedRunScopedInputEventsAsync(children[i].Id, newChildren[i].Id,
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId,
                     cancellationToken);
-                initialEvents.AddRange(cloned);
             }
-
-            var runs = new List<JobRun>(newChildren.Count + 1) { rerunCoordinator };
-            runs.AddRange(newChildren);
-
-            await store.CreateRunsAsync(runs, initialEvents, cancellationToken);
-
-            if (children.Count == 0)
-            {
-                await notifications.PublishAsync(NotificationChannels.RunCreated, rerunCoordinatorId,
-                    cancellationToken);
-                await TryCompleteEmptyBatchCoordinatorAsync(rerunCoordinatorId, cancellationToken);
-                return rerunCoordinatorId;
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunCreated, rerunCoordinatorId, cancellationToken);
-            return rerunCoordinatorId;
         }
-
-        var priority = await ResolveRequestedPriorityAsync(run.JobName, null, cancellationToken);
-        var rerun = CreateRun(
-            run.JobName,
-            run.Arguments,
-            new(),
-            timeProvider.GetUtcNow(),
-            priority ?? 0);
-
-        var clonedInputEvents = await BuildClonedRunScopedInputEventsAsync(runId, rerun.Id, cancellationToken);
-
-        var created = await store.TryCreateRunAsync(
-            rerun,
-            initialEvents: clonedInputEvents,
-            cancellationToken: cancellationToken);
-        if (!created)
+        else
         {
-            throw new RunConflictException($"Run creation for rerun of '{runId}' was rejected.");
+            foreach (var (runId, streams, _) in streamPumps)
+            {
+                StartInputPump(runId, streams);
+            }
         }
 
-        await notifications.PublishAsync(NotificationChannels.RunCreated, rerun.Id, cancellationToken);
-        return rerun.Id;
+        return batch;
     }
 
-    /// <inheritdoc />
-    public Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default) =>
-        store.GetRunAsync(runId, cancellationToken);
+    // =========================================================================
+    // Shared single-run hydration resolver — scalar / collection / IAsyncEnumerable
+    // =========================================================================
 
-    /// <inheritdoc />
-    public async IAsyncEnumerable<JobRun> GetRunsAsync(RunFilter filter,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async Task<T> HydrateRunAsync<T>(JobRun run, CancellationToken cancellationToken)
     {
-        var skip = 0;
-        const int pageSize = 200;
+        await ThrowIfNonSuccessTerminalAsync(run, cancellationToken);
 
-        while (true)
+        var target = typeof(T);
+
+        if (target.IsGenericType && target.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
         {
-            var page = await store.GetRunsAsync(filter, skip, pageSize, cancellationToken);
-            if (page.Items.Count == 0)
+            // Stream T — caller requested a live stream but the run is already terminal.
+            // Build a stream that yields from run.Result or Output events of the winning attempt.
+            var elementType = target.GetGenericArguments()[0];
+            var buildMethod = typeof(JobClient)
+                .GetMethod(nameof(BuildHydratedLiveStream), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(elementType);
+            return (T)buildMethod.Invoke(this, [run.Id, cancellationToken])!;
+        }
+
+        if (TypeHelpers.TryGetCollectionElementType(target, out var itemType, out var asArray))
+        {
+            var method = typeof(JobClient)
+                .GetMethod(nameof(HydrateCollectionAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(itemType);
+            var task = (Task<object?>)method.Invoke(this, [run, asArray, cancellationToken])!;
+            return (T)(await task)!;
+        }
+
+        return await HydrateScalarAsync<T>(run, cancellationToken);
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async Task<T> HydrateScalarAsync<T>(JobRun run, CancellationToken cancellationToken)
+    {
+        if (run.Result is { } resultJson)
+        {
+            return ResultSerializer.Deserialize<T>(resultJson, _serializerOptions);
+        }
+
+        // Scalar from OutputComplete+Output events: only valid when the winning attempt produced
+        // exactly one item. Zero / many surface as deserialization errors via the serializer.
+        if (await HasOutputCompleteForAttemptAsync(run.Id, run.Attempt, cancellationToken))
+        {
+            var items = await ReadAttemptOutputPayloadsAsync(run.Id, run.Attempt, cancellationToken);
+            return items.Count switch
+            {
+                0 => throw new InvalidOperationException($"Run '{run.Id}' produced no result."),
+                1 => ResultSerializer.Deserialize<T>(items[0], _serializerOptions),
+                _ => throw new InvalidOperationException(
+                    $"Run '{run.Id}' produced {items.Count} items; cannot materialize as scalar.")
+            };
+        }
+
+        throw new InvalidOperationException($"Run '{run.Id}' produced no result.");
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async Task<object?> HydrateCollectionAsync<TElement>(JobRun run, bool asArray,
+        CancellationToken cancellationToken)
+    {
+        List<TElement> items;
+
+        if (run.Result is { } resultJson)
+        {
+            // result column carries a JSON array (or a single value we'll let the serializer handle).
+            items = JsonSerializer.Deserialize<List<TElement>>(resultJson, _serializerOptions) ?? [];
+        }
+        else if (await HasOutputCompleteForAttemptAsync(run.Id, run.Attempt, cancellationToken))
+        {
+            var payloads = await ReadAttemptOutputPayloadsAsync(run.Id, run.Attempt, cancellationToken);
+            items = new(payloads.Count);
+            foreach (var payload in payloads)
+            {
+                items.Add(ResultSerializer.Deserialize<TElement>(payload, _serializerOptions));
+            }
+        }
+        else
+        {
+            throw new InvalidOperationException($"Run '{run.Id}' produced no result.");
+        }
+
+        return asArray ? items.ToArray() : items;
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private IAsyncEnumerable<TElement> BuildHydratedLiveStream<TElement>(string runId,
+        CancellationToken cancellationToken)
+        => StreamRunHydratedAsync<TElement>(runId, cancellationToken);
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async IAsyncEnumerable<T> StreamRunHydratedAsync<T>(string runId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Retry-transparent: yield every Output event (across all attempts) in commit order.
+        // Throw only if the run reaches a non-success terminal. If the run is already terminal
+        // with a result but no Output events, materialize from run.Result.
+        long sinceEventId = 0;
+        var yieldedAny = false;
+
+        await foreach (var @event in ObserveRunEventsAsync(runId, sinceEventId, cancellationToken))
+        {
+            sinceEventId = @event.Id;
+
+            if (@event.EventType == RunEventType.Output)
+            {
+                yieldedAny = true;
+                if (TryDeserializeJson(@event.Payload, out T? item, runId, @event.Id, @event.EventType,
+                        "run output stream"))
+                {
+                    yield return item!;
+                }
+            }
+        }
+
+        var run = await store.GetRunAsync(runId, cancellationToken)
+                  ?? throw new RunNotFoundException(runId);
+
+        if (run.Status is JobStatus.Failed or JobStatus.Cancelled)
+        {
+            throw await BuildJobRunExceptionAsync(run, cancellationToken);
+        }
+
+        // Succeeded with no Output events but a result value — decode result as collection to yield.
+        // If the result isn't a JSON array (job returned a scalar), yield it as a single item.
+        if (!yieldedAny && run.Result is { } resultJson)
+        {
+            var items = TryDeserializeResultAsList<T>(resultJson);
+            if (items is { })
+            {
+                foreach (var item in items)
+                {
+                    yield return item;
+                }
+
+                yield break;
+            }
+
+            yield return ResultSerializer.Deserialize<T>(resultJson, _serializerOptions);
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private List<T>? TryDeserializeResultAsList<T>(string resultJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<T>>(resultJson, _serializerOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async IAsyncEnumerable<T> StreamBatchHydratedValuesAsync<T>(string batchId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var item in StreamBatchHydratedAsync<T>(batchId, true, cancellationToken))
+        {
+            yield return item.Value!;
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private IAsyncEnumerable<HydratedChild<T>> StreamBatchHydratedAsync<T>(string batchId,
+        bool throwOnChildFailure, CancellationToken cancellationToken)
+    {
+        // Two code paths, unified entry point:
+        //   * IAsyncEnumerable<U>: each child yielded as a live stream (ChildLiveStreams).
+        //   * scalar / collection: batch hydration with per-child Output buffering + bulk terminal fetch.
+        if (typeof(T).IsGenericType && typeof(T).GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            // For IAsyncEnumerable<U> batch hydration the fail-fast/collect-all distinction is
+            // irrelevant: per-child failures always surface on the child's own inner stream, never
+            // on the outer. The outer enumerator yields handles early (as soon as each child is
+            // observed), so throwing there after the fact would hide faults on other in-flight
+            // inner streams. No throwOnChildFailure parameter is threaded through.
+            var elementType = typeof(T).GetGenericArguments()[0];
+            var method = typeof(JobClient)
+                .GetMethod(nameof(StreamBatchLiveInnerAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(elementType);
+            return (IAsyncEnumerable<HydratedChild<T>>)method.Invoke(this,
+                [batchId, cancellationToken])!;
+        }
+
+        return StreamBatchMaterializedAsync<T>(batchId, throwOnChildFailure, cancellationToken);
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async IAsyncEnumerable<HydratedChild<T>> StreamBatchMaterializedAsync<T>(string batchId,
+        bool throwOnChildFailure, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // Per-child buffers: accumulate Output events (for the current attempt only) until terminal.
+        // On terminal, hydrate from the buffered events or run.Result via bulk fetch (windowed).
+        var childBuffers = new Dictionary<string, ChildOutputBuffer>(StringComparer.Ordinal);
+        var pendingTerminalIds = new List<string>(BatchFetchWindowSize);
+        DateTimeOffset? windowDeadline = null;
+
+        async IAsyncEnumerable<HydratedChild<T>> FlushWindowAsync()
+        {
+            if (pendingTerminalIds.Count == 0)
             {
                 yield break;
             }
 
-            foreach (var run in page.Items)
+            var fetched = await store.GetRunsByIdsAsync(pendingTerminalIds.ToArray(), cancellationToken);
+            var byId = fetched.ToDictionary(r => r.Id, StringComparer.Ordinal);
+            foreach (var id in pendingTerminalIds)
             {
-                yield return run;
+                if (!byId.TryGetValue(id, out var run))
+                {
+                    continue;
+                }
+
+                var buffer = childBuffers.TryGetValue(id, out var b) ? b : null;
+                childBuffers.Remove(id);
+
+                HydratedChild<T> hydrated;
+                try
+                {
+                    var value = await HydrateBatchChildAsync<T>(run, buffer, cancellationToken);
+                    hydrated = new(value, null);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // Caller's CT — propagate so the outer enumerator terminates.
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // Any hydration failure is per-child: JobRunException (non-success terminal),
+                    // InvalidOperationException (no result), JsonException (deserialization), etc.
+                    // Collect it into the HydratedChild so WaitBatchAsync<T>'s collect-all semantics
+                    // can aggregate, and StreamBatchAsync<T>'s fail-fast can throw on first.
+                    hydrated = new(default, ex);
+                }
+
+                if (hydrated.Exception is { } ex2 && throwOnChildFailure)
+                {
+                    throw ex2;
+                }
+
+                yield return hydrated;
             }
 
-            skip += page.Items.Count;
+            pendingTerminalIds.Clear();
+            windowDeadline = null;
+        }
+
+        // We multiplex ObserveBatchEventsAsync with a deadline timer so the window flushes even
+        // under sparse arrivals (no new event for a while would otherwise strand pending IDs
+        // until the next event or batch-terminal). The extracted local function below yields
+        // the hydrated items; this outer method wraps it so we can ensure the in-flight
+        // MoveNextAsync on the ObserveBatchEventsAsync enumerator is observed before the
+        // enumerator disposes. Skipping that observation (when this method exits via a
+        // child-failure throw from FlushWindowAsync) races the async-iterator teardown with
+        // a still-pending ValueTaskSource subscription, masking the original exception with
+        // "System.NotSupportedException: Specified method is not supported." from the
+        // compiler-generated DisposeAsync.
+        await foreach (var hydrated in StreamBatchMaterializedCoreAsync())
+        {
+            yield return hydrated;
+        }
+
+        async IAsyncEnumerable<HydratedChild<T>> StreamBatchMaterializedCoreAsync()
+        {
+            // Linked CTS that we can cancel independently of the caller's token, so when
+            // an exception propagates out of the try we can signal the inner enumerator
+            // to stop its pending MoveNextAsync without waiting out the polling interval.
+            using var enumeratorCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            await using var enumerator = ObserveBatchEventsAsync(batchId, 0, enumeratorCts.Token)
+                .GetAsyncEnumerator(enumeratorCts.Token);
+            var moveTask = enumerator.MoveNextAsync().AsTask();
+            try
+            {
+                while (true)
+                {
+                    if (windowDeadline is { } dl)
+                    {
+                        var remaining = dl - timeProvider.GetUtcNow();
+                        if (remaining <= TimeSpan.Zero)
+                        {
+                            await foreach (var hydrated in FlushWindowAsync())
+                            {
+                                yield return hydrated;
+                            }
+
+                            continue;
+                        }
+
+                        using var delayCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                        var delayTask = Task.Delay(remaining, timeProvider, delayCts.Token);
+                        var winner = await Task.WhenAny(moveTask, delayTask);
+                        delayCts.Cancel();
+                        if (winner != moveTask)
+                        {
+                            // Deadline fired — flush queued results without blocking on the next event.
+                            await foreach (var hydrated in FlushWindowAsync())
+                            {
+                                yield return hydrated;
+                            }
+
+                            continue;
+                        }
+                    }
+
+                    bool moved;
+                    Exception? moveFault = null;
+                    try
+                    {
+                        moved = await moveTask;
+                        moveTask = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        moved = false;
+                        moveFault = ex;
+                        moveTask = null;
+                    }
+
+                    if (moveFault is { })
+                    {
+                        await foreach (var hydrated in FlushWindowAsync())
+                        {
+                            yield return hydrated;
+                        }
+
+                        ExceptionDispatchInfo.Capture(moveFault).Throw();
+                    }
+
+                    if (!moved)
+                    {
+                        break;
+                    }
+
+                    var @event = enumerator.Current;
+                    moveTask = enumerator.MoveNextAsync().AsTask();
+
+                    if (@event.EventType == RunEventType.Output)
+                    {
+                        if (!childBuffers.TryGetValue(@event.RunId, out var buffer))
+                        {
+                            buffer = new() { Attempt = @event.Attempt };
+                            childBuffers[@event.RunId] = buffer;
+                        }
+
+                        // If a retry advances the attempt, reset the buffer so it tracks the winning attempt's events.
+                        if (@event.Attempt > buffer.Attempt)
+                        {
+                            buffer.Attempt = @event.Attempt;
+                            buffer.Payloads.Clear();
+                            buffer.OutputCompleted = false;
+                        }
+
+                        if (@event.Attempt == buffer.Attempt)
+                        {
+                            buffer.Payloads.Add(@event.Payload);
+                        }
+
+                        continue;
+                    }
+
+                    if (@event.EventType == RunEventType.OutputComplete)
+                    {
+                        // Create the buffer if it doesn't exist yet — covers zero-item streams
+                        // (OutputComplete arrives without any preceding Output events).
+                        if (!childBuffers.TryGetValue(@event.RunId, out var buffer))
+                        {
+                            buffer = new() { Attempt = @event.Attempt };
+                            childBuffers[@event.RunId] = buffer;
+                        }
+
+                        if (@event.Attempt >= buffer.Attempt)
+                        {
+                            buffer.Attempt = @event.Attempt;
+                            buffer.OutputCompleted = true;
+                        }
+
+                        continue;
+                    }
+
+                    if (!RunStatusEvents.IsTerminal(@event))
+                    {
+                        continue;
+                    }
+
+                    pendingTerminalIds.Add(@event.RunId);
+                    windowDeadline ??= timeProvider.GetUtcNow() + BatchFetchWindowDelay;
+
+                    if (pendingTerminalIds.Count >= BatchFetchWindowSize
+                        || timeProvider.GetUtcNow() >= windowDeadline)
+                    {
+                        await foreach (var hydrated in FlushWindowAsync())
+                        {
+                            yield return hydrated;
+                        }
+                    }
+                }
+
+                await foreach (var hydrated in FlushWindowAsync())
+                {
+                    yield return hydrated;
+                }
+            }
+            finally
+            {
+                // Observe any still-in-flight MoveNextAsync before we let the enumerator
+                // dispose. Without this, an exception thrown from FlushWindowAsync (e.g.
+                // JobRunException from a cancelled child) can race the ValueTaskSource
+                // teardown and surface as "NotSupportedException: Specified method is
+                // not supported." from the compiler-generated DisposeAsync — which masks
+                // the real exception the caller wants to see.
+                if (moveTask is { } pending)
+                {
+                    // Signal the enumerator's internal awaits to complete now rather than
+                    // waiting for the polling interval. The caller's cancellationToken is
+                    // unaffected because enumeratorCts is a linked child.
+                    enumeratorCts.Cancel();
+                    try
+                    {
+                        await pending;
+                    }
+                    catch
+                    {
+                        // Swallow — the outer exception (the one that caused us to exit)
+                        // is already propagating. A cancellation/completion signal from
+                        // the enumerator during teardown is expected.
+                    }
+                }
+            }
         }
     }
 
-    private IAsyncEnumerable<TItem> BuildObserverRunStreamResult<TItem>(string runId,
-        CancellationToken cancellationToken) =>
-        WaitStreamAsync<TItem>(runId, cancellationToken);
-
-    private IAsyncEnumerable<TItem> BuildOwnedRunStreamResult<TItem>(string runId,
-        CancellationToken ownerCancellationToken) =>
-        OwnedRunStreamAsync<TItem>(runId, ownerCancellationToken);
-
-    private async IAsyncEnumerable<TItem> OwnedRunStreamAsync<TItem>(string runId,
-        CancellationToken ownerCancellationToken,
-        [EnumeratorCancellation] CancellationToken consumerCancellationToken = default)
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async Task<T> HydrateBatchChildAsync<T>(JobRun run, ChildOutputBuffer? buffer,
+        CancellationToken cancellationToken)
     {
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-            ownerCancellationToken,
-            consumerCancellationToken);
+        await ThrowIfNonSuccessTerminalAsync(run, cancellationToken);
 
-        await using var enumerator = WaitStreamAsync<TItem>(runId, linkedCts.Token)
-            .GetAsyncEnumerator(linkedCts.Token);
+        var target = typeof(T);
+
+        if (TypeHelpers.TryGetCollectionElementType(target, out var itemType, out var asArray))
+        {
+            var method = typeof(JobClient)
+                .GetMethod(nameof(HydrateBatchChildCollectionAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
+                .MakeGenericMethod(itemType);
+            var task = (Task<object?>)method.Invoke(this, [run, buffer, asArray, cancellationToken])!;
+            return (T)(await task)!;
+        }
+
+        return await HydrateScalarWithBufferAsync<T>(run, buffer, cancellationToken);
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private Task<T> HydrateScalarWithBufferAsync<T>(JobRun run, ChildOutputBuffer? buffer, CancellationToken _)
+    {
+        if (run.Result is { } resultJson)
+        {
+            return Task.FromResult(ResultSerializer.Deserialize<T>(resultJson, _serializerOptions));
+        }
+
+        if (buffer is { OutputCompleted: true, Attempt: var attempt } && attempt == run.Attempt)
+        {
+            return Task.FromResult(buffer.Payloads.Count switch
+            {
+                0 => throw new InvalidOperationException($"Run '{run.Id}' produced no result."),
+                1 => ResultSerializer.Deserialize<T>(buffer.Payloads[0], _serializerOptions),
+                _ => throw new InvalidOperationException(
+                    $"Run '{run.Id}' produced {buffer.Payloads.Count} items; cannot materialize as scalar.")
+            });
+        }
+
+        // Same invariant as HydrateBatchChildCollectionAsync: no result column and no OutputComplete
+        // means the run genuinely produced nothing.
+        throw new InvalidOperationException($"Run '{run.Id}' produced no result.");
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private Task<object?> HydrateBatchChildCollectionAsync<TElement>(JobRun run, ChildOutputBuffer? buffer,
+        bool asArray, CancellationToken _)
+    {
+        List<TElement> items;
+
+        if (run.Result is { } resultJson)
+        {
+            items = JsonSerializer.Deserialize<List<TElement>>(resultJson, _serializerOptions) ?? [];
+        }
+        else if (buffer is { OutputCompleted: true, Attempt: var attempt } && attempt == run.Attempt)
+        {
+            items = new(buffer.Payloads.Count);
+            foreach (var payload in buffer.Payloads)
+            {
+                items.Add(ResultSerializer.Deserialize<TElement>(payload, _serializerOptions));
+            }
+        }
+        else
+        {
+            // Store contract: OutputComplete is written atomically before Status(Succeeded), and
+            // both events are committed before the batch terminal transition. Since we drain events
+            // from sinceEventId=0 in commit order, by the time we hit this hydration call for a
+            // succeeded child, our buffer has observed both. Reaching this branch means the run has
+            // no materialized result column and no OutputComplete — i.e., truly no result.
+            throw new InvalidOperationException($"Run '{run.Id}' produced no result.");
+        }
+
+        return Task.FromResult<object?>(asArray ? items.ToArray() : items);
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async IAsyncEnumerable<HydratedChild<IAsyncEnumerable<TElement>>> StreamBatchLiveInnerAsync<TElement>(
+        string batchId, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        // CRITICAL: the event-reading loop MUST run on a background task, because the outer
+        // iterator yields inner streams that consumers iterate via `await foreach`. If event-reading
+        // happened inline, the outer iterator would be suspended while the consumer reads an inner
+        // stream — and the inner stream's channel would never get written to (the pump is the outer
+        // iterator itself). Result: deadlock.
+        //
+        // Decoupling: a background Task reads ObserveBatchEventsAsync and dispatches events to
+        // per-child channels. A top-level channel receives "new child stream" handles. The outer
+        // iterator just reads from that top-level channel.
+        var outerChannel = Channel.CreateUnbounded<HydratedChild<IAsyncEnumerable<TElement>>>(
+            new() { SingleReader = true, SingleWriter = true });
+
+        using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var pump = Task.Run(() => PumpBatchLiveInnerAsync(batchId, outerChannel.Writer, pumpCts.Token),
+            pumpCts.Token);
+
+        try
+        {
+            await foreach (var handle in outerChannel.Reader.ReadAllAsync(cancellationToken))
+            {
+                yield return handle;
+            }
+        }
+        finally
+        {
+            pumpCts.Cancel();
+            try
+            {
+                await pump;
+            }
+            catch
+            {
+                /* surfaced via channel */
+            }
+        }
+    }
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async Task PumpBatchLiveInnerAsync<TElement>(string batchId,
+        ChannelWriter<HydratedChild<IAsyncEnumerable<TElement>>> outerWriter,
+        CancellationToken cancellationToken)
+    {
+        // `live` holds streams that are currently open. `emitted` records which runIds we've already
+        // yielded to the outer so a late event (e.g., anything written after terminal on replay) can't
+        // cause a duplicate outer yield.
+        var live = new Dictionary<string, ChildLiveStream<TElement>>(StringComparer.Ordinal);
+        var emitted = new HashSet<string>(StringComparer.Ordinal);
+
+        try
+        {
+            await foreach (var @event in ObserveBatchEventsAsync(batchId, 0, cancellationToken))
+            {
+                if (!live.TryGetValue(@event.RunId, out var child))
+                {
+                    if (!emitted.Add(@event.RunId))
+                    {
+                        // Seen this child before and its stream is already closed. Ignore tail events.
+                        continue;
+                    }
+
+                    child = new(@event.RunId, @event.Attempt, _serializerOptions, logger);
+                    live[@event.RunId] = child;
+                    await outerWriter.WriteAsync(new(child.Reader, null), cancellationToken);
+                }
+
+                switch (@event.EventType)
+                {
+                    case RunEventType.Output:
+                        child.PushOutput(@event);
+                        break;
+                    case RunEventType.OutputComplete:
+                        child.MarkOutputComplete(@event.Attempt);
+                        break;
+                    case RunEventType.Status when RunStatusEvents.TryGetStatus(@event, out var status)
+                                                  && status.IsTerminal:
+                        // Inner-stream semantics: child failure surfaces on that child's next
+                        // MoveNextAsync. Other yielded inner streams continue unaffected.
+                        var snapshot = await store.GetRunAsync(@event.RunId, cancellationToken);
+                        if (snapshot is null)
+                        {
+                            child.CompleteNotFound();
+                        }
+                        else if (snapshot.Status is JobStatus.Failed or JobStatus.Cancelled)
+                        {
+                            // Enrich the exception with AttemptFailure detail when available,
+                            // but never let the pump die on a store hiccup — fall back to the
+                            // minimal exception so iteration still completes faulted cleanly.
+                            JobRunException faulted;
+                            try
+                            {
+                                faulted = await BuildJobRunExceptionAsync(snapshot, cancellationToken);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                faulted = new(snapshot.Id, snapshot.Status, snapshot.Reason);
+                            }
+
+                            child.CompleteFaulted(faulted);
+                        }
+                        else
+                        {
+                            child.Complete();
+                        }
+
+                        live.Remove(@event.RunId);
+                        break;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Consumer dropped the iterator; fault any in-flight inner streams so iteration unblocks.
+            foreach (var child in live.Values)
+            {
+                child.CompleteFaulted(new OperationCanceledException(cancellationToken));
+            }
+
+            outerWriter.TryComplete();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            foreach (var child in live.Values)
+            {
+                child.CompleteFaulted(ex);
+            }
+
+            outerWriter.TryComplete(ex);
+            throw;
+        }
+
+        foreach (var child in live.Values)
+        {
+            child.Complete();
+        }
+
+        outerWriter.TryComplete();
+    }
+
+    // =========================================================================
+    // Attempt-filtered Output payload reads
+    // =========================================================================
+
+    private async Task<bool> HasOutputCompleteForAttemptAsync(string runId, int attempt,
+        CancellationToken cancellationToken)
+    {
+        var events = await store.GetEventsAsync(runId, 0, [RunEventType.OutputComplete],
+            attempt, 1, cancellationToken);
+        return events.Count > 0;
+    }
+
+    private async Task<IReadOnlyList<string>> ReadAttemptOutputPayloadsAsync(string runId, int attempt,
+        CancellationToken cancellationToken)
+    {
+        var events = await store.GetEventsAsync(runId, 0, [RunEventType.Output],
+            attempt, cancellationToken: cancellationToken);
+        if (events.Count == 0)
+        {
+            return [];
+        }
+
+        var payloads = new List<string>(events.Count);
+        foreach (var @event in events)
+        {
+            payloads.Add(@event.Payload);
+        }
+
+        return payloads;
+    }
+
+    // =========================================================================
+    // Single-run trigger-owning stream (used by StreamAsync<T>(jobName, ...))
+    // =========================================================================
+
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    private async IAsyncEnumerable<TItem> OwnedRunStreamAsync<TItem>(string runId,
+        [EnumeratorCancellation] CancellationToken ownerCancellationToken)
+    {
+        await using var enumerator = StreamRunHydratedAsync<TItem>(runId, ownerCancellationToken)
+            .GetAsyncEnumerator(ownerCancellationToken);
 
         while (true)
         {
@@ -777,16 +1445,85 @@ public sealed partial class JobClient(
         }
     }
 
-    private static BatchRunEventCursor CreateBatchCursorSnapshot(long sinceEventId,
-        IReadOnlyDictionary<string, long> childSinceEventIds) =>
-        new()
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    private async Task ThrowIfNonSuccessTerminalAsync(JobRun run, CancellationToken cancellationToken)
+    {
+        if (run.Status is JobStatus.Failed or JobStatus.Cancelled)
         {
-            SinceEventId = sinceEventId,
-            ChildSinceEventIds = new Dictionary<string, long>(childSinceEventIds, StringComparer.Ordinal)
-        };
+            throw await BuildJobRunExceptionAsync(run, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    ///     Builds a <see cref="JobRunException" /> with a meaningful message. Prefers
+    ///     <see cref="JobRun.Reason" /> when set (non-exception terminations — cancel,
+    ///     expiration, no-handler, shutdown). For retry-exhaustion Failed runs the
+    ///     reason is intentionally null; we read the last <c>AttemptFailure</c> event
+    ///     so the exception still carries the type + message of the final attempt.
+    /// </summary>
+    private async Task<JobRunException> BuildJobRunExceptionAsync(JobRun run, CancellationToken cancellationToken)
+    {
+        if (run.Reason is { Length: > 0 })
+        {
+            return new(run.Id, run.Status, run.Reason);
+        }
+
+        if (run.Status == JobStatus.Failed)
+        {
+            var failures = await store.GetEventsAsync(
+                run.Id, 0, [RunEventType.AttemptFailure],
+                run.Attempt, cancellationToken: cancellationToken);
+
+            if (failures.Count > 0)
+            {
+                var detail = TryExtractFailureMessage(failures[^1].Payload);
+                if (detail is { })
+                {
+                    return new(run.Id, run.Status, detail);
+                }
+            }
+        }
+
+        return new(run.Id, run.Status, null);
+    }
+
+    private static string? TryExtractFailureMessage(string? payload)
+    {
+        if (string.IsNullOrEmpty(payload))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+            var type = root.TryGetProperty("exceptionType", out var t) && t.ValueKind == JsonValueKind.String
+                ? t.GetString()
+                : null;
+            var message = root.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String
+                ? m.GetString()
+                : null;
+
+            return (type, message) switch
+            {
+                ({ Length: > 0 }, { Length: > 0 }) => $"{type}: {message}",
+                (_, { Length: > 0 }) => message,
+                ({ Length: > 0 }, _) => type,
+                _ => null
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     private JobRun CreateRun(string jobName, string? serializedArguments, RunOptions runOptions,
-        DateTimeOffset now, int priority, string? runId = null)
+        DateTimeOffset now, int priority, string? runId = null, string? rerunOfRunId = null)
     {
         var run = new JobRun
         {
@@ -800,133 +1537,34 @@ public sealed partial class JobClient(
             Priority = priority,
             QueuePriority = 0,
             DeduplicationId = runOptions.DeduplicationId,
+            RerunOfRunId = rerunOfRunId,
             Progress = 0,
             Attempt = 0,
-            TraceId = Activity.Current?.TraceId.ToString(),
-            SpanId = Activity.Current?.SpanId.ToString()
+            ParentTraceId = Activity.Current?.TraceId.ToString(),
+            ParentSpanId = Activity.Current?.SpanId.ToString()
         };
 
-        LinkToCurrentRunScope(run);
-        return run;
+        return LinkToCurrentRunScope(run);
     }
 
-    private static void LinkToCurrentRunScope(JobRun run)
+    private static JobRun LinkToCurrentRunScope(JobRun run)
     {
         var current = JobContext.Current;
         if (current is null)
         {
-            return;
+            return run;
         }
 
-        if (run.ParentRunId is null)
+        return run with
         {
-            run.ParentRunId = current.RunId;
-        }
-
-        if (run.RootRunId is null)
-        {
-            run.RootRunId = current.RootRunId;
-        }
+            ParentRunId = run.ParentRunId ?? current.RunId,
+            RootRunId = run.RootRunId ?? current.RootRunId
+        };
     }
 
     private static string CreateRunId() => Guid.CreateVersion7().ToString("N");
 
-    private RunResult ToRunResult(JobRun run) => new()
-    {
-        RunId = run.Id,
-        JobName = run.JobName,
-        Status = run.Status,
-        Error = run.Error,
-        ResultJson = run.Result,
-        SerializerOptions = _serializerOptions
-    };
-
-    private static async Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
-    {
-        try
-        {
-            wakeup.Release();
-        }
-        catch (SemaphoreFullException)
-        {
-        }
-
-        await Task.CompletedTask;
-    }
-
-    private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
-    {
-        await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
-    }
-
-    private async IAsyncEnumerable<JobRun> EnumerateBatchChildrenAsync(string batchId,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var skip = 0;
-        const int pageSize = 200;
-        while (true)
-        {
-            var page = await store.GetRunsAsync(new() { ParentRunId = batchId }, skip, pageSize, cancellationToken);
-            if (page.Items.Count == 0)
-            {
-                yield break;
-            }
-
-            foreach (var child in page.Items)
-            {
-                yield return child;
-            }
-
-            skip += page.Items.Count;
-        }
-    }
-
-    private async IAsyncEnumerable<T> StreamRunAsync<T>(string runId, RunEventCursor cursor,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var emittedOutput = false;
-        await foreach (var observation in ObserveAsync(runId, cursor, cancellationToken))
-        {
-            if (observation.Event?.EventType == RunEventType.Output)
-            {
-                emittedOutput = true;
-                if (TryDeserializeJson(
-                        observation.Event.Payload,
-                        out T? item,
-                        observation.Run.Id,
-                        observation.Event.Id,
-                        observation.Event.EventType,
-                        "run output stream"))
-                {
-                    yield return item!;
-                }
-            }
-
-            if (observation.Event is { })
-            {
-                continue;
-            }
-
-            if (observation.Run.Status.IsTerminal)
-            {
-                if (observation.Run.Status == JobStatus.DeadLetter)
-                {
-                    throw new JobRunFailedException(runId, observation.Run.Error);
-                }
-
-                if (!emittedOutput && observation.Run.Result is { } resultJson
-                                   && TryDeserializeList(resultJson, out List<T>? resultItems))
-                {
-                    foreach (var item in resultItems!)
-                    {
-                        yield return item;
-                    }
-                }
-
-                yield break;
-            }
-        }
-    }
+    private JobRun AttachSerializerOptions(JobRun run) => run with { SerializerOptions = _serializerOptions };
 
     private async Task<int?> ResolveRequestedPriorityAsync(string jobName, int? explicitPriority,
         CancellationToken cancellationToken)
@@ -940,29 +1578,6 @@ public sealed partial class JobClient(
         return explicitPriority ?? job?.Priority;
     }
 
-    private static T[] ConvertBatchResults<T>(IReadOnlyList<RunResult> results)
-    {
-        var values = new List<T>(results.Count);
-        var exceptions = new List<Exception>();
-        foreach (var result in results)
-        {
-            if (!result.IsSuccess)
-            {
-                exceptions.Add(new JobRunFailedException(result.RunId, result.Error));
-                continue;
-            }
-
-            values.Add(result.GetResult<T>());
-        }
-
-        if (exceptions.Count > 0)
-        {
-            throw new AggregateException(exceptions);
-        }
-
-        return values.ToArray();
-    }
-
     private async Task CancelRunAndDescendantsAsync(string runId, ISet<string> visited,
         CancellationToken cancellationToken)
     {
@@ -971,151 +1586,46 @@ public sealed partial class JobClient(
             return;
         }
 
-        if (await store.TryCancelRunAsync(runId, cancellationToken))
+        var result = await store.TryCancelRunAsync(runId, reason: "Cancelled by client request.",
+            cancellationToken: cancellationToken);
+        if (result.Transitioned)
         {
-            await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(runId), runId, cancellationToken);
-        }
-
-        await foreach (var child in EnumerateBatchChildrenAsync(runId, cancellationToken))
-        {
-            await CancelRunAndDescendantsAsync(child.Id, visited, cancellationToken);
-        }
-    }
-
-    private async Task<T?> TryBuildResultFromOutputEventsAsync<T>(string runId, CancellationToken cancellationToken)
-    {
-        var target = typeof(T);
-        if (target.IsGenericType && target.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            var asyncItemType = target.GetGenericArguments()[0];
-            var asyncMethod = typeof(JobClient)
-                .GetMethod(nameof(BuildOutputAsyncEnumerable), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(asyncItemType);
-            var stream = asyncMethod.Invoke(this, [runId]);
-            return (T?)stream;
-        }
-
-        var itemType = TryGetCollectionElementType(target);
-        if (itemType is null)
-        {
-            return default;
-        }
-
-        var method = typeof(JobClient)
-            .GetMethod(nameof(MaterializeOutputCollectionAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-            .MakeGenericMethod(itemType);
-        var materialized = await (Task<object?>)method.Invoke(this, [runId, cancellationToken])!;
-        if (materialized is null)
-        {
-            return default;
-        }
-
-        return (T)materialized;
-    }
-
-    private IAsyncEnumerable<TItem> BuildOutputAsyncEnumerable<TItem>(string runId) =>
-        ReadOutputEventsAsync<TItem>(runId);
-
-    private async IAsyncEnumerable<TItem> ReadOutputEventsAsync<TItem>(string runId,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var events = await store.GetEventsAsync(runId, 0, [RunEventType.Output], null, cancellationToken);
-        foreach (var @event in events)
-        {
-            if (TryDeserializeJson(
-                    @event.Payload,
-                    out TItem? item,
-                    runId,
-                    @event.Id,
-                    @event.EventType,
-                    "output event replay"))
+            await PublishCancellationNotificationsAsync(runId, cancellationToken);
+            if (result.BatchCompletion is { } bc)
             {
-                yield return item!;
-            }
-        }
-    }
-
-    private async Task<object?> MaterializeOutputCollectionAsync<TItem>(string runId,
-        CancellationToken cancellationToken)
-    {
-        var events = await store.GetEventsAsync(runId, 0, [RunEventType.Output], null, cancellationToken);
-        if (events.Count == 0)
-        {
-            return null;
-        }
-
-        var list = new List<TItem>(events.Count);
-        foreach (var @event in events)
-        {
-            if (!TryDeserializeJson(
-                    @event.Payload,
-                    out TItem? item,
-                    runId,
-                    @event.Id,
-                    @event.EventType,
-                    "output collection materialization"))
-            {
-                continue;
-            }
-
-            list.Add(item!);
-        }
-
-        return list.Count == 0 ? null : list;
-    }
-
-    private static Type? TryGetCollectionElementType(Type targetType)
-    {
-        if (targetType.IsGenericType)
-        {
-            var genericDefinition = targetType.GetGenericTypeDefinition();
-            if (genericDefinition == typeof(List<>)
-                || genericDefinition == typeof(IReadOnlyList<>)
-                || genericDefinition == typeof(IList<>)
-                || genericDefinition == typeof(IEnumerable<>))
-            {
-                return targetType.GetGenericArguments()[0];
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
+                    cancellationToken);
             }
         }
 
-        return null;
-    }
+        var cancelledChildIds = await store.CancelChildRunsAsync(runId, "Cancelled by client request.",
+            cancellationToken);
+        foreach (var childId in cancelledChildIds)
+        {
+            visited.Add(childId);
+            await PublishCancellationNotificationsAsync(childId, cancellationToken);
 
-    private bool TryDeserializeList<T>(string json, out List<T>? items)
-    {
-        try
-        {
-            items = JsonSerializer.Deserialize<List<T>>(json, _serializerOptions);
-            return items is { };
-        }
-        catch
-        {
-            items = null;
-            return false;
+            // Recurse into cancelled children to handle nested batch coordinators.
+            await CancelRunAndDescendantsAsync(childId, visited, cancellationToken);
         }
     }
 
-    private bool TryDeserializeJson<T>(string json, out T? value, string runId, long eventId, RunEventType eventType,
-        string operation)
+    private async Task PublishCancellationNotificationsAsync(string runId, CancellationToken cancellationToken)
     {
-        try
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
         {
-            value = JsonSerializer.Deserialize<T>(json, _serializerOptions);
-            if (value is null)
-            {
-                Log.DeserializationReturnedNull(logger, runId, eventId, eventType, operation);
-                return false;
-            }
+            return;
+        }
 
-            return true;
-        }
-        catch (JsonException ex)
+        await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
+        if (run.Status.IsTerminal)
         {
-            Log.DeserializationFailed(logger, ex, runId, eventId, eventType, operation);
-            value = default;
-            return false;
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
         }
+
+        await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
     }
 
     private async Task<IReadOnlyList<RunEvent>> BuildClonedRunScopedInputEventsAsync(string sourceRunId,
@@ -1126,8 +1636,7 @@ public sealed partial class JobClient(
             sourceRunId,
             0,
             [RunEventType.InputDeclared, RunEventType.Input, RunEventType.InputComplete],
-            null,
-            cancellationToken);
+            cancellationToken: cancellationToken);
 
         if (inputEvents.Count == 0)
         {
@@ -1216,7 +1725,7 @@ public sealed partial class JobClient(
             {
                 RunId = runId,
                 EventType = RunEventType.InputDeclared,
-                Payload = JsonSerializer.Serialize(declaration, _serializerOptions),
+                Payload = JsonSerializer.Serialize(declaration, SurefireJsonContext.Default.InputDeclarationEnvelope),
                 CreatedAt = timeProvider.GetUtcNow(),
                 Attempt = 0
             }
@@ -1226,7 +1735,7 @@ public sealed partial class JobClient(
     private static bool TryCreateStreamSource(string argumentName, object? value,
         out StreamingArgumentSource? source)
     {
-        if (value is { } && TryGetAsyncEnumerableElementType(value.GetType(), out var elementType))
+        if (value is { } && TypeHelpers.TryGetAsyncEnumerableElementType(value.GetType(), out var elementType))
         {
             var boxMethod = typeof(JobClient)
                 .GetMethod(nameof(BoxAsyncEnumerable), BindingFlags.Static | BindingFlags.NonPublic)!
@@ -1240,31 +1749,65 @@ public sealed partial class JobClient(
         return false;
     }
 
-    private static bool TryGetAsyncEnumerableElementType(Type type, out Type elementType)
-    {
-        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            elementType = type.GetGenericArguments()[0];
-            return true;
-        }
-
-        var asyncEnumerable = type.GetInterfaces().FirstOrDefault(i =>
-            i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>));
-        if (asyncEnumerable is { })
-        {
-            elementType = asyncEnumerable.GetGenericArguments()[0];
-            return true;
-        }
-
-        elementType = null!;
-        return false;
-    }
-
     private static async IAsyncEnumerable<object?> BoxAsyncEnumerable<T>(IAsyncEnumerable<T> stream)
     {
         await foreach (var item in stream)
         {
             yield return item;
+        }
+    }
+
+    private void StartInputPump(string runId, IReadOnlyList<StreamingArgumentSource> streams)
+    {
+        var pumpCts = new CancellationTokenSource();
+        if (!_inputPumpTokens.TryAdd(runId, pumpCts))
+        {
+            pumpCts.Dispose();
+            throw new InvalidOperationException($"An input pump is already active for run '{runId}'.");
+        }
+
+        _ = MonitorInputPumpAsync(runId, streams, pumpCts);
+    }
+
+    private async Task MonitorInputPumpAsync(string runId, IReadOnlyList<StreamingArgumentSource> streams,
+        CancellationTokenSource pumpCts)
+    {
+        try
+        {
+            await using var terminatedSubscription = await notifications.SubscribeAsync(
+                NotificationChannels.RunTerminated(runId),
+                _ =>
+                {
+                    pumpCts.Cancel();
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None);
+            await using var cancelSubscription = await notifications.SubscribeAsync(
+                NotificationChannels.RunCancel(runId),
+                _ =>
+                {
+                    pumpCts.Cancel();
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None);
+
+            await PumpInputStreamsAsync(runId, streams, pumpCts.Token);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
+        {
+            Log.InputStreamingFailed(logger, ex, runId);
+            await TryCancelRunBestEffortAsync(runId);
+        }
+        finally
+        {
+            if (_inputPumpTokens.TryRemove(runId, out var activePump))
+            {
+                activePump.Dispose();
+            }
+            else
+            {
+                pumpCts.Dispose();
+            }
         }
     }
 
@@ -1277,11 +1820,6 @@ public sealed partial class JobClient(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-        }
-        catch (Exception ex)
-        {
-            Log.InputStreamingFailed(logger, ex, runId);
-            await TryCancelRunBestEffortAsync(runId);
         }
     }
 
@@ -1324,6 +1862,17 @@ public sealed partial class JobClient(
                 Error = null
             }, CancellationToken.None);
         }
+        catch (OperationCanceledException ex)
+        {
+            await AppendInputEventAsync(runId, RunEventType.InputComplete, new()
+            {
+                Argument = stream.Argument,
+                Sequence = sequence + 1,
+                Payload = null,
+                IsComplete = true,
+                Error = ex.Message
+            }, CancellationToken.None);
+        }
         catch (Exception ex)
         {
             await AppendInputEventAsync(runId, RunEventType.InputComplete, new()
@@ -1342,12 +1891,13 @@ public sealed partial class JobClient(
     private async Task AppendInputEventAsync(string runId, RunEventType eventType, InputEnvelope payload,
         CancellationToken cancellationToken)
     {
-        await store.AppendEventsAsync([
+        await store.AppendEventsAsync(
+        [
             new()
             {
                 RunId = runId,
                 EventType = eventType,
-                Payload = JsonSerializer.Serialize(payload, _serializerOptions),
+                Payload = JsonSerializer.Serialize(payload, SurefireJsonContext.Default.InputEnvelope),
                 CreatedAt = timeProvider.GetUtcNow(),
                 Attempt = 0
             }
@@ -1356,59 +1906,164 @@ public sealed partial class JobClient(
         await notifications.PublishAsync(NotificationChannels.RunInput(runId), runId, cancellationToken);
     }
 
-    private async Task TryCompleteEmptyBatchCoordinatorAsync(string coordinatorId, CancellationToken cancellationToken)
-    {
-        var coordinator = await store.GetRunAsync(coordinatorId, cancellationToken);
-        if (coordinator is null || coordinator.BatchTotal != 0)
-        {
-            return;
-        }
-
-        var completedAt = timeProvider.GetUtcNow();
-        var transition = RunStatusTransition.RunningToCompleted(
-            coordinatorId,
-            coordinator.Attempt,
-            completedAt,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            null,
-            null,
-            coordinator.StartedAt,
-            completedAt);
-
-        if (!await store.TryTransitionRunAsync(transition, cancellationToken))
-        {
-            return;
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinatorId), coordinatorId,
-            cancellationToken);
-        await notifications.PublishAsync(NotificationChannels.RunEvent(coordinatorId), coordinatorId,
-            cancellationToken);
-    }
-
     private async Task TryCancelOwnedRunAsync(string runId)
     {
+        using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
-            await CancelAsync(runId, CancellationToken.None);
+            await CancelAsync(runId, cleanupCts.Token);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
             Log.FailedToPropagateCancellation(logger, ex, runId);
         }
     }
 
+    private async Task TryCancelOwnedBatchAsync(string batchId)
+    {
+        using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
+        try
+        {
+            await CancelBatchAsync(batchId, cleanupCts.Token);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
+        {
+            Log.FailedToPropagateCancellation(logger, ex, batchId);
+        }
+    }
+
     private async Task TryCancelRunBestEffortAsync(string runId)
+    {
+        using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
+        try
+        {
+            await CancelAsync(runId, cleanupCts.Token);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
+        {
+            Log.FailedBestEffortCancellation(logger, ex, runId);
+        }
+    }
+
+    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup) => WakeupSignal.ReleaseAsync(wakeup);
+
+    private Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken) =>
+        WakeupSignal.WaitAsync(wakeup, options.PollingInterval, cancellationToken);
+
+    private bool TryDeserializeJson<T>(string json, out T? value, string runId, long eventId, RunEventType eventType,
+        string operation)
     {
         try
         {
-            await CancelAsync(runId, CancellationToken.None);
+            value = JsonSerializer.Deserialize<T>(json, _serializerOptions);
+            if (value is null)
+            {
+                Log.DeserializationReturnedNull(logger, runId, eventId, eventType, operation);
+                return false;
+            }
+
+            return true;
         }
-        catch
+        catch (JsonException ex)
         {
+            Log.DeserializationFailed(logger, ex, runId, eventId, eventType, operation);
+            value = default;
+            return false;
         }
+    }
+
+    // =========================================================================
+    // Batch hydration — shared pipeline for StreamBatchAsync<T> / WaitBatchAsync<T>
+    // =========================================================================
+
+    /// <summary>
+    ///     Unified batch hydration carrying either a successfully-hydrated T or the failure exception
+    ///     for a non-success child. <see cref="StreamBatchAsync{T}" /> throws on first failure;
+    ///     <see cref="WaitBatchAsync{T}" /> collects them for a terminal <see cref="AggregateException" />.
+    /// </summary>
+    private readonly struct HydratedChild<T>(T? value, Exception? exception)
+    {
+        public T? Value { get; } = value;
+        public Exception? Exception { get; } = exception;
+    }
+
+    private sealed class ChildOutputBuffer
+    {
+        public int Attempt { get; set; }
+        public List<string> Payloads { get; } = new();
+        public bool OutputCompleted { get; set; }
+    }
+
+    private sealed class ChildLiveStream<TElement>
+    {
+        private readonly Channel<TElement> _channel =
+            Channel.CreateUnbounded<TElement>(
+                new() { SingleReader = true, SingleWriter = true });
+
+        private readonly ILogger _logger;
+        private readonly string _runId;
+        private readonly JsonSerializerOptions _serializer;
+
+        private int _attempt;
+
+        public ChildLiveStream(string runId, int attempt, JsonSerializerOptions serializer, ILogger logger)
+        {
+            _runId = runId;
+            _attempt = attempt;
+            _serializer = serializer;
+            _logger = logger;
+            Reader = _channel.Reader.ReadAllAsync();
+        }
+
+        public IAsyncEnumerable<TElement> Reader { get; }
+
+        public void PushOutput(RunEvent @event)
+        {
+            // Drop events from superseded attempts.
+            if (@event.Attempt < _attempt)
+            {
+                return;
+            }
+
+            if (@event.Attempt > _attempt)
+            {
+                _attempt = @event.Attempt;
+                // A new attempt started; previously pushed items are already visible to the consumer.
+                // Retry-transparent streaming: consumer sees all attempts' items in commit order.
+            }
+
+            try
+            {
+                var value = JsonSerializer.Deserialize<TElement>(@event.Payload, _serializer);
+                if (value is null)
+                {
+                    Log.DeserializationReturnedNull(_logger, _runId, @event.Id, @event.EventType,
+                        "batch live stream");
+                    return;
+                }
+
+                _channel.Writer.TryWrite(value);
+            }
+            catch (JsonException ex)
+            {
+                Log.DeserializationFailed(_logger, ex, _runId, @event.Id, @event.EventType, "batch live stream");
+            }
+        }
+
+        public void MarkOutputComplete(int attempt)
+        {
+            if (attempt >= _attempt)
+            {
+                _attempt = attempt;
+            }
+        }
+
+        public void Complete() => _channel.Writer.TryComplete();
+
+        public void CompleteFaulted(Exception exception) => _channel.Writer.TryComplete(exception);
+
+        public void CompleteNotFound() =>
+            _channel.Writer.TryComplete(new RunNotFoundException(_runId));
     }
 
     private static partial class Log
@@ -1436,6 +2091,10 @@ public sealed partial class JobClient(
                 "Deserializer returned null for run '{RunId}', event '{EventId}' ({EventType}) during {Operation}.")]
         public static partial void DeserializationReturnedNull(ILogger logger, string runId, long eventId,
             RunEventType eventType, string operation);
+
+        [LoggerMessage(EventId = 1007, Level = LogLevel.Warning,
+            Message = "Best-effort cancellation failed for run '{RunId}'.")]
+        public static partial void FailedBestEffortCancellation(ILogger logger, Exception exception, string runId);
     }
 
     private sealed record PreparedArguments(
@@ -1447,18 +2106,4 @@ public sealed partial class JobClient(
     }
 
     private sealed record StreamingArgumentSource(string Argument, IAsyncEnumerable<object?> Stream);
-
-    private sealed class InputDeclarationEnvelope
-    {
-        public required string[] Arguments { get; init; }
-    }
-
-    private sealed class InputEnvelope
-    {
-        public required string Argument { get; init; }
-        public required long Sequence { get; init; }
-        public string? Payload { get; init; }
-        public required bool IsComplete { get; init; }
-        public string? Error { get; init; }
-    }
 }

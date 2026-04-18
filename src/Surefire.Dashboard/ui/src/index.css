@@ -21,8 +21,24 @@
 }
 
 @layer base {
+  html {
+    scroll-behavior: smooth;
+    /* Drives OS/UA form-control and (on Chromium) root-scrollbar chrome in
+       light mode. .dark overrides below for dark theme. */
+    color-scheme: light;
+    /* Removes the default grey tap highlight on touch devices so buttons/
+       links don't flash when tapped — rely on our own hover/active styles. */
+    -webkit-tap-highlight-color: transparent;
+  }
   body {
     @apply bg-background text-foreground;
+    /* Crisper glyph rendering on macOS; matches what most design-system sites
+       ship. No effect on Windows/Linux. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Enables kerning, ligatures, and OpenType features for UI text. Slightly
+       slower than default on extremely long text; fine for a dashboard. */
+    text-rendering: optimizeLegibility;
   }
   * {
     @apply border-border outline-ring/50;
@@ -30,14 +46,25 @@
   ::selection {
     background: oklch(from var(--primary) l c h / 20%);
   }
-  html {
-    scroll-behavior: smooth;
+  .dark {
+    color-scheme: dark;
   }
   .dark input[type="datetime-local"],
   .dark input[type="date"],
   .dark input[type="time"] {
     color-scheme: dark;
   }
+}
+
+:where(
+  .overflow-auto,
+  .overflow-y-auto,
+  .overflow-x-auto,
+  .overflow-scroll,
+  .overflow-y-scroll,
+  .overflow-x-scroll
+) {
+  overflow-anchor: none;
 }
 
 :root {
@@ -65,12 +92,11 @@
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --status-completed: oklch(0.52 0.14 162);
-  --status-retrying: oklch(0.52 0.18 16);
+  --status-succeeded: oklch(0.52 0.14 155);
   --status-pending: oklch(0.55 0.13 85);
-  --status-running: oklch(0.5 0.14 237);
-  --status-cancelled: oklch(0.5 0.04 257);
-  --status-dead-letter: oklch(0.5 0.16 293);
+  --status-running: oklch(0.50 0.14 237);
+  --status-cancelled: oklch(0.50 0.04 260);
+  --status-failed: var(--destructive);
   --sidebar: oklch(0.975 0.004 250);
   --sidebar-foreground: oklch(0.18 0.014 250);
   --sidebar-primary: oklch(0.44 0.12 250);
@@ -105,12 +131,11 @@
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --status-completed: oklch(0.77 0.18 162);
-  --status-retrying: oklch(0.72 0.21 14);
-  --status-pending: oklch(0.8 0.17 84);
+  --status-succeeded: oklch(0.77 0.18 155);
+  --status-pending: oklch(0.80 0.17 85);
   --status-running: oklch(0.73 0.17 240);
   --status-cancelled: oklch(0.65 0.05 264);
-  --status-dead-letter: oklch(0.7 0.2 293);
+  --status-failed: var(--destructive);
   --sidebar: oklch(0.11 0.014 260);
   --sidebar-foreground: oklch(0.985 0.005 250);
   --sidebar-primary: oklch(0.7 0.14 250);
@@ -171,12 +196,11 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
-  --color-status-completed: var(--status-completed);
-  --color-status-retrying: var(--status-retrying);
+  --color-status-succeeded: var(--status-succeeded);
   --color-status-pending: var(--status-pending);
   --color-status-running: var(--status-running);
   --color-status-cancelled: var(--status-cancelled);
-  --color-status-dead-letter: var(--status-dead-letter);
+  --color-status-failed: var(--status-failed);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);

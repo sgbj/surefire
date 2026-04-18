@@ -1,6 +1,11 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useParams, useNavigate, Link } from "react-router";
-import { api, type JobRun, type RunLogEntry, LogLevelLabels } from "@/lib/api";
+import { api, JobStatus, type JobRun, type RunLogEntry, LogLevelLabels } from "@/lib/api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,6 +31,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Progress } from "@/components/ui/progress";
 import { formatDate, formatDuration, formatLogTime } from "@/lib/format";
 import { useLiveDuration } from "@/hooks/use-live-duration";
+import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Ban, CircleAlert, RotateCcw } from "lucide-react";
 import { DtDd } from "@/components/dt-dd";
@@ -38,8 +44,9 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { TraceView } from "@/components/trace-view";
-import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
+import { TraceView, type TraceItem } from "@/components/trace-view";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import {
   Select,
   SelectContent,
@@ -61,6 +68,11 @@ const EMPTY_OUTPUT_ITEMS: unknown[] = [];
 const EMPTY_INPUT_ITEMS: { param: string; value: unknown }[] = [];
 const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
 const CHILD_RUN_PAGE_SIZE = 500;
+// Trace: tree-aware — ancestors + siblings window + direct children of focus.
+// Siblings-before uses a bounded window (typical workflows have few siblings);
+// children paginate on demand through /runs/{id}/children.
+const TRACE_SIBLING_WINDOW = 50;
+const TRACE_CHILDREN_TAKE = 100;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -111,7 +123,7 @@ function parseAttemptFailureItem(raw: string): AttemptFailureItem | null {
   const parsed = JSON.parse(raw) as Record<string, unknown>;
 
   const attempt = Number(parsed.attempt ?? parsed.Attempt);
-  if (!Number.isFinite(attempt) || attempt <= 0) {
+  if (!Number.isFinite(attempt) || attempt < 0) {
     return null;
   }
 
@@ -126,6 +138,28 @@ function parseAttemptFailureItem(raw: string): AttemptFailureItem | null {
   };
 }
 
+function pruneRunMap<T>(source: Record<string, T>, allowedRunIds: Set<string>) {
+  const entries = Object.entries(source).filter(([runId]) =>
+    allowedRunIds.has(runId),
+  );
+  return Object.fromEntries(entries) as Record<string, T>;
+}
+
+function dedupeRuns(runs: JobRun[]): JobRun[] {
+  const seen = new Set<string>();
+  const result: JobRun[] = [];
+  for (const run of runs) {
+    if (seen.has(run.id)) {
+      continue;
+    }
+
+    seen.add(run.id);
+    result.push(run);
+  }
+
+  return result;
+}
+
 export function RunDetailPage() {
   const { id } = useParams();
   const runKey = id ?? "";
@@ -135,51 +169,117 @@ export function RunDetailPage() {
     queryKey: ["run", id],
     queryFn: () => api.getRun(id!),
     refetchInterval: (query) => {
+      if (query.state.error) return false;
       const s = query.state.data?.status;
-      return s === 0 || s === 1 ? 5000 : false;
+      return s === JobStatus.Pending || s === JobStatus.Running ? 5000 : false;
     },
   });
-  const isActive = run?.status === 0 || run?.status === 1;
-  const { data: childRuns } = useQuery({
-    queryKey: ["runs", "children", id],
-    queryFn: async () => {
-      const items: JobRun[] = [];
-      let totalCount = 0;
-      let skip = 0;
-      const snapshotCreatedBefore = new Date(Date.now() + 1).toISOString();
+  const isActive = run?.status === JobStatus.Pending || run?.status === JobStatus.Running;
+  const [childRunsSnapshotCreatedBefore, setChildRunsSnapshotCreatedBefore] =
+    useState(() => new Date(Date.now() + 1).toISOString());
 
-      while (true) {
-        const page = await api.getRuns({
-          parentRunId: id!,
-          skip,
-          take: CHILD_RUN_PAGE_SIZE,
-          createdBefore: snapshotCreatedBefore,
-        });
+  useEffect(() => {
+    setChildRunsSnapshotCreatedBefore(new Date(Date.now() + 1).toISOString());
+  }, [id]);
 
-        totalCount = page.totalCount;
-        items.push(...page.items);
-
-        if (page.items.length === 0 || items.length >= totalCount) {
-          break;
-        }
-
-        skip += page.items.length;
-      }
-
-      return { items, totalCount };
+  const {
+    data: childRunsData,
+    hasNextPage: hasNextChildRunsPage,
+    fetchNextPage: fetchNextChildRunsPage,
+    isFetchingNextPage: isLoadingMoreChildren,
+  } = useInfiniteQuery({
+    queryKey: ["runs", "children", id, childRunsSnapshotCreatedBefore],
+    queryFn: ({ pageParam }) =>
+      api.getRuns({
+        parentRunId: id!,
+        skip: pageParam * CHILD_RUN_PAGE_SIZE,
+        take: CHILD_RUN_PAGE_SIZE,
+        createdBefore: childRunsSnapshotCreatedBefore,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, pages) => {
+      const loaded = pages.reduce((sum, page) => sum + page.items.length, 0);
+      return loaded < lastPage.totalCount ? pages.length : undefined;
     },
-    refetchInterval: isActive ? 5000 : false,
-  });
-  const { data: traceRuns } = useQuery({
-    queryKey: ["run-trace", id],
-    queryFn: () => api.getRunTrace(id!),
     refetchInterval: (query) => {
-      // Keep polling if any run in the trace is still active
-      const runs = query.state.data;
-      if (!runs) return 5000;
-      return runs.some((r) => r.status === 0 || r.status === 1) ? 5000 : false;
+      const pages = query.state.data?.pages;
+      if (!pages) return 5000;
+
+      const items = dedupeRuns(pages.flatMap((page) => page.items));
+      const hasActiveChild = items.some(
+        (r) => r.status === JobStatus.Pending || r.status === JobStatus.Running,
+      );
+      return isActive || hasActiveChild ? 5000 : false;
+    },
+    enabled: !!id,
+  });
+
+  // Initial focused trace view. Single round-trip returns: ancestor chain + focus +
+  // siblings window + first page of children. Lazy expansion via api.getRunChildren
+  // for "load more" actions.
+  const { data: traceData } = useQuery({
+    queryKey: ["run-trace", id],
+    queryFn: () =>
+      api.getRunTrace(id!, {
+        siblingWindow: TRACE_SIBLING_WINDOW,
+        childrenTake: TRACE_CHILDREN_TAKE,
+      }),
+    enabled: !!id,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) return 5000;
+      const allRuns = [
+        ...data.ancestors,
+        data.focus,
+        ...data.siblingsBefore,
+        ...data.siblingsAfter,
+        ...data.children,
+      ];
+      return allRuns.some((r) => r.status === JobStatus.Pending || r.status === JobStatus.Running)
+        ? 5000
+        : false;
     },
   });
+
+  // Lazy-expansion tree state. Clicking a node's disclosure caret populates
+  // childrenByNode[nodeId] (paginated via childrenCursorByNode); collapsing
+  // removes it from expandedNodes but preserves the cache for instant re-open.
+  // Focus is always conceptually expanded: its children come from
+  // traceData.children plus any paginated extras in childrenByNode[focusId].
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [childrenByNode, setChildrenByNode] = useState<
+    Record<string, JobRun[]>
+  >({});
+  const [childrenCursorByNode, setChildrenCursorByNode] = useState<
+    Record<string, string | null>
+  >({});
+  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
+
+  // Extended sibling windows when the user paginates past the initial bounds.
+  const [extraSiblingsBefore, setExtraSiblingsBefore] = useState<JobRun[]>([]);
+  const [extraSiblingsBeforeCursor, setExtraSiblingsBeforeCursor] = useState<
+    string | null
+  >(null);
+  const [extraSiblingsAfter, setExtraSiblingsAfter] = useState<JobRun[]>([]);
+  const [extraSiblingsAfterCursor, setExtraSiblingsAfterCursor] = useState<
+    string | null
+  >(null);
+  const [isLoadingMoreSiblingsAfter, setIsLoadingMoreSiblingsAfter] =
+    useState(false);
+  const [isLoadingMoreSiblingsBefore, setIsLoadingMoreSiblingsBefore] =
+    useState(false);
+
+  // Reset all trace-local state when the focus run changes.
+  useEffect(() => {
+    setExpandedNodes(new Set());
+    setChildrenByNode({});
+    setChildrenCursorByNode({});
+    setLoadingNodes(new Set());
+    setExtraSiblingsBefore([]);
+    setExtraSiblingsBeforeCursor(null);
+    setExtraSiblingsAfter([]);
+    setExtraSiblingsAfterCursor(null);
+  }, [id]);
   const [logsByRun, setLogsByRun] = useState<Record<string, RunLogEntry[]>>({});
   const [logFilterByRun, setLogFilterByRun] = useState<
     Record<string, number | null>
@@ -199,6 +299,150 @@ export function RunDetailPage() {
   const [expandedFailureRow, setExpandedFailureRow] = useState<string | null>(
     null,
   );
+
+  // DFS-flatten the tree into ordered TraceItems. Focus is always expanded; its
+  // children merge traceData.children (refreshed by the 5s poll — so status
+  // changes and new first-page children flow live) with childrenByNode[focusId]
+  // (the fully-paginated set from the auto-paginate effect). Non-focus expanded
+  // nodes draw solely from childrenByNode (one-shot auto-paginate on expand).
+  const traceItems = useMemo(() => {
+    if (!traceData) return [] as TraceItem[];
+
+    const focusId = traceData.focus.id;
+    const focusDepth = traceData.focus.depth ?? traceData.ancestors.length;
+
+    function childrenOf(node: JobRun): JobRun[] {
+      if (node.id === focusId) {
+        const paginated = childrenByNode[focusId];
+        const fresh = traceData!.children;
+        if (paginated === undefined || paginated.length === 0) return fresh;
+        // Overlay fresh (polled) first-page statuses onto the paginated set;
+        // append any brand-new items from fresh that aren't yet paginated.
+        const byId = new Map<string, JobRun>();
+        for (const r of paginated) byId.set(r.id, r);
+        for (const r of fresh) byId.set(r.id, r);
+        const merged: JobRun[] = [];
+        const seen = new Set<string>();
+        for (const r of paginated) {
+          const v = byId.get(r.id)!;
+          if (seen.has(v.id)) continue;
+          seen.add(v.id);
+          merged.push(v);
+        }
+        for (const r of fresh) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          merged.push(r);
+        }
+        return merged;
+      }
+      if (expandedNodes.has(node.id)) {
+        return childrenByNode[node.id] ?? [];
+      }
+      return [];
+    }
+
+    function flatten(node: JobRun, depth: number): TraceItem[] {
+      const result: TraceItem[] = [{ kind: "run", ...node, depth }];
+      const childDepth = depth + 1;
+      const seen = new Set<string>();
+      for (const child of childrenOf(node)) {
+        if (seen.has(child.id)) continue;
+        seen.add(child.id);
+        result.push(...flatten(child, childDepth));
+      }
+      return result;
+    }
+
+    const siblingDepth = focusDepth;
+    // Every node that can be expanded (siblings too, not just focus) must route
+    // through flatten() so its children appear in the flat list when the user
+    // toggles its caret. Ancestors are never expandable, so flattening them is a
+    // no-op — but going through flatten keeps the shape uniform.
+    const ordered: TraceItem[] = [
+      ...traceData.ancestors.flatMap((a) => flatten(a, a.depth ?? 0)),
+      ...extraSiblingsBefore.flatMap((s) => flatten(s, siblingDepth)),
+      ...traceData.siblingsBefore.flatMap((s) =>
+        flatten(s, s.depth ?? siblingDepth),
+      ),
+      ...flatten(traceData.focus, focusDepth),
+      ...traceData.siblingsAfter.flatMap((s) =>
+        flatten(s, s.depth ?? siblingDepth),
+      ),
+      ...extraSiblingsAfter.flatMap((s) => flatten(s, siblingDepth)),
+    ];
+
+    // Dedup runs by id across the ordered list.
+    const seen = new Set<string>();
+    const deduped: TraceItem[] = [];
+    for (const item of ordered) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      deduped.push(item);
+    }
+    return deduped;
+  }, [
+    traceData,
+    childrenByNode,
+    expandedNodes,
+    extraSiblingsBefore,
+    extraSiblingsAfter,
+  ]);
+
+  // Once expansion has loaded an empty first page and there's no cursor for more,
+  // the node is known to have no children — hide its caret.
+  const knownEmptyNodes = useMemo(() => {
+    const empty = new Set<string>();
+    for (const [id, items] of Object.entries(childrenByNode)) {
+      if (items.length === 0 && childrenCursorByNode[id] == null) {
+        empty.add(id);
+      }
+    }
+    return empty;
+  }, [childrenByNode, childrenCursorByNode]);
+
+  // Ancestors render as a linear chain above the focus; they don't get a caret
+  // (their one displayed "child" is the path down to focus).
+  const ancestorIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const a of traceData?.ancestors ?? []) ids.add(a.id);
+    return ids;
+  }, [traceData]);
+
+  const siblingsAfterCursor =
+    extraSiblingsAfterCursor ?? traceData?.siblingsCursor?.after ?? null;
+  const siblingsBeforeCursor =
+    extraSiblingsBeforeCursor ?? traceData?.siblingsCursor?.before ?? null;
+
+  const allowedRunIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (runKey) {
+      ids.add(runKey);
+    }
+    for (const item of traceItems) {
+      if (item.kind === "run") ids.add(item.id);
+    }
+    return ids;
+  }, [runKey, traceItems]);
+
+  useEffect(() => {
+    setLogsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setLogFilterByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setSseProgressByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setOutputItemsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setInputItemsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    setAttemptFailuresByRun((prev) => pruneRunMap(prev, allowedRunIds));
+
+    const nextSeen: Record<string, number> = {};
+    for (const runId of allowedRunIds) {
+      const seenEventId = lastSeenEventIdByRun.current[runId];
+      if (seenEventId) {
+        nextSeen[runId] = seenEventId;
+      }
+    }
+
+    lastSeenEventIdByRun.current = nextSeen;
+  }, [allowedRunIds]);
 
   const logs = logsByRun[runKey] ?? EMPTY_LOGS;
   const logFilter = logFilterByRun[runKey] ?? null;
@@ -231,7 +475,7 @@ export function RunDetailPage() {
     [sortedAttemptFailures],
   );
 
-  const isDeadLetter = run?.status === 5;
+  const isDeadLetter = run?.status === JobStatus.Failed;
 
   useEffect(() => {
     if (isDeadLetter && failureRows.length > 0) {
@@ -251,9 +495,48 @@ export function RunDetailPage() {
       logFilter === null ? logs : logs.filter((l) => l.level >= logFilter),
     [logs, logFilter],
   );
-  const logScrollRef = useStickToBottom(logs.length);
-  const inputScrollRef = useStickToBottom(inputItems.length);
-  const outputScrollRef = useStickToBottom(outputItems.length);
+
+  // All three virtualizers wrap rows to full content; measureElement rounds up
+  // to integer pixels via Math.ceil so sub-pixel drift doesn't jitter
+  // getTotalSize() mid-scroll.
+  const LOG_ROW_HEIGHT = 24;
+  const LIST_ROW_HEIGHT = 24;
+  const measureRow = (el: Element) =>
+    Math.ceil(el.getBoundingClientRect().height);
+
+  // Virtualized log viewer
+  const logScrollContainerRef = useRef<HTMLDivElement>(null);
+  const logVirtualizer = useVirtualizer({
+    count: filteredLogs.length,
+    getScrollElement: () => logScrollContainerRef.current,
+    estimateSize: () => LOG_ROW_HEIGHT,
+    overscan: 20,
+    measureElement: measureRow,
+  });
+
+  // Virtualized input stream
+  const inputScrollContainerRef = useRef<HTMLDivElement>(null);
+  const inputVirtualizer = useVirtualizer({
+    count: inputItems.length,
+    getScrollElement: () => inputScrollContainerRef.current,
+    estimateSize: () => LIST_ROW_HEIGHT,
+    overscan: 20,
+    measureElement: measureRow,
+  });
+
+  // Virtualized output stream
+  const outputScrollContainerRef = useRef<HTMLDivElement>(null);
+  const outputVirtualizer = useVirtualizer({
+    count: outputItems.length,
+    getScrollElement: () => outputScrollContainerRef.current,
+    estimateSize: () => LIST_ROW_HEIGHT,
+    overscan: 20,
+    measureElement: measureRow,
+  });
+
+  useStickToBottom({ scrollElement: logScrollContainerRef.current, virtualizer: logVirtualizer, count: filteredLogs.length });
+  useStickToBottom({ scrollElement: inputScrollContainerRef.current, virtualizer: inputVirtualizer, count: inputItems.length });
+  useStickToBottom({ scrollElement: outputScrollContainerRef.current, virtualizer: outputVirtualizer, count: outputItems.length });
 
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(id!),
@@ -466,7 +749,7 @@ export function RunDetailPage() {
         rafId.current = 0;
       }
     };
-  }, [id, queryClient, runKey, scheduleFlush]);
+  }, [id, queryClient, runKey, scheduleFlush, shouldProcessEvent]);
 
   const inputHeader = useMemo(() => {
     if (inputItems.length === 0) return "";
@@ -479,7 +762,9 @@ export function RunDetailPage() {
   }, [inputItems]);
 
   const sortedStepRuns = useMemo(() => {
-    const items = childRuns?.items;
+    const items = dedupeRuns(
+      (childRunsData?.pages ?? []).flatMap((page) => page.items),
+    );
     if (!items?.length) return [];
     return [...items].sort((a, b) => {
       const createdDelta =
@@ -487,17 +772,227 @@ export function RunDetailPage() {
       if (createdDelta !== 0) return createdDelta;
       return a.id.localeCompare(b.id);
     });
-  }, [childRuns]);
+  }, [childRunsData]);
+
+  // Trace view scroll container
+  const traceScrollRef = useRef<HTMLDivElement>(null);
+
+  // Virtualized triggered runs table
+  const TRIGRUN_ROW_HEIGHT = 40;
+  const triggeredRunsScrollRef = useRef<HTMLDivElement>(null);
+  const triggeredRunsVirtualizer = useVirtualizer({
+    count: sortedStepRuns.length,
+    getScrollElement: () => triggeredRunsScrollRef.current,
+    estimateSize: () => TRIGRUN_ROW_HEIGHT,
+    overscan: 20,
+  });
+  useStickToBottom({
+    scrollElement: triggeredRunsScrollRef.current,
+    virtualizer: triggeredRunsVirtualizer,
+    count: sortedStepRuns.length,
+  });
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
   const progress = sseProgress ?? run?.progress ?? 0;
+  const childTotalCount = childRunsData?.pages[0]?.totalCount ?? 0;
+  const canLoadMoreChildren = !!hasNextChildRunsPage;
+
+  const loadMoreSiblingsAfter = useCallback(async () => {
+    if (
+      !traceData ||
+      siblingsAfterCursor == null ||
+      isLoadingMoreSiblingsAfter
+    )
+      return;
+    if (!traceData.focus.parentRunId) return;
+    setIsLoadingMoreSiblingsAfter(true);
+    try {
+      const page = await api.getRunChildren(traceData.focus.parentRunId, {
+        afterCursor: siblingsAfterCursor,
+        take: TRACE_SIBLING_WINDOW,
+      });
+      setExtraSiblingsAfter((prev) => [...prev, ...page.items]);
+      setExtraSiblingsAfterCursor(page.nextCursor ?? null);
+    } finally {
+      setIsLoadingMoreSiblingsAfter(false);
+    }
+  }, [traceData, siblingsAfterCursor, isLoadingMoreSiblingsAfter]);
+
+  // Scroll preservation on siblings-before prepend is handled inside TraceView
+  // by shifting scrollTop by the prepended rows' height when
+  // extraSiblingsBeforeCount grows.
+  const loadMoreSiblingsBefore = useCallback(async () => {
+    if (
+      !traceData ||
+      siblingsBeforeCursor == null ||
+      isLoadingMoreSiblingsBefore
+    )
+      return;
+    if (!traceData.focus.parentRunId) return;
+    setIsLoadingMoreSiblingsBefore(true);
+    try {
+      const page = await api.getRunChildren(traceData.focus.parentRunId, {
+        beforeCursor: siblingsBeforeCursor,
+        take: TRACE_SIBLING_WINDOW,
+      });
+      // Before-cursor pagination returns rows in DESC order (newest-first among
+      // older siblings). Reverse so the combined list stays chronological.
+      const reversed = [...page.items].reverse();
+      setExtraSiblingsBefore((prev) => [...reversed, ...prev]);
+      setExtraSiblingsBeforeCursor(page.nextCursor ?? null);
+    } finally {
+      setIsLoadingMoreSiblingsBefore(false);
+    }
+  }, [traceData, siblingsBeforeCursor, isLoadingMoreSiblingsBefore]);
+
+  const canLoadMoreSiblingsAfter = siblingsAfterCursor != null;
+  const canLoadMoreSiblingsBefore = siblingsBeforeCursor != null;
+
+  // Ref-based lock for pagination dedup — protects against re-entrant expand/
+  // collapse/expand bursts and concurrent auto-paginations triggered by polling.
+  const inFlightPaginationRef = useRef<Set<string>>(new Set());
+  // Guard: only auto-paginate focus's children once per focus id per mount,
+  // otherwise the 5s trace poll would refire it on every refetch.
+  const focusPaginatedRef = useRef<string | null>(null);
+
+  // Paginate *all* cursor pages for a node into childrenByNode. Runs to
+  // completion; safe to call again later (skips if already loaded or in flight).
+  const paginateAllChildren = useCallback(
+    async (nodeId: string, firstCursor?: string) => {
+      if (inFlightPaginationRef.current.has(nodeId)) return;
+      inFlightPaginationRef.current.add(nodeId);
+      setLoadingNodes((prev) => {
+        const next = new Set(prev);
+        next.add(nodeId);
+        return next;
+      });
+      try {
+        let cursor: string | undefined = firstCursor;
+        // If no firstCursor and we already have the node cached, we're done.
+        if (cursor === undefined) {
+          // Fetch first page.
+          const page = await api.getRunChildren(nodeId, {
+            take: TRACE_CHILDREN_TAKE,
+          });
+          setChildrenByNode((prev) => ({ ...prev, [nodeId]: page.items }));
+          setChildrenCursorByNode((prev) => ({
+            ...prev,
+            [nodeId]: page.nextCursor ?? null,
+          }));
+          cursor = page.nextCursor ?? undefined;
+        }
+        // Continue paginating until cursor exhausted.
+        while (cursor) {
+          const page = await api.getRunChildren(nodeId, {
+            afterCursor: cursor,
+            take: TRACE_CHILDREN_TAKE,
+          });
+          const newItems = page.items;
+          setChildrenByNode((prev) => ({
+            ...prev,
+            [nodeId]: [...(prev[nodeId] ?? []), ...newItems],
+          }));
+          setChildrenCursorByNode((prev) => ({
+            ...prev,
+            [nodeId]: page.nextCursor ?? null,
+          }));
+          cursor = page.nextCursor ?? undefined;
+        }
+      } finally {
+        inFlightPaginationRef.current.delete(nodeId);
+        setLoadingNodes((prev) => {
+          const next = new Set(prev);
+          next.delete(nodeId);
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const expandNode = useCallback(
+    (nodeId: string) => {
+      setExpandedNodes((prev) => {
+        if (prev.has(nodeId)) return prev;
+        const next = new Set(prev);
+        next.add(nodeId);
+        return next;
+      });
+      // Skip fetch if we've already paginated this node fully.
+      if (childrenByNode[nodeId] !== undefined) return;
+      void paginateAllChildren(nodeId);
+    },
+    [childrenByNode, paginateAllChildren],
+  );
+
+  const collapseNode = useCallback((nodeId: string) => {
+    setExpandedNodes((prev) => {
+      if (!prev.has(nodeId)) return prev;
+      const next = new Set(prev);
+      next.delete(nodeId);
+      return next;
+    });
+  }, []);
+
+  const toggleNode = useCallback(
+    (nodeId: string) => {
+      if (expandedNodes.has(nodeId)) {
+        collapseNode(nodeId);
+      } else {
+        expandNode(nodeId);
+      }
+    },
+    [expandedNodes, expandNode, collapseNode],
+  );
+
+  // Focus is always conceptually expanded; traceData.children carries its first
+  // page. If there's a cursor for more, paginate the remainder in the background
+  // so the tree shows every child without requiring user action. Guarded by
+  // focusPaginatedRef so the 5s poll doesn't refire this.
+  useEffect(() => {
+    if (!traceData) return;
+    const focusId = traceData.focus.id;
+    const initialCursor = traceData.childrenCursor;
+    if (!initialCursor) return;
+    if (focusPaginatedRef.current === focusId) return;
+    focusPaginatedRef.current = focusId;
+
+    // Seed childrenByNode[focusId] with the first page from traceData so the
+    // subsequent cursor pages append cleanly. childrenOf() merges traceData's
+    // fresh statuses over this on every render, so polling updates still flow.
+    setChildrenByNode((prev) =>
+      prev[focusId] !== undefined ? prev : { ...prev, [focusId]: [] },
+    );
+    setChildrenCursorByNode((prev) => ({ ...prev, [focusId]: initialCursor }));
+    void paginateAllChildren(focusId, initialCursor);
+  }, [traceData, paginateAllChildren]);
+
+  // Reset per-focus paginate guards whenever the URL changes. Clearing
+  // inFlightPaginationRef guarantees that a paginate left mid-flight during
+  // the previous focus won't block a fresh expand of the same nodeId here.
+  useEffect(() => {
+    focusPaginatedRef.current = null;
+    inFlightPaginationRef.current.clear();
+  }, [id]);
+
+  const { sentinelRef: triggeredRunsSentinelRef } = useInfiniteScroll({
+    scrollContainerRef: triggeredRunsScrollRef,
+    hasMore: canLoadMoreChildren,
+    isLoading: isLoadingMoreChildren,
+    onLoadMore: () => void fetchNextChildRunsPage(),
+  });
 
   if (isError)
     return (
-      <Alert variant="destructive">
-        <CircleAlert />
-        <AlertDescription>Failed to load run</AlertDescription>
-      </Alert>
+      <div className="space-y-6">
+        <h2 className="text-xl font-semibold tracking-tight truncate">
+          Run {id}
+        </h2>
+        <Alert variant="destructive">
+          <CircleAlert />
+          <AlertDescription>Failed to load run</AlertDescription>
+        </Alert>
+      </div>
     );
   if (!run)
     return (
@@ -592,7 +1087,7 @@ export function RunDetailPage() {
         </div>
       </div>
 
-      {run.status === 1 && (
+      {run.status === JobStatus.Running && (
         <div className="flex items-center gap-3">
           <div className="relative flex-1">
             <Progress
@@ -677,9 +1172,9 @@ export function RunDetailPage() {
       </dl>
 
       {run.arguments && (
-        <div className="flex max-h-[26rem]">
-          <div className="flex-1 min-h-0 rounded-md border overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+        <div className="rounded-lg border overflow-hidden">
+          <div className="max-h-[26rem] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Arguments</span>
             </div>
             <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
@@ -689,228 +1184,10 @@ export function RunDetailPage() {
         </div>
       )}
 
-      {failureRows.length > 0 && (
-        <div
-          className={`rounded-md border overflow-hidden ${
-            isDeadLetter ? "border-destructive/20" : ""
-          }`}
-        >
-          <div
-            className={`sticky top-0 z-10 flex items-center h-10 px-2 border-b backdrop-blur-sm ${
-              isDeadLetter
-                ? "border-destructive/15 bg-destructive/[0.03]"
-                : "bg-muted/30"
-            }`}
-          >
-            <span
-              className={`text-sm ${
-                isDeadLetter ? "text-destructive/90" : "text-muted-foreground"
-              }`}
-            >
-              Errors ({failureRows.length})
-            </span>
-          </div>
-          <div className="overflow-x-auto">
-            <Table className="min-w-[40rem] md:min-w-full">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Attempt</TableHead>
-                  <TableHead>Occurred</TableHead>
-                  <TableHead className="hidden md:table-cell">
-                    Exception
-                  </TableHead>
-                  <TableHead className="hidden md:table-cell">
-                    Message
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {failureRows.map(({ failure, key }) => {
-                  const isExpanded = expandedFailureRow === key;
-                  return (
-                    <Fragment key={key}>
-                      <TableRow
-                        className={`cursor-pointer ${
-                          isExpanded ? "bg-muted/20" : ""
-                        }`}
-                        onClick={() =>
-                          setExpandedFailureRow((prev) =>
-                            prev === key ? null : key,
-                          )
-                        }
-                      >
-                        <TableCell className="tabular-nums">
-                          #{failure.attempt}
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {failure.occurredAt
-                            ? formatDate(failure.occurredAt)
-                            : ""}
-                        </TableCell>
-                        <TableCell className="hidden md:table-cell whitespace-normal break-all">
-                          {failure.exceptionType ?? ""}
-                        </TableCell>
-                        <TableCell className="hidden md:table-cell whitespace-normal break-all">
-                          {failure.message ?? ""}
-                        </TableCell>
-                      </TableRow>
-                      {isExpanded && (
-                        <TableRow className="hover:bg-transparent cursor-default">
-                          <TableCell colSpan={4}>
-                            <div className="space-y-2 text-sm">
-                              <div className="md:hidden">
-                                <div>Exception</div>
-                                <div className="whitespace-normal break-all">
-                                  {failure.exceptionType ?? ""}
-                                </div>
-                              </div>
-                              <div className="md:hidden">
-                                <div>Message</div>
-                                <div className="whitespace-normal break-all">
-                                  {failure.message ?? ""}
-                                </div>
-                              </div>
-                              {failure.stackTrace ? (
-                                <pre className="text-[13px] whitespace-pre overflow-x-auto font-mono">
-                                  {failure.stackTrace}
-                                </pre>
-                              ) : (
-                                <div>No stack trace recorded.</div>
-                              )}
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-        </div>
-      )}
-
-      {traceRuns && traceRuns.length > 1 && (
-        <TraceView runs={traceRuns} currentRunId={id!} />
-      )}
-
-      {sortedStepRuns.length > 0 && (
-        <div className="max-h-[32rem] overflow-auto rounded-md border">
-          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
-            <span className="text-sm text-muted-foreground">
-              Triggered runs ({sortedStepRuns.length})
-            </span>
-          </div>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="pl-4">ID</TableHead>
-                <TableHead>Job</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Started</TableHead>
-                <TableHead>Duration</TableHead>
-                <TableHead>Node</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sortedStepRuns.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="pl-4">
-                    <Link
-                      to={`/runs/${r.id}`}
-                      className="text-primary hover:underline truncate max-w-[200px] inline-block"
-                      title={r.id}
-                    >
-                      {r.id}
-                    </Link>
-                  </TableCell>
-                  <TableCell>
-                    <Link
-                      to={`/jobs/${encodeURIComponent(r.jobName)}`}
-                      className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block"
-                      title={r.jobName}
-                    >
-                      {r.jobName}
-                    </Link>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={r.status} />
-                  </TableCell>
-                  <TableCell>
-                    {r.startedAt ? formatDate(r.startedAt) : ""}
-                  </TableCell>
-                  <TableCell>
-                    {formatDuration(r.startedAt, r.completedAt)}
-                  </TableCell>
-                  <TableCell>
-                    {r.nodeName ? (
-                      <Link
-                        to={`/nodes/${encodeURIComponent(r.nodeName)}`}
-                        className="text-sm text-primary hover:underline truncate max-w-[160px] inline-block"
-                        title={r.nodeName}
-                      >
-                        {r.nodeName}
-                      </Link>
-                    ) : (
-                      ""
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-
-      {inputItems.length > 0 && (
-        <div className="flex max-h-[26rem]">
-          <div
-            ref={inputScrollRef}
-            className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto"
-          >
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground font-sans">
-                {inputHeader}
-              </span>
-            </div>
-            <div className="p-2">
-              {inputItems.map((item, i) => (
-                <div key={i} className="py-0.5 break-all">
-                  <span className="text-muted-foreground">{item.param}:</span>{" "}
-                  {JSON.stringify(item.value)}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {outputItems.length > 0 && (
-        <div className="flex max-h-[26rem]">
-          <div
-            ref={outputScrollRef}
-            className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto"
-          >
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground font-sans">
-                Output stream ({outputItems.length} items)
-              </span>
-            </div>
-            <div className="p-2">
-              {outputItems.map((item, i) => (
-                <div key={i} className="py-0.5 break-all">
-                  {JSON.stringify(item)}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {run.result && outputItems.length === 0 && (
-        <div className="flex max-h-[26rem]">
-          <div className="flex-1 min-h-0 rounded-md border overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+        <div className="rounded-lg border overflow-hidden">
+          <div className="max-h-[26rem] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Result</span>
             </div>
             <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
@@ -920,13 +1197,319 @@ export function RunDetailPage() {
         </div>
       )}
 
-      {logs.length > 0 && (
-        <div className="flex max-h-[26rem]">
+      {run.reason && (
+        <div className="rounded-lg border border-destructive/15 overflow-hidden">
+          <div className="max-h-[26rem] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/5 backdrop-blur-sm">
+              <span className="text-sm text-destructive/80">Reason</span>
+            </div>
+            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
+              {run.reason}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {failureRows.length > 0 && (
+        <div className="rounded-lg border border-destructive/15 overflow-hidden">
+          <div className="max-h-[26rem] overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/5 backdrop-blur-sm">
+              <span className="text-sm text-destructive/80">
+                Errors ({failureRows.length})
+              </span>
+            </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Attempt</TableHead>
+                <TableHead>Occurred</TableHead>
+                <TableHead>Exception</TableHead>
+                <TableHead>Message</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {failureRows.map(({ failure, key }) => {
+                const isExpanded = expandedFailureRow === key;
+                return (
+                  <Fragment key={key}>
+                    <TableRow
+                      className={`cursor-pointer ${
+                        isExpanded ? "bg-muted/20" : ""
+                      }`}
+                      onClick={() =>
+                        setExpandedFailureRow((prev) =>
+                          prev === key ? null : key,
+                        )
+                      }
+                    >
+                      <TableCell className="tabular-nums">
+                        #{failure.attempt}
+                      </TableCell>
+                      <TableCell className="tabular-nums">
+                        {failure.occurredAt
+                          ? formatDate(failure.occurredAt)
+                          : ""}
+                      </TableCell>
+                      <TableCell className="whitespace-normal break-all">
+                        {failure.exceptionType ?? ""}
+                      </TableCell>
+                      <TableCell className="whitespace-normal break-all">
+                        {failure.message ?? ""}
+                      </TableCell>
+                    </TableRow>
+                    {isExpanded && (
+                      <TableRow className="hover:bg-transparent cursor-default">
+                        <TableCell colSpan={4} className="max-w-0 w-full">
+                          {failure.stackTrace ? (
+                            <pre className="text-[13px] whitespace-pre overflow-x-auto font-mono">
+                              {failure.stackTrace}
+                            </pre>
+                          ) : (
+                            <div className="text-sm">
+                              No stack trace recorded.
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </TableBody>
+          </Table>
+          </div>
+        </div>
+      )}
+
+      {traceItems.length > 1 && (
+        <div className="rounded-lg border overflow-hidden">
           <div
-            ref={logScrollRef}
-            className="flex-1 min-h-0 rounded-md border font-mono text-[13px] overflow-y-auto"
+            ref={traceScrollRef}
+            className="max-h-[32rem] overflow-auto"
+            // scroll-padding-top keeps the sticky header/pill out of the
+            // "center" area scrollIntoView targets, so auto-centering lands
+            // the focus row below them rather than behind them.
+            style={{ scrollPaddingTop: "2.75rem" }}
           >
-            <div className="sticky top-0 z-10 flex items-center gap-3 h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+          <TraceView
+            items={traceItems}
+            currentRunId={id!}
+            ancestorIds={ancestorIds}
+            expandedNodes={expandedNodes}
+            knownEmptyNodes={knownEmptyNodes}
+            loadingNodes={loadingNodes}
+            onToggle={toggleNode}
+            scrollContainerRef={traceScrollRef}
+            header={<span>Trace</span>}
+            loadEarlierSiblings={
+              canLoadMoreSiblingsBefore
+                ? {
+                    onClick: () => void loadMoreSiblingsBefore(),
+                    isLoading: isLoadingMoreSiblingsBefore,
+                  }
+                : undefined
+            }
+            loadMoreLaterSiblings={
+              canLoadMoreSiblingsAfter
+                ? {
+                    onClick: () => void loadMoreSiblingsAfter(),
+                    isLoading: isLoadingMoreSiblingsAfter,
+                  }
+                : undefined
+            }
+            extraSiblingsBeforeCount={extraSiblingsBefore.length}
+          />
+          </div>
+        </div>
+      )}
+
+      {sortedStepRuns.length > 0 && (
+        <div className="rounded-lg border overflow-hidden">
+        <div
+          ref={triggeredRunsScrollRef}
+          className="max-h-[32rem] overflow-auto"
+          style={{
+            // Explicit fractions on every column: auto would measure each row
+            // independently (StatusBadge width vs "STATUS" header text) and
+            // misalign the grid between header and virtualized rows.
+            ["--trigrun-cols" as string]:
+              "minmax(0,2fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.25fr)",
+          }}
+        >
+        <div className="min-w-[768px]">
+          <div className="sticky top-0 z-10 bg-muted/30 backdrop-blur-sm border-b">
+            <div className="flex items-center py-2.5 px-2">
+              <span className="text-sm text-muted-foreground">
+                Triggered runs ({sortedStepRuns.length} /{" "}
+                {childTotalCount || sortedStepRuns.length})
+              </span>
+            </div>
+            <div
+              className="grid items-center border-t border-border/50 text-xs font-medium uppercase tracking-wider text-muted-foreground"
+              style={{ gridTemplateColumns: "var(--trigrun-cols)" }}
+            >
+              <div className="px-2 py-2.5 pl-4">ID</div>
+              <div className="px-2 py-2.5">Job</div>
+              <div className="px-2 py-2.5">Status</div>
+              <div className="px-2 py-2.5">Started</div>
+              <div className="px-2 py-2.5">Duration</div>
+              <div className="px-2 py-2.5">Node</div>
+            </div>
+          </div>
+          <div
+            className="relative"
+            style={{ height: `${triggeredRunsVirtualizer.getTotalSize()}px` }}
+          >
+            {triggeredRunsVirtualizer.getVirtualItems().map((virtualItem) => {
+              const r = sortedStepRuns[virtualItem.index];
+              return (
+                <div
+                  key={r.id}
+                  data-index={virtualItem.index}
+                  className="absolute top-0 left-0 w-full grid items-center border-b border-border/50 text-sm hover:bg-muted/50 transition-colors"
+                  style={{
+                    gridTemplateColumns: "var(--trigrun-cols)",
+                    height: `${TRIGRUN_ROW_HEIGHT}px`,
+                    transform: `translateY(${virtualItem.start}px)`,
+                  }}
+                >
+                  <div className="px-2 pl-4 flex items-center min-w-0">
+                    <Link
+                      to={`/runs/${r.id}`}
+                      className="text-primary hover:underline truncate block"
+                      title={r.id}
+                    >
+                      {r.id}
+                    </Link>
+                  </div>
+                  <div className="px-2 flex items-center min-w-0">
+                    <Link
+                      to={`/jobs/${encodeURIComponent(r.jobName)}`}
+                      className="text-primary hover:underline truncate block"
+                      title={r.jobName}
+                    >
+                      {r.jobName}
+                    </Link>
+                  </div>
+                  <div className="px-2 flex items-center min-w-0">
+                    <StatusBadge status={r.status} />
+                  </div>
+                  <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
+                    {r.startedAt ? formatDate(r.startedAt) : ""}
+                  </div>
+                  <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
+                    {formatDuration(r.startedAt, r.completedAt)}
+                  </div>
+                  <div className="px-2 flex items-center min-w-0">
+                    {r.nodeName ? (
+                      <Link
+                        to={`/nodes/${encodeURIComponent(r.nodeName)}`}
+                        className="text-primary hover:underline truncate block"
+                        title={r.nodeName}
+                      >
+                        {r.nodeName}
+                      </Link>
+                    ) : (
+                      ""
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {canLoadMoreChildren && (
+            <div
+              ref={triggeredRunsSentinelRef}
+              className="h-10 flex items-center justify-center text-xs text-muted-foreground"
+            >
+              {isLoadingMoreChildren ? "Loading…" : ""}
+            </div>
+          )}
+        </div>
+        </div>
+        </div>
+      )}
+
+      {inputItems.length > 0 && (
+        <div className="rounded-lg border overflow-hidden">
+          <div
+            ref={inputScrollContainerRef}
+            className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
+          >
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground font-sans">
+                {inputHeader}
+              </span>
+            </div>
+            <div
+              className="relative px-2"
+              style={{ height: `${inputVirtualizer.getTotalSize()}px` }}
+            >
+              {inputVirtualizer.getVirtualItems().map((virtualItem) => {
+                const item = inputItems[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.index}
+                    ref={inputVirtualizer.measureElement}
+                    data-index={virtualItem.index}
+                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
+                    style={{
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <span className="text-muted-foreground">{item.param}:</span>{" "}
+                    {JSON.stringify(item.value)}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {outputItems.length > 0 && (
+        <div className="rounded-lg border overflow-hidden">
+          <div
+            ref={outputScrollContainerRef}
+            className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
+          >
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground font-sans">
+                Output stream ({outputItems.length} items)
+              </span>
+            </div>
+            <div
+              className="relative px-2"
+              style={{ height: `${outputVirtualizer.getTotalSize()}px` }}
+            >
+              {outputVirtualizer.getVirtualItems().map((virtualItem) => {
+                const item = outputItems[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.index}
+                    ref={outputVirtualizer.measureElement}
+                    data-index={virtualItem.index}
+                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
+                    style={{
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    {JSON.stringify(item)}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {logs.length > 0 && (
+        <div className="rounded-lg border overflow-hidden">
+          <div
+            ref={logScrollContainerRef}
+            className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
+          >
+            <div className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Logs (
                 {logFilter !== null
@@ -954,18 +1537,32 @@ export function RunDetailPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="p-2">
-              {filteredLogs.map((log, i) => (
-                <div key={i} className="py-0.5">
-                  <span className="text-muted-foreground tabular-nums">
-                    {formatLogTime(log.timestamp)}
-                  </span>{" "}
-                  <span className={logLevelColor(log.level)}>
-                    [{LogLevelLabels[log.level] ?? "?"}]
-                  </span>{" "}
-                  <span>{log.message}</span>
-                </div>
-              ))}
+            <div
+              className="relative px-2"
+              style={{ height: `${logVirtualizer.getTotalSize()}px` }}
+            >
+              {logVirtualizer.getVirtualItems().map((virtualItem) => {
+                const log = filteredLogs[virtualItem.index];
+                return (
+                  <div
+                    key={virtualItem.index}
+                    ref={logVirtualizer.measureElement}
+                    data-index={virtualItem.index}
+                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-words"
+                    style={{
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <span className="text-muted-foreground tabular-nums">
+                      {formatLogTime(log.timestamp)}
+                    </span>{" "}
+                    <span className={logLevelColor(log.level)}>
+                      [{LogLevelLabels[log.level] ?? "?"}]
+                    </span>{" "}
+                    <span>{log.message}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

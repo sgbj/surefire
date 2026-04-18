@@ -4,8 +4,8 @@ namespace Surefire.Tests.InMemory;
 
 public sealed class InMemoryFixture : IStoreTestFixture
 {
-    public Task<IJobStore> CreateStoreAsync() =>
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync() =>
         Task.FromResult<IJobStore>(new InMemoryJobStore(TimeProvider.System));
 
-    public Task CleanAsync() => Task.CompletedTask;
+    Task IStoreTestFixture.CleanAsync() => Task.CompletedTask;
 }

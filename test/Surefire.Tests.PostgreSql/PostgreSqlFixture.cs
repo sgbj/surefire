@@ -11,33 +11,41 @@ public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
         .WithImage("postgres:17-alpine")
         .Build();
 
-    private PostgreSqlOptions? _options;
+    private string _connectionString = null!;
+
+    private NpgsqlDataSource? _dataSource;
     private PostgreSqlJobStore? _store;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
-        _options = new(_container.GetConnectionString());
-        _store = new(_options, TimeProvider.System);
+        var csb = new NpgsqlConnectionStringBuilder(_container.GetConnectionString())
+        {
+            MaxPoolSize = 50
+        };
+        _connectionString = csb.ConnectionString;
+
+        _dataSource = NpgsqlDataSource.Create(_connectionString);
+        _store = new(_dataSource, null, TimeProvider.System);
         await _store.MigrateAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        if (_options is { })
+        if (_dataSource is { })
         {
-            await _options.DisposeAsync();
+            await _dataSource.DisposeAsync();
         }
 
         await _container.DisposeAsync();
     }
 
-    public Task<IJobStore> CreateStoreAsync()
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync()
         => Task.FromResult<IJobStore>(_store!);
 
-    public async Task CleanAsync()
+    async Task IStoreTestFixture.CleanAsync()
     {
-        await using var conn = new NpgsqlConnection(_container.GetConnectionString());
+        await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync();
         await StoreFixtureCleanup.ExecuteDeleteAllAsync(conn, StoreFixtureCleanup.DefaultDeleteAllScript);
     }

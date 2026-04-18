@@ -199,7 +199,7 @@ export function DataTable<TData, TValue>({
       )}
       <div className="rounded-lg border overflow-hidden">
         {header && (
-          <div className="sticky top-0 z-10 flex items-center h-10 px-2 border-b bg-muted/30 backdrop-blur-sm">
+          <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
             {header}
           </div>
         )}
@@ -273,6 +273,7 @@ export function DataTable<TData, TValue>({
                         : "cursor-pointer"
                     }
                     aria-disabled={!table.getCanPreviousPage()}
+                    tabIndex={!table.getCanPreviousPage() ? -1 : undefined}
                   />
                 </PaginationItem>
                 {getPageNumbers(pagination.pageIndex + 1, currentPageCount).map(
@@ -302,6 +303,7 @@ export function DataTable<TData, TValue>({
                         : "cursor-pointer"
                     }
                     aria-disabled={!table.getCanNextPage()}
+                    tabIndex={!table.getCanNextPage() ? -1 : undefined}
                   />
                 </PaginationItem>
               </PaginationContent>

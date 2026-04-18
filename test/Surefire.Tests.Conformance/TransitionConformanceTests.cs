@@ -7,21 +7,23 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionRun_Success_WhenExpectedMatches()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        run.Status = JobStatus.Running;
-        run.NodeName = "node-1";
-        run.StartedAt = DateTimeOffset.UtcNow;
-        run.LastHeartbeatAt = DateTimeOffset.UtcNow;
-        var result = await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending));
+        run = run with
+        {
+            Status = JobStatus.Running, NodeName = "node-1", StartedAt = DateTimeOffset.UtcNow,
+            LastHeartbeatAt = DateTimeOffset.UtcNow
+        };
+        var result = await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending), ct);
 
-        Assert.True(result);
+        Assert.True(result.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
         Assert.Equal(JobStatus.Running, stored.Status);
     }
@@ -29,89 +31,64 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionRun_Fails_WhenExpectedMismatches()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Running;
-        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Pending));
+        claimed = claimed with { Status = JobStatus.Running };
+        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Pending), ct);
 
-        Assert.False(result);
+        Assert.False(result.Transitioned);
     }
 
     [Fact]
     public async Task TryTransitionRun_Running_To_Completed()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
-        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
+        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
 
-        Assert.True(result);
+        Assert.True(result.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Completed, stored.Status);
+        Assert.Equal(JobStatus.Succeeded, stored.Status);
     }
 
     [Fact]
-    public async Task TryTransitionRun_Running_To_Retrying()
+    public async Task TryTransitionRun_Running_To_Pending_Retry()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Retrying;
-        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
+        claimed = claimed with { Status = JobStatus.Pending, NotBefore = DateTimeOffset.UtcNow };
+        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
 
-        Assert.True(result);
+        Assert.True(result.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
-        Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Retrying, stored.Status);
-    }
-
-    [Fact]
-    public async Task TryTransitionRun_Retrying_To_Pending()
-    {
-        var job = CreateJob();
-        await Store.UpsertJobAsync(job);
-
-        var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
-
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
-        Assert.NotNull(claimed);
-
-        claimed.Status = JobStatus.Retrying;
-        var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
-        Assert.True(ok);
-
-        claimed.Status = JobStatus.Pending;
-        claimed.NotBefore = DateTimeOffset.UtcNow;
-        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Retrying));
-
-        Assert.True(result);
-
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
         Assert.Equal(JobStatus.Pending, stored.Status);
     }
@@ -119,36 +96,37 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionRun_TerminalToAnything_Fails()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
-        var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
-        Assert.True(ok);
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
+        var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
+        Assert.True(ok.Transitioned);
 
-        claimed.Status = JobStatus.Running;
-        var result = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Completed));
+        claimed = claimed with { Status = JobStatus.Running };
+        var result = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Succeeded), ct);
 
-        Assert.False(result);
+        Assert.False(result.Transitioned);
     }
 
     [Fact]
     public async Task TryTransitionRun_AttemptFencing()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
         Assert.Equal(1, claimed.Attempt);
 
@@ -157,28 +135,29 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         {
             Id = claimed.Id,
             JobName = claimed.JobName,
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             Attempt = 0, // stale attempt
             CreatedAt = claimed.CreatedAt,
             NotBefore = claimed.NotBefore,
             CompletedAt = DateTimeOffset.UtcNow
         };
 
-        var result = await Store.TryTransitionRunAsync(Transition(stale, JobStatus.Running));
+        var result = await Store.TryTransitionRunAsync(Transition(stale, JobStatus.Running), ct);
 
-        Assert.False(result);
+        Assert.False(result.Transitioned);
     }
 
     [Fact]
     public async Task TryTransitionRun_PreservesTimestamps_WhenPayloadOmitsThem()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
         Assert.NotNull(claimed.StartedAt);
 
@@ -188,43 +167,43 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         {
             Id = claimed.Id,
             JobName = claimed.JobName,
-            Status = JobStatus.Retrying,
+            Status = JobStatus.Pending,
             Attempt = claimed.Attempt,
             CreatedAt = claimed.CreatedAt,
             NotBefore = DateTimeOffset.UtcNow.AddSeconds(1),
             Progress = claimed.Progress,
-            Error = claimed.Error,
+            Reason = claimed.Reason,
             Result = claimed.Result,
             NodeName = claimed.NodeName
         };
 
-        var ok = await Store.TryTransitionRunAsync(Transition(update, JobStatus.Running));
+        var ok = await Store.TryTransitionRunAsync(Transition(update, JobStatus.Running), ct);
 
-        Assert.True(ok);
+        Assert.True(ok.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Retrying, stored.Status);
+        Assert.Equal(JobStatus.Pending, stored.Status);
         Assert.Equal(expectedStartedAt, stored.StartedAt);
     }
 
     [Fact]
     public async Task TryTransitionStatus_InvalidTransition_IsRejected()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        run.Status = JobStatus.Completed;
-        run.CompletedAt = DateTimeOffset.UtcNow;
+        run = run with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
 
-        var ok = await Store.TryTransitionRunAsync(InvalidTransition(run, JobStatus.Pending));
+        var ok = await Store.TryTransitionRunAsync(InvalidTransition(run, JobStatus.Pending), ct);
 
-        Assert.False(ok);
+        Assert.False(ok.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
         Assert.Equal(JobStatus.Pending, stored.Status);
         Assert.Null(stored.CompletedAt);
@@ -233,23 +212,23 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionStatus_CompletedWithoutCompletedAt_IsRejected()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Completed;
-        claimed.CompletedAt = null;
+        claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = null };
 
-        var ok = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Running));
+        var ok = await Store.TryTransitionRunAsync(InvalidTransition(claimed, JobStatus.Running), ct);
 
-        Assert.False(ok);
+        Assert.False(ok.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
         Assert.Equal(JobStatus.Running, stored.Status);
     }
@@ -257,23 +236,24 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionStatus_RunningWithoutHeartbeat_IsRejected()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        run.Status = JobStatus.Running;
-        run.Attempt = 0;
-        run.StartedAt = DateTimeOffset.UtcNow;
-        run.LastHeartbeatAt = null;
-        run.NodeName = "node-1";
+        run = run with
+        {
+            Status = JobStatus.Running, Attempt = 0, StartedAt = DateTimeOffset.UtcNow, LastHeartbeatAt = null,
+            NodeName = "node-1"
+        };
 
-        var ok = await Store.TryTransitionRunAsync(InvalidTransition(run, JobStatus.Pending));
+        var ok = await Store.TryTransitionRunAsync(InvalidTransition(run, JobStatus.Pending), ct);
 
-        Assert.False(ok);
+        Assert.False(ok.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
         Assert.Equal(JobStatus.Pending, stored.Status);
     }
@@ -281,16 +261,17 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionRun_Concurrent_OnlyOneWins()
     {
+        var ct = TestContext.Current.CancellationToken;
         for (var trial = 0; trial < 10; trial++)
         {
             var jobName = "ConcurrentCas_" + Guid.CreateVersion7().ToString("N");
             var job = CreateJob(jobName);
-            await Store.UpsertJobAsync(job);
+            await Store.UpsertJobAsync(job, ct);
 
             var run = CreateRun(jobName);
-            await Store.CreateRunsAsync([run]);
+            await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-            var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"]);
+            var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
             Assert.NotNull(claimed);
 
             var results = new ConcurrentBag<bool>();
@@ -303,7 +284,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
                 {
                     Id = claimed.Id,
                     JobName = claimed.JobName,
-                    Status = i < 5 ? JobStatus.Completed : JobStatus.Cancelled,
+                    Status = i < 5 ? JobStatus.Succeeded : JobStatus.Cancelled,
                     Attempt = claimed.Attempt,
                     CreatedAt = claimed.CreatedAt,
                     NotBefore = claimed.NotBefore,
@@ -312,7 +293,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
                 };
 
                 var ok = await Store.TryTransitionRunAsync(Transition(attempt, JobStatus.Running));
-                results.Add(ok);
+                results.Add(ok.Transitioned);
             }));
 
             await Task.WhenAll(tasks);
@@ -324,23 +305,25 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionRun_Running_To_Cancelled()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.Cancelled;
-        claimed.CancelledAt = DateTimeOffset.UtcNow;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
-        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
+        claimed = claimed with
+        {
+            Status = JobStatus.Cancelled, CancelledAt = DateTimeOffset.UtcNow, CompletedAt = DateTimeOffset.UtcNow
+        };
+        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
 
-        Assert.True(result);
+        Assert.True(result.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
         Assert.Equal(JobStatus.Cancelled, stored.Status);
     }
@@ -348,40 +331,42 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     [Fact]
     public async Task TryTransitionRun_Running_To_DeadLetter()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
         Assert.NotNull(claimed);
 
-        claimed.Status = JobStatus.DeadLetter;
-        claimed.CompletedAt = DateTimeOffset.UtcNow;
-        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running));
+        claimed = claimed with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow };
+        var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
 
-        Assert.True(result);
+        Assert.True(result.Transitioned);
 
-        var stored = await Store.GetRunAsync(run.Id);
+        var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.DeadLetter, stored.Status);
+        Assert.Equal(JobStatus.Failed, stored.Status);
     }
 
     [Fact]
     public async Task TryTransitionRun_Pending_To_Cancelled()
     {
+        var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(job.Name);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        run.Status = JobStatus.Cancelled;
-        run.CancelledAt = DateTimeOffset.UtcNow;
-        run.CompletedAt = DateTimeOffset.UtcNow;
-        var result = await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending));
+        run = run with
+        {
+            Status = JobStatus.Cancelled, CancelledAt = DateTimeOffset.UtcNow, CompletedAt = DateTimeOffset.UtcNow
+        };
+        var result = await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending), ct);
 
-        Assert.True(result);
+        Assert.True(result.Transitioned);
     }
 }

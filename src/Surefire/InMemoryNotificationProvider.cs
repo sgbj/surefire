@@ -1,12 +1,9 @@
-using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace Surefire;
 
-// WARNING: Do NOT add ILogger<T> as a dependency here.
-// This type is a dependency of SurefireLoggerProvider (an ILoggerProvider), while
-// ILogger<T> depends on LoggerFactory, which resolves all ILoggerProviders at startup.
-// Injecting ILogger<T> here would create a circular dependency.
-internal sealed class InMemoryNotificationProvider : INotificationProvider
+internal sealed partial class InMemoryNotificationProvider(
+    ILogger<InMemoryNotificationProvider> logger) : INotificationProvider
 {
     private readonly Lock _lock = new();
     private readonly Dictionary<string, Dictionary<Guid, Func<string?, Task>>> _subscriptions = new();
@@ -29,12 +26,13 @@ internal sealed class InMemoryNotificationProvider : INotificationProvider
             handlers = [.. subscribers.Values];
         }
 
-        foreach (var handler in handlers)
+        if (handlers.Length == 0)
         {
-            _ = InvokeHandlerAsync(handler, message, channel);
+            return Task.CompletedTask;
         }
 
-        return Task.CompletedTask;
+        var tasks = handlers.Select(handler => InvokeHandlerAsync(handler, message, channel));
+        return Task.WhenAll(tasks);
     }
 
     public Task<IAsyncDisposable> SubscribeAsync(string channel, Func<string?, Task> handler,
@@ -58,7 +56,7 @@ internal sealed class InMemoryNotificationProvider : INotificationProvider
         return Task.FromResult(disposable);
     }
 
-    private static async Task InvokeHandlerAsync(Func<string?, Task> handler, string? message, string channel)
+    private async Task InvokeHandlerAsync(Func<string?, Task> handler, string? message, string channel)
     {
         try
         {
@@ -66,7 +64,7 @@ internal sealed class InMemoryNotificationProvider : INotificationProvider
         }
         catch (Exception ex)
         {
-            Trace.TraceWarning("Notification handler failed on channel {0}: {1}", channel, ex.Message);
+            Log.NotificationHandlerFailed(logger, ex, channel);
         }
     }
 
@@ -83,6 +81,13 @@ internal sealed class InMemoryNotificationProvider : INotificationProvider
                 }
             }
         }
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(EventId = 1701, Level = LogLevel.Warning,
+            Message = "Notification handler failed on channel {Channel}.")]
+        public static partial void NotificationHandlerFailed(ILogger logger, Exception exception, string channel);
     }
 }
 

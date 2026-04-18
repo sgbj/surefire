@@ -2,7 +2,7 @@ using Surefire.Tests.Conformance;
 
 namespace Surefire.Tests.PostgreSql;
 
-[CollectionDefinition("PostgreSql")]
+[CollectionDefinition("PostgreSql", DisableParallelization = true)]
 public class PostgreSqlCollection : ICollectionFixture<PostgreSqlFixture>;
 
 [Collection("PostgreSql")]
@@ -72,3 +72,7 @@ public sealed class PostgreSqlQueueStatsParityTests(PostgreSqlFixture fixture)
 [Collection("PostgreSql")]
 public sealed class PostgreSqlRuntimeReliabilityTests(PostgreSqlFixture fixture)
     : FixtureBackedRuntimeReliabilityConformanceTests<PostgreSqlFixture>(fixture);
+
+[Collection("PostgreSql")]
+public sealed class PostgreSqlTraceTests(PostgreSqlFixture fixture)
+    : FixtureBackedTraceConformanceTests<PostgreSqlFixture>(fixture);

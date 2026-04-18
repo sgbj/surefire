@@ -1,4 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Description>SQLite storage provider for Surefire.</Description>
+    </PropertyGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="Surefire.Tests.Sqlite"/>
     </ItemGroup>

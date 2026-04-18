@@ -16,7 +16,7 @@ dotnet add package Surefire.Redis
 dotnet add package Surefire.Sqlite
 ```
 
-The core package includes an in-memory store that works out of the box for development.
+The core package includes an in-memory store that works out of the box. It runs in a single process and loses its state when the process stops.
 
 ## Quick start
 

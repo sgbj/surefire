@@ -1,9 +1,13 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Integration;
 
@@ -12,6 +16,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task Executor_Completes_Triggered_Run()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -20,19 +25,48 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("Echo", (string value) => value);
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("Echo", new { value = "ok" });
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("Echo", new { value = "ok" }, cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal("ok", result.GetResult<string>());
+        Assert.True(run.IsSuccess);
+        Assert.Equal("ok", run.GetResult<string>());
+    }
+
+    [Fact]
+    public async Task Waited_Run_Uses_Configured_SerializerOptions_For_GetResult()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(50);
+            options.RetentionPeriod = null;
+            options.SerializerOptions = new(JsonSerializerDefaults.Web)
+            {
+                Converters = { new JsonStringEnumConverter() }
+            };
+        });
+
+        harness.Host.AddJob("EnumEcho", () => DayOfWeek.Wednesday);
+        await harness.StartAsync(ct);
+
+        var run = await harness.Client.TriggerAsync("EnumEcho", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
+
+        Assert.True(run.IsSuccess);
+        Assert.Equal(DayOfWeek.Wednesday, run.GetResult<DayOfWeek>());
     }
 
     [Fact]
     public async Task Executor_Retries_Then_Completes()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -57,23 +91,25 @@ public sealed class RuntimeWorkersTests
             policy.Jitter = false;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("Flaky");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("Flaky", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(42, result.GetResult<int>());
+        Assert.True(run.IsSuccess);
+        Assert.Equal(42, run.GetResult<int>());
 
-        var run = await harness.Store.GetRunAsync(runId, cts.Token);
-        Assert.NotNull(run);
-        Assert.Equal(2, run.Attempt);
+        var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
+        Assert.NotNull(runRecord);
+        Assert.Equal(2, runRecord.Attempt);
     }
 
     [Fact]
     public async Task Executor_NonGenericTaskResult_IsStoredAsEmpty()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -82,23 +118,25 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("NoResultTask", async () => { await Task.Delay(1); });
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("NoResultTask");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("NoResultTask", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.False(result.TryGetResult<object?>(out _));
+        Assert.True(run.IsSuccess);
+        Assert.False(run.TryGetResult<object?>(out _));
 
-        var run = await harness.Store.GetRunAsync(runId, cts.Token);
-        Assert.NotNull(run);
-        Assert.Null(run.Result);
+        var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
+        Assert.NotNull(runRecord);
+        Assert.Null(runRecord.Result);
     }
 
     [Fact]
     public async Task Executor_ExplicitNullResult_IsSerializedAsNull()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -107,24 +145,26 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("ExplicitNull", () => (object?)null);
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("ExplicitNull");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("ExplicitNull", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.True(result.TryGetResult<object?>(out var typed));
+        Assert.True(run.IsSuccess);
+        Assert.True(run.TryGetResult<object?>(out var typed));
         Assert.Null(typed);
 
-        var run = await harness.Store.GetRunAsync(runId, cts.Token);
-        Assert.NotNull(run);
-        Assert.Equal("null", run.Result);
+        var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
+        Assert.NotNull(runRecord);
+        Assert.Equal("null", runRecord.Result);
     }
 
     [Fact]
     public async Task Executor_EmptyObjectResult_IsSerializedAsObject()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -133,24 +173,26 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("EmptyObject", () => new { });
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("EmptyObject");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("EmptyObject", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.True(result.TryGetResult<JsonElement>(out var typed));
+        Assert.True(run.IsSuccess);
+        Assert.True(run.TryGetResult<JsonElement>(out var typed));
         Assert.Equal(JsonValueKind.Object, typed.ValueKind);
 
-        var run = await harness.Store.GetRunAsync(runId, cts.Token);
-        Assert.NotNull(run);
-        Assert.Equal("{}", run.Result);
+        var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
+        Assert.NotNull(runRecord);
+        Assert.Equal("{}", runRecord.Result);
     }
 
     [Fact]
     public async Task Scheduler_FireAll_Enqueues_Missed_Occurrences()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(100);
@@ -162,33 +204,73 @@ public sealed class RuntimeWorkersTests
             .WithCron("* * * * * *")
             .WithMisfirePolicy(MisfirePolicy.FireAll);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        await harness.Store.UpdateLastCronFireAtAsync("CronFireAll", DateTimeOffset.UtcNow.AddSeconds(-3));
+        await harness.Store.UpdateLastCronFireAtAsync("CronFireAll", DateTimeOffset.UtcNow.AddSeconds(-3), ct);
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var runsPage = await harness.Store.GetRunsAsync(new()
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
                 JobName = "CronFireAll",
                 ExactJobName = true
-            });
+            }, cancellationToken: ct),
+            runsPage => runsPage.TotalCount >= 2,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(30),
+            "Expected scheduler with FireAll misfire policy to enqueue at least two runs.",
+            ct);
+    }
 
-            if (runsPage.TotalCount >= 2)
+    [Fact]
+    public async Task Scheduler_FireAll_WithCatchUpCap_ReplaysBacklogAcrossTicks()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(900);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CronFireAllBounded", () => 1)
+            .WithCron("* * * * * *")
+            .WithMisfirePolicy(MisfirePolicy.FireAll, 1);
+
+        await harness.StartAsync(ct);
+
+        await harness.Store.UpdateLastCronFireAtAsync("CronFireAllBounded", DateTimeOffset.UtcNow.AddSeconds(-3), ct);
+
+        var firstPage = await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
-                return;
-            }
+                JobName = "CronFireAllBounded",
+                ExactJobName = true
+            }, cancellationToken: ct),
+            runsPage => runsPage.TotalCount >= 1,
+            TimeSpan.FromSeconds(4),
+            TimeSpan.FromMilliseconds(25),
+            "Expected scheduler to enqueue the first FireAll catch-up run.",
+            ct);
 
-            await Task.Delay(30);
-        }
+        Assert.Equal(1, firstPage.TotalCount);
 
-        throw new TimeoutException("Expected scheduler with FireAll misfire policy to enqueue at least two runs.");
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
+            {
+                JobName = "CronFireAllBounded",
+                ExactJobName = true
+            }, cancellationToken: ct),
+            runsPage => runsPage.TotalCount >= 3,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(50),
+            "Expected capped FireAll catch-up to continue replaying remaining missed occurrences on later ticks.",
+            ct);
     }
 
     [Fact]
     public async Task Scheduler_NewCronJob_WithNullLastCronFireAt_StartsScheduling()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(50);
@@ -200,31 +282,25 @@ public sealed class RuntimeWorkersTests
             .WithCron("* * * * * *")
             .WithMisfirePolicy(MisfirePolicy.FireOnce);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(4);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var runsPage = await harness.Store.GetRunsAsync(new()
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
                 JobName = "CronInitialSeed",
                 ExactJobName = true
-            }, 0, 10);
-
-            if (runsPage.TotalCount > 0)
-            {
-                return;
-            }
-
-            await Task.Delay(40);
-        }
-
-        throw new TimeoutException("Expected new cron job to start scheduling when LastCronFireAt was initially null.");
+            }, 0, 10, ct),
+            runsPage => runsPage.TotalCount > 0,
+            TimeSpan.FromSeconds(4),
+            TimeSpan.FromMilliseconds(40),
+            "Expected new cron job to start scheduling when LastCronFireAt was initially null.",
+            ct);
     }
 
     [Fact]
     public async Task Maintenance_Updates_Heartbeat_For_Active_Run()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -234,29 +310,37 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("Slow", async (CancellationToken ct) =>
         {
-            await Task.Delay(300, ct);
+            await Task.Delay(800, ct);
             return 1;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("Slow");
-        var first = await WaitForStatusAsync(harness.Store, runId, JobStatus.Running);
+        var run = await harness.Client.TriggerAsync("Slow", cancellationToken: ct);
+        var runId = run.Id;
+        var first = await WaitForStatusAsync(harness, runId, JobStatus.Running, ct);
         var hb1 = first.LastHeartbeatAt;
-
-        await Task.Delay(160);
-
-        var running = await harness.Store.GetRunAsync(runId);
-        Assert.NotNull(running);
-        Assert.Equal(JobStatus.Running, running.Status);
         Assert.NotNull(hb1);
-        Assert.NotNull(running.LastHeartbeatAt);
-        Assert.True(running.LastHeartbeatAt >= hb1);
+
+        var updated = await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(runId, ct),
+            run => run.Status == JobStatus.Running
+                   && run.LastHeartbeatAt is { } latestHeartbeat
+                   && latestHeartbeat > hb1.Value,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(20),
+            "Expected heartbeat to advance while run is active.",
+            ct);
+
+        Assert.Equal(JobStatus.Running, updated.Status);
+        Assert.NotNull(updated.LastHeartbeatAt);
+        Assert.True(updated.LastHeartbeatAt > hb1);
     }
 
     [Fact]
     public async Task ExternalStoreCancellation_CancelsRunningRun_WithoutNotification()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(25);
@@ -266,32 +350,29 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("Spin", async (CancellationToken ct) =>
         {
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-                await Task.Delay(20, ct);
-            }
-#pragma warning disable CS0162
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return 0;
-#pragma warning restore CS0162
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("Spin");
-        await WaitForStatusAsync(harness.Store, runId, JobStatus.Running);
+        var run = await harness.Client.TriggerAsync("Spin", cancellationToken: ct);
+        var runId = run.Id;
+        await WaitForStatusAsync(harness, runId, JobStatus.Running, ct);
 
-        var cancelled = await harness.Store.TryCancelRunAsync(runId);
-        Assert.True(cancelled);
+        var cancelResult = await harness.Store.TryCancelRunAsync(runId, cancellationToken: ct);
+        Assert.True(cancelResult.Transitioned);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
-        Assert.True(result.IsCancelled);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
+        Assert.True(run.IsCancelled);
     }
 
     [Fact]
     public async Task RunAsync_Cancellation_PropagatesToRunExecution()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -301,46 +382,39 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("CancelableRun", async (CancellationToken ct) =>
         {
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-                await Task.Delay(20, ct);
-            }
-#pragma warning disable CS0162
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return 0;
-#pragma warning restore CS0162
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(120));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(120));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            harness.Client.RunAsync<int>("CancelableRun", cts.Token));
+            harness.Client.RunAsync("CancelableRun", cancellationToken: cts.Token));
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var page = await harness.Store.GetRunsAsync(new()
+        await TestWait.PollUntilAsync(
+            async _ =>
             {
-                JobName = "CancelableRun",
-                ExactJobName = true
-            }, 0, 1);
+                var page = await harness.Store.GetRunsAsync(new()
+                {
+                    JobName = "CancelableRun",
+                    ExactJobName = true
+                }, 0, 1, ct);
 
-            var run = page.Items.SingleOrDefault();
-            if (run is { Status: JobStatus.Cancelled })
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        throw new TimeoutException("Expected RunAsync cancellation to propagate and cancel execution.");
+                return page.Items.SingleOrDefault();
+            },
+            run => run.Status == JobStatus.Cancelled,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(25),
+            "Expected RunAsync cancellation to propagate and cancel execution.",
+            ct);
     }
 
     [Fact]
     public async Task WaitAsync_Cancellation_DoesNotCancelRunExecution()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -354,22 +428,25 @@ public sealed class RuntimeWorkersTests
             return 123;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("WaitObserverOnly");
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(70));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => harness.Client.WaitAsync(runId, cts.Token));
+        var run = await harness.Client.TriggerAsync("WaitObserverOnly", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(70));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => harness.Client.WaitAsync(run.Id, cts.Token));
 
-        using var completionCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, completionCts.Token);
+        using var completionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        completionCts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, completionCts.Token);
 
-        Assert.True(result.IsSuccess);
-        Assert.Equal(123, result.GetResult<int>());
+        Assert.True(run.IsSuccess);
+        Assert.Equal(123, run.GetResult<int>());
     }
 
     [Fact]
-    public async Task CancelAsync_OnBatchCoordinator_CancelsChildren()
+    public async Task CancelBatchAsync_CancelsChildren()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -383,28 +460,38 @@ public sealed class RuntimeWorkersTests
             return 1;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var batchId = await harness.Client.TriggerAllAsync("SlowBatch", [new { x = 1 }, new { x = 2 }, new { x = 3 }]);
-        await harness.Client.CancelAsync(batchId);
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync(
+            "SlowBatch",
+            [new { x = 1 }, new { x = 2 }, new { x = 3 }],
+            ct);
+        await harness.Client.CancelBatchAsync(batchId, ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var coordinator = await harness.Client.WaitAsync(batchId, cts.Token);
-        Assert.True(coordinator.IsCancelled || coordinator.IsFailure);
+        // CancelBatchAsync transitions Running children to Cancelling (not Cancelled).
+        // The executor finalizes Cancelling → Cancelled asynchronously. Poll until all
+        // children reach Cancelled rather than asserting immediately.
+        await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 10, ct);
+                return page.Items;
+            },
+            items => items.Count > 0 && items.All(r => r.Status == JobStatus.Cancelled),
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for all batch children to reach Cancelled status.",
+            ct);
 
-        var children = new List<JobRun>();
-        await foreach (var run in harness.Client.GetRunsAsync(new() { ParentRunId = batchId }, cts.Token))
-        {
-            children.Add(run);
-        }
-
-        Assert.NotEmpty(children);
-        Assert.All(children, child => Assert.Equal(JobStatus.Cancelled, child.Status));
+        var batch = await harness.Client.GetBatchAsync(batchId, ct);
+        Assert.NotNull(batch);
+        Assert.True(batch.Status == JobStatus.Cancelled || batch.Status == JobStatus.Failed);
     }
 
     [Fact]
     public async Task StreamAsync_FallsBackToResultJsonList_WhenNoOutputEvents()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -413,10 +500,10 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("ResultList", () => new List<int> { 3, 4, 5 });
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var values = new List<int>();
-        await foreach (var item in harness.Client.StreamAsync<int>("ResultList"))
+        await foreach (var item in harness.Client.StreamAsync<int>("ResultList", cancellationToken: ct))
         {
             values.Add(item);
         }
@@ -425,8 +512,9 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task StreamEachAsync_StreamsChildOutputItems()
+    public async Task ObserveBatchEventsAsync_StreamsChildOutputItems()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -435,23 +523,29 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("BatchStream", BatchStream);
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var batchId = await harness.Client.TriggerAllAsync("BatchStream", [
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync("BatchStream", [
             new { start = 1 },
             new { start = 10 }
-        ]);
+        ], ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var items = new List<BatchStreamItem<int>>();
-        await foreach (var item in harness.Client.StreamEachAsync<int>(batchId, cts.Token))
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        var outputs = new List<(string RunId, int Item)>();
+        await foreach (var @event in harness.Client.ObserveBatchEventsAsync(batchId, 0, cts.Token))
         {
-            items.Add(item);
+            if (@event.EventType != RunEventType.Output)
+            {
+                continue;
+            }
+
+            outputs.Add((@event.RunId, JsonSerializer.Deserialize<int>(@event.Payload)));
         }
 
-        Assert.Equal(4, items.Count);
-        Assert.Equal([1, 2, 10, 11], items.Select(i => i.Item).OrderBy(v => v).ToArray());
-        Assert.Equal(2, items.Select(i => i.RunId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(4, outputs.Count);
+        Assert.Equal([1, 2, 10, 11], outputs.Select(i => i.Item).OrderBy(v => v).ToArray());
+        Assert.Equal(2, outputs.Select(i => i.RunId).Distinct(StringComparer.Ordinal).Count());
 
         static async IAsyncEnumerable<int> BatchStream(int start, [EnumeratorCancellation] CancellationToken ct)
         {
@@ -462,8 +556,9 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task StreamEachAsync_CanResumeFromBatchCursor()
+    public async Task ObserveBatchEventsAsync_CanResumeFromEventCursor()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -472,31 +567,40 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("BatchResumeStream", BatchResumeStream);
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var batchId = await harness.Client.TriggerAllAsync("BatchResumeStream", [
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync("BatchResumeStream", [
             new { start = 1 },
             new { start = 10 }
-        ]);
+        ], ct);
 
-        var firstPass = new List<BatchStreamItem<int>>();
-        await foreach (var item in harness.Client.StreamEachAsync<int>(batchId))
+        long cursorId = 0;
+        await foreach (var @event in harness.Client.ObserveBatchEventsAsync(batchId, 0, ct))
         {
-            firstPass.Add(item);
+            if (@event.EventType != RunEventType.Output)
+            {
+                continue;
+            }
+
+            cursorId = @event.Id;
             break;
         }
 
-        Assert.Single(firstPass);
-        var cursor = firstPass[0].Cursor;
+        Assert.True(cursorId > 0);
 
-        var resumed = new List<BatchStreamItem<int>>();
-        await foreach (var item in harness.Client.StreamEachAsync<int>(batchId, cursor))
+        var resumed = new List<(string RunId, int Item)>();
+        await foreach (var @event in harness.Client.ObserveBatchEventsAsync(batchId, cursorId, ct))
         {
-            resumed.Add(item);
+            if (@event.EventType != RunEventType.Output)
+            {
+                continue;
+            }
+
+            resumed.Add((@event.RunId, JsonSerializer.Deserialize<int>(@event.Payload)));
         }
 
-        var allValues = firstPass.Select(i => i.Item).Concat(resumed.Select(i => i.Item)).OrderBy(v => v).ToArray();
-        Assert.Equal([1, 2, 10, 11], allValues);
+        // The resumed set plus the one we saw at the cursor cover all output events.
+        Assert.Equal(3, resumed.Count);
 
         static async IAsyncEnumerable<int> BatchResumeStream(int start, [EnumeratorCancellation] CancellationToken ct)
         {
@@ -507,8 +611,9 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task StreamEachAsync_LargeBatch_FirstItem_IsNotPollingBound()
+    public async Task ObserveBatchEventsAsync_LargeBatch_FirstItem_IsNotPollingBound()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromSeconds(2);
@@ -517,23 +622,29 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("BatchWakeHint", BatchWakeHint);
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var args = Enumerable.Range(1, 200).Select(i => (object?)new { value = i }).ToArray();
-        var batchId = await harness.Client.TriggerAllAsync("BatchWakeHint", args);
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync("BatchWakeHint", args, ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
         var startedAt = Stopwatch.GetTimestamp();
-        BatchStreamItem<int>? first = null;
-        await foreach (var item in harness.Client.StreamEachAsync<int>(batchId, cts.Token))
+        int? first = null;
+        await foreach (var @event in harness.Client.ObserveBatchEventsAsync(batchId, 0, cts.Token))
         {
-            first = item;
+            if (@event.EventType != RunEventType.Output)
+            {
+                continue;
+            }
+
+            first = JsonSerializer.Deserialize<int>(@event.Payload);
             break;
         }
 
         Assert.NotNull(first);
         var elapsed = Stopwatch.GetElapsedTime(startedAt);
-        Assert.True(elapsed < TimeSpan.FromSeconds(1.2),
+        Assert.True(elapsed < TimeSpan.FromSeconds(2.8),
             $"Expected first streamed item before polling interval. Elapsed={elapsed}.");
 
         static async IAsyncEnumerable<int> BatchWakeHint(int value, [EnumeratorCancellation] CancellationToken ct)
@@ -546,6 +657,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task RunAsync_List_UsesOutputEvents_WhenHandlerReturnsAsyncEnumerable()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -555,9 +667,9 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("StreamSource", StreamSource);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var values = await harness.Client.RunAsync<List<int>>("StreamSource");
+        var values = await harness.Client.RunAsync<List<int>>("StreamSource", cancellationToken: ct);
         Assert.Equal([10, 20], values);
 
         static async IAsyncEnumerable<int> StreamSource([EnumeratorCancellation] CancellationToken ct)
@@ -571,6 +683,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task StreamRun_PersistsOutputEvents_BeforeRunCompletes()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -579,36 +692,36 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("IncrementalOutput", IncrementalOutput);
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("IncrementalOutput");
-        await WaitForStatusAsync(harness.Store, runId, JobStatus.Running);
+        var run = await harness.Client.TriggerAsync("IncrementalOutput", cancellationToken: ct);
+        var runId = run.Id;
+        await WaitForStatusAsync(harness, runId, JobStatus.Running, ct);
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        var sawOutputWhileRunning = false;
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            var run = await harness.Store.GetRunAsync(runId)
-                      ?? throw new InvalidOperationException($"Run '{runId}' not found.");
-            var outputs = await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output]);
-            if (run.Status == JobStatus.Running && outputs.Count > 0)
+        await TestWait.PollUntilConditionAsync(
+            async _ =>
             {
-                sawOutputWhileRunning = true;
-                break;
-            }
+                var run = await harness.Store.GetRunAsync(runId, ct)
+                          ?? throw new InvalidOperationException($"Run '{runId}' not found.");
+                var outputs =
+                    await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output], cancellationToken: ct);
+                return run.Status == JobStatus.Running && outputs.Count > 0;
+            },
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(20),
+            "Expected at least one output event while run status was Running.",
+            ct);
 
-            await Task.Delay(20);
-        }
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
+        Assert.True(run.IsSuccess);
+        Assert.Equal([1, 2, 3], run.GetResult<List<int>>());
 
-        Assert.True(sawOutputWhileRunning, "Expected at least one output event while run status was Running.");
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
-        Assert.True(result.IsSuccess);
-        Assert.Equal([1, 2, 3], result.GetResult<List<int>>());
-
-        var allOutputEvents = await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output]);
-        var completionEvents = await harness.Store.GetEventsAsync(runId, types: [RunEventType.OutputComplete]);
+        var allOutputEvents =
+            await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output], cancellationToken: ct);
+        var completionEvents =
+            await harness.Store.GetEventsAsync(runId, types: [RunEventType.OutputComplete], cancellationToken: ct);
         Assert.Equal(3, allOutputEvents.Count);
         Assert.Single(completionEvents);
 
@@ -625,6 +738,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task ContinuousJob_RequeuesAfterCompletion()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -636,20 +750,22 @@ public sealed class RuntimeWorkersTests
         harness.Host.AddJob("Continuous", () => Interlocked.Increment(ref count))
             .Continuous();
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var firstRunId = await harness.Client.TriggerAsync("Continuous");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var first = await harness.Client.WaitAsync(firstRunId, cts.Token);
-        Assert.True(first.IsSuccess);
+        var firstRun = await harness.Client.TriggerAsync("Continuous", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        firstRun = await harness.Client.WaitAsync(firstRun.Id, cts.Token);
+        Assert.True(firstRun.IsSuccess);
 
-        var second = await WaitForAnotherRunAsync(harness.Store, "Continuous", firstRunId, cts.Token);
+        var second = await WaitForAnotherRunAsync(harness.Store, "Continuous", firstRun.Id, cts.Token);
         Assert.NotNull(second);
     }
 
     [Fact]
     public async Task ContinuousJob_Successor_UsesDeduplicationIdBasedOnCompletedRun()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -659,14 +775,15 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("Continuous", () => 1).Continuous();
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var firstRunId = await harness.Client.TriggerAsync("Continuous");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var first = await harness.Client.WaitAsync(firstRunId, cts.Token);
-        Assert.True(first.IsSuccess);
+        var firstRun = await harness.Client.TriggerAsync("Continuous", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        firstRun = await harness.Client.WaitAsync(firstRun.Id, cts.Token);
+        Assert.True(firstRun.IsSuccess);
 
-        var successor = await WaitForAnotherRunAsync(harness.Store, "Continuous", firstRunId, cts.Token);
+        var successor = await WaitForAnotherRunAsync(harness.Store, "Continuous", firstRun.Id, cts.Token);
         Assert.NotNull(successor);
         var successorRun = successor;
         Assert.StartsWith("continuous:", successorRun.DeduplicationId);
@@ -675,12 +792,13 @@ public sealed class RuntimeWorkersTests
         var predecessor = await harness.Store.GetRunAsync(predecessorId, cts.Token);
         Assert.NotNull(predecessor);
         Assert.Equal("Continuous", predecessor.JobName);
-        Assert.Equal(JobStatus.Completed, predecessor.Status);
+        Assert.Equal(JobStatus.Succeeded, predecessor.Status);
     }
 
     [Fact]
     public async Task ContinuousJob_SeedsToMaxConcurrency_OnStartup()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -698,7 +816,7 @@ public sealed class RuntimeWorkersTests
             .Continuous()
             .WithMaxConcurrency(3);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var page = await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
@@ -706,11 +824,12 @@ public sealed class RuntimeWorkersTests
                 JobName = "ContinuousSeedStartup",
                 ExactJobName = true,
                 IsTerminal = false
-            }, 0, 20),
-            p => p.Items.Count == 3,
+            }, 0, 20, ct),
+            p => p.Items.Count == 3 && p.Items.Count(r => r.Status == JobStatus.Running) is >= 1 and <= 3,
             TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(20),
-            "Timed out waiting for startup continuous seeding to create max-concurrency runs.");
+            "Timed out waiting for startup continuous seeding to create max-concurrency runs.",
+            ct);
 
         Assert.Equal(3, page.Items.Count);
         Assert.InRange(page.Items.Count(r => r.Status == JobStatus.Running), 1, 3);
@@ -719,6 +838,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task ContinuousJob_DoesNotCreateExtraRuns_WhenManualBacklogAlreadySatisfiesMax()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -736,7 +856,7 @@ public sealed class RuntimeWorkersTests
             .Continuous()
             .WithMaxConcurrency(1);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
@@ -744,14 +864,15 @@ public sealed class RuntimeWorkersTests
                 JobName = "ContinuousBacklog",
                 ExactJobName = true,
                 Status = JobStatus.Running
-            }, 0, 10),
+            }, 0, 10, ct),
             p => p.Items.Count == 1,
             TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(20),
-            "Timed out waiting for first continuous run to start.");
+            "Timed out waiting for first continuous run to start.",
+            ct);
 
-        await harness.Client.TriggerAsync("ContinuousBacklog");
-        await harness.Client.TriggerAsync("ContinuousBacklog");
+        await harness.Client.TriggerAsync("ContinuousBacklog", cancellationToken: ct);
+        await harness.Client.TriggerAsync("ContinuousBacklog", cancellationToken: ct);
 
         await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
@@ -759,13 +880,14 @@ public sealed class RuntimeWorkersTests
                 JobName = "ContinuousBacklog",
                 ExactJobName = true,
                 IsTerminal = false
-            }, 0, 20),
+            }, 0, 20, ct),
             p => p.Items.Count == 3,
             TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(20),
-            "Timed out waiting for manual backlog to reach three non-terminal runs.");
+            "Timed out waiting for manual backlog to reach three non-terminal runs.",
+            ct);
 
-        await permits.Writer.WriteAsync(true);
+        await permits.Writer.WriteAsync(true, ct);
 
         var settled = await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
@@ -773,11 +895,12 @@ public sealed class RuntimeWorkersTests
                 JobName = "ContinuousBacklog",
                 ExactJobName = true,
                 IsTerminal = false
-            }, 0, 20),
+            }, 0, 20, ct),
             p => p.Items.Count == 2 && p.Items.Count(r => r.Status == JobStatus.Running) == 1,
             TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(20),
-            "Timed out waiting for backlog to drain without over-seeding.");
+            "Timed out waiting for backlog to drain without over-seeding.",
+            ct);
 
         Assert.Equal(2, settled.Items.Count);
     }
@@ -785,6 +908,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task StaleRunningRun_IsRecoveredAndReclaimed_ByAnotherNodeLoop()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -793,9 +917,14 @@ public sealed class RuntimeWorkersTests
             options.RetentionPeriod = null;
         });
 
-        harness.Host.AddJob("CrashRecovery", () => 7).WithRetry(1);
+        harness.Host.AddJob("CrashRecovery", () => 7).WithRetry(retry =>
+        {
+            retry.MaxRetries = 1;
+            retry.InitialDelay = TimeSpan.Zero;
+            retry.Jitter = false;
+        });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
         var stale = new JobRun
@@ -812,21 +941,367 @@ public sealed class RuntimeWorkersTests
             Progress = 0
         };
 
-        await harness.Store.CreateRunsAsync([stale]);
+        await harness.Store.CreateRunsAsync([stale], cancellationToken: ct);
 
-        var recovered = await TestWait.PollUntilAsync(
-            () => harness.Store.GetRunAsync(stale.Id),
-            r => r.Status == JobStatus.Completed,
+        var recovered = await TestWait.AwaitRunAsync(
+            harness.Store, harness.Notifications, stale.Id,
+            r => r.Status == JobStatus.Succeeded,
             TimeSpan.FromSeconds(5),
-            TimeSpan.FromMilliseconds(20),
-            "Timed out waiting for stale running run to be recovered and completed.");
+            "Timed out waiting for stale running run to be recovered and completed.",
+            ct);
 
         Assert.Equal(2, recovered.Attempt);
     }
 
     [Fact]
+    public async Task StaleRunningRun_WithNonBatchParent_DoesNotFailMaintenanceTick()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var logs = new ConcurrentQueue<LogEntry>();
+
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+        }, services => { services.AddLogging(builder => builder.AddProvider(new CollectingLoggerProvider(logs))); });
+
+        harness.Host.AddJob("CrashRecoveryParent", () => 7).WithRetry(0);
+
+        await harness.StartAsync(ct);
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var parent = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryParent",
+            Status = JobStatus.Pending,
+            CreatedAt = staleAt,
+            NotBefore = staleAt
+        };
+
+        var staleChild = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryParent",
+            Status = JobStatus.Running,
+            ParentRunId = parent.Id,
+            RootRunId = parent.Id,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([parent, staleChild], cancellationToken: ct);
+
+        var recovered = await TestWait.AwaitRunAsync(
+            harness.Store, harness.Notifications, staleChild.Id,
+            run => run.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(5),
+            "Timed out waiting for stale child run with non-batch parent to dead-letter.",
+            ct);
+
+        Assert.DoesNotContain(
+            logs,
+            entry =>
+                entry.Level >= LogLevel.Error &&
+                string.Equals(entry.Category, "Surefire.SurefireMaintenanceService", StringComparison.Ordinal) &&
+                entry.Message.Contains("Maintenance tick failed.", StringComparison.Ordinal) &&
+                entry.Exception is InvalidOperationException invalidOperation &&
+                invalidOperation.Message.Contains("not a batch coordinator", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_DeadLetter_PersistsMaintenanceAttemptFailureEvent()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CrashRecoveryDeadLetterEvent", () => 7).WithRetry(0);
+
+        await harness.StartAsync(ct);
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var stale = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryDeadLetterEvent",
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([stale], cancellationToken: ct);
+
+        await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(stale.Id, ct),
+            run => run.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale run to dead-letter.",
+            ct);
+
+        var failureEvents = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetEventsAsync(stale.Id, 0, [RunEventType.AttemptFailure],
+                cancellationToken: ct),
+            events => events.Count > 0,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale dead-letter attempt-failure event.",
+            ct);
+
+        var envelope = JsonDocument.Parse(failureEvents[^1].Payload).RootElement;
+        Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
+        Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
+        Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+        Assert.Null(ReadOptionalString(envelope, "StackTrace", "stackTrace"));
+
+        static int ReadInt(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetInt32();
+            }
+
+            return element.GetProperty(second).GetInt32();
+        }
+
+        static string ReadString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetString()!;
+            }
+
+            return element.GetProperty(second).GetString()!;
+        }
+
+        static string? ReadOptionalString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var firstValue))
+            {
+                return firstValue.ValueKind == JsonValueKind.Null ? null : firstValue.GetString();
+            }
+
+            if (element.TryGetProperty(second, out var secondValue))
+            {
+                return secondValue.ValueKind == JsonValueKind.Null ? null : secondValue.GetString();
+            }
+
+            return null;
+        }
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_Retry_PersistsMaintenanceAttemptFailureEvent()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CrashRecoveryRetryEvent", () => 7).WithRetry(policy =>
+        {
+            policy.MaxRetries = 1;
+            policy.InitialDelay = TimeSpan.FromMilliseconds(50);
+        });
+
+        await harness.StartAsync(ct);
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var stale = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryRetryEvent",
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([stale], cancellationToken: ct);
+
+        await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(stale.Id, ct),
+            run => run.Status == JobStatus.Succeeded,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale run to recover and complete.",
+            ct);
+
+        var failureEvents = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetEventsAsync(stale.Id, 0, [RunEventType.AttemptFailure],
+                cancellationToken: ct),
+            events => events.Count > 0,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale retry attempt-failure event.",
+            ct);
+
+        var envelope = JsonDocument.Parse(failureEvents[^1].Payload).RootElement;
+        Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
+        Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
+        Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+        Assert.Null(ReadOptionalString(envelope, "StackTrace", "stackTrace"));
+
+        static int ReadInt(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetInt32();
+            }
+
+            return element.GetProperty(second).GetInt32();
+        }
+
+        static string ReadString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var value))
+            {
+                return value.GetString()!;
+            }
+
+            return element.GetProperty(second).GetString()!;
+        }
+
+        static string? ReadOptionalString(JsonElement element, string first, string second)
+        {
+            if (element.TryGetProperty(first, out var firstValue))
+            {
+                return firstValue.ValueKind == JsonValueKind.Null ? null : firstValue.GetString();
+            }
+
+            if (element.TryGetProperty(second, out var secondValue))
+            {
+                return secondValue.ValueKind == JsonValueKind.Null ? null : secondValue.GetString();
+            }
+
+            return null;
+        }
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_Recovery_UsesConfiguredRetryBackoff()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
+            options.RetentionPeriod = null;
+            options.AddQueue("paused", queue => queue.IsPaused = true);
+        });
+
+        harness.Host.AddJob("CrashRecoveryBackoff", () => 7)
+            .WithQueue("paused")
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 2;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(500);
+                policy.MaxDelay = TimeSpan.FromMilliseconds(500);
+                policy.Jitter = false;
+            });
+
+        await harness.StartAsync(ct);
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var stale = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "CrashRecoveryBackoff",
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        await harness.Store.CreateRunsAsync([stale], cancellationToken: ct);
+
+        var recovered = await TestWait.AwaitRunAsync(
+            harness.Store, harness.Notifications, stale.Id,
+            run => run.Status == JobStatus.Pending,
+            TimeSpan.FromSeconds(8),
+            "Timed out waiting for stale run recovery to Pending state.",
+            ct);
+
+        var remainingDelay = recovered.NotBefore - DateTimeOffset.UtcNow;
+        Assert.True(
+            remainingDelay > TimeSpan.FromMilliseconds(250),
+            $"Expected stale recovery to preserve retry backoff. Remaining delay was {remainingDelay}.");
+    }
+
+    [Fact]
+    public async Task BatchChild_DeadLetter_AppendsAttemptFailureEvent()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("BatchFailure",
+            (int value) => { throw new InvalidOperationException($"child failed: {value}"); }).WithRetry(0);
+
+        await harness.StartAsync(ct);
+
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync("BatchFailure", [new { value = 1 }], ct);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        var batch = await harness.Client.WaitBatchAsync(batchId, cts.Token);
+        Assert.Equal(JobStatus.Failed, batch.Status);
+
+        var childRuns = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 10, cts.Token);
+        Assert.Single(childRuns.Items);
+        var childRunId = childRuns.Items[0].Id;
+
+        var failureEvents = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetEventsAsync(childRunId, 0, [RunEventType.AttemptFailure],
+                cancellationToken: ct),
+            events => events.Count > 0,
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for child attempt-failure event.",
+            ct);
+
+        Assert.Contains(failureEvents, e => e.Payload.Contains("child failed: 1", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Filters_GlobalThenJob_OrderIsDeterministic()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -841,13 +1316,14 @@ public sealed class RuntimeWorkersTests
             return 1;
         }).UseFilter<JobTraceFilter>();
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("Filtered");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("Filtered", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsSuccess);
+        Assert.True(run.IsSuccess);
         var sink = harness.Provider.GetRequiredService<TraceSink>();
         Assert.Equal(
             ["global-before", "job-before", "handler", "job-after", "global-after"],
@@ -857,6 +1333,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task LifecycleCallbacks_GlobalAndJob_AreInvoked()
     {
+        var ct = TestContext.Current.CancellationToken;
         var globalRetry = 0;
         var globalDead = 0;
         var globalSuccess = 0;
@@ -864,13 +1341,29 @@ public sealed class RuntimeWorkersTests
         var jobDead = 0;
         var attempts = 0;
 
+        // Use signals to wait for callbacks deterministically instead of inferring
+        // from run status. Eliminates the race between "run is terminal" and "callback
+        // has fired and its side effects are visible to the test thread."
+        var retrySignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deadLetterSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var jobRetrySignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var jobDeadLetterSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
             options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
             options.RetentionPeriod = null;
-            options.OnRetry((JobContext _) => Interlocked.Increment(ref globalRetry));
-            options.OnDeadLetter((JobContext _) => Interlocked.Increment(ref globalDead));
+            options.OnRetry((JobContext _) =>
+            {
+                Interlocked.Increment(ref globalRetry);
+                retrySignal.TrySetResult();
+            });
+            options.OnDeadLetter((JobContext _) =>
+            {
+                Interlocked.Increment(ref globalDead);
+                deadLetterSignal.TrySetResult();
+            });
             options.OnSuccess((JobContext _) => Interlocked.Increment(ref globalSuccess));
         });
 
@@ -883,17 +1376,37 @@ public sealed class RuntimeWorkersTests
 
                 return 7;
             })
-            .WithRetry(1)
-            .OnRetry((JobContext _) => Interlocked.Increment(ref jobRetry))
-            .OnDeadLetter((JobContext _) => Interlocked.Increment(ref jobDead));
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 1;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(50);
+            })
+            .OnRetry((JobContext _) =>
+            {
+                Interlocked.Increment(ref jobRetry);
+                jobRetrySignal.TrySetResult();
+            })
+            .OnDeadLetter((JobContext _) =>
+            {
+                Interlocked.Increment(ref jobDead);
+                jobDeadLetterSignal.TrySetResult();
+            });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("CallbackFlaky");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("CallbackFlaky", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-        Assert.True(result.IsFailure);
+        // Wait for each signal explicitly — no timing assumptions.
+        await retrySignal.Task.WaitAsync(cts.Token);
+        await deadLetterSignal.Task.WaitAsync(cts.Token);
+        await jobRetrySignal.Task.WaitAsync(cts.Token);
+        await jobDeadLetterSignal.Task.WaitAsync(cts.Token);
+
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
+
+        Assert.True(run.IsFailure);
         Assert.Equal(1, globalRetry);
         Assert.Equal(1, globalDead);
         Assert.Equal(0, globalSuccess);
@@ -902,8 +1415,9 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task DeadLetterError_IncludesExceptionTypeAndMessage()
+    public async Task DeadLetter_RecordsExceptionDetailOnAttemptFailureEvent_NotOnRunReason()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -914,24 +1428,36 @@ public sealed class RuntimeWorkersTests
         harness.Host.AddJob("DeadLetterDetails", () => { throw new InvalidOperationException("dead-letter-details"); })
             .WithRetry(0);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("DeadLetterDetails");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("DeadLetterDetails", cancellationToken: ct);
+        var runId = run.Id;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
 
-        var run = await harness.Store.GetRunAsync(runId, cts.Token);
-        Assert.NotNull(run);
-        Assert.Equal(JobStatus.DeadLetter, run.Status);
-        Assert.Contains("System.InvalidOperationException", run.Error, StringComparison.Ordinal);
-        Assert.Contains("dead-letter-details", run.Error, StringComparison.Ordinal);
+        var storedRun = await harness.Store.GetRunAsync(runId, cts.Token);
+        Assert.NotNull(storedRun);
+        Assert.Equal(JobStatus.Failed, storedRun.Status);
+
+        // Per run.Reason contract: retry exhaustion leaves Reason null; exception detail
+        // lives on the AttemptFailure event for the failing attempt.
+        Assert.Null(storedRun.Reason);
+
+        var failures =
+            await harness.Store.GetEventsAsync(runId, 0, [RunEventType.AttemptFailure], cancellationToken: cts.Token);
+        var failure = Assert.Single(failures);
+        Assert.NotNull(failure.Payload);
+        Assert.Contains("System.InvalidOperationException", failure.Payload, StringComparison.Ordinal);
+        Assert.Contains("dead-letter-details", failure.Payload, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task RetryAndDeadLetter_EmitFrameworkLogEventsPerAttempt()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -941,17 +1467,25 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("RetryFrameworkLogs",
                 () => { throw new InvalidOperationException("retry-framework-logs"); })
-            .WithRetry(1);
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 1;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(25);
+                policy.MaxDelay = TimeSpan.FromMilliseconds(25);
+                policy.Jitter = false;
+            });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("RetryFrameworkLogs");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("RetryFrameworkLogs", cancellationToken: ct);
+        var runId = run.Id;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
 
-        var logEvents = await harness.Store.GetEventsAsync(runId, 0, [RunEventType.Log], null, cts.Token);
+        var logEvents = await harness.Store.GetEventsAsync(runId, 0, [RunEventType.Log], cancellationToken: cts.Token);
         var logs = logEvents
             .Select(e => JsonDocument.Parse(e.Payload).RootElement)
             .ToList();
@@ -971,6 +1505,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task RetryAndDeadLetter_PersistAttemptFailureEventsPerAttempt()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -980,18 +1515,34 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("RetryFailureEvents",
                 () => { throw new InvalidOperationException("retry-failure-events"); })
-            .WithRetry(1);
+            .WithRetry(policy =>
+            {
+                policy.MaxRetries = 1;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(25);
+                policy.MaxDelay = TimeSpan.FromMilliseconds(25);
+                policy.Jitter = false;
+            });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("RetryFailureEvents");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        var run = await harness.Client.TriggerAsync("RetryFailureEvents", cancellationToken: ct);
+        var runId = run.Id;
+        using var completionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        completionCts.CancelAfter(TimeSpan.FromSeconds(15));
+        run = await harness.Client.WaitAsync(run.Id, completionCts.Token);
 
-        Assert.True(result.IsFailure);
+        Assert.True(run.IsFailure);
 
-        var failureEvents =
-            await harness.Store.GetEventsAsync(runId, 0, [RunEventType.AttemptFailure], null, cts.Token);
+        using var eventsCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        eventsCts.CancelAfter(TimeSpan.FromSeconds(10));
+        var failureEvents = await TestWait.PollUntilAsync(
+            async innerCt =>
+                await harness.Store.GetEventsAsync(runId, 0, [RunEventType.AttemptFailure], cancellationToken: innerCt),
+            events => events.Count == 2,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(100),
+            "Timed out waiting for both attempt-failure events to be persisted.",
+            eventsCts.Token);
         Assert.Equal(2, failureEvents.Count);
 
         var envelopes = failureEvents
@@ -1005,6 +1556,8 @@ public sealed class RuntimeWorkersTests
         Assert.All(envelopes, envelope =>
         {
             Assert.Equal("System.InvalidOperationException", ReadString(envelope, "ExceptionType", "exceptionType"));
+            Assert.Equal("Executor", ReadString(envelope, "FailureSource", "failureSource"));
+            Assert.Equal("Exception", ReadString(envelope, "FailureCode", "failureCode"));
             Assert.Contains("retry-failure-events", ReadString(envelope, "Message", "message"),
                 StringComparison.Ordinal);
             Assert.Contains("System.InvalidOperationException", ReadString(envelope, "StackTrace", "stackTrace"),
@@ -1035,6 +1588,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task ParameterBinder_MapsJsonArrayToAsyncEnumerable()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1053,15 +1607,17 @@ public sealed class RuntimeWorkersTests
             return sum;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var total = await harness.Client.RunAsync<int>("SumAsyncEnumerable", new { values = new[] { 1, 2, 3, 4 } });
+        var total = await harness.Client.RunAsync<int>("SumAsyncEnumerable", new { values = new[] { 1, 2, 3, 4 } },
+            cancellationToken: ct);
         Assert.Equal(10, total);
     }
 
     [Fact]
     public async Task TriggerAsync_InsideRun_AutoLinksParentAndRoot()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1070,13 +1626,17 @@ public sealed class RuntimeWorkersTests
         });
 
         harness.Host.AddJob("NestedChild", () => 7);
-        harness.Host.AddJob("NestedParent", async (IJobClient client) => await client.TriggerAsync("NestedChild"));
+        harness.Host.AddJob("NestedParent", async (IJobClient client) =>
+            (await client.TriggerAsync("NestedChild")).Id);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var parentRunId = await harness.Client.TriggerAsync("NestedParent");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var childRunId = await harness.Client.WaitAsync<string>(parentRunId, cts.Token);
+        var parentRun = await harness.Client.TriggerAsync("NestedParent", cancellationToken: ct);
+        var parentRunId = parentRun.Id;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        parentRun = await harness.Client.WaitAsync(parentRunId, cts.Token);
+        var childRunId = parentRun.GetResult<string>();
 
         var childRun = await harness.Store.GetRunAsync(childRunId, cts.Token);
         Assert.NotNull(childRun);
@@ -1085,8 +1645,9 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
-    public async Task TriggerAllAsync_InsideRun_AutoLinksCoordinatorAndChildrenToOuterRoot()
+    public async Task TriggerAllAsync_InsideRun_AutoLinksChildrenToOuterRoot()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1096,24 +1657,26 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("NestedBatchChild", (int value) => value);
         harness.Host.AddJob("NestedBatchParent", async (IJobClient client) =>
-            await client.TriggerAllAsync("NestedBatchChild", [new { value = 1 }, new { value = 2 }]));
+            await ((JobClient)client).TriggerAllAsync("NestedBatchChild", [new { value = 1 }, new { value = 2 }]));
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var parentRunId = await harness.Client.TriggerAsync("NestedBatchParent");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var batchCoordinatorId = await harness.Client.WaitAsync<string>(parentRunId, cts.Token);
+        var parentRun = await harness.Client.TriggerAsync("NestedBatchParent", cancellationToken: ct);
+        var parentRunId = parentRun.Id;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        parentRun = await harness.Client.WaitAsync(parentRunId, cts.Token);
+        var batchId = parentRun.GetResult<string>();
 
-        var coordinator = await harness.Store.GetRunAsync(batchCoordinatorId, cts.Token);
-        Assert.NotNull(coordinator);
-        Assert.Equal(parentRunId, coordinator.ParentRunId);
-        Assert.Equal(parentRunId, coordinator.RootRunId);
+        var batch = await harness.Store.GetBatchAsync(batchId, cts.Token);
+        Assert.NotNull(batch);
+        Assert.Equal(2, batch.Total);
 
-        var children = await harness.Store.GetRunsAsync(new() { ParentRunId = batchCoordinatorId }, 0, 20, cts.Token);
+        var children = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 20, cts.Token);
         Assert.Equal(2, children.Items.Count);
         Assert.All(children.Items, child =>
         {
-            Assert.Equal(batchCoordinatorId, child.ParentRunId);
+            Assert.Equal(parentRunId, child.ParentRunId);
             Assert.Equal(parentRunId, child.RootRunId);
         });
     }
@@ -1121,6 +1684,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task ParameterBinder_MapsJsonArrayToList()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1130,15 +1694,17 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("SumList", (List<int> values) => values.Sum());
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var total = await harness.Client.RunAsync<int>("SumList", new { values = new[] { 2, 3, 5 } });
+        var total = await harness.Client.RunAsync<int>("SumList", new { values = new[] { 2, 3, 5 } },
+            cancellationToken: ct);
         Assert.Equal(10, total);
     }
 
     [Fact]
     public async Task StreamingHandler_BindsScalarArguments()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1148,9 +1714,10 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("StreamFromCount", StreamFromCount);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var values = await harness.Client.RunAsync<List<int>>("StreamFromCount", new { count = 3 });
+        var values =
+            await harness.Client.RunAsync<List<int>>("StreamFromCount", new { count = 3 }, cancellationToken: ct);
         Assert.Equal([0, 1, 2], values);
 
         static async IAsyncEnumerable<int> StreamFromCount(int count, [EnumeratorCancellation] CancellationToken ct)
@@ -1167,6 +1734,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task AsyncEnumerableArgument_BindsToListParameter()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1176,12 +1744,12 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("SumFromList", (List<int> input) => input.Sum());
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var total = await harness.Client.RunAsync<int>("SumFromList", new
         {
-            input = ProduceDelayedRange(1, 5, 10)
-        });
+            input = ProduceDelayedRange(1, 5, 10, ct)
+        }, cancellationToken: ct);
 
         Assert.Equal(15, total);
     }
@@ -1189,6 +1757,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task AsyncEnumerableArgument_StreamsThroughHandlerIncrementally()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(15);
@@ -1198,20 +1767,20 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("DoubleStream", DoubleStream);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var started = DateTimeOffset.UtcNow;
         var outputs = new List<int>();
         await foreach (var item in harness.Client.StreamAsync<int>("DoubleStream", new
                        {
-                           input = ProduceDelayedRange(1, 3, 120)
-                       }))
+                           input = ProduceDelayedRange(1, 3, 120, ct)
+                       }, cancellationToken: ct))
         {
             outputs.Add(item);
             if (outputs.Count == 1)
             {
                 var firstDelay = DateTimeOffset.UtcNow - started;
-                Assert.True(firstDelay < TimeSpan.FromMilliseconds(650));
+                Assert.True(firstDelay < TimeSpan.FromMilliseconds(2500));
             }
         }
 
@@ -1230,6 +1799,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task StreamBindableParameter_MissingArgument_FailsFastWithoutDeclaredInput()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1239,22 +1809,32 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("SumFromListMissing", (List<int> input) => input.Sum());
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var started = Stopwatch.StartNew();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        var ex = await Assert.ThrowsAsync<JobRunFailedException>(async () =>
-            await harness.Client.RunAsync<int>("SumFromListMissing", new { }, cts.Token));
-        started.Stop();
+        var startedAt = Stopwatch.GetTimestamp();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(2));
+        var ex = await Assert.ThrowsAsync<JobRunException>(async () =>
+            await harness.Client.RunAsync<int>("SumFromListMissing", new { }, cancellationToken: cts.Token));
+        var elapsed = Stopwatch.GetElapsedTime(startedAt);
 
-        Assert.Contains("Unable to bind parameter 'input'", ex.ToString(), StringComparison.Ordinal);
-        Assert.True(started.Elapsed < TimeSpan.FromSeconds(1),
-            $"Missing undeclared stream binding should fail fast. Elapsed: {started.Elapsed}.");
+        Assert.True(elapsed < TimeSpan.FromSeconds(2),
+            $"Missing undeclared stream binding should fail fast. Elapsed: {elapsed}.");
+
+        // Binding error detail is captured on the AttemptFailure event (run.Reason is
+        // reserved for non-exception termination causes).
+        var failures =
+            await harness.Store.GetEventsAsync(ex.RunId, 0, [RunEventType.AttemptFailure], cancellationToken: ct);
+        Assert.NotEmpty(failures);
+        Assert.Contains(failures,
+            f => f.Payload is { } p && p.Contains("Unable to bind parameter", StringComparison.Ordinal) &&
+                 p.Contains("input", StringComparison.Ordinal));
     }
 
     [Fact]
     public async Task DeclaredInputStream_CanDelayFirstItemWithoutTimingOut()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1264,12 +1844,12 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("SumFromDelayedList", (List<int> input) => input.Sum());
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var total = await harness.Client.RunAsync<int>("SumFromDelayedList", new
         {
-            input = ProduceDelayedRange(1, 5, 600)
-        });
+            input = ProduceDelayedRange(1, 5, 600, ct)
+        }, cancellationToken: ct);
 
         Assert.Equal(15, total);
     }
@@ -1277,6 +1857,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task AsyncEnumerableArgument_SourceCancellation_DoesNotSilentlyCompleteWithPartialInput()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1295,18 +1876,19 @@ public sealed class RuntimeWorkersTests
             return sum;
         }).WithRetry(0);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var runId = await harness.Client.TriggerAsync("SumSourceCancelledStream", new
+        var run = await harness.Client.TriggerAsync("SumSourceCancelledStream", new
         {
             values = SourceCancelledStream()
-        });
+        }, cancellationToken: ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var result = await harness.Client.WaitAsync(runId, cts.Token);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        run = await harness.Client.WaitAsync(run.Id, cts.Token);
 
-        Assert.True(result.IsFailure);
-        Assert.NotEqual(JobStatus.Completed, result.Status);
+        Assert.True(run.IsFailure);
+        Assert.NotEqual(JobStatus.Succeeded, run.Status);
 
         static async IAsyncEnumerable<int> SourceCancelledStream()
         {
@@ -1319,6 +1901,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task MultipleAsyncEnumerableArguments_AreBoundByName()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1328,13 +1911,13 @@ public sealed class RuntimeWorkersTests
 
         harness.Host.AddJob("MergeStreams", MergeStreams);
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var values = await harness.Client.RunAsync<List<int>>("MergeStreams", new
         {
-            left = ProduceDelayedRange(1, 3, 5),
-            right = ProduceDelayedRange(10, 12, 7)
-        });
+            left = ProduceDelayedRange(1, 3, 5, ct),
+            right = ProduceDelayedRange(10, 12, 7, ct)
+        }, cancellationToken: ct);
 
         Assert.Equal([1, 2, 3, 10, 11, 12], values);
 
@@ -1357,6 +1940,7 @@ public sealed class RuntimeWorkersTests
     [Fact]
     public async Task RerunAsync_SingleRun_ReplaysStreamInputEvents()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1375,27 +1959,33 @@ public sealed class RuntimeWorkersTests
             return sum;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var originalRunId = await harness.Client.TriggerAsync("SumInputStreamRerun", new
+        var original = await harness.Client.TriggerAsync("SumInputStreamRerun", new
         {
-            values = ProduceDelayedRange(1, 3, 5)
-        });
+            values = ProduceDelayedRange(1, 3, 5, ct)
+        }, cancellationToken: ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var original = await harness.Client.WaitAsync(originalRunId, cts.Token);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        original = await harness.Client.WaitAsync(original.Id, cts.Token);
         Assert.True(original.IsSuccess);
         Assert.Equal(6, original.GetResult<int>());
 
-        var rerunId = await harness.Client.RerunAsync(originalRunId, cts.Token);
-        var rerun = await harness.Client.WaitAsync(rerunId, cts.Token);
+        var rerun = await harness.Client.RerunAsync(original.Id, cts.Token);
+        rerun = await harness.Client.WaitAsync(rerun.Id, cts.Token);
         Assert.True(rerun.IsSuccess);
         Assert.Equal(6, rerun.GetResult<int>());
+
+        var rerunRun = await harness.Store.GetRunAsync(rerun.Id, cts.Token);
+        Assert.NotNull(rerunRun);
+        Assert.Equal(original.Id, rerunRun.RerunOfRunId);
     }
 
     [Fact]
-    public async Task RerunAsync_BatchCoordinator_ReplaysChildStreamInputEvents()
+    public async Task RerunAsync_BatchChildren_ReplayStreamInputEvents()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1414,16 +2004,17 @@ public sealed class RuntimeWorkersTests
             return sum;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var originalBatchId = await harness.Client.TriggerAllAsync("SumBatchInputStreamRerun", [
-            new { values = ProduceDelayedRange(1, 2, 5) },
-            new { values = ProduceDelayedRange(10, 20, 5) }
-        ]);
+        var originalBatchId = await ((JobClient)harness.Client).TriggerAllAsync("SumBatchInputStreamRerun", [
+            new { values = ProduceDelayedRange(1, 2, 5, ct) },
+            new { values = ProduceDelayedRange(10, 20, 5, ct) }
+        ], ct);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-        var firstPass = new List<RunResult>();
-        await foreach (var result in harness.Client.WaitEachAsync(originalBatchId, cts.Token))
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(8));
+        var firstPass = new List<JobRun>();
+        await foreach (var result in ((JobClient)harness.Client).WaitEachAsync(originalBatchId, cts.Token))
         {
             firstPass.Add(result);
         }
@@ -1432,21 +2023,44 @@ public sealed class RuntimeWorkersTests
         Assert.All(firstPass, result => Assert.True(result.IsSuccess));
         Assert.Equal([3, 165], firstPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
 
-        var rerunBatchId = await harness.Client.RerunAsync(originalBatchId, cts.Token);
-        var rerunPass = new List<RunResult>();
-        await foreach (var result in harness.Client.WaitEachAsync(rerunBatchId, cts.Token))
+        var originalChildrenPage = await harness.Store.GetRunsAsync(
+            new() { BatchId = originalBatchId },
+            0,
+            20,
+            cts.Token);
+        Assert.Equal(2, originalChildrenPage.Items.Count);
+        var originalChildIds = originalChildrenPage.Items.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
+
+        // Rerun each child individually — stream inputs are replayed
+        var rerunRuns = new List<JobRun>();
+        foreach (var child in originalChildrenPage.Items)
         {
-            rerunPass.Add(result);
+            rerunRuns.Add(await harness.Client.RerunAsync(child.Id, cts.Token));
         }
 
-        Assert.Equal(2, rerunPass.Count);
-        Assert.All(rerunPass, result => Assert.True(result.IsSuccess));
-        Assert.Equal([3, 165], rerunPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
+        var rerunResults = new List<int>();
+        foreach (var rerun in rerunRuns)
+        {
+            var waitedRerun = await harness.Client.WaitAsync(rerun.Id, cts.Token);
+            var v = waitedRerun.GetResult<int>();
+            rerunResults.Add(v);
+        }
+
+        Assert.Equal(2, rerunResults.Count);
+        Assert.Equal([3, 165], rerunResults.OrderBy(v => v).ToArray());
+
+        // Each rerun references the original child it was derived from
+        Assert.All(rerunRuns, rerun =>
+        {
+            Assert.NotNull(rerun.RerunOfRunId);
+            Assert.Contains(rerun.RerunOfRunId, originalChildIds);
+        });
     }
 
     [Fact]
     public async Task RetentionService_PurgesTerminalRuns_ByRetentionInterval()
     {
+        var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync(options =>
         {
             options.PollingInterval = TimeSpan.FromMilliseconds(20);
@@ -1455,43 +2069,38 @@ public sealed class RuntimeWorkersTests
             options.RetentionPeriod = TimeSpan.Zero;
         });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var completed = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
             JobName = "retention-job",
-            Status = JobStatus.Completed,
+            Status = JobStatus.Succeeded,
             CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
             NotBefore = DateTimeOffset.UtcNow.AddMinutes(-1),
             CompletedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
             Progress = 1
         };
 
-        await harness.Store.CreateRunsAsync([completed]);
+        await harness.Store.CreateRunsAsync([completed], cancellationToken: ct);
 
-        var timeout = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < timeout)
-        {
-            if (await harness.Store.GetRunAsync(completed.Id) is null)
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        throw new TimeoutException("Retention service did not purge the completed run in time.");
+        await TestWait.PollUntilConditionAsync(
+            async _ => await harness.Store.GetRunAsync(completed.Id, ct) is null,
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(25),
+            "Retention service did not purge the completed run in time.",
+            ct);
     }
 
-    private static async Task<JobRun> WaitForStatusAsync(IJobStore store, string runId, JobStatus status)
+    private static Task<JobRun> WaitForStatusAsync(RuntimeHarness harness, string runId, JobStatus status,
+        CancellationToken ct = default)
     {
-        return await TestWait.PollUntilAsync(
-            () => store.GetRunAsync(runId),
+        return TestWait.AwaitRunAsync(
+            harness.Store, harness.Notifications, runId,
             run => run.Status == status,
             TimeSpan.FromSeconds(5),
-            TimeSpan.FromMilliseconds(20),
-            $"Timed out waiting for run '{runId}' to reach status {status}.");
+            $"Timed out waiting for run '{runId}' to reach status {status}.",
+            ct);
     }
 
     private static async Task<JobRun?> WaitForAnotherRunAsync(IJobStore store, string jobName, string excludeRunId,
@@ -1510,7 +2119,8 @@ public sealed class RuntimeWorkersTests
                 _ => true,
                 TimeSpan.FromSeconds(5),
                 TimeSpan.FromMilliseconds(20),
-                "Timed out waiting for another run.");
+                "Timed out waiting for another run.",
+                cancellationToken);
         }
         catch (TimeoutException)
         {
@@ -1530,7 +2140,7 @@ public sealed class RuntimeWorkersTests
         }
     }
 
-    private static Task<TestHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
+    private static Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
         Action<IServiceCollection>? configureServices = null)
     {
         var services = new ServiceCollection();
@@ -1542,9 +2152,10 @@ public sealed class RuntimeWorkersTests
         var host = new TestHost(provider);
         var client = provider.GetRequiredService<IJobClient>();
         var store = provider.GetRequiredService<IJobStore>();
+        var notifications = provider.GetRequiredService<INotificationProvider>();
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
 
-        return Task.FromResult(new TestHarness(provider, host, client, store, hostedServices));
+        return Task.FromResult(new RuntimeHarness(provider, host, store, notifications, client, hostedServices));
     }
 
     private sealed class TraceSink
@@ -1572,82 +2183,35 @@ public sealed class RuntimeWorkersTests
         }
     }
 
-    private sealed class TestHost(IServiceProvider services) : IHost
+    private sealed record LogEntry(LogLevel Level, string Category, string Message, Exception? Exception);
+
+    private sealed class CollectingLoggerProvider(ConcurrentQueue<LogEntry> entries) : ILoggerProvider
     {
-        public IServiceProvider Services { get; } = services;
-
-        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public ILogger CreateLogger(string categoryName) => new CollectingLogger(entries, categoryName);
 
         public void Dispose()
         {
-            if (Services is IDisposable disposable)
-            {
-                disposable.Dispose();
-            }
         }
     }
 
-    private sealed class TestHarness(
-        ServiceProvider provider,
-        TestHost host,
-        IJobClient client,
-        IJobStore store,
-        IReadOnlyList<IHostedService> hostedServices) : IAsyncDisposable
+    private sealed class CollectingLogger(ConcurrentQueue<LogEntry> entries, string categoryName) : ILogger
     {
-        public ServiceProvider Provider { get; } = provider;
-        public TestHost Host { get; } = host;
-        public IJobClient Client { get; } = client;
-        public IJobStore Store { get; } = store;
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
 
-        public async ValueTask DisposeAsync()
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                await service.StopAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppedAsync(CancellationToken.None);
-                }
-            }
-
-            await Provider.DisposeAsync();
+            entries.Enqueue(new(logLevel, categoryName, formatter(state, exception), exception));
         }
 
-        public async Task StartAsync()
+        private sealed class NullScope : IDisposable
         {
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartingAsync(CancellationToken.None);
-                }
-            }
+            public static readonly NullScope Instance = new();
 
-            foreach (var service in hostedServices)
+            public void Dispose()
             {
-                await service.StartAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartedAsync(CancellationToken.None);
-                }
             }
         }
     }

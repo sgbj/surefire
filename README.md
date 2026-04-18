@@ -30,7 +30,7 @@ app.Run();
 - **Streaming input & output** — stream values into and out of jobs with `IAsyncEnumerable<T>`.
 - **Lifecycle callbacks** — hook into success, retry, and dead letter events.
 - **OpenTelemetry** — traces and metrics out of the box.
-- **Health checks** — integrates with ASP.NET Core health checks for store and node liveness.
+- **Health checks** — integrates with ASP.NET Core health checks for store, notifications, and node liveness.
 
 ## Getting started
 
@@ -39,12 +39,26 @@ app.Run();
 dotnet add package Surefire
 dotnet add package Surefire.Dashboard
 
-# Optional storage provider (defaults to in-memory)
+# Optional provider packages (the core package defaults to an in-memory store + in-memory notifications)
 dotnet add package Surefire.PostgreSql
 dotnet add package Surefire.SqlServer
 dotnet add package Surefire.Redis
 dotnet add package Surefire.Sqlite
 ```
+
+### Provider capabilities
+
+| Package               | Store     | Notifications | Notes                                                   |
+|-----------------------|-----------|---------------|---------------------------------------------------------|
+| `Surefire`            | In-memory | In-memory     | Single-process, state lost on restart                   |
+| `Surefire.PostgreSql` | Yes       | Yes           | Best all-around production backend                      |
+| `Surefire.SqlServer`  | Yes       | No            | Use when SQL Server is your system of record            |
+| `Surefire.Sqlite`     | Yes       | No            | Good for single-node apps, local tools, and development |
+| `Surefire.Redis`      | Yes       | Yes           | Best when Redis is already a core dependency            |
+
+PostgreSQL and Redis provide cross-node notifications. SQL Server and SQLite currently provide durable storage only, so
+wakeups fall back to polling behavior. If a notification transport is unavailable, Surefire still recovers from the
+durable store, but pickup latency falls back to `PollingInterval`.
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -78,14 +92,35 @@ app.MapSurefireDashboard();
 app.Run();
 ```
 
+Provider packages expose strongly typed options, including command timeout configuration:
+
+```csharp
+builder.Services.AddSurefire(options =>
+{
+    options.UsePostgreSql(new PostgreSqlOptions
+    {
+        ConnectionString = builder.Configuration.GetConnectionString("surefire-postgres")!,
+        CommandTimeout = TimeSpan.FromSeconds(30)
+    });
+});
+```
+
 ## Observability and health
 
-Surefire emits OpenTelemetry traces and metrics during runtime execution, and registers a built-in health check named `surefire` via `AddSurefire()`.
+Surefire emits OpenTelemetry traces and metrics during runtime execution, and registers a built-in health check named
+`surefire` via `AddSurefire()`.
 
 ```csharp
 builder.Services.AddHealthChecks();
 
 app.MapHealthChecks("/health");
+```
+
+For production deployments, secure the dashboard:
+
+```csharp
+app.MapSurefireDashboard()
+    .RequireAuthorization("AdminPolicy");
 ```
 
 ## Triggering jobs
@@ -132,7 +167,8 @@ app.AddJob("ProcessOrder", async (int orderId) => { /* ... */ })
     });
 ```
 
-`OnSuccess` fires when a run completes. `OnRetry` fires when Surefire schedules another attempt after a failure. `OnDeadLetter` fires when no retries remain.
+`OnSuccess` fires when a run completes. `OnRetry` fires when Surefire schedules another attempt after a failure.
+`OnDeadLetter` fires when no retries remain.
 
 ## Dashboard
 

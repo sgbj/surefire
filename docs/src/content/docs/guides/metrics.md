@@ -7,15 +7,17 @@ Surefire emits metrics via `System.Diagnostics.Metrics` and traces via `System.D
 
 ## Instruments
 
-| Instrument | Type | Unit | Description |
+| Instrument | Type | Tags | Description |
 |---|---|---|---|
-| `surefire.runs.claimed` | Counter | — | Runs claimed by workers |
-| `surefire.runs.completed` | Counter | — | Runs completed successfully |
-| `surefire.runs.failed` | Counter | — | Runs that reached dead letter |
-| `surefire.runs.cancelled` | Counter | — | Runs cancelled |
-| `surefire.runs.duration.ms` | Histogram | ms | Run execution duration |
-
-Current counters and histograms are emitted without additional metric tags.
+| `surefire.runs.claimed` | Counter | `surefire.job.name` | Runs claimed by workers |
+| `surefire.runs.completed` | Counter | `surefire.job.name` | Runs completed successfully |
+| `surefire.runs.failed` | Counter | `surefire.job.name` | Runs that reached dead letter |
+| `surefire.runs.cancelled` | Counter | `surefire.job.name` | Runs cancelled |
+| `surefire.runs.duration.ms` | Histogram | `surefire.job.name` | Run execution duration |
+| `surefire.store.operation.ms` | Histogram | `surefire.store.operation` | Store operation duration |
+| `surefire.store.operation.failed` | Counter | `surefire.store.operation` | Failed store operations |
+| `surefire.store.retries` | Counter | `surefire.service` | Transient store failure retries |
+| `surefire.log_entries.dropped` | Counter | `surefire.drop.reason` | Log entries dropped before store flush |
 
 ## Traces
 

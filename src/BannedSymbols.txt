@@ -1,0 +1,5 @@
+T:System.Diagnostics.Trace;Use ILogger instead of Trace
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken) instead
+M:System.Threading.Tasks.Task.Delay(System.TimeSpan,System.Threading.CancellationToken);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken) instead
+M:System.Threading.Tasks.Task.Delay(System.Int32);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken) instead
+M:System.Threading.Tasks.Task.Delay(System.Int32,System.Threading.CancellationToken);Use Task.Delay(TimeSpan, TimeProvider, CancellationToken) instead

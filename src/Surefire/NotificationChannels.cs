@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Surefire;
 
 /// <summary>
@@ -6,17 +8,21 @@ namespace Surefire;
 public static class NotificationChannels
 {
     private const int MaxChannelLength = 63;
+    private const string RunPrefix = "surefire:run:";
 
     /// <summary>Broadcast channel for new run creation.</summary>
     public const string RunCreated = "surefire:run:created";
+
+    /// <summary>Broadcast channel for run completion (concurrency freed).</summary>
+    public const string RunAvailable = "surefire:run:available";
 
     /// <summary>Returns the channel name for cancelling a specific run.</summary>
     /// <param name="runId">The run identifier.</param>
     public static string RunCancel(string runId) => BuildRunChannel(runId, "cancel");
 
-    /// <summary>Returns the channel name for run completion notifications.</summary>
+    /// <summary>Returns the channel name for run terminal notifications.</summary>
     /// <param name="runId">The run identifier.</param>
-    public static string RunCompleted(string runId) => BuildRunChannel(runId, "completed");
+    public static string RunTerminated(string runId) => BuildRunChannel(runId, "terminal");
 
     /// <summary>Returns the channel name for run event streaming.</summary>
     /// <param name="runId">The run identifier.</param>
@@ -25,6 +31,10 @@ public static class NotificationChannels
     /// <summary>Returns the channel name for sending input to a running job.</summary>
     /// <param name="runId">The run identifier.</param>
     public static string RunInput(string runId) => BuildRunChannel(runId, "input");
+
+    /// <summary>Returns the channel name for batch termination notifications.</summary>
+    /// <param name="batchId">The batch identifier.</param>
+    public static string BatchTerminated(string batchId) => BuildRunChannel(batchId, "batch-term");
 
     /// <summary>
     ///     Validates that a notification channel is safe and portable across providers.
@@ -66,7 +76,9 @@ public static class NotificationChannels
             throw new ArgumentException("Run ID cannot be null or whitespace.", nameof(runId));
         }
 
-        var channel = $"surefire:run:{runId}:{suffix}";
+        var channel = $"{RunPrefix}{runId}:{suffix}";
+        Debug.Assert(channel.Length <= MaxChannelLength,
+            $"Run channel '{channel}' exceeds {MaxChannelLength} characters; run IDs are expected to be 32-char hex.");
         ValidateChannel(channel);
         return channel;
     }

@@ -10,13 +10,13 @@ public sealed class SqliteFixture : IAsyncLifetime, IStoreTestFixture
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"surefire_{Guid.NewGuid():N}.db");
     private SqliteJobStore? _store;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        _store = new(new() { ConnectionString = $"Data Source={_dbPath}" }, TimeProvider.System);
+        _store = new($"Data Source={_dbPath}", null, TimeProvider.System);
         await _store.MigrateAsync();
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         SqliteConnection.ClearAllPools();
 
@@ -25,13 +25,13 @@ public sealed class SqliteFixture : IAsyncLifetime, IStoreTestFixture
         DeleteFileWithRetry($"{_dbPath}-wal");
         DeleteFileWithRetry($"{_dbPath}-shm");
 
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    public Task<IJobStore> CreateStoreAsync()
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync()
         => Task.FromResult<IJobStore>(_store!);
 
-    public async Task CleanAsync()
+    async Task IStoreTestFixture.CleanAsync()
     {
         await using var conn = new SqliteConnection($"Data Source={_dbPath}");
         await conn.OpenAsync();

@@ -1,9 +1,7 @@
-using System.Collections;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -14,14 +12,20 @@ namespace Surefire;
 internal sealed partial class SurefireExecutorService(
     IJobStore store,
     INotificationProvider notifications,
+    SurefireLogEventPump logEventPump,
     JobRegistry registry,
     ActiveRunTracker activeRunTracker,
     IServiceScopeFactory scopeFactory,
     SurefireOptions options,
     TimeProvider timeProvider,
     SurefireInstrumentation instrumentation,
+    BatchCompletionHandler batchCompletionHandler,
+    Backoff backoff,
     ILogger<SurefireExecutorService> logger) : BackgroundService
 {
+    private static readonly TimeSpan BackoffInitial = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
+
     private readonly ConcurrentDictionary<string, Task> _activeTasks = new(StringComparer.Ordinal);
 
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _runCancellation =
@@ -34,116 +38,293 @@ internal sealed partial class SurefireExecutorService(
             NotificationChannels.RunCreated,
             _ => ReleaseWakeupAsync(wakeup),
             stoppingToken);
+        await using var availableSubscription = await notifications.SubscribeAsync(
+            NotificationChannels.RunAvailable,
+            _ => ReleaseWakeupAsync(wakeup),
+            stoppingToken);
 
-        while (!stoppingToken.IsCancellationRequested)
+        var cancellationSweep = Task.Run(() => RunCancellationSweepAsync(stoppingToken), stoppingToken);
+
+        try
+        {
+            var backoffAttempt = 0;
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    if (options.MaxNodeConcurrency is { } max && _activeTasks.Count >= max)
+                    {
+                        await WaitForWakeupAsync(wakeup, stoppingToken);
+                        continue;
+                    }
+
+                    var claimStartedAt = Stopwatch.GetTimestamp();
+                    var claimed = await store.ClaimRunAsync(
+                        options.NodeName,
+                        registry.GetJobNames(),
+                        registry.GetQueueNames(),
+                        stoppingToken);
+                    instrumentation.RecordStoreOperation("claim",
+                        Stopwatch.GetElapsedTime(claimStartedAt).TotalMilliseconds);
+
+                    if (claimed is null)
+                    {
+                        await WaitForWakeupAsync(wakeup, stoppingToken);
+                        continue;
+                    }
+
+                    instrumentation.RecordRunClaimed(claimed.JobName);
+
+                    var executionTask = ExecuteClaimedRunAsync(claimed, stoppingToken);
+                    _activeTasks[claimed.Id] = executionTask;
+                    _ = executionTask.ContinueWith(_ =>
+                        {
+                            _activeTasks.TryRemove(claimed.Id, out var _);
+                            _runCancellation.TryRemove(claimed.Id, out var _);
+                            activeRunTracker.Remove(claimed.Id);
+                            logEventPump.DropRunState(claimed.Id);
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.None,
+                        TaskScheduler.Default);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    if (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    Log.ExecutorLoopFailed(logger, ex);
+                    if (!store.IsTransientException(ex))
+                    {
+                        throw;
+                    }
+
+                    instrumentation.RecordStoreRetry("executor");
+                    await Task.Delay(backoff.NextDelay(backoffAttempt++, BackoffInitial, BackoffMax), timeProvider,
+                        stoppingToken);
+                    continue;
+                }
+
+                backoffAttempt = 0;
+            }
+
+            await WaitForActiveRunsAsync();
+        }
+        finally
         {
             try
             {
-                if (options.MaxNodeConcurrency is { } max && _activeTasks.Count >= max)
-                {
-                    await WaitForWakeupAsync(wakeup, stoppingToken);
-                    continue;
-                }
-
-                var claimed = await store.ClaimRunAsync(
-                    options.NodeName,
-                    registry.GetJobNames(),
-                    registry.GetQueueNames(),
-                    stoppingToken);
-
-                if (claimed is null)
-                {
-                    await WaitForWakeupAsync(wakeup, stoppingToken);
-                    continue;
-                }
-
-                instrumentation.RecordRunClaimed();
-
-                var executionTask = ExecuteClaimedRunAsync(claimed, stoppingToken);
-                _activeTasks[claimed.Id] = executionTask;
-                activeRunTracker.Add(claimed.Id);
-                _ = executionTask.ContinueWith(_ =>
-                    {
-                        _activeTasks.TryRemove(claimed.Id, out var ignored);
-                        activeRunTracker.Remove(claimed.Id);
-                    },
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
+                await cancellationSweep;
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                break;
-            }
-            catch (Exception ex)
-            {
-                Log.ExecutorLoopFailed(logger, ex);
-                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
             }
         }
+    }
 
-        await WaitForActiveRunsAsync();
+    /// <summary>
+    ///     Single consolidated polling fallback for missed cancellation notifications. Replaces the
+    ///     per-run monitor task that the original implementation spawned for every active run, which
+    ///     was O(active runs) store reads per polling interval. This is one batched read per interval
+    ///     regardless of concurrency.
+    /// </summary>
+    private async Task RunCancellationSweepAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(options.PollingInterval, timeProvider);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
+                try
+                {
+                    var ids = activeRunTracker.Snapshot();
+                    if (ids.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var stopped = await store.GetExternallyStoppedRunIdsAsync(ids, stoppingToken);
+                    foreach (var id in stopped)
+                    {
+                        activeRunTracker.TryRequestCancel(id);
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log.CancellationSweepFailed(logger, ex);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+        }
     }
 
     private async Task ExecuteClaimedRunAsync(JobRun run, CancellationToken stoppingToken)
     {
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         _runCancellation[run.Id] = runCts;
-        var monitorTask = MonitorExternalRunStateAsync(run.Id, runCts, stoppingToken);
+        activeRunTracker.Add(run.Id, runCts);
 
         await using var cancellationSubscription = await notifications.SubscribeAsync(
             NotificationChannels.RunCancel(run.Id),
             _ =>
             {
-                runCts.Cancel();
+                try
+                {
+                    runCts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
                 return Task.CompletedTask;
             },
             stoppingToken);
-        using var activity = await StartRunActivityAsync(run, runCts.Token);
-        var context = new JobContext
+        var parentContext = ResolveParentActivityContext(run);
+        using var activity = parentContext is { } ctx
+            ? instrumentation.ActivitySource.StartActivity("surefire.run.execute", ActivityKind.Consumer, ctx)
+            : instrumentation.ActivitySource.StartActivity("surefire.run.execute", ActivityKind.Consumer);
+        if (activity is { })
         {
-            RunId = run.Id,
-            RootRunId = run.RootRunId ?? run.Id,
-            JobName = run.JobName,
-            Attempt = run.Attempt,
-            BatchRunId = run.ParentRunId,
-            CancellationToken = runCts.Token,
-            Store = store,
-            Notifications = notifications,
-            TimeProvider = timeProvider,
-            NodeName = run.NodeName ?? options.NodeName
-        };
-        using var jobContextScope = JobContext.EnterScope(context);
+            await InitializeRunActivityAsync(activity, run, runCts.Token);
+        }
+
+        // Declared outside the try so the OCE catch can tell timeout apart from other cancellations.
+        // Disposed explicitly in finally.
+        CancellationTokenSource? timeoutCts = null;
+        CancellationTokenSource? executionCts = null;
+        IDisposable? jobContextScope = null;
+        TimeSpan? configuredTimeout = null;
 
         try
         {
             if (!registry.TryGet(run.JobName, out var job))
             {
-                if (await TryTransitionToDeadLetterAsync(run, "No handler registered for this job.", stoppingToken))
+                using var deadLetterCts = CreateBestEffortWorkCts(stoppingToken);
+                var deadLetterToken = deadLetterCts.Token;
+
+                var noHandlerFailureEvent = batchCompletionHandler.CreateFailureEvent(
+                    run,
+                    RunFailureEnvelope.FromMessage(
+                        run.Attempt,
+                        timeProvider.GetUtcNow(),
+                        "Executor",
+                        "NoHandlerRegistered",
+                        "No handler registered for this job.",
+                        typeof(InvalidOperationException).FullName));
+
+                if (options.CompiledOnDeadLetterCallbacks.Count > 0)
                 {
-                    instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
-                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
-                    await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
-                    await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, stoppingToken);
+                    await using var callbackScope = scopeFactory.CreateAsyncScope();
+                    var callbackContext = new JobContext
+                    {
+                        RunId = run.Id,
+                        RootRunId = run.RootRunId ?? run.Id,
+                        JobName = run.JobName,
+                        Attempt = run.Attempt,
+                        BatchId = run.BatchId,
+                        CancellationToken = deadLetterToken,
+                        Store = store,
+                        Notifications = notifications,
+                        TimeProvider = timeProvider,
+                        NodeName = run.NodeName ?? options.NodeName,
+                        Exception = new InvalidOperationException("No handler registered for this job.")
+                    };
+
+                    await InvokeLifecycleCallbacksAsync(
+                        options.CompiledOnDeadLetterCallbacks,
+                        callbackContext,
+                        callbackScope.ServiceProvider,
+                        deadLetterToken);
+                }
+
+                var noHandlerTransition = RunStatusTransition.RunningToFailed(
+                    run.Id,
+                    run.Attempt,
+                    timeProvider.GetUtcNow(),
+                    run.NotBefore,
+                    run.NodeName,
+                    run.Progress,
+                    "No handler registered for this job.",
+                    run.Result,
+                    run.StartedAt,
+                    run.LastHeartbeatAt,
+                    noHandlerFailureEvent is { } ? [noHandlerFailureEvent] : null);
+
+                var dlResult = await FlushAndTransitionTerminalAsync(
+                    run,
+                    noHandlerTransition,
+                    deadLetterToken);
+                if (dlResult.Transitioned)
+                {
+                    instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
+                    await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
+                        deadLetterToken);
+                    await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, deadLetterToken);
+                    await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, deadLetterToken);
+                    if (run.BatchId is { } noHandlerBatchId)
+                    {
+                        await notifications.PublishAsync(NotificationChannels.RunEvent(noHandlerBatchId), run.Id,
+                            deadLetterToken);
+                    }
+
+                    if (dlResult.BatchCompletion is { } bc)
+                    {
+                        await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
+                            deadLetterToken);
+                    }
                 }
 
                 return;
             }
 
-            if (job.Definition.Timeout is { } timeout)
+            // Timeout CTS fires independently of runCts so the OCE catch can distinguish
+            // timeout from external cancellation. Linked with runCts so the handler observes
+            // both via a single token. TimeProvider-aware so FakeTimeProvider drives it in tests.
+            configuredTimeout = job.Definition.Timeout;
+            if (configuredTimeout is { } timeout)
             {
-                runCts.CancelAfter(timeout);
+                timeoutCts = new(timeout, timeProvider);
+                executionCts = CancellationTokenSource.CreateLinkedTokenSource(runCts.Token, timeoutCts.Token);
             }
+
+            var executionToken = executionCts?.Token ?? runCts.Token;
+
+            var context = new JobContext
+            {
+                RunId = run.Id,
+                RootRunId = run.RootRunId ?? run.Id,
+                JobName = run.JobName,
+                Attempt = run.Attempt,
+                BatchId = run.BatchId,
+                CancellationToken = executionToken,
+                Store = store,
+                Notifications = notifications,
+                TimeProvider = timeProvider,
+                NodeName = run.NodeName ?? options.NodeName
+            };
+            jobContextScope = JobContext.EnterScope(context);
 
             // Resolve handler/filter dependencies in a per-run scope (for scoped services).
             await using var scope = scopeFactory.CreateAsyncScope();
 
-            var invocation = await ExecuteThroughFiltersAsync(job, run, context, scope.ServiceProvider, runCts.Token);
+            var invocation = await ExecuteThroughFiltersAsync(job, run, context, scope.ServiceProvider, executionToken);
             context.Result = invocation.ResultObject;
 
             var completedAt = timeProvider.GetUtcNow();
 
-            var completed = RunStatusTransition.RunningToCompleted(
+            var completed = RunStatusTransition.RunningToSucceeded(
                 run.Id,
                 run.Attempt,
                 completedAt,
@@ -155,130 +336,181 @@ internal sealed partial class SurefireExecutorService(
                 run.StartedAt,
                 completedAt);
 
-            if (await store.TryTransitionRunAsync(completed, runCts.Token))
+            using var completionCts = CreateBestEffortWorkCts(stoppingToken);
+            var completionToken = completionCts.Token;
+
+            var transitionResult = await FlushAndTransitionTerminalAsync(run, completed, completionToken);
+            if (transitionResult.Transitioned)
             {
-                instrumentation.RecordRunCompleted(run.StartedAt, completedAt);
+                instrumentation.RecordRunCompleted(run.JobName, run.StartedAt, completedAt);
                 await RunPostCompletionHousekeepingAsync(
                     job,
                     run,
                     context,
+                    transitionResult,
                     scope.ServiceProvider,
-                    stoppingToken);
+                    completionToken);
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            await HandleRunFailureAsync(run, ex, stoppingToken);
+        }
+        catch (OperationCanceledException ex)
+        {
+            if (stoppingToken.IsCancellationRequested)
+            {
+                await HandleRunFailureAsync(
+                    run,
+                    new ShutdownInterruptedException(ex),
+                    stoppingToken);
+                return;
+            }
+
+            // A timeout is a failure, not a cancellation — the job exceeded its allowed
+            // execution time. Route through HandleRunFailureAsync so it's retryable, has
+            // an error message, and emits an AttemptFailure event visible on the dashboard.
+            if (timeoutCts is { IsCancellationRequested: true })
+            {
+                await HandleRunFailureAsync(
+                    run,
+                    new TimeoutException(
+                        $"Job execution timed out after {configuredTimeout}.", ex),
+                    stoppingToken);
+                return;
+            }
+
+            // If the run's own CancellationToken was not cancelled, this exception came from
+            // post-handler bookkeeping (e.g. the best-effort completion token timing out),
+            // not from a genuine cancellation request. Leave the run in Running — the
+            // maintenance service will recover it via stale detection.
+            if (!runCts.IsCancellationRequested)
+            {
+                Log.PostHandlerBookkeepingFailed(logger, ex, run.Id, run.JobName);
+                try
+                {
+                    await batchCompletionHandler.AppendFailureEventAsync(
+                        run,
+                        RunFailureEnvelope.FromException(
+                            run.Attempt,
+                            timeProvider.GetUtcNow(),
+                            ex,
+                            "Executor",
+                            "BookkeepingFailure"),
+                        stoppingToken);
+                }
+                catch (Exception appendEx)
+                {
+                    Log.PostCompletionHousekeepingFailed(logger, appendEx, run.Id, run.JobName);
+                }
+
+                return;
+            }
+
+            using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
+            var bestEffortToken = bestEffortCts.Token;
+
             var cancelledAt = timeProvider.GetUtcNow();
-            var cancelled = RunStatusTransition.ToCancelled(
-                JobStatus.Running,
+            var cancelReason = "Cancelled by external request.";
+
+            var cancelEvent = batchCompletionHandler.CreateFailureEvent(
+                run,
+                RunFailureEnvelope.FromMessage(
+                    run.Attempt,
+                    cancelledAt,
+                    "Executor",
+                    "RunCancelled",
+                    cancelReason));
+
+            await logEventPump.FlushRunAsync(run.Id, bestEffortToken);
+            var cancelResult = await store.TryCancelRunAsync(
                 run.Id,
                 run.Attempt,
-                cancelledAt,
-                cancelledAt,
-                run.NotBefore,
-                run.NodeName,
-                run.Progress,
-                null,
-                run.Result,
-                run.StartedAt,
-                cancelledAt);
+                cancelReason,
+                cancelEvent is { } ? [cancelEvent] : null,
+                bestEffortToken);
 
-            if (await store.TryTransitionRunAsync(cancelled, CancellationToken.None))
+            if (cancelResult.Transitioned)
             {
-                instrumentation.RecordRunCancelled(run.StartedAt, cancelledAt);
-                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
-                    CancellationToken.None);
-                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, CancellationToken.None);
-            }
-        }
-        catch (Exception ex)
-        {
-            await AppendAttemptFailureEventAsync(run, ex, CancellationToken.None);
-
-            if (registry.TryGet(run.JobName, out var job))
-            {
-                var canRetry = run.Attempt <= job.Definition.RetryPolicy.MaxRetries;
-                var attemptError = BuildDeadLetterError(ex);
-                if (canRetry)
+                instrumentation.RecordRunCancelled(run.JobName, run.StartedAt, cancelledAt);
+                await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
+                    bestEffortToken);
+                await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, bestEffortToken);
+                await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, bestEffortToken);
+                if (run.BatchId is { } cancelledBatchId)
                 {
-                    var notBefore = timeProvider.GetUtcNow() + job.Definition.RetryPolicy.GetDelay(run.Attempt + 1);
-                    var retrying = RunStatusTransition.RunningToRetrying(
-                        run.Id,
-                        run.Attempt,
-                        notBefore,
-                        run.NodeName,
-                        run.Progress,
-                        attemptError,
-                        run.Result,
-                        timeProvider.GetUtcNow());
+                    await notifications.PublishAsync(NotificationChannels.RunEvent(cancelledBatchId), run.Id,
+                        bestEffortToken);
+                }
 
-                    if (await store.TryTransitionRunAsync(retrying, CancellationToken.None))
-                    {
-                        logger.LogWarning(
-                            ex,
-                            "Attempt {Attempt} failed. Retrying at {NotBefore} (max retries: {MaxRetries}).",
-                            run.Attempt,
-                            notBefore,
-                            job.Definition.RetryPolicy.MaxRetries);
-
-                        if (ex is not OperationCanceledException)
-                        {
-                            await using var retryScope = scopeFactory.CreateAsyncScope();
-                            var retryContext = new JobContext
-                            {
-                                RunId = run.Id,
-                                RootRunId = run.RootRunId ?? run.Id,
-                                JobName = run.JobName,
-                                Attempt = run.Attempt,
-                                BatchRunId = run.ParentRunId,
-                                CancellationToken = CancellationToken.None,
-                                Store = store,
-                                Notifications = notifications,
-                                TimeProvider = timeProvider,
-                                NodeName = run.NodeName ?? options.NodeName,
-                                Exception = ex
-                            };
-
-                            await InvokeLifecycleCallbacksAsync(
-                                [.. options.OnRetryCallbacks, .. job.OnRetryCallbacks],
-                                retryContext,
-                                retryScope.ServiceProvider,
-                                CancellationToken.None);
-                        }
-
-                        var pending = RunStatusTransition.RetryingToPending(
-                            run.Id,
-                            run.Attempt,
-                            notBefore,
-                            null,
-                            run.Progress,
-                            attemptError,
-                            run.Result);
-
-                        if (await store.TryTransitionRunAsync(pending, CancellationToken.None))
-                        {
-                            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
-                                CancellationToken.None);
-                            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id,
-                                CancellationToken.None);
-                            return;
-                        }
-                    }
+                if (cancelResult.BatchCompletion is { } bc)
+                {
+                    await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
+                        bestEffortToken);
                 }
             }
-
-            if (registry.TryGet(run.JobName, out var deadLetterJob)
-                && ex is not OperationCanceledException)
+        }
+        finally
+        {
+            jobContextScope?.Dispose();
+            executionCts?.Dispose();
+            timeoutCts?.Dispose();
+            _runCancellation.TryRemove(run.Id, out _);
+            activeRunTracker.Remove(run.Id);
+            try
             {
-                await using var callbackScope = scopeFactory.CreateAsyncScope();
-                var callbackContext = new JobContext
+                runCts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    private async Task HandleRunFailureAsync(JobRun run, Exception ex, CancellationToken stoppingToken)
+    {
+        using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
+        var bestEffortToken = bestEffortCts.Token;
+        var isShutdownInterruption = ex is ShutdownInterruptedException;
+
+        IReadOnlyList<CompiledCallback> jobDeadLetterCallbacks = [];
+        if (registry.TryGet(run.JobName, out var job))
+        {
+            jobDeadLetterCallbacks = job.OnDeadLetterCallbacks;
+            var canRetry = run.Attempt <= job.Definition.RetryPolicy.MaxRetries;
+            if (canRetry)
+            {
+                var notBefore = timeProvider.GetUtcNow() + backoff.NextDelay(run.Attempt - 1,
+                    job.Definition.RetryPolicy.InitialDelay, job.Definition.RetryPolicy.MaxDelay,
+                    job.Definition.RetryPolicy.Jitter, job.Definition.RetryPolicy.BackoffType);
+
+                if (isShutdownInterruption)
+                {
+                    Log.AttemptInterruptedByShutdownRetrying(
+                        logger,
+                        run.Attempt,
+                        notBefore,
+                        job.Definition.RetryPolicy.MaxRetries);
+                }
+                else
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Attempt {Attempt} failed. Retrying at {NotBefore} (max retries: {MaxRetries}).",
+                        run.Attempt,
+                        notBefore,
+                        job.Definition.RetryPolicy.MaxRetries);
+                }
+
+                await using var retryScope = scopeFactory.CreateAsyncScope();
+                var retryContext = new JobContext
                 {
                     RunId = run.Id,
                     RootRunId = run.RootRunId ?? run.Id,
                     JobName = run.JobName,
                     Attempt = run.Attempt,
-                    BatchRunId = run.ParentRunId,
-                    CancellationToken = CancellationToken.None,
+                    BatchId = run.BatchId,
+                    CancellationToken = bestEffortToken,
                     Store = store,
                     Notifications = notifications,
                     TimeProvider = timeProvider,
@@ -287,44 +519,128 @@ internal sealed partial class SurefireExecutorService(
                 };
 
                 await InvokeLifecycleCallbacksAsync(
-                    [.. options.OnDeadLetterCallbacks, .. deadLetterJob.OnDeadLetterCallbacks],
-                    callbackContext,
-                    callbackScope.ServiceProvider,
-                    CancellationToken.None);
-            }
+                    [.. options.CompiledOnRetryCallbacks, .. job.OnRetryCallbacks],
+                    retryContext,
+                    retryScope.ServiceProvider,
+                    bestEffortToken);
 
-            if (await TryTransitionToDeadLetterAsync(run, BuildDeadLetterError(ex), CancellationToken.None))
-            {
-                logger.LogError(ex, "Run moved to dead letter after attempt {Attempt}.", run.Attempt);
+                var retryFailureEvent = batchCompletionHandler.CreateFailureEvent(
+                    run,
+                    RunFailureEnvelope.FromException(
+                        run.Attempt,
+                        timeProvider.GetUtcNow(),
+                        ex,
+                        "Executor",
+                        GetFailureCode(ex)));
 
-                instrumentation.RecordRunFailed(run.StartedAt, timeProvider.GetUtcNow());
-                await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
-                    CancellationToken.None);
-                await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, CancellationToken.None);
-                await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, true, CancellationToken.None);
+                // Retry path: do not set Reason — per-attempt failure detail lives on the
+                // AttemptFailure event so dashboards and inspection can show the exception
+                // per attempt. `run.Reason` is reserved for non-exception termination causes.
+                var pending = RunStatusTransition.RunningToPending(
+                    run.Id,
+                    run.Attempt,
+                    notBefore,
+                    null,
+                    run.Result,
+                    events: retryFailureEvent is { } ? [retryFailureEvent] : null);
+
+                if ((await store.TryTransitionRunAsync(pending, bestEffortToken)).Transitioned)
+                {
+                    await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
+                        bestEffortToken);
+                    await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id,
+                        bestEffortToken);
+                    return;
+                }
             }
         }
-        finally
+
+        if (options.CompiledOnDeadLetterCallbacks.Count > 0 || jobDeadLetterCallbacks.Count > 0)
         {
-            _runCancellation.TryRemove(run.Id, out _);
-            runCts.Cancel();
-            await monitorTask;
-            runCts.Dispose();
+            await using var callbackScope = scopeFactory.CreateAsyncScope();
+            var callbackContext = new JobContext
+            {
+                RunId = run.Id,
+                RootRunId = run.RootRunId ?? run.Id,
+                JobName = run.JobName,
+                Attempt = run.Attempt,
+                BatchId = run.BatchId,
+                CancellationToken = bestEffortToken,
+                Store = store,
+                Notifications = notifications,
+                TimeProvider = timeProvider,
+                NodeName = run.NodeName ?? options.NodeName,
+                Exception = ex
+            };
+
+            await InvokeLifecycleCallbacksAsync(
+                [.. options.CompiledOnDeadLetterCallbacks, .. jobDeadLetterCallbacks],
+                callbackContext,
+                callbackScope.ServiceProvider,
+                bestEffortToken);
+        }
+
+        var failureEvent = batchCompletionHandler.CreateFailureEvent(
+            run,
+            RunFailureEnvelope.FromException(
+                run.Attempt,
+                timeProvider.GetUtcNow(),
+                ex,
+                "Executor",
+                GetFailureCode(ex)));
+
+        // Dead-letter path: Reason is only set when the run is being discarded for a
+        // non-exception cause. Shutdown interruption is an environmental termination —
+        // we surface it on Reason so the dashboard can distinguish it from retry
+        // exhaustion. Ordinary failures (retry exhaustion) leave Reason null; the final
+        // attempt's exception detail is captured by the AttemptFailure event.
+        var deadLetter = RunStatusTransition.RunningToFailed(
+            run.Id,
+            run.Attempt,
+            timeProvider.GetUtcNow(),
+            run.NotBefore,
+            run.NodeName,
+            run.Progress,
+            isShutdownInterruption ? "Shutdown interrupted mid-run." : null,
+            run.Result,
+            run.StartedAt,
+            timeProvider.GetUtcNow(),
+            failureEvent is { } ? [failureEvent] : null);
+
+        if (isShutdownInterruption)
+        {
+            Log.ShutdownInterruptedRunFinalizingToDeadLetter(logger, run.Id, run.JobName, run.Attempt);
+        }
+        else
+        {
+            logger.LogError(ex,
+                "Retries exhausted after attempt {Attempt}; flushing final events before moving run to dead letter.",
+                run.Attempt);
+        }
+
+        var transitionResult = await FlushAndTransitionTerminalAsync(run, deadLetter, bestEffortToken);
+        if (transitionResult.Transitioned)
+        {
+            instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, bestEffortToken);
+            await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, bestEffortToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, bestEffortToken);
+            if (run.BatchId is { } deadLetterBatchId)
+            {
+                await notifications.PublishAsync(NotificationChannels.RunEvent(deadLetterBatchId), run.Id,
+                    bestEffortToken);
+            }
+
+            if (transitionResult.BatchCompletion is { } bc)
+            {
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
+                    bestEffortToken);
+            }
         }
     }
 
-    private async Task<Activity?> StartRunActivityAsync(JobRun run, CancellationToken cancellationToken)
+    private async Task InitializeRunActivityAsync(Activity activity, JobRun run, CancellationToken cancellationToken)
     {
-        var parent = await ResolveParentActivityContextAsync(run, cancellationToken);
-        var activity = parent is { } parentContext
-            ? instrumentation.ActivitySource.StartActivity("surefire.run.execute", ActivityKind.Consumer, parentContext)
-            : instrumentation.ActivitySource.StartActivity("surefire.run.execute", ActivityKind.Consumer);
-
-        if (activity is null)
-        {
-            return null;
-        }
-
         activity.SetTag("surefire.run.id", run.Id);
         activity.SetTag("surefire.run.job", run.JobName);
         activity.SetTag("surefire.run.attempt", run.Attempt);
@@ -332,57 +648,31 @@ internal sealed partial class SurefireExecutorService(
 
         var traceId = activity.TraceId.ToString();
         var spanId = activity.SpanId.ToString();
-        if (!string.Equals(run.TraceId, traceId, StringComparison.Ordinal)
-            || !string.Equals(run.SpanId, spanId, StringComparison.Ordinal))
+        if (string.Equals(run.TraceId, traceId, StringComparison.Ordinal)
+            && string.Equals(run.SpanId, spanId, StringComparison.Ordinal))
         {
-            run.TraceId = traceId;
-            run.SpanId = spanId;
-
-            try
-            {
-                await store.UpdateRunAsync(new()
-                {
-                    Id = run.Id,
-                    JobName = run.JobName,
-                    NodeName = run.NodeName,
-                    Progress = run.Progress,
-                    TraceId = traceId,
-                    SpanId = spanId,
-                    LastHeartbeatAt = timeProvider.GetUtcNow()
-                }, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                Log.FailedToPersistTraceContext(logger, ex, run.Id);
-            }
+            return;
         }
 
-        return activity;
+        try
+        {
+            await store.UpdateRunAsync(run with
+            {
+                TraceId = traceId,
+                SpanId = spanId,
+                LastHeartbeatAt = timeProvider.GetUtcNow()
+            }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Log.FailedToPersistTraceContext(logger, ex, run.Id);
+        }
     }
 
-    private async Task<ActivityContext?> ResolveParentActivityContextAsync(JobRun run,
-        CancellationToken cancellationToken)
-    {
-        if (TryParseActivityContext(run.TraceId, run.SpanId, out var runContext))
-        {
-            return runContext;
-        }
-
-        if (run.ParentRunId is null)
-        {
-            return null;
-        }
-
-        var parentRun = await store.GetRunAsync(run.ParentRunId, cancellationToken);
-        if (parentRun is null)
-        {
-            return null;
-        }
-
-        return TryParseActivityContext(parentRun.TraceId, parentRun.SpanId, out var parentContext)
-            ? parentContext
+    private static ActivityContext? ResolveParentActivityContext(JobRun run)
+        => TryParseActivityContext(run.ParentTraceId, run.ParentSpanId, out var context)
+            ? context
             : null;
-    }
 
     private static bool TryParseActivityContext(string? traceId, string? spanId, out ActivityContext context)
     {
@@ -407,131 +697,13 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private async Task<bool> TryTransitionToDeadLetterAsync(JobRun run, string error,
+    private async Task<RunTransitionResult> FlushAndTransitionTerminalAsync(JobRun run, RunStatusTransition transition,
         CancellationToken cancellationToken)
     {
-        var deadLetter = RunStatusTransition.RunningToDeadLetter(
-            run.Id,
-            run.Attempt,
-            timeProvider.GetUtcNow(),
-            run.NotBefore,
-            run.NodeName,
-            run.Progress,
-            error,
-            run.Result,
-            run.StartedAt,
-            timeProvider.GetUtcNow());
-
-        return await store.TryTransitionRunAsync(deadLetter, cancellationToken);
+        await logEventPump.FlushRunAsync(run.Id, cancellationToken);
+        return await store.TryTransitionRunAsync(transition, cancellationToken);
     }
 
-    private static string BuildDeadLetterError(Exception exception) => exception.ToString();
-
-    private async Task MaybeCompleteBatchAsync(string? batchRunId, string? childRunId, bool failed,
-        CancellationToken cancellationToken)
-    {
-        if (batchRunId is null)
-        {
-            return;
-        }
-
-        var batchRun = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (batchRun?.BatchTotal is null)
-        {
-            return;
-        }
-
-        var counters = await store.IncrementBatchCounterAsync(batchRunId, failed, cancellationToken);
-        await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId ?? batchRunId,
-            cancellationToken);
-        if (counters.Completed + counters.Failed < counters.Total)
-        {
-            return;
-        }
-
-        var coordinator = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (coordinator is null || coordinator.Status.IsTerminal)
-        {
-            return;
-        }
-
-        var coordinatorStartedAt = coordinator.StartedAt ??
-                                   await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
-
-        var transition = counters.Failed == 0
-            ? RunStatusTransition.RunningToCompleted(
-                coordinator.Id,
-                coordinator.Attempt,
-                timeProvider.GetUtcNow(),
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                null,
-                null,
-                coordinatorStartedAt,
-                timeProvider.GetUtcNow())
-            : RunStatusTransition.RunningToDeadLetter(
-                coordinator.Id,
-                coordinator.Attempt,
-                timeProvider.GetUtcNow(),
-                coordinator.NotBefore,
-                coordinator.NodeName,
-                1,
-                $"Batch completed with {counters.Failed} failed run(s).",
-                null,
-                coordinatorStartedAt,
-                timeProvider.GetUtcNow());
-
-        if (await store.TryTransitionRunAsync(transition, cancellationToken))
-        {
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
-                cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
-                cancellationToken);
-        }
-    }
-
-    private async Task<DateTimeOffset?> GetBatchEarliestChildStartedAtAsync(string batchRunId,
-        CancellationToken cancellationToken)
-    {
-        DateTimeOffset? earliest = null;
-        var skip = 0;
-        const int take = 200;
-
-        while (true)
-        {
-            var page = await store.GetRunsAsync(
-                new()
-                {
-                    ParentRunId = batchRunId,
-                    OrderBy = RunOrderBy.CreatedAt
-                },
-                skip,
-                take,
-                cancellationToken);
-
-            if (page.Items.Count == 0)
-            {
-                break;
-            }
-
-            foreach (var child in page.Items)
-            {
-                if (child.StartedAt is not { } startedAt)
-                {
-                    continue;
-                }
-
-                earliest = earliest is null || startedAt < earliest
-                    ? startedAt
-                    : earliest;
-            }
-
-            skip += page.Items.Count;
-        }
-
-        return earliest;
-    }
 
     private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
@@ -560,21 +732,12 @@ internal sealed partial class SurefireExecutorService(
     private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, JobRun run, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
-        var parameters = registration.Handler.Method.GetParameters();
-        var args = await BindParametersAsync(parameters, run, context, services, cancellationToken);
+        var metadata = registration.Metadata;
+        var args = await BindParametersAsync(metadata, run, context, services, cancellationToken);
 
-        object? invocationResult;
-        try
-        {
-            invocationResult = registration.Handler.DynamicInvoke(args);
-        }
-        catch (TargetInvocationException ex) when (ex.InnerException is { })
-        {
-            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-            throw;
-        }
+        var invocationResult = metadata.Invoke(args);
 
-        var (hasResult, value) = await AwaitResultAsync(invocationResult, registration.Handler.Method.ReturnType);
+        var (hasResult, value) = await AwaitResultAsync(invocationResult, metadata);
         if (!hasResult)
         {
             return InvocationResult.Empty;
@@ -588,14 +751,24 @@ internal sealed partial class SurefireExecutorService(
                 null);
         }
 
-        if (TryGetAsyncEnumerableElementType(value.GetType(), out _))
+        if (metadata.AsyncEnumerableElementType is { })
         {
-            var items = await MaterializeAsyncEnumerableAsync(value, run, cancellationToken);
+            var items = await metadata.Materializer!(this, value, run, cancellationToken);
             var resultJson = $"[{string.Join(',', items)}]";
             return new(
                 resultJson,
                 value,
                 items);
+        }
+
+        // Runtime guard: if a handler returns IAsyncEnumerable<T> through a type that the
+        // metadata didn't detect at registration (e.g., untyped delegate), fail clearly
+        // instead of letting JsonSerializer throw a confusing NotSupportedException.
+        if (TypeHelpers.TryGetAsyncEnumerableElementType(value.GetType(), out _))
+        {
+            throw new InvalidOperationException(
+                $"Job '{run.JobName}' returned an IAsyncEnumerable but the handler's return type was not detected as async-enumerable. " +
+                "Ensure the handler's declared return type is IAsyncEnumerable<T>, not object or a non-generic wrapper.");
         }
 
         return new(
@@ -604,9 +777,10 @@ internal sealed partial class SurefireExecutorService(
             null);
     }
 
-    private async Task<object?[]> BindParametersAsync(ParameterInfo[] parameters, JobRun run,
+    private async Task<object?[]> BindParametersAsync(HandlerMetadata metadata, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
+        var parameters = metadata.Parameters;
         using var doc = run.Arguments is null ? null : JsonDocument.Parse(run.Arguments);
         var root = doc?.RootElement;
         var declaredInputArguments = await GetDeclaredInputArgumentsAsync(run.Id, cancellationToken);
@@ -641,7 +815,7 @@ internal sealed partial class SurefireExecutorService(
                 continue;
             }
 
-            if (CanBindFromInputStream(parameter.ParameterType))
+            if (metadata.StreamBinders[i] is { } binder)
             {
                 if (TryGetDeclaredInputArgumentName(
                         parameters,
@@ -650,11 +824,7 @@ internal sealed partial class SurefireExecutorService(
                         declaredInputArguments,
                         out var argumentName))
                 {
-                    values[i] = await BindStreamInputParameterAsync(
-                        run.Id,
-                        argumentName,
-                        parameter.ParameterType,
-                        cancellationToken);
+                    values[i] = await binder(this, run.Id, argumentName, cancellationToken);
                     continue;
                 }
             }
@@ -686,14 +856,14 @@ internal sealed partial class SurefireExecutorService(
             0,
             [RunEventType.InputDeclared],
             0,
-            cancellationToken);
+            cancellationToken: cancellationToken);
 
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var @event in events)
         {
-            var declaration = JsonSerializer.Deserialize<InputDeclarationEnvelope>(
+            var declaration = JsonSerializer.Deserialize(
                 @event.Payload,
-                options.SerializerOptions);
+                SurefireJsonContext.Default.InputDeclarationEnvelope);
             if (declaration?.Arguments is null)
             {
                 continue;
@@ -741,109 +911,11 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private static bool CanBindFromInputStream(Type targetType)
-    {
-        if (targetType.IsGenericType
-            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            return true;
-        }
-
-        return TryGetCollectionElementType(targetType, out _, out _);
-    }
-
-    private async Task<object?> BindStreamInputParameterAsync(string runId, string argumentName,
-        Type targetType, CancellationToken cancellationToken)
-    {
-        if (targetType.IsGenericType
-            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            var itemType = targetType.GetGenericArguments()[0];
-            var method = typeof(SurefireExecutorService)
-                .GetMethod(nameof(CreateInputStreamAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(itemType);
-            return method.Invoke(this, [runId, argumentName, cancellationToken]);
-        }
-
-        if (TryGetCollectionElementType(targetType, out var elementType, out var asArray))
-        {
-            var method = typeof(SurefireExecutorService)
-                .GetMethod(nameof(MaterializeInputStreamAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-                .MakeGenericMethod(elementType);
-            var list = (IList)await (Task<object>)method.Invoke(this,
-                [runId, argumentName, cancellationToken])!;
-
-            if (asArray)
-            {
-                var toArrayMethod = typeof(SurefireExecutorService)
-                    .GetMethod(nameof(ToArray), BindingFlags.Static | BindingFlags.NonPublic)!
-                    .MakeGenericMethod(elementType);
-                return toArrayMethod.Invoke(null, [list]);
-            }
-
-            return list;
-        }
-
-        throw new InvalidOperationException(
-            $"Parameter type '{targetType.Name}' cannot bind streamed input argument '{argumentName}'.");
-    }
-
-    private static bool TryGetCollectionElementType(Type targetType, out Type elementType, out bool asArray)
-    {
-        if (targetType.IsArray)
-        {
-            elementType = targetType.GetElementType()!;
-            asArray = true;
-            return true;
-        }
-
-        if (targetType.IsGenericType)
-        {
-            var definition = targetType.GetGenericTypeDefinition();
-            if (definition == typeof(List<>)
-                || definition == typeof(IReadOnlyList<>)
-                || definition == typeof(IList<>)
-                || definition == typeof(IEnumerable<>))
-            {
-                elementType = targetType.GetGenericArguments()[0];
-                asArray = false;
-                return true;
-            }
-        }
-
-        elementType = null!;
-        asArray = false;
-        return false;
-    }
-
-    private static T[] ToArray<T>(IList values)
-    {
-        var result = new T[values.Count];
-        for (var i = 0; i < values.Count; i++)
-        {
-            result[i] = (T)values[i]!;
-        }
-
-        return result;
-    }
-
-    private object CreateInputStreamAsync<T>(string runId, string argumentName,
+    internal IAsyncEnumerable<T> CreateInputStreamAsync<T>(string runId, string argumentName,
         CancellationToken cancellationToken) =>
         ReadInputStreamAsync<T>(runId, argumentName, cancellationToken);
 
-    private async Task<object> MaterializeInputStreamAsync<T>(string runId, string argumentName,
-        CancellationToken cancellationToken)
-    {
-        var items = new List<T>();
-        await foreach (var item in ReadInputStreamAsync<T>(runId, argumentName, cancellationToken))
-        {
-            items.Add(item);
-        }
-
-        return items;
-    }
-
-    private async IAsyncEnumerable<T> ReadInputStreamAsync<T>(string runId, string argumentName,
+    internal async IAsyncEnumerable<T> ReadInputStreamAsync<T>(string runId, string argumentName,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         using var wakeup = new SemaphoreSlim(0, 1);
@@ -860,12 +932,12 @@ internal sealed partial class SurefireExecutorService(
             var events = await store.GetEventsAsync(runId, sinceId,
                 [RunEventType.Input, RunEventType.InputComplete],
                 0,
-                cancellationToken);
+                cancellationToken: cancellationToken);
 
             foreach (var @event in events)
             {
                 sinceId = @event.Id;
-                var envelope = JsonSerializer.Deserialize<InputEnvelope>(@event.Payload, options.SerializerOptions);
+                var envelope = JsonSerializer.Deserialize(@event.Payload, SurefireJsonContext.Default.InputEnvelope);
                 if (envelope is null
                     || !string.Equals(envelope.Argument, argumentName, StringComparison.OrdinalIgnoreCase))
                 {
@@ -955,11 +1027,9 @@ internal sealed partial class SurefireExecutorService(
 
     private static async Task<(bool HasResult, object? Value)> AwaitResultAsync(
         object? invocationResult,
-        Type declaredReturnType)
+        HandlerMetadata metadata)
     {
-        if (declaredReturnType == typeof(void)
-            || declaredReturnType == typeof(Task)
-            || declaredReturnType == typeof(ValueTask))
+        if (!metadata.HasResult)
         {
             if (invocationResult is Task noResultTask)
             {
@@ -979,19 +1049,16 @@ internal sealed partial class SurefireExecutorService(
                 return (true, null);
             case Task task:
                 await task;
-                return (true, GetTaskResult(task));
-            case ValueTask valueTask:
-                await valueTask;
+                return (true, metadata.ExtractTaskResult!(task));
+            case ValueTask:
                 return (false, null);
             default:
             {
-                var type = invocationResult.GetType();
-                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
+                if (metadata.AsTaskDelegate is { } asTask)
                 {
-                    var asTaskMethod = type.GetMethod("AsTask")!;
-                    var task = (Task)asTaskMethod.Invoke(invocationResult, null)!;
+                    var task = asTask(invocationResult);
                     await task;
-                    return (true, GetTaskResult(task));
+                    return (true, metadata.ExtractTaskResult!(task));
                 }
 
                 return (true, invocationResult);
@@ -999,55 +1066,7 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private static object? GetTaskResult(Task task)
-    {
-        var taskType = task.GetType();
-        if (!taskType.IsGenericType)
-        {
-            return null;
-        }
-
-        return taskType.GetProperty("Result")?.GetValue(task);
-    }
-
-    private static bool TryGetAsyncEnumerableElementType(Type type, out Type elementType)
-    {
-        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            elementType = type.GetGenericArguments()[0];
-            return true;
-        }
-
-        var asyncEnumerable = type.GetInterfaces().FirstOrDefault(i =>
-            i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>));
-        if (asyncEnumerable is { })
-        {
-            elementType = asyncEnumerable.GetGenericArguments()[0];
-            return true;
-        }
-
-        elementType = null!;
-        return false;
-    }
-
-    private async Task<IReadOnlyList<string>> MaterializeAsyncEnumerableAsync(object stream, JobRun run,
-        CancellationToken cancellationToken)
-    {
-        var items = new List<string>();
-        var streamType = stream.GetType();
-        var elementType = streamType.GetInterfaces()
-            .First(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-            .GetGenericArguments()[0];
-        var method = typeof(SurefireExecutorService)
-            .GetMethod(nameof(MaterializeCoreAsync), BindingFlags.Instance | BindingFlags.NonPublic)!
-            .MakeGenericMethod(elementType);
-        var task = (Task<List<string>>)method.Invoke(this, [stream, run, cancellationToken])!;
-        var serialized = await task;
-        items.AddRange(serialized);
-        return items;
-    }
-
-    private async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
+    internal async Task<List<string>> MaterializeCoreAsync<T>(IAsyncEnumerable<T> stream,
         JobRun run,
         CancellationToken cancellationToken)
     {
@@ -1080,9 +1099,9 @@ internal sealed partial class SurefireExecutorService(
         ], cancellationToken);
 
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.ParentRunId is { } batchRunId)
+        if (run.BatchId is { } batchId1)
         {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId1), run.Id, cancellationToken);
         }
     }
 
@@ -1101,47 +1120,9 @@ internal sealed partial class SurefireExecutorService(
         ], cancellationToken);
 
         await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.ParentRunId is { } batchRunId)
+        if (run.BatchId is { } batchId2)
         {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
-        }
-    }
-
-    private async Task MonitorExternalRunStateAsync(string runId, CancellationTokenSource runCts,
-        CancellationToken stoppingToken)
-    {
-        using var wakeup = new SemaphoreSlim(0, 1);
-        await using var eventSub = await notifications.SubscribeAsync(
-            NotificationChannels.RunEvent(runId),
-            _ => ReleaseWakeupAsync(wakeup),
-            stoppingToken);
-        await using var completionSub = await notifications.SubscribeAsync(
-            NotificationChannels.RunCompleted(runId),
-            _ => ReleaseWakeupAsync(wakeup),
-            stoppingToken);
-
-        while (!runCts.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                await wakeup.WaitAsync(options.PollingInterval, runCts.Token);
-                if (runCts.IsCancellationRequested)
-                    return;
-                var current = await store.GetRunAsync(runId, stoppingToken);
-                if (current is null || current.Status.IsTerminal)
-                {
-                    runCts.Cancel();
-                    return;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                Log.FailedToMonitorRunState(logger, ex, runId);
-            }
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId2), run.Id, cancellationToken);
         }
     }
 
@@ -1182,22 +1163,34 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, JobRun run, JobContext context,
-        IServiceProvider services, CancellationToken stoppingToken)
+        RunTransitionResult transitionResult, IServiceProvider services, CancellationToken cancellationToken)
     {
         try
         {
             await InvokeLifecycleCallbacksAsync(
-                [.. options.OnSuccessCallbacks, .. job.OnSuccessCallbacks],
+                [.. options.CompiledOnSuccessCallbacks, .. job.OnSuccessCallbacks],
                 context,
                 services,
-                stoppingToken);
+                cancellationToken);
 
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id, stoppingToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, stoppingToken);
-            await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, false, stoppingToken);
-            await TryCreateContinuousRunAsync(job, run, stoppingToken);
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
+            if (run.BatchId is { } completedBatchId)
+            {
+                await notifications.PublishAsync(NotificationChannels.RunEvent(completedBatchId), run.Id,
+                    cancellationToken);
+            }
+
+            if (transitionResult.BatchCompletion is { } bc)
+            {
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
+                    cancellationToken);
+            }
+
+            await TryCreateContinuousRunAsync(job, run, cancellationToken);
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         catch (Exception ex)
@@ -1209,14 +1202,14 @@ internal sealed partial class SurefireExecutorService(
     private static string BuildContinuousDeduplicationId(string completedRunId)
         => $"continuous:{completedRunId}";
 
-    private async Task InvokeLifecycleCallbacksAsync(IReadOnlyList<Delegate> callbacks, JobContext context,
+    private async Task InvokeLifecycleCallbacksAsync(IReadOnlyList<CompiledCallback> callbacks, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
         foreach (var callback in callbacks)
         {
             try
             {
-                await InvokeCallbackAsync(callback, context, services, cancellationToken);
+                await callback.InvokeAsync(context, services, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -1225,135 +1218,30 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task AppendAttemptFailureEventAsync(JobRun run, Exception exception,
-        CancellationToken cancellationToken)
+    private static string GetFailureCode(Exception exception) => exception switch
     {
-        try
-        {
-            var payload = JsonSerializer.Serialize(new AttemptFailureEnvelope
-            {
-                Attempt = run.Attempt,
-                OccurredAt = timeProvider.GetUtcNow(),
-                ExceptionType = exception.GetType().FullName ?? exception.GetType().Name,
-                Message = exception.Message,
-                StackTrace = exception.ToString()
-            }, options.SerializerOptions);
+        ShutdownInterruptedException => "ShutdownInterrupted",
+        OperationCanceledException => "OperationCanceled",
+        _ => "Exception"
+    };
 
-            await store.AppendEventsAsync(
-            [
-                new()
-                {
-                    RunId = run.Id,
-                    EventType = RunEventType.AttemptFailure,
-                    Payload = payload,
-                    CreatedAt = timeProvider.GetUtcNow(),
-                    Attempt = run.Attempt
-                }
-            ], cancellationToken);
-
-            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-            if (run.ParentRunId is { } batchRunId)
-            {
-                await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), run.Id, cancellationToken);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.FailedToAppendAttemptFailure(logger, ex, run.Id);
-        }
-    }
-
-    private static async Task InvokeCallbackAsync(Delegate callback, JobContext context,
-        IServiceProvider services, CancellationToken cancellationToken)
-    {
-        var parameters = callback.Method.GetParameters();
-        var args = new object?[parameters.Length];
-
-        for (var i = 0; i < parameters.Length; i++)
-        {
-            var parameter = parameters[i];
-            if (parameter.ParameterType == typeof(JobContext))
-            {
-                args[i] = context;
-                continue;
-            }
-
-            if (parameter.ParameterType == typeof(CancellationToken))
-            {
-                args[i] = cancellationToken;
-                continue;
-            }
-
-            if (context.Exception is { } && parameter.ParameterType.IsInstanceOfType(context.Exception))
-            {
-                args[i] = context.Exception;
-                continue;
-            }
-
-            if (context.Result is { } && parameter.ParameterType.IsInstanceOfType(context.Result))
-            {
-                args[i] = context.Result;
-                continue;
-            }
-
-            var service = services.GetService(parameter.ParameterType);
-            if (service is { })
-            {
-                args[i] = service;
-                continue;
-            }
-
-            if (parameter.HasDefaultValue)
-            {
-                args[i] = parameter.DefaultValue;
-                continue;
-            }
-
-            throw new InvalidOperationException(
-                $"Unable to bind callback parameter '{parameter.Name}' for job '{context.JobName}'.");
-        }
-
-        var returned = callback.DynamicInvoke(args);
-        if (returned is Task task)
-        {
-            await task;
-            return;
-        }
-
-        if (returned is ValueTask valueTask)
-        {
-            await valueTask;
-            return;
-        }
-
-        if (returned is { })
-        {
-            var type = returned.GetType();
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>))
-            {
-                var asTaskMethod = type.GetMethod("AsTask")!;
-                var convertedTask = (Task)asTaskMethod.Invoke(returned, null)!;
-                await convertedTask;
-            }
-        }
-    }
-
-    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup)
-    {
-        try
-        {
-            wakeup.Release();
-        }
-        catch (SemaphoreFullException)
-        {
-        }
-
-        return Task.CompletedTask;
-    }
+    private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup) => WakeupSignal.ReleaseAsync(wakeup);
 
     private async Task WaitForWakeupAsync(SemaphoreSlim wakeup, CancellationToken cancellationToken)
     {
-        await wakeup.WaitAsync(options.PollingInterval, cancellationToken);
+        await WakeupSignal.WaitAsync(wakeup, options.PollingInterval, cancellationToken);
+    }
+
+    private CancellationTokenSource CreateBestEffortWorkCts(CancellationToken stoppingToken)
+    {
+        if (stoppingToken.IsCancellationRequested)
+        {
+            return new(options.ShutdownTimeout);
+        }
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        cts.CancelAfter(options.ShutdownTimeout);
+        return cts;
     }
 
     private async Task WaitForActiveRunsAsync()
@@ -1363,6 +1251,19 @@ internal sealed partial class SurefireExecutorService(
             return;
         }
 
+        // Signal all active runs to cancel, then wait up to ShutdownTimeout for them
+        // to complete cleanup (state transitions, failure events, notifications).
+        foreach (var cts in _runCancellation.Values)
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
         using var timeoutCts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
@@ -1370,25 +1271,7 @@ internal sealed partial class SurefireExecutorService(
         }
         catch (OperationCanceledException)
         {
-            foreach (var cts in _runCancellation.Values)
-            {
-                cts.Cancel();
-            }
         }
-    }
-
-    private sealed class InputDeclarationEnvelope
-    {
-        public required string[] Arguments { get; init; }
-    }
-
-    private sealed class InputEnvelope
-    {
-        public required string Argument { get; init; }
-        public required long Sequence { get; init; }
-        public string? Payload { get; init; }
-        public required bool IsComplete { get; init; }
-        public string? Error { get; init; }
     }
 
     private static partial class Log
@@ -1401,20 +1284,34 @@ internal sealed partial class SurefireExecutorService(
         public static partial void FailedToPersistTraceContext(ILogger logger, Exception exception, string runId);
 
         [LoggerMessage(EventId = 1103, Level = LogLevel.Warning,
-            Message = "Failed to monitor run state for run '{RunId}'.")]
-        public static partial void FailedToMonitorRunState(ILogger logger, Exception exception, string runId);
+            Message = "Cancellation sweep failed.")]
+        public static partial void CancellationSweepFailed(ILogger logger, Exception exception);
 
         [LoggerMessage(EventId = 1104, Level = LogLevel.Warning,
             Message = "Lifecycle callback failed for job '{JobName}'.")]
         public static partial void LifecycleCallbackFailed(ILogger logger, Exception exception, string jobName);
 
-        [LoggerMessage(EventId = 1105, Level = LogLevel.Warning,
-            Message = "Failed to append attempt failure event for run '{RunId}'.")]
-        public static partial void FailedToAppendAttemptFailure(ILogger logger, Exception exception, string runId);
-
         [LoggerMessage(EventId = 1106, Level = LogLevel.Warning,
             Message = "Post-completion housekeeping failed for run '{RunId}' (job '{JobName}').")]
         public static partial void PostCompletionHousekeepingFailed(ILogger logger, Exception exception, string runId,
+            string jobName);
+
+        [LoggerMessage(EventId = 1107, Level = LogLevel.Warning,
+            Message =
+                "Attempt {Attempt} interrupted by application shutdown. Retrying at {NotBefore} (max retries: {MaxRetries}).")]
+        public static partial void AttemptInterruptedByShutdownRetrying(ILogger logger, int attempt,
+            DateTimeOffset notBefore, int maxRetries);
+
+        [LoggerMessage(EventId = 1108, Level = LogLevel.Warning,
+            Message =
+                "Run '{RunId}' (job '{JobName}') was interrupted by application shutdown; flushing final events before moving it to dead letter after attempt {Attempt}.")]
+        public static partial void ShutdownInterruptedRunFinalizingToDeadLetter(ILogger logger, string runId,
+            string jobName, int attempt);
+
+        [LoggerMessage(EventId = 1109, Level = LogLevel.Error,
+            Message =
+                "Post-handler bookkeeping failed for run '{RunId}' (job '{JobName}'). The run will remain in Running status for maintenance recovery.")]
+        public static partial void PostHandlerBookkeepingFailed(ILogger logger, Exception exception, string runId,
             string jobName);
     }
 
@@ -1425,13 +1322,7 @@ internal sealed partial class SurefireExecutorService(
     {
         public static InvocationResult Empty { get; } = new(null, null, null);
     }
-
-    private sealed class AttemptFailureEnvelope
-    {
-        public required int Attempt { get; init; }
-        public required DateTimeOffset OccurredAt { get; init; }
-        public required string ExceptionType { get; init; }
-        public required string Message { get; init; }
-        public required string StackTrace { get; init; }
-    }
 }
+
+internal sealed class ShutdownInterruptedException(Exception innerException)
+    : Exception("Run interrupted because the application is shutting down.", innerException);

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using StackExchange.Redis;
 using Surefire.Redis;
 using Surefire.Tests.Conformance;
@@ -11,41 +12,43 @@ public sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
         .WithImage("redis:7-alpine")
         .Build();
 
-    private ConnectionMultiplexer? _mux;
+    private ConnectionMultiplexer? _adminConnection;
 
-    private RedisOptions? _options;
+    private ConnectionMultiplexer? _connection;
     private IServer? _server;
     private RedisJobStore? _store;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
-        _options = new(_container.GetConnectionString());
-        _store = new(_options, TimeProvider.System);
+        _connection = await ConnectionMultiplexer.ConnectAsync(_container.GetConnectionString());
+        _store = new(_connection, TimeProvider.System,
+            NullLogger<RedisJobStore>.Instance);
         await _store.MigrateAsync();
 
-        _mux = await ConnectionMultiplexer.ConnectAsync(_container.GetConnectionString() + ",allowAdmin=true");
-        _server = _mux.GetServers()[0];
+        _adminConnection =
+            await ConnectionMultiplexer.ConnectAsync(_container.GetConnectionString() + ",allowAdmin=true");
+        _server = _adminConnection.GetServers()[0];
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        if (_options is { })
+        if (_adminConnection is { })
         {
-            await _options.DisposeAsync();
+            await _adminConnection.DisposeAsync();
         }
 
-        if (_mux is { })
+        if (_connection is { })
         {
-            await _mux.DisposeAsync();
+            await _connection.DisposeAsync();
         }
 
         await _container.DisposeAsync();
     }
 
-    public Task<IJobStore> CreateStoreAsync() => Task.FromResult<IJobStore>(_store!);
+    Task<IJobStore> IStoreTestFixture.CreateStoreAsync() => Task.FromResult<IJobStore>(_store!);
 
-    public async Task CleanAsync()
+    async Task IStoreTestFixture.CleanAsync()
     {
         await _server!.FlushDatabaseAsync();
     }

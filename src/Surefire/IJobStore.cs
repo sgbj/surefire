@@ -14,6 +14,13 @@ public interface IJobStore
     Task MigrateAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Performs a lightweight connectivity probe against the underlying store.
+    ///     Implementations should avoid heavyweight scans.
+    /// </summary>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>
     ///     Inserts or updates a job definition. If a job with the same name exists, all mutable
     ///     fields are overwritten except <c>IsEnabled</c> and <c>LastCronFireAt</c>, which are
     ///     preserved across upserts.
@@ -62,7 +69,6 @@ public interface IJobStore
     ///     Inserts one or more runs in a single atomic transaction. All runs are inserted or none.
     ///     When <paramref name="initialEvents" /> is provided, runs and events are persisted atomically
     ///     in the same transaction/critical section.
-    ///     Used for both single-run creation (list of 1) and batch creation (coordinator + children).
     /// </summary>
     /// <param name="runs">The runs to insert.</param>
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
@@ -104,6 +110,17 @@ public interface IJobStore
     Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Returns runs for the specified IDs in a single bulk fetch. Runs are returned in the
+    ///     same order as <paramref name="ids" />; missing runs are omitted. Implementations MUST
+    ///     issue a single round trip (Redis MGET, SQL <c>WHERE id IN (...)</c>, or equivalent).
+    /// </summary>
+    /// <param name="ids">The run IDs to fetch.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching runs, in the order of <paramref name="ids" />, with missing IDs omitted.</returns>
+    Task<IReadOnlyList<JobRun>> GetRunsByIdsAsync(IReadOnlyList<string> ids,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     ///     Returns a page of runs matching the specified filter criteria.
     /// </summary>
     /// <param name="filter">The filter criteria.</param>
@@ -119,7 +136,7 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Updates mutable fields on a run (progress, result, error, trace IDs, heartbeat).
+    ///     Updates mutable fields on a run (progress, result, reason, trace IDs, heartbeat).
     ///     Fenced by node ownership: the update is silently skipped if the run's current
     ///     <c>NodeName</c> does not match the run's <c>NodeName</c> property, or if the run
     ///     is already in a terminal status.
@@ -133,22 +150,54 @@ public interface IJobStore
     ///     if the run's current status and attempt match the expected values. Exactly one concurrent
     ///     caller wins. Timestamp fields supplied as null on <paramref name="transition" /> preserve the
     ///     existing stored values.
+    ///     <para>
+    ///         When a run with a non-null <c>BatchId</c> transitions to a terminal status, the store
+    ///         atomically increments the batch progress counter and, if all children are now terminal,
+    ///         completes the batch — all within the same transaction.
+    ///     </para>
     /// </summary>
     /// <param name="transition">The transition request.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>True if the transition was applied; false if the current status or attempt did not match.</returns>
-    Task<bool> TryTransitionRunAsync(RunStatusTransition transition,
+    /// <returns>
+    ///     A <see cref="RunTransitionResult" /> indicating whether the transition was applied and,
+    ///     if a batch was completed as a side-effect, the batch completion details.
+    /// </returns>
+    Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Atomically cancels a run if it is not already in a terminal status. Unlike
-    ///     <see cref="TryTransitionRunAsync" />, this does not require a specific expected status --
-    ///     it transitions from any non-terminal status to Cancelled.
+    ///     Atomically cancels a run by transitioning it directly to <see cref="JobStatus.Cancelled" />.
+    ///     Any non-terminal run (Pending or Running) is cancelled in a single atomic operation.
+    ///     When <paramref name="expectedAttempt" /> is provided, the cancellation only applies if the
+    ///     run's attempt matches (executor scoping). When null, any non-terminal run is cancelled.
+    ///     <para>
+    ///         The operation atomically inserts status events, caller-provided events, and updates
+    ///         batch counters — all in the same transaction. Returns <see cref="RunTransitionResult" />
+    ///         with batch completion info if applicable.
+    ///     </para>
     /// </summary>
     /// <param name="runId">The run ID to cancel.</param>
+    /// <param name="expectedAttempt">When non-null, only cancel if the run's attempt matches.</param>
+    /// <param name="reason">Optional termination reason to set on the run.</param>
+    /// <param name="events">Optional events to append atomically with the cancellation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>True if the run was cancelled; false if it was already terminal.</returns>
-    Task<bool> TryCancelRunAsync(string runId,
+    /// <returns>A <see cref="RunTransitionResult" /> indicating whether the run was cancelled and batch completion info.</returns>
+    Task<RunTransitionResult> TryCancelRunAsync(string runId,
+        int? expectedAttempt = null,
+        string? reason = null,
+        IReadOnlyList<RunEvent>? events = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Cancels all non-terminal runs belonging to the specified parent run.
+    ///     Atomically inserts events and updates batch counters.
+    /// </summary>
+    /// <param name="parentRunId">The parent run ID whose children should be cancelled.</param>
+    /// <param name="reason">Optional termination reason to set on cancelled runs.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The IDs of child runs that were cancelled.</returns>
+    Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
+        string? reason = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -166,15 +215,106 @@ public interface IJobStore
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Atomically increments the batch coordinator's completion counters and returns the
-    ///     post-increment values. The increment is skipped if the coordinator is already in a
-    ///     terminal status (returns current values without modifying them).
+    ///     Inserts a batch record and its child runs atomically. The batch starts with
+    ///     <see cref="JobStatus.Pending" /> status and transitions when runs complete.
     /// </summary>
-    /// <param name="batchRunId">The batch coordinator run ID.</param>
-    /// <param name="isFailed">True to increment the failed counter; false to increment the completed counter.</param>
+    /// <param name="batch">The batch record to create.</param>
+    /// <param name="runs">The child runs belonging to the batch.</param>
+    /// <param name="initialEvents">Optional events to append atomically with batch and run creation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The post-increment batch counters.</returns>
-    Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
+    Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
+        IReadOnlyList<RunEvent>? initialEvents = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the batch record with the specified ID, or null if not found.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching batch record, or null.</returns>
+    Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Atomically transitions a batch from a non-terminal status to the specified terminal status.
+    ///     Returns true if the transition was applied; false if already terminal.
+    ///     Used only by batch recovery (maintenance); the hot path updates batch status atomically
+    ///     inside <see cref="TryTransitionRunAsync" /> and <see cref="TryCancelRunAsync" />.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="status">The terminal status to transition to.</param>
+    /// <param name="completedAt">The completion timestamp to record.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>True if the transition was applied; false if the batch was already terminal.</returns>
+    Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Cancels all non-terminal runs belonging to the specified batch.
+    ///     Atomically inserts events and updates batch counters.
+    /// </summary>
+    /// <param name="batchId">The batch ID whose runs should be cancelled.</param>
+    /// <param name="reason">Optional termination reason to set on cancelled runs.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The IDs of runs that were cancelled.</returns>
+    Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+        string? reason = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the direct children of a run (those whose <c>ParentRunId</c> equals
+    ///     <paramref name="parentRunId" />), paginated by <c>(CreatedAt, Id)</c> keyset.
+    ///     Use for tree-aware navigation where offset-based pagination over large parents
+    ///     would scan too many rows.
+    ///     <para>
+    ///         Direction is determined by which cursor (if any) is supplied:
+    ///         <list type="bullet">
+    ///             <item>
+    ///                 <description>Neither cursor: first page, ordered <c>(CreatedAt ASC, Id ASC)</c>.</description>
+    ///             </item>
+    ///             <item>
+    ///                 <description>
+    ///                     <paramref name="afterCursor" />: next forward page — items strictly
+    ///                     greater than the cursor, ordered ASC.
+    ///                 </description>
+    ///             </item>
+    ///             <item>
+    ///                 <description>
+    ///                     <paramref name="beforeCursor" />: reverse page — items strictly less than
+    ///                     the cursor, returned in DESC order (most-recent-first). Callers reverse
+    ///                     for chronological display.
+    ///                 </description>
+    ///             </item>
+    ///         </list>
+    ///     </para>
+    /// </summary>
+    /// <param name="parentRunId">The parent run ID.</param>
+    /// <param name="afterCursor">
+    ///     Opaque cursor from a previous response's <see cref="DirectChildrenPage.NextCursor" />.
+    ///     Mutually exclusive with <paramref name="beforeCursor" />.
+    /// </param>
+    /// <param name="beforeCursor">
+    ///     Reverse-direction cursor: returns items strictly less than this cursor in
+    ///     DESC keyset order, capped at <paramref name="take" />.
+    ///     Mutually exclusive with <paramref name="afterCursor" />.
+    /// </param>
+    /// <param name="take">Maximum number of children to return. Must be greater than 0.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The children page.</returns>
+    Task<DirectChildrenPage> GetDirectChildrenAsync(string parentRunId,
+        string? afterCursor = null,
+        string? beforeCursor = null,
+        int take = 50,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Walks the parent chain of <paramref name="runId" /> upward to the root, returning
+    ///     the ancestors in root → immediate-parent order. The run itself is excluded. Returns
+    ///     an empty list if the run is a root (no parent). Bounded by tree depth (typically small).
+    /// </summary>
+    /// <param name="runId">The run whose ancestors are requested.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>Ancestors in root → parent order; empty if the run has no parent.</returns>
+    Task<IReadOnlyList<JobRun>> GetAncestorChainAsync(string runId,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -194,21 +334,34 @@ public interface IJobStore
     ///     When non-null, only return events for this attempt number. Events with
     ///     <c>Attempt = 0</c> (run-scoped, shared across attempts) are always included.
     /// </param>
+    /// <param name="take">When non-null, limits the number of events returned. Must be greater than 0.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching events ordered by ID ascending.</returns>
     Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null,
-        int? attempt = null, CancellationToken cancellationToken = default);
+        int? attempt = null, int? take = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Returns output events across all direct child runs of a batch coordinator, ordered by
+    ///     Returns events across all direct child runs of a batch, ordered by event ID ascending
+    ///     for global cross-child event ordering.
+    /// </summary>
+    /// <param name="batchId">The batch ID.</param>
+    /// <param name="sinceEventId">Only return events with an ID greater than this value.</param>
+    /// <param name="take">The maximum number of events to return.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching events ordered by ID ascending.</returns>
+    Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0, int take = 200,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns output events across all direct child runs of a batch, ordered by
     ///     event ID ascending for global cross-child event ordering.
     /// </summary>
-    /// <param name="batchRunId">The batch coordinator run ID.</param>
+    /// <param name="batchId">The batch ID.</param>
     /// <param name="sinceEventId">Only return events with an ID greater than this value.</param>
     /// <param name="take">The maximum number of events to return.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching output events ordered by ID ascending.</returns>
-    Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0, int take = 200,
+    Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0, int take = 200,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -224,11 +377,31 @@ public interface IJobStore
         IReadOnlyCollection<string> activeRunIds, CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Returns the subset of <paramref name="runIds" /> that are no longer in
+    ///     <see cref="JobStatus.Running" /> status: either deleted or in a terminal/non-running status.
+    ///     Used by the executor to react to externally-initiated cancellation when notifications
+    ///     are missed.
+    /// </summary>
+    /// <param name="runIds">The IDs of runs currently executing on this node.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The IDs from the input set that should be stopped.</returns>
+    Task<IReadOnlyList<string>> GetExternallyStoppedRunIdsAsync(IReadOnlyCollection<string> runIds,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     ///     Returns all known nodes, including inactive ones that have not been purged.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>All node records.</returns>
     Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns a specific node by name, or null when not found.
+    /// </summary>
+    /// <param name="name">The node name.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The matching node record, or null.</returns>
+    Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Inserts or updates a queue definition. If a queue with the same name exists, all mutable
@@ -264,12 +437,13 @@ public interface IJobStore
     Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Cancels all pending or retrying runs whose <c>NotAfter</c> deadline has passed.
-    ///     Batch coordinator runs (those with a non-null <c>BatchTotal</c>) are excluded.
+    ///     Cancels all pending runs whose <c>NotAfter</c> deadline has passed and
+    ///     returns the run IDs that were transitioned to <see cref="JobStatus.Cancelled" />.
+    ///     Atomically updates batch counters for cancelled batch children.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The number of runs that were cancelled.</returns>
-    Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default);
+    /// <returns>The IDs of runs that were cancelled in this operation.</returns>
+    Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Purges all data older than the specified threshold: terminal runs (by <c>CompletedAt</c>)
@@ -306,4 +480,19 @@ public interface IJobStore
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A dictionary of queue statistics keyed by queue name.</returns>
     Task<IReadOnlyDictionary<string, QueueStats>> GetQueueStatsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the IDs of non-terminal batches where all runs have completed
+    ///     but the batch has not yet been marked terminal. Used for stuck-batch recovery.
+    /// </summary>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>IDs of batches that can be completed.</returns>
+    Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns whether the given exception represents a transient store failure that is
+    ///     safe to retry (e.g. deadlock, connection reset, lock timeout). Non-transient
+    ///     exceptions (constraint violations, schema errors, auth failures) return false.
+    /// </summary>
+    bool IsTransientException(Exception ex) => false;
 }

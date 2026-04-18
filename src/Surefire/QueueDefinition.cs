@@ -34,4 +34,14 @@ public sealed class QueueDefinition
     ///     Gets or sets the time of the last heartbeat from a node registering this queue.
     /// </summary>
     public DateTimeOffset? LastHeartbeatAt { get; set; }
+
+    internal QueueDefinition Clone() => new()
+    {
+        Name = Name,
+        Priority = Priority,
+        MaxConcurrency = MaxConcurrency,
+        IsPaused = IsPaused,
+        RateLimitName = RateLimitName,
+        LastHeartbeatAt = LastHeartbeatAt
+    };
 }

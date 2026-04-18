@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 
 namespace Surefire;
@@ -37,9 +38,9 @@ public sealed class JobContext
     public int Attempt { get; init; }
 
     /// <summary>
-    ///     Gets the run ID of the batch coordinator, if this run is part of a batch.
+    ///     Gets the batch ID if this run is part of a batch.
     /// </summary>
-    public string? BatchRunId { get; init; }
+    public string? BatchId { get; init; }
 
     /// <summary>
     ///     Gets or sets the result produced by the job handler. Populated before lifecycle callbacks.
@@ -52,9 +53,9 @@ public sealed class JobContext
     public Exception? Exception { get; internal set; }
 
     /// <summary>
-    ///     Gets a key-value bag for passing data between filters in the pipeline.
+    ///     Gets a thread-safe key-value bag for passing data between filters in the pipeline.
     /// </summary>
-    public IDictionary<string, object?> Items { get; } = new Dictionary<string, object?>();
+    public IDictionary<string, object?> Items { get; } = new ConcurrentDictionary<string, object?>();
 
     internal IJobStore Store { get; init; } = null!;
 

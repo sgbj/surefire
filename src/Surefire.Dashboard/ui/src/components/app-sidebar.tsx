@@ -13,8 +13,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
-
-type Theme = "system" | "light" | "dark"
+import type { Theme } from "@/components/layout"
 
 const navItems = [
   { title: "Dashboard", url: "/", icon: House },

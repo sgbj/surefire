@@ -14,6 +14,13 @@ public interface INotificationProvider
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Performs a lightweight connectivity probe against the notification backend.
+    ///     Implementations should avoid heavyweight scans or state mutation.
+    /// </summary>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>
     ///     Publishes a notification to the specified channel. All active subscribers on any
     ///     node receive the message.
     /// </summary>

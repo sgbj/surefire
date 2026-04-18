@@ -6,5 +6,12 @@
         <ProjectReference Include="..\..\src\Surefire.Redis\Surefire.Redis.csproj"/>
         <ProjectReference Include="..\..\src\Surefire.Sqlite\Surefire.Sqlite.csproj"/>
         <ProjectReference Include="..\..\src\Surefire.SqlServer\Surefire.SqlServer.csproj"/>
+        <ProjectReference Include="..\Surefire.Sample.ServiceDefaults\Surefire.Sample.ServiceDefaults.csproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Aspire.Npgsql"/>
+        <PackageReference Include="Aspire.StackExchange.Redis"/>
+        <PackageReference Include="Aspire.Microsoft.Data.SqlClient"/>
     </ItemGroup>
 </Project>

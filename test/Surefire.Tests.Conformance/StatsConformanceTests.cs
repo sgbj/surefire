@@ -5,90 +5,81 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetDashboardStats_ReturnsCorrectCounts()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"StatsJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
-        await Store.UpsertQueueAsync(new() { Name = "default" });
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
 
         var now = DateTimeOffset.UtcNow;
         var runs = new[]
         {
             CreateRun(jobName),
             CreateRun(jobName, JobStatus.Running),
-            CreateRun(jobName, JobStatus.Completed),
-            CreateRun(jobName, JobStatus.Retrying),
+            CreateRun(jobName, JobStatus.Succeeded),
             CreateRun(jobName, JobStatus.Cancelled),
-            CreateRun(jobName, JobStatus.DeadLetter)
+            CreateRun(jobName, JobStatus.Failed)
         };
 
-        foreach (var run in runs)
+        for (var i = 0; i < runs.Length; i++)
         {
-            run.CreatedAt = now;
-            run.NotBefore = now;
-            if (run.Status is JobStatus.Completed or JobStatus.Cancelled or JobStatus.DeadLetter)
-            {
-                run.StartedAt = now;
-                run.CompletedAt = now;
-            }
+            runs[i] = runs[i].Status is JobStatus.Succeeded or JobStatus.Cancelled or JobStatus.Failed
+                ? runs[i] with { CreatedAt = now, NotBefore = now, StartedAt = now, CompletedAt = now }
+                : runs[i] with { CreatedAt = now, NotBefore = now };
         }
 
-        await Store.CreateRunsAsync(runs);
+        await Store.CreateRunsAsync(runs, cancellationToken: ct);
 
-        var stats = await Store.GetDashboardStatsAsync();
+        var stats = await Store.GetDashboardStatsAsync(cancellationToken: ct);
 
-        Assert.Equal(6, stats.TotalRuns);
-        Assert.Equal(3, stats.ActiveRuns);
+        Assert.Equal(5, stats.TotalRuns);
+        Assert.Equal(2, stats.ActiveRuns);
         Assert.True(stats.RunsByStatus.ContainsKey("Pending"));
         Assert.Equal(1, stats.RunsByStatus["Pending"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Running"));
         Assert.Equal(1, stats.RunsByStatus["Running"]);
-        Assert.True(stats.RunsByStatus.ContainsKey("Completed"));
-        Assert.Equal(1, stats.RunsByStatus["Completed"]);
-        Assert.True(stats.RunsByStatus.ContainsKey("Retrying"));
-        Assert.Equal(1, stats.RunsByStatus["Retrying"]);
+        Assert.True(stats.RunsByStatus.ContainsKey("Succeeded"));
+        Assert.Equal(1, stats.RunsByStatus["Succeeded"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Cancelled"));
         Assert.Equal(1, stats.RunsByStatus["Cancelled"]);
-        Assert.True(stats.RunsByStatus.ContainsKey("DeadLetter"));
-        Assert.Equal(1, stats.RunsByStatus["DeadLetter"]);
+        Assert.True(stats.RunsByStatus.ContainsKey("Failed"));
+        Assert.Equal(1, stats.RunsByStatus["Failed"]);
         Assert.True(stats.TotalJobs >= 1);
         Assert.Equal(1d / 3d, stats.SuccessRate, 5);
         Assert.NotEmpty(stats.Timeline);
 
         Assert.Equal(1, stats.Timeline.Sum(b => b.Pending));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Running));
-        Assert.Equal(1, stats.Timeline.Sum(b => b.Completed));
-        Assert.Equal(1, stats.Timeline.Sum(b => b.Retrying));
+        Assert.Equal(1, stats.Timeline.Sum(b => b.Succeeded));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Cancelled));
-        Assert.Equal(1, stats.Timeline.Sum(b => b.DeadLetter));
+        Assert.Equal(1, stats.Timeline.Sum(b => b.Failed));
     }
 
     [Fact]
     public async Task GetJobStats_ReturnsCorrectCounts()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"JobStatsJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
-        await Store.UpsertQueueAsync(new() { Name = "default" });
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
 
         var r1 = CreateRun(jobName);
-        await Store.CreateRunsAsync([r1]);
-        var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
+        await Store.CreateRunsAsync([r1], cancellationToken: ct);
+        var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
         Assert.NotNull(c1);
-        c1.Status = JobStatus.Completed;
-        c1.CompletedAt = DateTimeOffset.UtcNow;
-        await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running));
+        c1 = c1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
+        await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running), ct);
 
         var r2 = CreateRun(jobName);
-        await Store.CreateRunsAsync([r2]);
-        var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
+        await Store.CreateRunsAsync([r2], cancellationToken: ct);
+        var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
         Assert.NotNull(c2);
-        c2.Status = JobStatus.DeadLetter;
-        c2.CompletedAt = DateTimeOffset.UtcNow;
-        c2.Error = "permanent failure";
-        await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running));
+        c2 = c2 with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow, Reason = "permanent failure" };
+        await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running), ct);
 
         var r3 = CreateRun(jobName);
-        await Store.CreateRunsAsync([r3]);
+        await Store.CreateRunsAsync([r3], cancellationToken: ct);
 
-        var stats = await Store.GetJobStatsAsync(jobName);
+        var stats = await Store.GetJobStatsAsync(jobName, ct);
 
         Assert.Equal(3, stats.TotalRuns);
         Assert.Equal(1, stats.SucceededRuns);
@@ -98,25 +89,26 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetQueueStats_ReturnsCorrectCounts()
     {
+        var ct = TestContext.Current.CancellationToken;
         var queueName = $"stats-queue-{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = queueName });
+        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
 
         var jobName = $"QStatsJob_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.Queue = queueName;
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var p1 = CreateRun(jobName);
         var p2 = CreateRun(jobName);
-        await Store.CreateRunsAsync([p1]);
-        await Store.CreateRunsAsync([p2]);
+        await Store.CreateRunsAsync([p1], cancellationToken: ct);
+        await Store.CreateRunsAsync([p2], cancellationToken: ct);
 
         var r1 = CreateRun(jobName);
-        await Store.CreateRunsAsync([r1]);
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], [queueName]);
+        await Store.CreateRunsAsync([r1], cancellationToken: ct);
+        var claimed = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
         Assert.NotNull(claimed);
 
-        var queueStats = await Store.GetQueueStatsAsync();
+        var queueStats = await Store.GetQueueStatsAsync(ct);
 
         Assert.True(queueStats.ContainsKey(queueName));
         var qs = queueStats[queueName];
@@ -127,7 +119,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetDashboardStats_EmptyStore_ReturnsZeros()
     {
-        var stats = await Store.GetDashboardStatsAsync();
+        var ct = TestContext.Current.CancellationToken;
+        var stats = await Store.GetDashboardStatsAsync(cancellationToken: ct);
 
         Assert.Equal(0, stats.TotalRuns);
         Assert.Equal(0, stats.ActiveRuns);
@@ -137,25 +130,29 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetDashboardStats_WithSince_FiltersTimeline()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"StatsTimeline_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
-        await Store.UpsertQueueAsync(new() { Name = "default" });
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
 
         var now = DateTimeOffset.UtcNow;
 
-        // Create a completed run in the past (before "since")
-        var oldRun = CreateRun(jobName, JobStatus.Completed);
-        oldRun.CompletedAt = now.AddHours(-5);
-        oldRun.StartedAt = now.AddHours(-5);
+        var oldRun = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            CompletedAt = now.AddHours(-5),
+            StartedAt = now.AddHours(-5)
+        };
 
         // Create a completed run recently (after "since")
-        var recentRun = CreateRun(jobName, JobStatus.Completed);
-        recentRun.CompletedAt = now.AddMinutes(-30);
-        recentRun.StartedAt = now.AddMinutes(-30);
+        var recentRun = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            CompletedAt = now.AddMinutes(-30),
+            StartedAt = now.AddMinutes(-30)
+        };
 
-        await Store.CreateRunsAsync([oldRun, recentRun]);
+        await Store.CreateRunsAsync([oldRun, recentRun], cancellationToken: ct);
 
-        var stats = await Store.GetDashboardStatsAsync(now.AddHours(-1), 30);
+        var stats = await Store.GetDashboardStatsAsync(now.AddHours(-1), 30, ct);
 
         Assert.NotNull(stats);
         Assert.True(stats.Timeline.Count > 0);
@@ -169,57 +166,57 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetDashboardStats_NodeCount_IncludesFreshNodes()
     {
+        var ct = TestContext.Current.CancellationToken;
         var freshNode = $"fresh-{Guid.CreateVersion7():N}";
         var staleNode = $"stale-{Guid.CreateVersion7():N}";
 
-        await Store.HeartbeatAsync(freshNode, ["TestJob"], ["default"], []);
-        await Store.HeartbeatAsync(staleNode, ["TestJob"], ["default"], []);
+        await Store.HeartbeatAsync(freshNode, ["TestJob"], ["default"], [], ct);
+        await Store.HeartbeatAsync(staleNode, ["TestJob"], ["default"], [], ct);
 
         // Purge the stale node's heartbeat by re-heartbeating with a very old time
         // is not possible via the API. Instead, create a third fresh node and verify
         // that the count includes recent nodes. We just check NodeCount > 0 since
         // we can't easily make a node stale via the public API.
-        var stats = await Store.GetDashboardStatsAsync();
+        var stats = await Store.GetDashboardStatsAsync(cancellationToken: ct);
         Assert.True(stats.NodeCount >= 2);
     }
 
     [Fact]
     public async Task GetDashboardStats_ZeroBucketMinutes_DoesNotHang()
     {
-        var stats = await Store.GetDashboardStatsAsync(bucketMinutes: 0);
+        var ct = TestContext.Current.CancellationToken;
+        var stats = await Store.GetDashboardStatsAsync(bucketMinutes: 0, cancellationToken: ct);
         Assert.NotNull(stats);
     }
 
     [Fact]
     public async Task GetDashboardStats_Timeline_CorrectBucketCounts()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"BucketJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
-        await Store.UpsertQueueAsync(new() { Name = "default" });
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
 
         // Create a completed run and a failed run via proper claim + CAS flow
         var r1 = CreateRun(jobName);
         var r2 = CreateRun(jobName);
-        await Store.CreateRunsAsync([r1, r2]);
+        await Store.CreateRunsAsync([r1, r2], cancellationToken: ct);
 
-        var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
+        var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
         Assert.NotNull(c1);
-        c1.Status = JobStatus.Completed;
-        c1.CompletedAt = DateTimeOffset.UtcNow;
-        await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running));
+        c1 = c1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
+        await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running), ct);
 
-        var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"]);
+        var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
         Assert.NotNull(c2);
-        c2.Status = JobStatus.DeadLetter;
-        c2.CompletedAt = DateTimeOffset.UtcNow;
-        c2.Error = "permanent failure";
-        await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running));
+        c2 = c2 with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow, Reason = "permanent failure" };
+        await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running), ct);
 
         var since = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));
-        var stats = await Store.GetDashboardStatsAsync(since);
+        var stats = await Store.GetDashboardStatsAsync(since, cancellationToken: ct);
 
-        var totalCompleted = stats.Timeline.Sum(b => b.Completed);
-        var totalDeadLetter = stats.Timeline.Sum(b => b.DeadLetter);
+        var totalCompleted = stats.Timeline.Sum(b => b.Succeeded);
+        var totalDeadLetter = stats.Timeline.Sum(b => b.Failed);
 
         Assert.True(totalCompleted >= 1,
             $"Expected >= 1 completed, got {totalCompleted}. Buckets: {stats.Timeline.Count}");

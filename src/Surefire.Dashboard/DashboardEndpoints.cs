@@ -1,7 +1,7 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Routing;
@@ -15,7 +15,12 @@ namespace Microsoft.AspNetCore.Builder;
 
 public static class DashboardEndpoints
 {
-    private const int TracePageSize = 500;
+    private const int DefaultRunsPageSize = 50;
+    private const int MaxRunsPageSize = 500;
+    private const int DefaultChildrenPageSize = 100;
+    private const int MaxChildrenPageSize = 500;
+    private const int DefaultSiblingWindow = 50;
+    private const int MaxSiblingWindow = 200;
 
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
         string prefix = "/surefire")
@@ -41,11 +46,13 @@ public static class DashboardEndpoints
             {
                 var now = timeProvider.GetUtcNow();
                 var cutoff = now - surefireOpts.InactiveThreshold;
-                var filter = new JobListFilter { Name = name, Tag = tag, IsEnabled = isEnabled };
-                if (includeInactive != true)
+                var filter = new JobListFilter
                 {
-                    filter.HeartbeatAfter = cutoff;
-                }
+                    Name = name,
+                    Tag = tag,
+                    IsEnabled = isEnabled,
+                    HeartbeatAfter = includeInactive == true ? null : cutoff
+                };
 
                 var jobs = await store.GetJobsAsync(filter, ct);
                 return TypedResults.Ok(jobs.Select(j => JobResponse.From(j, cutoff, now)).ToList());
@@ -127,10 +134,10 @@ public static class DashboardEndpoints
                 {
                     var runId = runOptions is { }
                         ? await client.TriggerAsync(name, args, runOptions, ct)
-                        : await client.TriggerAsync(name, args, ct);
-                    return TypedResults.Ok(new RunIdResponse(runId));
+                        : await client.TriggerAsync(name, args, cancellationToken: ct);
+                    return TypedResults.Ok(new RunIdResponse(runId.Id));
                 }
-                catch (InvalidOperationException ex)
+                catch (RunConflictException ex)
                 {
                     return ConflictProblem(ex.Message);
                 }
@@ -151,11 +158,12 @@ public static class DashboardEndpoints
                 CreatedAfter = createdAfter,
                 CreatedBefore = createdBefore
             };
-            var requestedTake = take is null ? 50 : Math.Max(take.Value, 1);
+
+            var requestedTake = Math.Clamp(take ?? DefaultRunsPageSize, 1, MaxRunsPageSize);
             var runsPage = await store.GetRunsAsync(filter, Math.Max(skip ?? 0, 0), requestedTake, ct);
             return TypedResults.Ok(new PagedResponse<RunResponse>
             {
-                Items = runsPage.Items.Select(RunResponse.From).ToList(),
+                Items = runsPage.Items.Select(r => RunResponse.From(r)).ToList(),
                 TotalCount = runsPage.TotalCount
             });
         });
@@ -170,9 +178,107 @@ public static class DashboardEndpoints
                     : TypedResults.Ok(RunResponse.From(run));
             });
 
+        // Tree-aware focused trace view. Returns the ancestor chain (root → immediate
+        // parent), the focus run, a window of siblings, and the first page of children.
+        // Client renders the tree directly from `depth` on each node — no client-side
+        // reconstruction.
         api.MapGet("/runs/{id}/trace",
-            async Task<Results<Ok<List<RunResponse>>, ProblemHttpResult>> (string id, int? limit, IJobStore store,
-                TimeProvider timeProvider, CancellationToken ct) =>
+            async Task<Results<Ok<RunTraceResponse>, ProblemHttpResult>> (string id, int? siblingWindow,
+                int? childrenTake, IJobStore store, CancellationToken ct) =>
+            {
+                var focus = await store.GetRunAsync(id, ct);
+                if (focus is null)
+                {
+                    return NotFoundProblem($"Run '{id}' was not found.");
+                }
+
+                var window = Math.Clamp(siblingWindow ?? DefaultSiblingWindow, 1, MaxSiblingWindow);
+                var childTake = Math.Clamp(childrenTake ?? DefaultChildrenPageSize, 1, MaxChildrenPageSize);
+
+                var ancestors = await store.GetAncestorChainAsync(id, ct);
+                var ancestorResponses = ancestors
+                    .Select((ancestor, index) => RunResponse.From(ancestor, index))
+                    .ToList();
+
+                var focusDepth = ancestorResponses.Count;
+                var focusResponse = RunResponse.From(focus, focusDepth);
+
+                // Siblings: direct children of the focus's parent, split by the focus's
+                // keyset position. We fetch `window` entries before and after the focus.
+                var siblingsBefore = new List<RunResponse>();
+                var siblingsAfter = new List<RunResponse>();
+                string? siblingsAfterCursor = null;
+                string? siblingsBeforeCursor = null;
+
+                if (focus.ParentRunId is { } parentId)
+                {
+                    var siblingDepth = focusDepth; // same depth as focus
+                    var focusCursor = DirectChildrenPage.EncodeCursor(focus.CreatedAt, focus.Id);
+
+                    var afterPage = await store.GetDirectChildrenAsync(parentId,
+                        focusCursor,
+                        take: window,
+                        cancellationToken: ct);
+                    siblingsAfter.AddRange(afterPage.Items.Select(r => RunResponse.From(r, siblingDepth)));
+                    siblingsAfterCursor = afterPage.NextCursor;
+
+                    // Single reverse-keyset query — DESC by (createdAt, id), strict less-than.
+                    // Reverse client-side for chronological display. The store returns a
+                    // NextCursor keyed to the oldest row in the page, which is the cursor to
+                    // continue paginating further back.
+                    var beforePage = await store.GetDirectChildrenAsync(parentId,
+                        beforeCursor: focusCursor,
+                        take: window,
+                        cancellationToken: ct);
+                    siblingsBefore = beforePage.Items
+                        .Reverse()
+                        .Select(r => RunResponse.From(r, siblingDepth))
+                        .ToList();
+                    siblingsBeforeCursor = beforePage.NextCursor;
+                }
+                // else (batch focus with no ParentRunId): siblings left empty. Batches are
+                // atomic — all children share a CreatedAt — so a (createdAt, id) keyset split
+                // around the focus is not possible with the current RunFilter. The trace view
+                // is not the right UI for browsing batch children at scale; the batch page
+                // already lists all siblings with full pagination. We surface the focus +
+                // ancestor chain + focus's own children, and let the UI show a "View batch"
+                // link when focus.BatchId is set.
+
+                var childrenPage = await store.GetDirectChildrenAsync(id, take: childTake, cancellationToken: ct);
+                var childResponses = childrenPage.Items
+                    .Select(c => RunResponse.From(c, focusDepth + 1))
+                    .ToList();
+
+                var siblingsCursor =
+                    siblingsAfterCursor is { } || siblingsBeforeCursor is { }
+                        ? new SiblingsCursorResponse
+                        {
+                            After = siblingsAfterCursor,
+                            Before = siblingsBeforeCursor
+                        }
+                        : null;
+
+                return TypedResults.Ok(new RunTraceResponse
+                {
+                    Ancestors = ancestorResponses,
+                    Focus = focusResponse,
+                    SiblingsBefore = siblingsBefore,
+                    SiblingsAfter = siblingsAfter,
+                    SiblingsCursor = siblingsCursor,
+                    Children = childResponses,
+                    ChildrenCursor = childrenPage.NextCursor
+                });
+            });
+
+        // Direct-children pagination — used by the trace UI for expanding a collapsed node
+        // and for loading additional siblings at the focus level. Supports both forward
+        // (afterCursor) and reverse (beforeCursor) pagination; exactly one may be supplied.
+        // Items are always returned in the store's natural order: ascending (createdAt, id)
+        // for afterCursor / unset, descending for beforeCursor. Callers paginating backward
+        // reverse client-side for chronological display.
+        api.MapGet("/runs/{id}/children",
+            async Task<Results<Ok<RunChildrenResponse>, ProblemHttpResult>> (string id, string? afterCursor,
+                string? beforeCursor, int? take, IJobStore store, CancellationToken ct) =>
             {
                 var run = await store.GetRunAsync(id, ct);
                 if (run is null)
@@ -180,61 +286,27 @@ public static class DashboardEndpoints
                     return NotFoundProblem($"Run '{id}' was not found.");
                 }
 
-                var requestedLimit = limit is null ? (int?)null : Math.Max(limit.Value, 1);
-                var snapshotCreatedBefore = timeProvider.GetUtcNow().AddTicks(1);
-                var rootRunId = run.RootRunId ?? run.Id;
-                var rootRun = run.RootRunId is null ? run : await store.GetRunAsync(rootRunId, ct);
-                if (rootRun is null)
+                if (!string.IsNullOrEmpty(afterCursor) && !string.IsNullOrEmpty(beforeCursor))
                 {
-                    return NotFoundProblem($"Root run '{rootRunId}' was not found.");
+                    return TypedResults.Problem(
+                        statusCode: StatusCodes.Status400BadRequest,
+                        title: "Invalid pagination cursors",
+                        detail: "afterCursor and beforeCursor are mutually exclusive.");
                 }
 
-                if (requestedLimit == 1)
+                var resolvedTake = Math.Clamp(take ?? DefaultChildrenPageSize, 1, MaxChildrenPageSize);
+                var page = await store.GetDirectChildrenAsync(id,
+                    afterCursor,
+                    beforeCursor,
+                    resolvedTake,
+                    ct);
+
+                return TypedResults.Ok(new RunChildrenResponse
                 {
-                    return TypedResults.Ok(new List<RunResponse> { RunResponse.From(rootRun) });
-                }
-
-                var descendants = new List<RunResponse>();
-                var skip = 0;
-                var remaining = requestedLimit is null ? (int?)null : requestedLimit.Value - 1;
-
-                while (remaining is null || remaining.Value > 0)
-                {
-                    var take = remaining is null ? TracePageSize : Math.Min(TracePageSize, remaining.Value);
-                    var descendantsPage = await store.GetRunsAsync(
-                        new()
-                        {
-                            RootRunId = rootRunId,
-                            OrderBy = RunOrderBy.CreatedAt,
-                            CreatedBefore = snapshotCreatedBefore
-                        },
-                        skip,
-                        take,
-                        ct);
-
-                    if (descendantsPage.Items.Count == 0)
-                    {
-                        break;
-                    }
-
-                    descendants.AddRange(descendantsPage.Items.Select(RunResponse.From));
-                    skip += descendantsPage.Items.Count;
-                    if (remaining is { })
-                    {
-                        remaining -= descendantsPage.Items.Count;
-                    }
-
-                    if (skip >= descendantsPage.TotalCount)
-                    {
-                        break;
-                    }
-                }
-
-                var trace = new List<RunResponse>(descendants.Count + 1) { RunResponse.From(rootRun) };
-                trace.AddRange(descendants);
-                return TypedResults.Ok(trace);
+                    Items = page.Items.Select(r => RunResponse.From(r)).ToList(),
+                    NextCursor = page.NextCursor
+                });
             });
-
         api.MapPost("/runs/{id}/cancel",
             async Task<Results<NoContent, ProblemHttpResult>> (string id, IJobClient client, CancellationToken ct) =>
             {
@@ -260,7 +332,7 @@ public static class DashboardEndpoints
                 try
                 {
                     var newRunId = await client.RerunAsync(id, ct);
-                    return TypedResults.Ok(new RunIdResponse(newRunId));
+                    return TypedResults.Ok(new RunIdResponse(newRunId.Id));
                 }
                 catch (RunNotFoundException ex)
                 {
@@ -273,8 +345,8 @@ public static class DashboardEndpoints
             });
 
         api.MapGet("/runs/{id}/logs",
-            async Task<Results<Ok<List<JsonElement>>, ProblemHttpResult>> (string id, IJobStore store,
-                ILoggerFactory loggerFactory, CancellationToken ct) =>
+            async Task<Results<Ok<LogPageResponse>, ProblemHttpResult>> (string id, long? sinceEventId,
+                int? take, IJobStore store, ILoggerFactory loggerFactory, CancellationToken ct) =>
             {
                 var run = await store.GetRunAsync(id, ct);
                 if (run is null)
@@ -282,14 +354,25 @@ public static class DashboardEndpoints
                     return NotFoundProblem($"Run '{id}' was not found.");
                 }
 
+                var resolvedTake = Math.Clamp(take ?? 200, 1, 1000);
                 var logger = loggerFactory.CreateLogger(typeof(DashboardEndpoints));
-                var events = await store.GetEventsAsync(id, types: [RunEventType.Log], cancellationToken: ct);
-                var logs = new List<JsonElement>(events.Count);
+                // Fetch one extra to detect whether more pages exist.
+                var events = await store.GetEventsAsync(id, sinceEventId ?? 0,
+                    [RunEventType.Log], take: resolvedTake + 1, cancellationToken: ct);
+
+                var logs = new List<JsonElement>(Math.Min(events.Count, resolvedTake));
+                long? nextCursor = null;
                 foreach (var @event in events)
                 {
+                    if (logs.Count >= resolvedTake)
+                    {
+                        break;
+                    }
+
                     try
                     {
                         logs.Add(JsonSerializer.Deserialize<JsonElement>(@event.Payload));
+                        nextCursor = @event.Id;
                     }
                     catch (JsonException ex)
                     {
@@ -300,66 +383,25 @@ public static class DashboardEndpoints
                     }
                 }
 
-                return TypedResults.Ok(logs);
+                var hasMore = events.Count > resolvedTake;
+                return TypedResults.Ok(new LogPageResponse
+                {
+                    Items = logs,
+                    NextCursor = hasMore ? nextCursor : null
+                });
             });
 
         api.MapGet("/runs/{id}/stream", async Task<Results<ProblemHttpResult, EmptyHttpResult>> (string id,
-            long? sinceEventId, HttpResponse response, INotificationProvider notifications, IJobStore store,
-            SurefireOptions surefireOptions, ILoggerFactory loggerFactory, CancellationToken ct) =>
+            long? sinceEventId, HttpResponse response, IJobClient client, CancellationToken ct) =>
         {
-            var run = await store.GetRunAsync(id, ct);
+            var run = await client.GetRunAsync(id, ct);
             if (run is null)
             {
                 return NotFoundProblem($"Run '{id}' was not found.");
             }
 
-            var logger = loggerFactory.CreateLogger(typeof(DashboardEndpoints));
-
             response.ContentType = "text/event-stream";
             response.Headers.CacheControl = "no-cache";
-
-            var pollingInterval = surefireOptions.PollingInterval;
-            using var wakeup = new SemaphoreSlim(0, 1);
-
-            await using var eventSub = await notifications.SubscribeAsync(
-                NotificationChannels.RunEvent(id),
-                _ =>
-                {
-                    try
-                    {
-                        wakeup.Release();
-                    }
-                    catch (Exception ex) when (ex is SemaphoreFullException or ObjectDisposedException)
-                    {
-                        logger.LogTrace(ex,
-                            "Ignored wakeup release error for run stream '{RunId}' on run event subscription.",
-                            id);
-                    }
-
-                    return Task.CompletedTask;
-                },
-                ct);
-
-            var completedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await using var completedSub = await notifications.SubscribeAsync(
-                NotificationChannels.RunCompleted(id),
-                _ =>
-                {
-                    completedTcs.TrySetResult();
-                    try
-                    {
-                        wakeup.Release();
-                    }
-                    catch (Exception ex) when (ex is SemaphoreFullException or ObjectDisposedException)
-                    {
-                        logger.LogTrace(ex,
-                            "Ignored wakeup release error for run stream '{RunId}' on completion subscription.",
-                            id);
-                    }
-
-                    return Task.CompletedTask;
-                },
-                ct);
 
             long lastSeenId = 0;
             if (long.TryParse(response.HttpContext.Request.Headers["Last-Event-ID"], out var resumeId))
@@ -373,61 +415,48 @@ public static class DashboardEndpoints
 
             try
             {
-                // Send all existing events (resumes from Last-Event-ID on reconnect)
-                var existingEvents = await store.GetEventsAsync(id, lastSeenId, cancellationToken: ct);
-                foreach (var evt in existingEvents)
+                using var writeLock = new SemaphoreSlim(1, 1);
+                using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var lastWriteTimestamp = Stopwatch.GetTimestamp();
+
+                var keepaliveTask = RunKeepaliveLoopAsync(
+                    response,
+                    writeLock,
+                    () => Stopwatch.GetElapsedTime(Volatile.Read(ref lastWriteTimestamp)),
+                    keepaliveCts.Token);
+
+                try
                 {
-                    await WriteEventAsync(response, evt, ct);
-                    lastSeenId = evt.Id;
-                }
-
-                await response.Body.FlushAsync(ct);
-
-                // Check if already terminal and drain events appended after initial fetch.
-                run = await store.GetRunAsync(id, ct);
-                if (run is { } && run.Status.IsTerminal)
-                {
-                    lastSeenId = await DrainTerminalEventsUntilStableAsync(id, lastSeenId, response, store,
-                        surefireOptions.PollingInterval, ct);
-
-                    await response.WriteAsync("event: done\ndata: {}\n\n", ct);
-                    return TypedResults.Empty;
-                }
-
-                // Poll-on-wake loop
-                await using var reg = ct.Register(() => completedTcs.TrySetCanceled(ct));
-
-                while (!ct.IsCancellationRequested)
-                {
-                    await wakeup.WaitAsync(pollingInterval, ct);
-
-                    var newEvents = await store.GetEventsAsync(id, lastSeenId, cancellationToken: ct);
-                    foreach (var evt in newEvents)
+                    await foreach (var evt in client.ObserveRunEventsAsync(id, lastSeenId, ct))
                     {
-                        await WriteEventAsync(response, evt, ct);
+                        await WriteSseFrameAsync(
+                            response,
+                            writeLock,
+                            frameToken => WriteEventAsync(response, evt, frameToken),
+                            () => Volatile.Write(ref lastWriteTimestamp, Stopwatch.GetTimestamp()),
+                            ct);
                         lastSeenId = evt.Id;
                     }
 
-                    if (newEvents.Count > 0)
+                    // ObserveRunEventsAsync completes when the run reaches a terminal status;
+                    // emit the SSE "done" frame so the UI can close its EventSource cleanly.
+                    await WriteSseFrameAsync(
+                        response,
+                        writeLock,
+                        frameToken => response.WriteAsync("event: done\ndata: {}\n\n", frameToken),
+                        () => Volatile.Write(ref lastWriteTimestamp, Stopwatch.GetTimestamp()),
+                        CancellationToken.None);
+                    return TypedResults.Empty;
+                }
+                finally
+                {
+                    keepaliveCts.Cancel();
+                    try
                     {
-                        await response.Body.FlushAsync(ct);
+                        await keepaliveTask;
                     }
-                    else
+                    catch (OperationCanceledException)
                     {
-                        // Send keepalive comment to prevent proxies/load balancers
-                        // from closing idle connections (nginx default: 60s)
-                        await response.WriteAsync(": keepalive\n\n", ct);
-                        await response.Body.FlushAsync(ct);
-                    }
-
-                    // Check if run completed
-                    if (completedTcs.Task.IsCompleted)
-                    {
-                        lastSeenId = await DrainTerminalEventsUntilStableAsync(id, lastSeenId, response, store,
-                            surefireOptions.PollingInterval, ct);
-
-                        await response.WriteAsync("event: done\ndata: {}\n\n", CancellationToken.None);
-                        return TypedResults.Empty;
                     }
                 }
             }
@@ -497,17 +526,9 @@ public static class DashboardEndpoints
             });
 
         api.MapPatch("/queues/{name}",
-            async (string name, UpdateQueueRequest request, IJobStore store, CancellationToken ct) =>
+            async Task<NoContent> (string name, UpdateQueueRequest request,
+                IJobStore store, CancellationToken ct) =>
             {
-                var queue = (await store.GetQueuesAsync(ct)).FirstOrDefault(q => q.Name == name);
-
-                // Implicit queues (e.g. "default") aren't in the store — materialize them so we can update properties.
-                if (queue is null)
-                {
-                    queue = new() { Name = name };
-                    await store.UpsertQueueAsync(queue, ct);
-                }
-
                 if (request.IsPaused is { })
                 {
                     await store.SetQueuePausedAsync(name, request.IsPaused.Value, ct);
@@ -533,7 +554,7 @@ public static class DashboardEndpoints
         api.MapGet("/nodes/{name}", async Task<Results<Ok<NodeResponse>, ProblemHttpResult>> (string name,
             IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
         {
-            var node = (await store.GetNodesAsync(ct)).FirstOrDefault(n => n.Name == name);
+            var node = await store.GetNodeAsync(name, ct);
             if (node is null)
             {
                 return NotFoundProblem($"Node '{name}' was not found.");
@@ -631,42 +652,44 @@ public static class DashboardEndpoints
         }
     }
 
-    private static async Task<long> DrainTerminalEventsUntilStableAsync(string runId, long lastSeenId,
-        HttpResponse response, IJobStore store, TimeSpan pollingInterval, CancellationToken ct)
+    private static async Task WriteSseFrameAsync(HttpResponse response, SemaphoreSlim writeLock,
+        Func<CancellationToken, Task> writer, Action onWritten, CancellationToken ct)
     {
-        var settleDelay = TimeSpan.FromMilliseconds(Math.Clamp(pollingInterval.TotalMilliseconds / 4d, 5, 50));
-        var settleWindow = TimeSpan.FromMilliseconds(Math.Clamp(pollingInterval.TotalMilliseconds * 2d, 20, 500));
-        var settleStopwatch = Stopwatch.StartNew();
-        var lastEventAt = settleStopwatch.Elapsed;
-        var idlePolls = 0;
-
-        while (true)
+        await writeLock.WaitAsync(ct);
+        try
         {
-            var events = await store.GetEventsAsync(runId, lastSeenId, cancellationToken: ct);
-            if (events.Count == 0)
-            {
-                idlePolls++;
-                if (idlePolls >= 2 && settleStopwatch.Elapsed - lastEventAt >= settleWindow)
-                {
-                    break;
-                }
+            await writer(ct);
+            await response.Body.FlushAsync(ct);
+            onWritten();
+        }
+        finally
+        {
+            writeLock.Release();
+        }
+    }
 
-                await Task.Delay(settleDelay, ct);
+    private static async Task RunKeepaliveLoopAsync(HttpResponse response, SemaphoreSlim writeLock,
+        Func<TimeSpan> getIdleDuration, CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        while (await timer.WaitForNextTickAsync(ct))
+        {
+            if (getIdleDuration() < TimeSpan.FromSeconds(15))
+            {
                 continue;
             }
 
-            idlePolls = 0;
-            lastEventAt = settleStopwatch.Elapsed;
-            foreach (var evt in events)
+            await writeLock.WaitAsync(ct);
+            try
             {
-                await WriteEventAsync(response, evt, ct);
-                lastSeenId = evt.Id;
+                await response.WriteAsync(": keepalive\n\n", ct);
+                await response.Body.FlushAsync(ct);
             }
-
-            await response.Body.FlushAsync(ct);
+            finally
+            {
+                writeLock.Release();
+            }
         }
-
-        return lastSeenId;
     }
 
     private static ProblemHttpResult NotFoundProblem(string detail) =>

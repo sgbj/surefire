@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data;
+using System.Net.Sockets;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -10,17 +11,18 @@ namespace Surefire.PostgreSql;
 ///     PostgreSQL notification provider using LISTEN/NOTIFY.
 /// </summary>
 internal sealed class PostgreSqlNotificationProvider(
-    PostgreSqlOptions options,
+    NpgsqlDataSource dataSource,
+    TimeProvider timeProvider,
+    Backoff backoff,
     ILogger<PostgreSqlNotificationProvider> logger)
     : INotificationProvider, IAsyncDisposable
 {
-    private const int DispatchQueueCapacity = 4096;
-    private readonly string _connectionString = options.ConnectionString;
+    private static readonly TimeSpan ReconnectBackoffInitial = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan ReconnectBackoffMax = TimeSpan.FromSeconds(30);
 
     private readonly Channel<DispatchWorkItem> _dispatchQueue =
-        Channel.CreateBounded<DispatchWorkItem>(new BoundedChannelOptions(DispatchQueueCapacity)
+        Channel.CreateUnbounded<DispatchWorkItem>(new()
         {
-            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
         });
@@ -31,7 +33,6 @@ internal sealed class PostgreSqlNotificationProvider(
     private readonly ConcurrentQueue<string> _pendingUnlistens = new();
     private CancellationTokenSource? _cts;
     private Task? _dispatchLoop;
-    private long _droppedDispatchItems;
     private NpgsqlConnection? _listenConnection;
     private CancellationTokenSource? _listenInterrupt;
     private Task? _listenLoop;
@@ -42,6 +43,14 @@ internal sealed class PostgreSqlNotificationProvider(
         if (_cts is { })
         {
             await _cts.CancelAsync();
+        }
+
+        try
+        {
+            _listenInterrupt?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
         }
 
         if (_listenLoop is { })
@@ -74,18 +83,23 @@ internal sealed class PostgreSqlNotificationProvider(
         {
             await _listenConnection.DisposeAsync();
         }
-
-        await options.DisposeAsync();
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         _cts = new();
-        _listenConnection = new(_connectionString);
-        await _listenConnection.OpenAsync(cancellationToken);
+        _listenConnection = await dataSource.OpenConnectionAsync(cancellationToken);
         RegisterNotificationHandler(_listenConnection);
         _dispatchLoop = DispatchLoopAsync(_cts.Token);
         _listenLoop = ListenLoopAsync(_cts.Token);
+    }
+
+    public async Task PingAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        await cmd.ExecuteScalarAsync(cancellationToken);
     }
 
     public async Task PublishAsync(string channel, string? message = null,
@@ -93,7 +107,7 @@ internal sealed class PostgreSqlNotificationProvider(
     {
         NotificationChannels.ValidateChannel(channel);
 
-        await using var conn = await options.DataSource.OpenConnectionAsync(cancellationToken);
+        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = conn.CreateCommand();
 
         if (message is null)
@@ -142,8 +156,7 @@ internal sealed class PostgreSqlNotificationProvider(
                         await _listenConnection.DisposeAsync();
                     }
 
-                    _listenConnection = new(_connectionString);
-                    await _listenConnection.OpenAsync(cancellationToken);
+                    _listenConnection = await dataSource.OpenConnectionAsync(cancellationToken);
                     if (_reconnectAttempt > 0)
                     {
                         logger.LogInformation(
@@ -216,13 +229,18 @@ internal sealed class PostgreSqlNotificationProvider(
             }
             catch (Exception ex)
             {
+                if (IsExpectedListenInterruption(ex, cancellationToken))
+                {
+                    continue;
+                }
+
+                var delay = backoff.NextDelay(_reconnectAttempt, ReconnectBackoffInitial, ReconnectBackoffMax);
                 _reconnectAttempt++;
-                var delay = ComputeReconnectDelay(_reconnectAttempt);
                 logger.LogWarning(ex,
                     "PostgreSQL notification listen loop failed (attempt {Attempt}). Retrying in {DelayMs}ms.",
                     _reconnectAttempt,
                     (int)delay.TotalMilliseconds);
-                await Task.Delay(delay, cancellationToken);
+                await Task.Delay(delay, timeProvider, cancellationToken);
             }
         }
     }
@@ -237,16 +255,7 @@ internal sealed class PostgreSqlNotificationProvider(
 
                 foreach (var handler in handlers.Values)
                 {
-                    if (!_dispatchQueue.Writer.TryWrite(new(handler, payload, args.Channel)))
-                    {
-                        var dropped = Interlocked.Increment(ref _droppedDispatchItems);
-                        if (dropped == 1 || dropped % 100 == 0)
-                        {
-                            logger.LogWarning(
-                                "PostgreSQL notification dispatch queue saturated; dropped {Dropped} handler dispatch items.",
-                                dropped);
-                        }
-                    }
+                    _dispatchQueue.Writer.TryWrite(new(handler, payload, args.Channel));
                 }
             }
         };
@@ -275,22 +284,36 @@ internal sealed class PostgreSqlNotificationProvider(
         {
             await handler(payload);
         }
+        catch (ObjectDisposedException)
+        {
+            // Handlers can legitimately outlive local synchronization primitives during teardown.
+        }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "PostgreSQL notification handler failed on channel {Channel}.", channel);
         }
     }
 
-    private static TimeSpan ComputeReconnectDelay(int attempt)
+    private static bool IsExpectedListenInterruption(Exception ex, CancellationToken cancellationToken)
     {
-        var exponent = Math.Min(attempt - 1, 7);
-        var baseMs = 200 * (1 << exponent);
-        var jitterMs = Random.Shared.Next(0, 251);
-        var delayMs = Math.Min(30_000, baseMs + jitterMs);
-        return TimeSpan.FromMilliseconds(delayMs);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return true;
+        }
+
+        return ex is NpgsqlException
+        {
+            InnerException: IOException
+            {
+                InnerException: SocketException
+                {
+                    SocketErrorCode: SocketError.OperationAborted
+                }
+            }
+        };
     }
 
-    private Task UnsubscribeAsync(string channel, Guid subscriptionId)
+    internal Task UnsubscribeAsync(string channel, Guid subscriptionId)
     {
         lock (_lock)
         {
@@ -311,16 +334,16 @@ internal sealed class PostgreSqlNotificationProvider(
         return Task.CompletedTask;
     }
 
-    private sealed class Subscription(
-        PostgreSqlNotificationProvider provider,
-        string channel,
-        Guid subscriptionId) : IAsyncDisposable
-    {
-        public async ValueTask DisposeAsync()
-        {
-            await provider.UnsubscribeAsync(channel, subscriptionId);
-        }
-    }
-
     private readonly record struct DispatchWorkItem(Func<string?, Task> Handler, string? Payload, string Channel);
+}
+
+file sealed class Subscription(
+    PostgreSqlNotificationProvider provider,
+    string channel,
+    Guid subscriptionId) : IAsyncDisposable
+{
+    public async ValueTask DisposeAsync()
+    {
+        await provider.UnsubscribeAsync(channel, subscriptionId);
+    }
 }

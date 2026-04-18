@@ -109,7 +109,7 @@ export function TriggerDialog({
         : resolveType(prop);
       if (resolvedType === "integer" || resolvedType === "number") {
         const num = Number(value);
-        if (isNaN(num)) {
+        if (Number.isNaN(num)) {
           toast.error(`"${name}" must be a number`);
           return null;
         }
@@ -168,7 +168,7 @@ export function TriggerDialog({
 
     if (priority) {
       const p = parseInt(priority, 10);
-      if (!isNaN(p)) opts.priority = p;
+      if (!Number.isNaN(p)) opts.priority = p;
     }
     if (deduplicationId.trim()) opts.deduplicationId = deduplicationId.trim();
 

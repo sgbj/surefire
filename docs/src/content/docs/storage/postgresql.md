@@ -36,3 +36,13 @@ options.UsePostgreSqlNotifications("Host=primary;Database=myapp");
 
 The PostgreSQL provider supports all Surefire features.
 
+## Notification behavior
+
+`LISTEN`/`NOTIFY` is the low-latency wakeup path. PostgreSQL remains the durable store either way.
+
+- **Normal case** — workers wake immediately from notifications.
+- **Notification connection outage** — wakeups fall back to polling until notifications recover.
+- **Health checks** — Surefire degrades health when notification delivery is unhealthy, even if the store itself is still reachable.
+
+If you run through proxies or poolers, prefer a direct connection for notifications when you need predictable wakeup latency.
+

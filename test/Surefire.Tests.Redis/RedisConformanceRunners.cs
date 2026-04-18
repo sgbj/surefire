@@ -2,7 +2,7 @@ using Surefire.Tests.Conformance;
 
 namespace Surefire.Tests.Redis;
 
-[CollectionDefinition("Redis")]
+[CollectionDefinition("Redis", DisableParallelization = true)]
 public class RedisCollection : ICollectionFixture<RedisFixture>;
 
 [Collection("Redis")]
@@ -72,3 +72,7 @@ public sealed class RedisQueueStatsParityTests(RedisFixture fixture)
 [Collection("Redis")]
 public sealed class RedisRuntimeReliabilityTests(RedisFixture fixture)
     : FixtureBackedRuntimeReliabilityConformanceTests<RedisFixture>(fixture);
+
+[Collection("Redis")]
+public sealed class RedisTraceTests(RedisFixture fixture)
+    : FixtureBackedTraceConformanceTests<RedisFixture>(fixture);

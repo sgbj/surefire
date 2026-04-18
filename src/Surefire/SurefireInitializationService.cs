@@ -37,7 +37,12 @@ internal sealed class SurefireInitializationService(
 
         foreach (var registered in registrations)
         {
-            await EnsureContinuousSeedCapacityAsync(registered.Definition, cancellationToken);
+            await ContinuousRunSeeder.EnsureCapacityAsync(
+                store,
+                notifications,
+                timeProvider,
+                registered.Definition,
+                cancellationToken);
         }
 
         await store.HeartbeatAsync(
@@ -57,41 +62,4 @@ internal sealed class SurefireInitializationService(
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-
-    private async Task EnsureContinuousSeedCapacityAsync(JobDefinition definition, CancellationToken cancellationToken)
-    {
-        if (!definition.IsContinuous || !definition.IsEnabled)
-        {
-            return;
-        }
-
-        var desired = Math.Max(definition.MaxConcurrency ?? 1, 1);
-        for (var i = 0; i < desired; i++)
-        {
-            var now = timeProvider.GetUtcNow();
-            var run = new JobRun
-            {
-                Id = Guid.CreateVersion7().ToString("N"),
-                JobName = definition.Name,
-                Status = JobStatus.Pending,
-                CreatedAt = now,
-                NotBefore = now,
-                Priority = definition.Priority,
-                QueuePriority = 0,
-                Progress = 0,
-                Attempt = 0
-            };
-
-            var created = await store.TryCreateRunAsync(
-                run,
-                desired,
-                cancellationToken: cancellationToken);
-            if (!created)
-            {
-                break;
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
-        }
-    }
 }

@@ -26,6 +26,9 @@ public sealed class SurefireOptions
     internal List<Delegate> OnSuccessCallbacks { get; } = [];
     internal List<Delegate> OnRetryCallbacks { get; } = [];
     internal List<Delegate> OnDeadLetterCallbacks { get; } = [];
+    internal IReadOnlyList<CompiledCallback> CompiledOnSuccessCallbacks { get; private set; } = [];
+    internal IReadOnlyList<CompiledCallback> CompiledOnRetryCallbacks { get; private set; } = [];
+    internal IReadOnlyList<CompiledCallback> CompiledOnDeadLetterCallbacks { get; private set; } = [];
     internal List<Type> FilterTypes { get; } = [];
     internal List<QueueDefinition> Queues { get; } = [];
     internal List<RateLimitDefinition> RateLimits { get; } = [];
@@ -318,15 +321,12 @@ public sealed class SurefireOptions
 
     internal void Validate()
     {
-        _ = NodeName;
-        _ = PollingInterval;
-        _ = HeartbeatInterval;
-        _ = InactiveThreshold;
-        _ = RetentionPeriod;
-        _ = RetentionCheckInterval;
-        _ = ShutdownTimeout;
-        _ = SerializerOptions;
-        _ = MaxNodeConcurrency;
+        if (InactiveThreshold < HeartbeatInterval * 2)
+        {
+            throw new InvalidOperationException(
+                $"InactiveThreshold ({InactiveThreshold}) must be at least 2x HeartbeatInterval ({HeartbeatInterval}) " +
+                "to avoid premature stale detection between heartbeat cycles.");
+        }
 
         foreach (var queue in Queues)
         {
@@ -337,6 +337,32 @@ public sealed class SurefireOptions
         {
             ValidateRateLimitArguments(rateLimit.Name, rateLimit.MaxPermits, rateLimit.Window);
         }
+    }
+
+    internal SurefireOptions Freeze()
+    {
+        var clone = new SurefireOptions
+        {
+            NodeName = NodeName,
+            PollingInterval = PollingInterval,
+            HeartbeatInterval = HeartbeatInterval,
+            InactiveThreshold = InactiveThreshold,
+            RetentionPeriod = RetentionPeriod,
+            RetentionCheckInterval = RetentionCheckInterval,
+            ShutdownTimeout = ShutdownTimeout,
+            SerializerOptions = new(SerializerOptions),
+            MaxNodeConcurrency = MaxNodeConcurrency,
+            AutoMigrate = AutoMigrate
+        };
+
+        clone.CompiledOnSuccessCallbacks = OnSuccessCallbacks.Select(CompiledCallback.Build).ToArray();
+        clone.CompiledOnRetryCallbacks = OnRetryCallbacks.Select(CompiledCallback.Build).ToArray();
+        clone.CompiledOnDeadLetterCallbacks = OnDeadLetterCallbacks.Select(CompiledCallback.Build).ToArray();
+        clone.FilterTypes.AddRange(FilterTypes);
+        clone.Queues.AddRange(Queues.Select(queue => queue.Clone()));
+        clone.RateLimits.AddRange(RateLimits.Select(rateLimit => rateLimit.Clone()));
+        clone.ServiceConfigurators.AddRange(ServiceConfigurators);
+        return clone;
     }
 
     private static void ValidateRateLimitArguments(string name, int maxPermits, TimeSpan window)

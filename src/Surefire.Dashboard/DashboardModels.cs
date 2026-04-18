@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Surefire.Dashboard;
 
@@ -15,7 +16,7 @@ public sealed class DashboardStatsResponse
     public IReadOnlyList<TimelineBucketResponse> Timeline { get; init; } = [];
     public IReadOnlyList<RunResponse> RecentRuns { get; init; } = [];
 
-    public static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<JobRun> recentRuns) => new()
+    internal static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<JobRun> recentRuns) => new()
     {
         TotalJobs = stats.TotalJobs,
         TotalRuns = stats.TotalRuns,
@@ -24,7 +25,7 @@ public sealed class DashboardStatsResponse
         NodeCount = stats.NodeCount,
         RunsByStatus = stats.RunsByStatus,
         Timeline = stats.Timeline.Select(TimelineBucketResponse.From).ToList(),
-        RecentRuns = recentRuns.Select(RunResponse.From).ToList()
+        RecentRuns = recentRuns.Select(r => RunResponse.From(r)).ToList()
     };
 }
 
@@ -35,7 +36,16 @@ public sealed class RunResponse
     public JobStatus Status { get; init; }
     public string? Arguments { get; init; }
     public string? Result { get; init; }
-    public string? Error { get; init; }
+    public string? Reason { get; init; }
+
+    /// <summary>
+    ///     Optional depth in a trace hierarchy. Populated by the trace endpoint so the
+    ///     client can render a tree without rebuilding it. Omitted from non-trace
+    ///     responses — the UI treats presence as "this run came from a trace view".
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Depth { get; init; }
+
     public double Progress { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
@@ -45,6 +55,8 @@ public sealed class RunResponse
     public int Attempt { get; init; }
     public string? TraceId { get; init; }
     public string? SpanId { get; init; }
+    public string? ParentTraceId { get; init; }
+    public string? ParentSpanId { get; init; }
     public string? ParentRunId { get; init; }
     public string? RootRunId { get; init; }
     public string? RerunOfRunId { get; init; }
@@ -54,18 +66,16 @@ public sealed class RunResponse
     public int QueuePriority { get; init; }
     public string? DeduplicationId { get; init; }
     public DateTimeOffset? LastHeartbeatAt { get; init; }
-    public int? BatchTotal { get; init; }
-    public int? BatchCompleted { get; init; }
-    public int? BatchFailed { get; init; }
+    public string? BatchId { get; init; }
 
-    public static RunResponse From(JobRun run) => new()
+    internal static RunResponse From(JobRun run, int? depth = null) => new()
     {
         Id = run.Id,
         JobName = run.JobName,
         Status = run.Status,
         Arguments = run.Arguments,
         Result = run.Result,
-        Error = run.Error,
+        Reason = run.Reason,
         Progress = run.Progress,
         CreatedAt = run.CreatedAt,
         StartedAt = run.StartedAt,
@@ -75,6 +85,8 @@ public sealed class RunResponse
         Attempt = run.Attempt,
         TraceId = run.TraceId,
         SpanId = run.SpanId,
+        ParentTraceId = run.ParentTraceId,
+        ParentSpanId = run.ParentSpanId,
         ParentRunId = run.ParentRunId,
         RootRunId = run.RootRunId,
         RerunOfRunId = run.RerunOfRunId,
@@ -84,10 +96,54 @@ public sealed class RunResponse
         QueuePriority = run.QueuePriority,
         DeduplicationId = run.DeduplicationId,
         LastHeartbeatAt = run.LastHeartbeatAt,
-        BatchTotal = run.BatchTotal,
-        BatchCompleted = run.BatchCompleted,
-        BatchFailed = run.BatchFailed
+        BatchId = run.BatchId,
+        Depth = depth
     };
+}
+
+/// <summary>
+///     Focused trace response: ancestor chain (root → immediate parent), the run itself,
+///     a window of siblings around it, and the first page of direct children. Enough
+///     context for the client to render a tree view without rebuilding it from a flat list.
+/// </summary>
+public sealed class RunTraceResponse
+{
+    /// <summary>Ancestors from root → immediate parent, each with a <see cref="RunResponse.Depth" /> starting at 0.</summary>
+    public required IReadOnlyList<RunResponse> Ancestors { get; init; }
+
+    /// <summary>The focus run itself. Depth equals the ancestors count.</summary>
+    public required RunResponse Focus { get; init; }
+
+    /// <summary>Siblings ordered before the focus (in parent-order). Empty if focus has no parent.</summary>
+    public required IReadOnlyList<RunResponse> SiblingsBefore { get; init; }
+
+    /// <summary>Siblings ordered after the focus (in parent-order). Empty if focus has no parent.</summary>
+    public required IReadOnlyList<RunResponse> SiblingsAfter { get; init; }
+
+    /// <summary>Cursor for loading more siblings before/after.</summary>
+    public SiblingsCursorResponse? SiblingsCursor { get; init; }
+
+    /// <summary>First page of direct children of the focus.</summary>
+    public required IReadOnlyList<RunResponse> Children { get; init; }
+
+    /// <summary>Cursor for loading more children, or null if all children are included.</summary>
+    public string? ChildrenCursor { get; init; }
+}
+
+public sealed class SiblingsCursorResponse
+{
+    /// <summary>Cursor to fetch more siblings ordered after the current <c>SiblingsAfter</c>; null if no more.</summary>
+    public string? After { get; init; }
+
+    /// <summary>Cursor to fetch more siblings ordered before the current <c>SiblingsBefore</c>; null if no more.</summary>
+    public string? Before { get; init; }
+}
+
+/// <summary>Response for the direct-children pagination endpoint.</summary>
+public sealed class RunChildrenResponse
+{
+    public required IReadOnlyList<RunResponse> Items { get; init; }
+    public string? NextCursor { get; init; }
 }
 
 public sealed class PagedResponse<T>
@@ -127,20 +183,18 @@ public sealed class TimelineBucketResponse
     public DateTimeOffset Timestamp { get; init; }
     public int Pending { get; init; }
     public int Running { get; init; }
-    public int Completed { get; init; }
-    public int Retrying { get; init; }
+    public int Succeeded { get; init; }
     public int Cancelled { get; init; }
-    public int DeadLetter { get; init; }
+    public int Failed { get; init; }
 
     public static TimelineBucketResponse From(TimelineBucket bucket) => new()
     {
         Timestamp = bucket.Start,
         Pending = bucket.Pending,
         Running = bucket.Running,
-        Completed = bucket.Completed,
-        Retrying = bucket.Retrying,
+        Succeeded = bucket.Succeeded,
         Cancelled = bucket.Cancelled,
-        DeadLetter = bucket.DeadLetter
+        Failed = bucket.Failed
     };
 }
 
@@ -199,11 +253,13 @@ public sealed class JobResponse
 
         try
         {
-            var cron = Cronos.CronExpression.Parse(job.CronExpression);
-            var tz = job.TimeZoneId is { } ? TimeZoneInfo.FindSystemTimeZoneById(job.TimeZoneId) : null;
-            var next = tz is { }
-                ? cron.GetNextOccurrence(now.UtcDateTime, tz)
-                : cron.GetNextOccurrence(now.UtcDateTime);
+            if (!CronScheduleValidation.TryParseCron(job.CronExpression, out var cron) ||
+                !CronScheduleValidation.TryResolveTimeZone(job.TimeZoneId, out var timeZone))
+            {
+                return null;
+            }
+
+            var next = cron.GetNextOccurrence(now.UtcDateTime, timeZone);
             return next.HasValue ? new DateTimeOffset(next.Value, TimeSpan.Zero) : null;
         }
         catch
@@ -268,6 +324,12 @@ public sealed class UpdateJobRequest
 public sealed class UpdateQueueRequest
 {
     public bool? IsPaused { get; set; }
+}
+
+public sealed class LogPageResponse
+{
+    public required IReadOnlyList<JsonElement> Items { get; init; }
+    public long? NextCursor { get; init; }
 }
 
 public sealed record RunIdResponse(string RunId);

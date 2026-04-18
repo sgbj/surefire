@@ -34,8 +34,20 @@ file sealed class SurefireRunLogger(string categoryName, IServiceProvider servic
             return;
         }
 
-        _pump ??= services.GetService<SurefireLogEventPump>();
-        if (_pump is null)
+        var pump = Volatile.Read(ref _pump);
+        if (pump is null)
+        {
+            var resolved = services.GetService<SurefireLogEventPump>();
+            if (resolved is null)
+            {
+                return;
+            }
+
+            Interlocked.CompareExchange(ref _pump, resolved, null);
+            pump = _pump;
+        }
+
+        if (pump is null)
         {
             return;
         }
@@ -43,6 +55,7 @@ file sealed class SurefireRunLogger(string categoryName, IServiceProvider servic
         var message = formatter(state, exception);
         var entry = new SurefireLogEventPump.LogEntry(
             context.RunId,
+            0, // Assigned by RunFlushState.TryEnqueue under its lock
             context.Attempt,
             timeProvider.GetUtcNow(),
             categoryName,
@@ -52,6 +65,6 @@ file sealed class SurefireRunLogger(string categoryName, IServiceProvider servic
             message,
             exception?.ToString());
 
-        _pump.TryEnqueue(entry);
+        pump.TryEnqueue(entry);
     }
 }

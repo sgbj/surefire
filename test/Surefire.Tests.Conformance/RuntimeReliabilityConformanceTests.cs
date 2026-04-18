@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Conformance;
 
@@ -9,6 +10,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
     [Fact]
     public async Task ContinuousJob_SeedsToMaxConcurrency_OnStartup()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"ContinuousSeed_{Guid.CreateVersion7():N}";
 
         await using var harness = await CreateHarnessAsync(options =>
@@ -29,9 +31,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 }).Continuous().WithMaxConcurrency(3);
             });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        var page = await PollUntilAsync(
+        var page = await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -41,7 +43,8 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             p => p.Items.Count == 3,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for startup continuous seeding to create max-concurrency runs.");
+            "Timed out waiting for startup continuous seeding to create max-concurrency runs.",
+            ct);
 
         Assert.Equal(3, page.Items.Count);
     }
@@ -49,6 +52,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
     [Fact]
     public async Task StaleRunningRun_IsRecoveredAndReclaimed_ByMaintenanceLoop()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"CrashRecovery_{Guid.CreateVersion7():N}";
 
         await using var harness = await CreateHarnessAsync(options =>
@@ -59,9 +63,13 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 options.InactiveThreshold = TimeSpan.FromMilliseconds(120);
                 options.RetentionPeriod = null;
             },
-            (host, _) => host.AddJob(jobName, () => 7).WithRetry(1));
+            (host, _) => host.AddJob(jobName, () => 7).WithRetry(policy =>
+            {
+                policy.MaxRetries = 1;
+                policy.InitialDelay = TimeSpan.FromMilliseconds(50);
+            }));
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
         var stale = new JobRun
@@ -78,22 +86,21 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             Progress = 0
         };
 
-        await harness.Store.CreateRunsAsync([stale]);
+        await harness.Store.CreateRunsAsync([stale], cancellationToken: ct);
 
-        var recovered = await PollUntilAsync(
-            () => harness.Store.GetRunAsync(stale.Id),
-            run => run is { } && run.Status == JobStatus.Completed,
+        var recovered = await TestWait.AwaitRunAsync(
+            harness.Store, harness.Notifications, stale.Id,
+            run => run.Status == JobStatus.Succeeded,
             TimeSpan.FromSeconds(8),
-            TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for stale running run to be recovered and completed.");
-
-        Assert.NotNull(recovered);
+            "Timed out waiting for stale running run to be recovered and completed.",
+            ct);
         Assert.Equal(2, recovered.Attempt);
     }
 
     [Fact]
     public async Task StaleRunningRun_ExhaustedRetryPolicy_TransitionsToDeadLetter()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"CrashRecoveryNoRetry_{Guid.CreateVersion7():N}";
 
         await using var harness = await CreateHarnessAsync(options =>
@@ -106,7 +113,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             },
             (host, _) => host.AddJob(jobName, () => 7).WithRetry(0));
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
         var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
         var stale = new JobRun
@@ -123,22 +130,22 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             Progress = 0
         };
 
-        await harness.Store.CreateRunsAsync([stale]);
+        await harness.Store.CreateRunsAsync([stale], cancellationToken: ct);
 
-        var recovered = await PollUntilAsync(
-            () => harness.Store.GetRunAsync(stale.Id),
-            run => run is { } && run.Status == JobStatus.DeadLetter,
+        var recovered = await TestWait.AwaitRunAsync(
+            harness.Store, harness.Notifications, stale.Id,
+            run => run.Status == JobStatus.Failed,
             TimeSpan.FromSeconds(8),
-            TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for stale running run to dead-letter when retries are exhausted.");
+            "Timed out waiting for stale running run to dead-letter when retries are exhausted.",
+            ct);
 
-        Assert.NotNull(recovered);
-        Assert.Equal(JobStatus.DeadLetter, recovered.Status);
+        Assert.Equal(JobStatus.Failed, recovered.Status);
     }
 
     [Fact]
     public async Task ContinuousJob_DoesNotCreateExtraRuns_WhenManualBacklogAlreadySatisfiesMax()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"ContinuousBacklog_{Guid.CreateVersion7():N}";
 
         await using var harness = await CreateHarnessAsync(options =>
@@ -158,9 +165,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 }).Continuous().WithMaxConcurrency(1);
             });
 
-        await harness.StartAsync();
+        await harness.StartAsync(ct);
 
-        await PollUntilAsync(
+        await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -170,12 +177,13 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             p => p.Items.Count == 1,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for first continuous run to start.");
+            "Timed out waiting for first continuous run to start.",
+            ct);
 
-        await harness.Client.TriggerAsync(jobName);
-        await harness.Client.TriggerAsync(jobName);
+        await harness.Client.TriggerAsync(jobName, cancellationToken: ct);
+        await harness.Client.TriggerAsync(jobName, cancellationToken: ct);
 
-        await PollUntilAsync(
+        await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -185,11 +193,12 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             p => p.Items.Count == 3,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for manual backlog to reach three non-terminal runs.");
+            "Timed out waiting for manual backlog to reach three non-terminal runs.",
+            ct);
 
-        await harness.Permits.Writer.WriteAsync(true);
+        await harness.Permits.Writer.WriteAsync(true, ct);
 
-        var settled = await PollUntilAsync(
+        var settled = await TestWait.PollUntilAsync(
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
@@ -199,9 +208,113 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             p => p.Items.Count == 2 && p.Items.Count(r => r.Status == JobStatus.Running) == 1,
             TimeSpan.FromSeconds(8),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for backlog to drain without over-seeding.");
+            "Timed out waiting for backlog to drain without over-seeding.",
+            ct);
 
         Assert.Equal(2, settled.Items.Count);
+    }
+
+    [Fact]
+    public async Task JobTimeout_TransitionsRunToFailed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"TimeoutFail_{Guid.CreateVersion7():N}";
+
+        var jobStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var harness = await CreateHarnessAsync(options =>
+            {
+                options.AutoMigrate = false;
+                options.PollingInterval = TimeSpan.FromMilliseconds(20);
+                options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+                options.InactiveThreshold = TimeSpan.FromMilliseconds(250);
+                options.RetentionPeriod = null;
+            },
+            (host, _) =>
+            {
+                host.AddJob(jobName, async (CancellationToken ct) =>
+                {
+                    jobStarted.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                    return 1;
+                }).WithTimeout(TimeSpan.FromSeconds(5));
+            });
+
+        await harness.StartAsync(ct);
+
+        var jobRun = await harness.Client.TriggerAsync(jobName, cancellationToken: ct);
+
+        await jobStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+
+        var run = await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(jobRun.Id, ct),
+            r => r.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(60),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for timeout run to reach Failed status.",
+            ct);
+        Assert.Null(run.Reason);
+        Assert.NotNull(run.CompletedAt);
+
+        var failures =
+            await harness.Store.GetEventsAsync(run.Id, 0, [RunEventType.AttemptFailure], cancellationToken: ct);
+        var failure = Assert.Single(failures);
+        Assert.NotNull(failure.Payload);
+        Assert.Contains("timed out", failure.Payload, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task JobTimeout_WithRetry_RetriesAfterTimeout()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"TimeoutRetry_{Guid.CreateVersion7():N}";
+        var attempts = 0;
+
+        var jobStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var harness = await CreateHarnessAsync(options =>
+            {
+                options.AutoMigrate = false;
+                options.PollingInterval = TimeSpan.FromMilliseconds(20);
+                options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+                options.InactiveThreshold = TimeSpan.FromMilliseconds(250);
+                options.RetentionPeriod = null;
+            },
+            (host, _) =>
+            {
+                host.AddJob(jobName, async (CancellationToken ct) =>
+                    {
+                        if (Interlocked.Increment(ref attempts) == 1)
+                        {
+                            jobStarted.TrySetResult();
+                            // First attempt times out
+                            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                        }
+
+                        // Second attempt succeeds
+                        return 42;
+                    }).WithTimeout(TimeSpan.FromSeconds(5))
+                    .WithRetry(policy =>
+                    {
+                        policy.MaxRetries = 1;
+                        policy.InitialDelay = TimeSpan.FromMilliseconds(50);
+                    });
+            });
+
+        await harness.StartAsync(ct);
+
+        var jobRun = await harness.Client.TriggerAsync(jobName, cancellationToken: ct);
+
+        await jobStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+
+        var run = await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(jobRun.Id, ct),
+            r => r.Status == JobStatus.Succeeded,
+            TimeSpan.FromSeconds(60),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for timeout-retry run to succeed on second attempt.",
+            ct);
+        Assert.Equal(2, run.Attempt);
     }
 
     private async Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
@@ -221,106 +334,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
         registerJobs(host, harnessPermits);
 
         var client = provider.GetRequiredService<IJobClient>();
+        var notifications = provider.GetRequiredService<INotificationProvider>();
 
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
-        return new(provider, host, Store, client, harnessPermits, hostedServices);
-    }
-
-    private static async Task<T> PollUntilAsync<T>(Func<Task<T>> probe, Func<T, bool> condition,
-        TimeSpan timeout, TimeSpan interval, string timeoutMessage)
-    {
-        var deadline = DateTimeOffset.UtcNow + timeout;
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            var value = await probe();
-            if (condition(value))
-            {
-                return value;
-            }
-
-            await Task.Delay(interval);
-        }
-
-        throw new TimeoutException(timeoutMessage);
-    }
-
-    private sealed class TestHost(IServiceProvider services) : IHost
-    {
-        public IServiceProvider Services { get; } = services;
-
-        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public void Dispose()
-        {
-            if (Services is IDisposable disposable)
-            {
-                disposable.Dispose();
-            }
-        }
-    }
-
-    private sealed class RuntimeHarness(
-        ServiceProvider provider,
-        IHost host,
-        IJobStore store,
-        IJobClient client,
-        Channel<bool> permits,
-        IReadOnlyList<IHostedService> hostedServices) : IAsyncDisposable
-    {
-        public ServiceProvider Provider { get; } = provider;
-        public IHost Host { get; } = host;
-        public IJobStore Store { get; } = store;
-        public IJobClient Client { get; } = client;
-        public Channel<bool> Permits { get; } = permits;
-
-        public async ValueTask DisposeAsync()
-        {
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                await service.StopAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices.Reverse())
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StoppedAsync(CancellationToken.None);
-                }
-            }
-        }
-
-        public async Task StartAsync()
-        {
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartingAsync(CancellationToken.None);
-                }
-            }
-
-            foreach (var service in hostedServices)
-            {
-                await service.StartAsync(CancellationToken.None);
-            }
-
-            foreach (var service in hostedServices)
-            {
-                if (service is IHostedLifecycleService lifecycle)
-                {
-                    await lifecycle.StartedAsync(CancellationToken.None);
-                }
-            }
-        }
+        return new(provider, host, Store, notifications, client, harnessPermits, hostedServices, false);
     }
 }

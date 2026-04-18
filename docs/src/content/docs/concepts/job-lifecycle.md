@@ -11,10 +11,11 @@ Every run goes through a series of statuses:
 |---|---|
 | Pending | Waiting to be picked up by a node |
 | Running | Currently executing |
-| Completed | Finished successfully |
+| Cancelling | Cancellation was requested for a running attempt and finalization is still in progress |
+| Succeeded | Finished successfully |
 | Retrying | The latest attempt failed and another attempt is scheduled |
 | Cancelled | Cancelled by a user, during shutdown, or because it expired |
-| Dead letter | Failed after all retry attempts were exhausted |
+| Failed | Failed after all retry attempts were exhausted |
 
 ## Retries
 
@@ -22,7 +23,7 @@ When a job fails and retries are configured:
 
 1. The run transitions to `Retrying`.
 2. After the backoff delay, the run transitions back to `Pending`.
-3. If retries are exhausted, the run is marked `Dead letter`.
+3. If retries are exhausted, the run is marked `Failed`.
 
 Configure retries on a per-job basis:
 
@@ -57,7 +58,7 @@ await client.TriggerAsync("Import", args, new RunOptions
 });
 ```
 
-If a non-terminal run with the same deduplication ID already exists, the trigger is rejected. Deduplication IDs are released when the existing run reaches a terminal status (`Completed`, `Cancelled`, or `Dead letter`).
+If a non-terminal run with the same deduplication ID already exists, the trigger is rejected. Deduplication IDs are released when the existing run reaches a terminal status (`Succeeded`, `Cancelled`, or `Failed`).
 
 Cron jobs use automatic deduplication based on the job name and scheduled time, so you don't need to worry about double-firing after a node restart.
 
@@ -73,7 +74,7 @@ await client.TriggerAsync("TimelyReport", args, new RunOptions
 });
 ```
 
-This is useful for time-sensitive work where a late execution is worse than no execution.
+This is useful for time-sensitive work where a late execution is worse than no execution. Expiration cancels runs that have not started yet; in-flight runs are handled through normal cancellation/finalization.
 
 ## Node health
 

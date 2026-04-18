@@ -1,5 +1,4 @@
 using Microsoft.Extensions.DependencyInjection;
-using System.Reflection;
 
 namespace Surefire.Tests;
 
@@ -54,18 +53,63 @@ public sealed class ConfigurationValidationTests
         Assert.Throws<ArgumentOutOfRangeException>(() => job.WithMaxConcurrency(0));
         Assert.Throws<ArgumentOutOfRangeException>(() => job.WithTimeout(TimeSpan.Zero));
         Assert.Throws<ArgumentOutOfRangeException>(() => job.WithRetry(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => job.WithMisfirePolicy(MisfirePolicy.FireAll, 0));
         Assert.Throws<ArgumentException>(() => job.WithQueue(" "));
         Assert.Throws<ArgumentException>(() => job.WithRateLimit(" "));
+        Assert.Throws<ArgumentException>(() => job.WithCron("not a cron"));
+        Assert.Throws<ArgumentException>(() => job.WithCron("0 9 * * *", "Invalid/Zone"));
     }
 
-    private static JobBuilder CreateJobBuilder()
+    [Fact]
+    public void AddSurefire_InactiveThresholdLessThanTwiceHeartbeatInterval_Throws()
     {
-        var ctor = typeof(JobBuilder).GetConstructor(
-            BindingFlags.Instance | BindingFlags.NonPublic,
-            binder: null,
-            [typeof(JobDefinition)],
-            modifiers: null)!;
+        var services = new ServiceCollection();
 
-        return (JobBuilder)ctor.Invoke([new JobDefinition { Name = "validation-job" }]);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddSurefire(options =>
+            {
+                options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+                options.InactiveThreshold = TimeSpan.FromSeconds(30);
+            }));
+
+        Assert.Contains("2x", ex.Message);
     }
+
+    [Fact]
+    public void AddSurefire_InactiveThresholdExactlyTwiceHeartbeatInterval_Succeeds()
+    {
+        var services = new ServiceCollection();
+
+        services.AddSurefire(options =>
+        {
+            options.HeartbeatInterval = TimeSpan.FromSeconds(30);
+            options.InactiveThreshold = TimeSpan.FromSeconds(60);
+        });
+    }
+
+    [Fact]
+    public void AddSurefire_CopiesSerializerOptionsSnapshot()
+    {
+        var services = new ServiceCollection();
+        SurefireOptions? configured = null;
+
+        services.AddSurefire(options =>
+        {
+            configured = options;
+            options.SerializerOptions.PropertyNameCaseInsensitive = false;
+        });
+
+        using var provider = services.BuildServiceProvider();
+        var runtimeOptions = provider.GetRequiredService<SurefireOptions>();
+
+        Assert.NotNull(configured);
+        Assert.NotSame(configured!.SerializerOptions, runtimeOptions.SerializerOptions);
+        Assert.False(runtimeOptions.SerializerOptions.PropertyNameCaseInsensitive);
+
+        configured.SerializerOptions.PropertyNameCaseInsensitive = true;
+        Assert.False(runtimeOptions.SerializerOptions.PropertyNameCaseInsensitive);
+    }
+
+    private static JobBuilder CreateJobBuilder() =>
+        new(new() { Name = "validation-job" }, () => { });
 }

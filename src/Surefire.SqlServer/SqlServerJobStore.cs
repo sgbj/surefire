@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
@@ -7,14 +8,31 @@ namespace Surefire.SqlServer;
 /// <summary>
 ///     SQL Server implementation of <see cref="IJobStore" />.
 /// </summary>
-public sealed class SqlServerJobStore(string connectionString, TimeProvider timeProvider) : IJobStore
+internal sealed class SqlServerJobStore(
+    string connectionString,
+    TimeSpan? commandTimeout,
+    TimeProvider timeProvider) : IJobStore
 {
+    private readonly string _connectionString = connectionString;
+
+    internal int? CommandTimeoutSeconds { get; } =
+        CommandTimeouts.ToSeconds(commandTimeout, nameof(commandTimeout));
+
+    public async Task PingAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = "SELECT 1";
+        _ = await cmd.ExecuteScalarAsync(cancellationToken);
+    }
+
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
-        await using var lockCmd = conn.CreateCommand();
+        await using var lockCmd = CreateCommand(conn);
         lockCmd.CommandText = """
                               DECLARE @result INT;
                               EXEC @result = sp_getapplock
@@ -29,20 +47,20 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
         try
         {
-            await using var migCmd = conn.CreateCommand();
+            await using var migCmd = CreateCommand(conn);
             migCmd.CommandText = """
                                  IF OBJECT_ID('dbo.surefire_schema_migrations', 'U') IS NULL
                                  CREATE TABLE dbo.surefire_schema_migrations (version INT NOT NULL PRIMARY KEY);
                                  """;
             await migCmd.ExecuteNonQueryAsync(cancellationToken);
 
-            await using var checkCmd = conn.CreateCommand();
+            await using var checkCmd = CreateCommand(conn);
             checkCmd.CommandText = "SELECT ISNULL(MAX(version), 0) FROM dbo.surefire_schema_migrations";
             var currentVersion = (int)(await checkCmd.ExecuteScalarAsync(cancellationToken))!;
 
             if (currentVersion < 1)
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = CreateCommand(conn);
                 cmd.CommandText = """
                                   IF OBJECT_ID('dbo.surefire_jobs', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_jobs (
@@ -60,6 +78,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                       rate_limit_name NVARCHAR(450),
                                       is_enabled BIT NOT NULL DEFAULT 1,
                                       misfire_policy INT NOT NULL DEFAULT 0,
+                                      fire_all_limit INT,
                                       arguments_schema NVARCHAR(MAX),
                                       last_heartbeat_at DATETIMEOFFSET,
                                       last_cron_fire_at DATETIMEOFFSET
@@ -72,7 +91,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                       status INT NOT NULL DEFAULT 0,
                                       arguments NVARCHAR(MAX),
                                       result NVARCHAR(MAX),
-                                      error NVARCHAR(MAX),
+                                      reason NVARCHAR(MAX),
                                       progress FLOAT NOT NULL DEFAULT 0,
                                       created_at DATETIMEOFFSET NOT NULL,
                                       started_at DATETIMEOFFSET,
@@ -82,6 +101,8 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                       attempt INT NOT NULL DEFAULT 0,
                                       trace_id NVARCHAR(450),
                                       span_id NVARCHAR(450),
+                                      parent_trace_id NVARCHAR(450),
+                                      parent_span_id NVARCHAR(450),
                                       parent_run_id NVARCHAR(450),
                                       root_run_id NVARCHAR(450),
                                       rerun_of_run_id NVARCHAR(450),
@@ -90,16 +111,14 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                       priority INT NOT NULL DEFAULT 0,
                                       deduplication_id NVARCHAR(450),
                                       last_heartbeat_at DATETIMEOFFSET,
-                                      batch_total INT,
-                                      batch_completed INT NOT NULL DEFAULT 0,
-                                      batch_failed INT NOT NULL DEFAULT 0,
+                                      batch_id NVARCHAR(450),
                                       queue_priority INT NOT NULL DEFAULT 0
                                   );
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_claim')
                                   CREATE INDEX ix_surefire_runs_claim
                                       ON dbo.surefire_runs (queue_priority DESC, priority DESC, not_before, id)
-                                      WHERE status = 0 AND batch_total IS NULL;
+                                      WHERE status = 0;
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_root')
                                   CREATE INDEX ix_surefire_runs_root
@@ -108,8 +127,13 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_parent')
                                   CREATE INDEX ix_surefire_runs_parent
-                                      ON dbo.surefire_runs (parent_run_id)
+                                      ON dbo.surefire_runs (parent_run_id, created_at, id)
                                       WHERE parent_run_id IS NOT NULL;
+
+                                  IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_batch_id')
+                                  CREATE INDEX ix_surefire_runs_batch_id
+                                      ON dbo.surefire_runs (batch_id)
+                                      WHERE batch_id IS NOT NULL;
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_dedup')
                                   CREATE UNIQUE INDEX ix_surefire_runs_dedup
@@ -133,6 +157,18 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                   IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_created')
                                   CREATE INDEX ix_surefire_runs_created
                                       ON dbo.surefire_runs (created_at DESC, id DESC);
+
+                                  IF OBJECT_ID('dbo.surefire_batches', 'U') IS NULL
+                                  CREATE TABLE dbo.surefire_batches (
+                                      id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                                      status SMALLINT NOT NULL DEFAULT 0,
+                                      total INT NOT NULL DEFAULT 0,
+                                      succeeded INT NOT NULL DEFAULT 0,
+                                      failed INT NOT NULL DEFAULT 0,
+                                      cancelled INT NOT NULL DEFAULT 0,
+                                      created_at DATETIMEOFFSET NOT NULL,
+                                      completed_at DATETIMEOFFSET
+                                  );
 
                                   IF OBJECT_ID('dbo.surefire_events', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_events (
@@ -187,19 +223,28 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
         }
-        finally
+        catch
         {
-            await using var unlockCmd = conn.CreateCommand();
-            unlockCmd.CommandText = "EXEC sp_releaseapplock @Resource = 'surefire_migrate', @LockOwner = 'Session'";
-            await unlockCmd.ExecuteNonQueryAsync(cancellationToken);
+            try
+            {
+                await ReleaseMigrationLockAsync(conn);
+            }
+            catch
+            {
+                /* don't mask the primary exception */
+            }
+
+            throw;
         }
+
+        await ReleaseMigrationLockAsync(conn);
     }
 
     public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           MERGE dbo.surefire_jobs WITH (HOLDLOCK) AS target
                           USING (SELECT @name AS name) AS source ON target.name = source.name
@@ -216,48 +261,51 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                               queue = @queue,
                               rate_limit_name = @rate_limit_name,
                               misfire_policy = @misfire_policy,
+                              fire_all_limit = @fire_all_limit,
                               arguments_schema = @arguments_schema,
                               last_heartbeat_at = SYSUTCDATETIME()
                           WHEN NOT MATCHED THEN INSERT (
                               name, description, tags, cron_expression, time_zone_id, timeout,
                               max_concurrency, priority, retry_policy, is_continuous, queue,
-                              rate_limit_name, is_enabled, misfire_policy, arguments_schema,
+                              rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
                               last_heartbeat_at
                           ) VALUES (
                               @name, @description, @tags, @cron_expression, @time_zone_id, @timeout,
                               @max_concurrency, @priority, @retry_policy, @is_continuous, @queue,
-                              @rate_limit_name, @is_enabled, @misfire_policy, @arguments_schema,
+                              @rate_limit_name, @is_enabled, @misfire_policy, @fire_all_limit, @arguments_schema,
                               SYSUTCDATETIME()
                           );
                           """;
 
-        cmd.Parameters.AddWithValue("@name", job.Name);
-        cmd.Parameters.AddWithValue("@description", (object?)job.Description ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@tags", JsonSerializer.Serialize(job.Tags));
-        cmd.Parameters.AddWithValue("@cron_expression", (object?)job.CronExpression ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@timeout", job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value);
-        cmd.Parameters.AddWithValue("@max_concurrency",
-            job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@priority", job.Priority);
-        cmd.Parameters.AddWithValue("@retry_policy", SerializeRetryPolicy(job.RetryPolicy));
-        cmd.Parameters.AddWithValue("@is_continuous", job.IsContinuous);
-        cmd.Parameters.AddWithValue("@queue", (object?)job.Queue ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@is_enabled", job.IsEnabled);
-        cmd.Parameters.AddWithValue("@misfire_policy", (int)job.MisfirePolicy);
-        cmd.Parameters.AddWithValue("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
+        cmd.Parameters.Add(CreateParameter("@name", job.Name));
+        cmd.Parameters.Add(CreateParameter("@description", (object?)job.Description ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@tags", JsonSerializer.Serialize(job.Tags)));
+        cmd.Parameters.Add(CreateParameter("@cron_expression", (object?)job.CronExpression ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@timeout", job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@max_concurrency",
+            job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@priority", job.Priority));
+        cmd.Parameters.Add(CreateParameter("@retry_policy", SerializeRetryPolicy(job.RetryPolicy)));
+        cmd.Parameters.Add(CreateParameter("@is_continuous", job.IsContinuous));
+        cmd.Parameters.Add(CreateParameter("@queue", (object?)job.Queue ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@is_enabled", job.IsEnabled));
+        cmd.Parameters.Add(CreateParameter("@misfire_policy", (int)job.MisfirePolicy));
+        cmd.Parameters.Add(CreateParameter("@fire_all_limit",
+            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<JobDefinition?> GetJobAsync(string name, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -271,34 +319,34 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
     public async Task<IReadOnlyList<JobDefinition>> GetJobsAsync(JobListFilter? filter = null,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
 
         var sb = new StringBuilder("SELECT * FROM dbo.surefire_jobs WHERE 1=1");
 
         if (filter?.Name is { } nameFilter)
         {
             sb.Append(" AND name LIKE '%' + @name + '%'");
-            cmd.Parameters.AddWithValue("@name", EscapeLike(nameFilter));
+            cmd.Parameters.Add(CreateParameter("@name", EscapeLike(nameFilter)));
         }
 
         if (filter?.Tag is { } tagFilter)
         {
             sb.Append(" AND LOWER(@tag) IN (SELECT LOWER(value) FROM OPENJSON(tags))");
-            cmd.Parameters.AddWithValue("@tag", tagFilter);
+            cmd.Parameters.Add(CreateParameter("@tag", tagFilter));
         }
 
         if (filter?.IsEnabled is { } enabledFilter)
         {
             sb.Append(" AND is_enabled = @is_enabled");
-            cmd.Parameters.AddWithValue("@is_enabled", enabledFilter);
+            cmd.Parameters.Add(CreateParameter("@is_enabled", enabledFilter));
         }
 
         if (filter?.HeartbeatAfter is { } heartbeatFilter)
         {
             sb.Append(" AND last_heartbeat_at > @heartbeat_after");
-            cmd.Parameters.AddWithValue("@heartbeat_after", heartbeatFilter);
+            cmd.Parameters.Add(CreateParameter("@heartbeat_after", heartbeatFilter));
         }
 
         sb.Append(" ORDER BY name");
@@ -316,24 +364,24 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
     public async Task SetJobEnabledAsync(string name, bool enabled, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "UPDATE dbo.surefire_jobs SET is_enabled = @enabled WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
-        cmd.Parameters.AddWithValue("@enabled", enabled);
+        cmd.Parameters.Add(CreateParameter("@name", name));
+        cmd.Parameters.Add(CreateParameter("@enabled", enabled));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task UpdateLastCronFireAtAsync(string jobName, DateTimeOffset fireAt,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "UPDATE dbo.surefire_jobs SET last_cron_fire_at = @fire_at WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", jobName);
-        cmd.Parameters.AddWithValue("@fire_at", fireAt);
+        cmd.Parameters.Add(CreateParameter("@name", jobName));
+        cmd.Parameters.Add(CreateParameter("@fire_at", fireAt));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -350,11 +398,11 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = "SELECT * FROM dbo.surefire_runs WHERE id = @id";
-        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.Add(CreateParameter("@id", id));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -363,6 +411,162 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         }
 
         return ReadRun(reader);
+    }
+
+    public async Task<IReadOnlyList<JobRun>> GetRunsByIdsAsync(IReadOnlyList<string> ids,
+        CancellationToken cancellationToken = default)
+    {
+        if (ids.Count == 0)
+        {
+            return [];
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        var placeholders = new string[ids.Count];
+        for (var i = 0; i < ids.Count; i++)
+        {
+            var p = "@id" + i;
+            placeholders[i] = p;
+            cmd.Parameters.Add(CreateParameter(p, ids[i]));
+        }
+
+        cmd.CommandText = $"SELECT * FROM dbo.surefire_runs WHERE id IN ({string.Join(",", placeholders)})";
+
+        var byId = new Dictionary<string, JobRun>(ids.Count, StringComparer.Ordinal);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var run = ReadRun(reader);
+            byId[run.Id] = run;
+        }
+
+        var result = new List<JobRun>(byId.Count);
+        foreach (var id in ids)
+        {
+            if (byId.TryGetValue(id, out var run))
+            {
+                result.Add(run);
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<DirectChildrenPage> GetDirectChildrenAsync(string parentRunId,
+        string? afterCursor = null,
+        string? beforeCursor = null,
+        int take = 50,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(take, 0);
+        if (!string.IsNullOrEmpty(afterCursor) && !string.IsNullOrEmpty(beforeCursor))
+        {
+            throw new ArgumentException(
+                "afterCursor and beforeCursor are mutually exclusive.", nameof(afterCursor));
+        }
+
+        var after = DirectChildrenPage.DecodeCursor(afterCursor);
+        var before = DirectChildrenPage.DecodeCursor(beforeCursor);
+
+        string sql;
+        if (before is { })
+        {
+            sql = """
+                  SELECT TOP (@take) * FROM dbo.surefire_runs
+                  WHERE parent_run_id = @parent
+                    AND (created_at < @cts OR (created_at = @cts AND id < @cid))
+                  ORDER BY created_at DESC, id DESC
+                  """;
+        }
+        else if (after is { })
+        {
+            sql = """
+                  SELECT TOP (@take) * FROM dbo.surefire_runs
+                  WHERE parent_run_id = @parent
+                    AND (created_at > @cts OR (created_at = @cts AND id > @cid))
+                  ORDER BY created_at, id
+                  """;
+        }
+        else
+        {
+            sql = """
+                  SELECT TOP (@take) * FROM dbo.surefire_runs
+                  WHERE parent_run_id = @parent
+                  ORDER BY created_at, id
+                  """;
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = sql;
+        cmd.Parameters.Add(CreateParameter("@parent", parentRunId));
+        // Keyset pagination with take+1 lookahead: NextCursor is non-null iff
+        // a strictly additional row exists beyond the page boundary, per the
+        // DirectChildrenPage contract.
+        cmd.Parameters.Add(CreateParameter("@take", take + 1));
+        if ((after ?? before) is { } c)
+        {
+            cmd.Parameters.Add(CreateParameter("@cts", c.CreatedAt));
+            cmd.Parameters.Add(CreateParameter("@cid", c.Id));
+        }
+
+        var items = new List<JobRun>(take + 1);
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                items.Add(ReadRun(reader));
+            }
+        }
+
+        var hasMore = items.Count > take;
+        if (hasMore)
+        {
+            items.RemoveAt(items.Count - 1);
+        }
+
+        var nextCursor = hasMore
+            ? DirectChildrenPage.EncodeCursor(items[^1].CreatedAt, items[^1].Id)
+            : null;
+
+        return new() { Items = items, NextCursor = nextCursor };
+    }
+
+    public async Task<IReadOnlyList<JobRun>> GetAncestorChainAsync(string runId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        // Parent IDs are immutable; recursion terminates when parent_run_id is null.
+        // OPTION (MAXRECURSION 0) disables SQL Server's default 100-row recursion guard.
+        cmd.CommandText = """
+                          WITH ancestors(depth, id) AS (
+                              SELECT 0, parent_run_id FROM dbo.surefire_runs WHERE id = @id
+                              UNION ALL
+                              SELECT a.depth + 1, r.parent_run_id
+                              FROM ancestors a
+                              JOIN dbo.surefire_runs r ON r.id = a.id
+                              WHERE a.id IS NOT NULL
+                          )
+                          SELECT r.* FROM ancestors a
+                          JOIN dbo.surefire_runs r ON r.id = a.id
+                          WHERE a.id IS NOT NULL
+                          ORDER BY a.depth DESC
+                          OPTION (MAXRECURSION 0)
+                          """;
+        cmd.Parameters.Add(CreateParameter("@id", runId));
+        var chain = new List<JobRun>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            chain.Add(ReadRun(reader));
+        }
+
+        return chain;
     }
 
     public async Task<PagedResult<JobRun>> GetRunsAsync(RunFilter filter, int skip = 0, int take = 50,
@@ -378,14 +582,21 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             throw new ArgumentOutOfRangeException(nameof(take));
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
         var whereParts = new List<string>();
-        await using var cmd = conn.CreateCommand();
-
-        BuildRunFilterWhere(filter, whereParts, cmd);
+        await using var countCmd = CreateCommand(conn);
+        BuildRunFilterWhere(filter, whereParts, countCmd);
         var whereClause = whereParts.Count > 0 ? "WHERE " + string.Join(" AND ", whereParts) : "";
+
+        countCmd.CommandText = $"SELECT COUNT(*) FROM dbo.surefire_runs {whereClause}";
+        var totalCount = (int)(await countCmd.ExecuteScalarAsync(cancellationToken))!;
+
+        if (totalCount == 0 || skip >= totalCount)
+        {
+            return new() { Items = [], TotalCount = totalCount };
+        }
 
         var orderBy = filter.OrderBy switch
         {
@@ -394,22 +605,20 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             _ => "created_at DESC, id DESC"
         };
 
+        await using var cmd = CreateCommand(conn);
+        BuildRunFilterWhere(filter, [], cmd);
         cmd.CommandText =
-            $"SELECT *, COUNT(*) OVER() AS total_count FROM dbo.surefire_runs {whereClause} ORDER BY {orderBy} OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY";
-        cmd.Parameters.AddWithValue("@take", take);
-        cmd.Parameters.AddWithValue("@skip", skip);
+            $"SELECT * FROM dbo.surefire_runs {whereClause} ORDER BY {orderBy} OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY";
+        cmd.Parameters.Add(CreateParameter("@take", take));
+        cmd.Parameters.Add(CreateParameter("@skip", skip));
 
         var items = new List<JobRun>();
-        var totalCount = 0;
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
-            if (items.Count == 0)
+            while (await reader.ReadAsync(cancellationToken))
             {
-                totalCount = reader.GetInt32(reader.GetOrdinal("total_count"));
+                items.Add(ReadRun(reader));
             }
-
-            items.Add(ReadRun(reader));
         }
 
         return new() { Items = items, TotalCount = totalCount };
@@ -417,45 +626,47 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
     public async Task UpdateRunAsync(JobRun run, CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           UPDATE dbo.surefire_runs SET
                               progress = @progress,
                               result = @result,
-                              error = @error,
+                              reason = @reason,
                               trace_id = @trace_id,
                               span_id = @span_id,
                               last_heartbeat_at = @last_heartbeat_at
                           WHERE id = @id AND (node_name = @node_name OR (node_name IS NULL AND @node_name IS NULL)) AND status NOT IN (2, 4, 5)
                           """;
 
-        cmd.Parameters.AddWithValue("@id", run.Id);
-        cmd.Parameters.AddWithValue("@progress", run.Progress);
-        cmd.Parameters.AddWithValue("@result", (object?)run.Result ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@error", (object?)run.Error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@trace_id", (object?)run.TraceId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@span_id", (object?)run.SpanId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@last_heartbeat_at",
-            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@node_name", (object?)run.NodeName ?? DBNull.Value);
+        cmd.Parameters.Add(CreateParameter("@id", run.Id));
+        cmd.Parameters.Add(CreateParameter("@progress", run.Progress));
+        cmd.Parameters.Add(CreateParameter("@result", (object?)run.Result ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@reason", (object?)run.Reason ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@trace_id", (object?)run.TraceId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@span_id", (object?)run.SpanId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@last_heartbeat_at",
+            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@node_name", (object?)run.NodeName ?? DBNull.Value));
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<bool> TryTransitionRunAsync(RunStatusTransition transition,
+    public async Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
         CancellationToken cancellationToken = default)
     {
         if (!RunTransitionRules.IsAllowed(transition.ExpectedStatus, transition.NewStatus)
             || !transition.HasRequiredFields())
         {
-            return false;
+            return RunTransitionResult.NotApplied;
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
         cmd.CommandText = """
                           UPDATE dbo.surefire_runs SET
                               status = @new_status,
@@ -463,7 +674,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                               started_at = COALESCE(@started_at, started_at),
                               completed_at = COALESCE(@completed_at, completed_at),
                               cancelled_at = COALESCE(@cancelled_at, cancelled_at),
-                              error = @error,
+                              reason = @reason,
                               result = @result,
                               progress = @progress,
                               not_before = @not_before,
@@ -474,59 +685,1331 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                               AND status NOT IN (2, 4, 5)
                           """;
 
-        cmd.Parameters.AddWithValue("@id", transition.RunId);
-        cmd.Parameters.AddWithValue("@new_status", (int)transition.NewStatus);
-        cmd.Parameters.AddWithValue("@node_name", (object?)transition.NodeName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@started_at",
-            transition.StartedAt.HasValue ? transition.StartedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@completed_at",
-            transition.CompletedAt.HasValue ? transition.CompletedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@cancelled_at",
-            transition.CancelledAt.HasValue ? transition.CancelledAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@error", (object?)transition.Error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@result", (object?)transition.Result ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@progress", transition.Progress);
-        cmd.Parameters.AddWithValue("@not_before", transition.NotBefore);
-        cmd.Parameters.AddWithValue("@last_heartbeat_at",
-            transition.LastHeartbeatAt.HasValue ? transition.LastHeartbeatAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@expected_status", (int)transition.ExpectedStatus);
-        cmd.Parameters.AddWithValue("@expected_attempt", transition.ExpectedAttempt);
+        cmd.Parameters.Add(CreateParameter("@id", transition.RunId));
+        cmd.Parameters.Add(CreateParameter("@new_status", (int)transition.NewStatus));
+        cmd.Parameters.Add(CreateParameter("@node_name", (object?)transition.NodeName ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@started_at",
+            transition.StartedAt.HasValue ? transition.StartedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@completed_at",
+            transition.CompletedAt.HasValue ? transition.CompletedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@cancelled_at",
+            transition.CancelledAt.HasValue ? transition.CancelledAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@reason", (object?)transition.Reason ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@result", (object?)transition.Result ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@progress", transition.Progress));
+        cmd.Parameters.Add(CreateParameter("@not_before", transition.NotBefore));
+        cmd.Parameters.Add(CreateParameter("@last_heartbeat_at",
+            transition.LastHeartbeatAt.HasValue ? transition.LastHeartbeatAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@expected_status", (int)transition.ExpectedStatus));
+        cmd.Parameters.Add(CreateParameter("@expected_attempt", transition.ExpectedAttempt));
 
-        var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
-        return rows > 0;
+        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
+        if (updated)
+        {
+            var transitionEvents = new List<RunEvent>();
+            transitionEvents.Add(RunStatusEvents.Create(transition.RunId, transition.ExpectedAttempt,
+                transition.NewStatus, timeProvider.GetUtcNow()));
+            if (transition.Events is { Count: > 0 })
+            {
+                transitionEvents.AddRange(transition.Events);
+            }
+
+            await InsertEventsAsync(conn, tx, transitionEvents, cancellationToken);
+        }
+
+        BatchCompletionInfo? batchCompletion = null;
+        var newStatus = transition.NewStatus;
+        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Cancelled ||
+                        newStatus == JobStatus.Failed))
+        {
+            await using var batchIdCmd = CreateCommand(conn);
+            batchIdCmd.Transaction = tx;
+            batchIdCmd.CommandText = "SELECT batch_id FROM dbo.surefire_runs WHERE id = @id";
+            batchIdCmd.Parameters.Add(CreateParameter("@id", transition.RunId));
+            var batchIdObj = await batchIdCmd.ExecuteScalarAsync(cancellationToken);
+            var batchId = batchIdObj is string s ? s : null;
+
+            if (batchId is { })
+            {
+                await using var incrCmd = CreateCommand(conn);
+                incrCmd.Transaction = tx;
+                incrCmd.CommandText = """
+                                      UPDATE dbo.surefire_batches
+                                      SET succeeded = succeeded + CASE WHEN @status = 2 THEN 1 ELSE 0 END,
+                                          failed    = failed    + CASE WHEN @status = 5 THEN 1 ELSE 0 END,
+                                          cancelled = cancelled + CASE WHEN @status = 4 THEN 1 ELSE 0 END
+                                      OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                      WHERE id = @id AND status NOT IN (2, 4, 5)
+                                      """;
+                incrCmd.Parameters.Add(CreateParameter("@id", batchId));
+                incrCmd.Parameters.Add(CreateParameter("@status", (int)newStatus));
+                await using var reader = await incrCmd.ExecuteReaderAsync(cancellationToken);
+
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    var total = reader.GetInt32(0);
+                    var succeeded = reader.GetInt32(1);
+                    var failed = reader.GetInt32(2);
+                    var cancelled = reader.GetInt32(3);
+
+                    if (succeeded + failed + cancelled >= total)
+                    {
+                        var batchStatus = failed > 0 ? JobStatus.Failed
+                            : cancelled > 0 ? JobStatus.Cancelled
+                            : JobStatus.Succeeded;
+                        var completedAt = timeProvider.GetUtcNow();
+
+                        await reader.CloseAsync();
+
+                        await using var completeCmd = CreateCommand(conn);
+                        completeCmd.Transaction = tx;
+                        completeCmd.CommandText = """
+                                                  UPDATE dbo.surefire_batches
+                                                  SET status = @status, completed_at = @completed_at
+                                                  WHERE id = @id AND status NOT IN (2, 4, 5)
+                                                  """;
+                        completeCmd.Parameters.Add(CreateParameter("@id", batchId));
+                        completeCmd.Parameters.Add(CreateParameter("@status", (short)batchStatus));
+                        completeCmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+                        await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+
+                        batchCompletion = new(batchId, batchStatus, completedAt);
+                    }
+                }
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return new(updated, batchCompletion);
     }
 
-    public async Task<bool> TryCancelRunAsync(string runId,
+    public async Task<RunTransitionResult> TryCancelRunAsync(string runId,
+        int? expectedAttempt = null,
+        string? reason = null,
+        IReadOnlyList<RunEvent>? events = null,
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+
+                          DECLARE @updated TABLE (
+                              id NVARCHAR(450) NOT NULL,
+                              attempt INT NOT NULL,
+                              batch_id NVARCHAR(450)
+                          );
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
                               cancelled_at = @now,
-                              completed_at = @now
+                              completed_at = @now,
+                              reason = COALESCE(@reason, reason)
+                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id INTO @updated(id, attempt, batch_id)
                           WHERE id = @id AND status NOT IN (2, 4, 5)
+                              AND (@expected_attempt IS NULL OR attempt = @expected_attempt);
+
+                          SELECT id, attempt, batch_id FROM @updated;
                           """;
 
-        cmd.Parameters.AddWithValue("@id", runId);
+        cmd.Parameters.Add(CreateParameter("@id", runId));
+        cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@expected_attempt",
+            expectedAttempt.HasValue ? expectedAttempt.Value : DBNull.Value));
 
-        var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
-        return rows > 0;
+        int? attempt = null;
+        string? batchId = null;
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                attempt = reader.GetInt32(1);
+                batchId = reader.IsDBNull(2) ? null : reader.GetString(2);
+            }
+        }
+
+        if (attempt is null)
+        {
+            await tx.CommitAsync(cancellationToken);
+            return RunTransitionResult.NotApplied;
+        }
+
+        var allEvents = new List<RunEvent>();
+        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Cancelled, timeProvider.GetUtcNow()));
+        if (events is { Count: > 0 })
+        {
+            allEvents.AddRange(events);
+        }
+
+        await InsertEventsAsync(conn, tx, allEvents, cancellationToken);
+
+        BatchCompletionInfo? batchCompletion = null;
+        if (batchId is { })
+        {
+            await using var incrCmd = CreateCommand(conn);
+            incrCmd.Transaction = tx;
+            incrCmd.CommandText = """
+                                  UPDATE dbo.surefire_batches
+                                  SET cancelled = cancelled + 1
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  WHERE id = @id AND status NOT IN (2, 4, 5)
+                                  """;
+            incrCmd.Parameters.Add(CreateParameter("@id", batchId));
+            await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
+
+            if (await batchReader.ReadAsync(cancellationToken))
+            {
+                var total = batchReader.GetInt32(0);
+                var succeeded = batchReader.GetInt32(1);
+                var failed = batchReader.GetInt32(2);
+                var cancelled = batchReader.GetInt32(3);
+
+                if (succeeded + failed + cancelled >= total)
+                {
+                    var batchStatus = failed > 0 ? JobStatus.Failed
+                        : cancelled > 0 ? JobStatus.Cancelled
+                        : JobStatus.Succeeded;
+                    var completedAt = timeProvider.GetUtcNow();
+
+                    await batchReader.CloseAsync();
+
+                    await using var completeCmd = CreateCommand(conn);
+                    completeCmd.Transaction = tx;
+                    completeCmd.CommandText = """
+                                              UPDATE dbo.surefire_batches
+                                              SET status = @status, completed_at = @completed_at
+                                              WHERE id = @id AND status NOT IN (2, 4, 5)
+                                              """;
+                    completeCmd.Parameters.Add(CreateParameter("@id", batchId));
+                    completeCmd.Parameters.Add(CreateParameter("@status", (short)batchStatus));
+                    completeCmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+
+                    batchCompletion = new(batchId, batchStatus, completedAt);
+                }
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return new(true, batchCompletion);
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
     {
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
+            return Task.FromResult<JobRun?>(null);
+        }
+
+        return ClaimRunCoreAsync(nodeName, jobNames, queueNames, cancellationToken);
+    }
+
+
+    public async Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
+        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+
+        await using var batchCmd = CreateCommand(conn);
+        batchCmd.Transaction = tx;
+        batchCmd.CommandText = """
+                               INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, cancelled, created_at, completed_at)
+                               VALUES (@id, @status, @total, @succeeded, @failed, @cancelled, @created_at, @completed_at)
+                               """;
+        batchCmd.Parameters.Add(CreateParameter("@id", batch.Id));
+        batchCmd.Parameters.Add(CreateParameter("@status", (short)batch.Status));
+        batchCmd.Parameters.Add(CreateParameter("@total", batch.Total));
+        batchCmd.Parameters.Add(CreateParameter("@succeeded", batch.Succeeded));
+        batchCmd.Parameters.Add(CreateParameter("@failed", batch.Failed));
+        batchCmd.Parameters.Add(CreateParameter("@cancelled", batch.Cancelled));
+        batchCmd.Parameters.Add(CreateParameter("@created_at", batch.CreatedAt));
+        batchCmd.Parameters.Add(CreateParameter("@completed_at",
+            batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value));
+        await batchCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        const int paramsPerRun = 26;
+        const int maxParams = 2100;
+        var chunkSize = maxParams / paramsPerRun;
+
+        for (var offset = 0; offset < runs.Count; offset += chunkSize)
+        {
+            var chunk = runs.Skip(offset).Take(chunkSize).ToList();
+            var sb = new StringBuilder();
+            sb.Append("""
+                      INSERT INTO dbo.surefire_runs (
+                          id, job_name, status, arguments, result, reason, progress,
+                          created_at, started_at, completed_at, cancelled_at, node_name,
+                          attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
+                          rerun_of_run_id, not_before, not_after, priority, deduplication_id,
+                          last_heartbeat_at, batch_id, queue_priority
+                      ) VALUES
+                      """);
+
+            await using var runCmd = CreateCommand(conn);
+            runCmd.Transaction = tx;
+
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                if (i > 0)
+                {
+                    sb.Append(',');
+                }
+
+                var p = $"@p{i}_";
+                sb.Append($"""
+                           (
+                               {p}id, {p}job_name, {p}status, {p}arguments, {p}result, {p}reason, {p}progress,
+                               {p}created_at, {p}started_at, {p}completed_at, {p}cancelled_at, {p}node_name,
+                               {p}attempt, {p}trace_id, {p}span_id, {p}parent_trace_id, {p}parent_span_id, {p}parent_run_id, {p}root_run_id,
+                               {p}rerun_of_run_id, {p}not_before, {p}not_after, {p}priority, {p}deduplication_id,
+                               {p}last_heartbeat_at, {p}batch_id,
+                               ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = {p}job_name), 'default')), 0)
+                           )
+                           """);
+                AddRunParams(runCmd, $"@p{i}_", chunk[i]);
+            }
+
+            runCmd.CommandText = sb.ToString();
+            await runCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await InsertEventsAsync(conn, tx, initialEvents, cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+    }
+
+    public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = "SELECT * FROM dbo.surefire_batches WHERE id = @id";
+        cmd.Parameters.Add(CreateParameter("@id", batchId));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
             return null;
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        return ReadBatch(reader);
+    }
+
+    public async Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          UPDATE dbo.surefire_batches
+                          SET status = @status, completed_at = @completed_at
+                          OUTPUT INSERTED.id
+                          WHERE id = @id AND status NOT IN (2, 4, 5)
+                          """;
+        cmd.Parameters.Add(CreateParameter("@id", batchId));
+        cmd.Parameters.Add(CreateParameter("@status", (short)status));
+        cmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+        string? reason = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL);
+
+                          UPDATE dbo.surefire_runs SET
+                              status = 4,
+                              cancelled_at = @now,
+                              completed_at = @now,
+                              reason = COALESCE(@reason, reason)
+                          OUTPUT INSERTED.id, INSERTED.attempt INTO @cancelled(id, attempt)
+                          WHERE batch_id = @batch_id AND status IN (0, 1);
+
+                          SELECT id, attempt FROM @cancelled;
+                          """;
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
+        cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
+
+        var cancelledIds = new List<string>();
+        var statusEvents = new List<RunEvent>();
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var runId = reader.GetString(0);
+                cancelledIds.Add(runId);
+                statusEvents.Add(RunStatusEvents.Create(
+                    runId,
+                    reader.GetInt32(1),
+                    JobStatus.Cancelled,
+                    timeProvider.GetUtcNow()));
+            }
+        }
+
+        await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
+
+        if (cancelledIds.Count > 0)
+        {
+            await using var incrCmd = CreateCommand(conn);
+            incrCmd.Transaction = tx;
+            incrCmd.CommandText = """
+                                  UPDATE dbo.surefire_batches
+                                  SET cancelled = cancelled + @cnt
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  WHERE id = @id AND status NOT IN (2, 4, 5)
+                                  """;
+            incrCmd.Parameters.Add(CreateParameter("@id", batchId));
+            incrCmd.Parameters.Add(CreateParameter("@cnt", cancelledIds.Count));
+            await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
+
+            if (await batchReader.ReadAsync(cancellationToken))
+            {
+                var total = batchReader.GetInt32(0);
+                var succeeded = batchReader.GetInt32(1);
+                var failed = batchReader.GetInt32(2);
+                var cancelled = batchReader.GetInt32(3);
+
+                if (succeeded + failed + cancelled >= total)
+                {
+                    var batchStatus = failed > 0 ? JobStatus.Failed
+                        : cancelled > 0 ? JobStatus.Cancelled
+                        : JobStatus.Succeeded;
+                    var completedAt = timeProvider.GetUtcNow();
+
+                    await batchReader.CloseAsync();
+
+                    await using var completeCmd = CreateCommand(conn);
+                    completeCmd.Transaction = tx;
+                    completeCmd.CommandText = """
+                                              UPDATE dbo.surefire_batches
+                                              SET status = @status, completed_at = @completed_at
+                                              WHERE id = @id AND status NOT IN (2, 4, 5)
+                                              """;
+                    completeCmd.Parameters.Add(CreateParameter("@id", batchId));
+                    completeCmd.Parameters.Add(CreateParameter("@status", (short)batchStatus));
+                    completeCmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return cancelledIds;
+    }
+
+    public async Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
+        string? reason = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL, batch_id NVARCHAR(450));
+
+                          UPDATE dbo.surefire_runs SET
+                              status = 4,
+                              cancelled_at = @now,
+                              completed_at = @now,
+                              reason = COALESCE(@reason, reason)
+                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id INTO @cancelled(id, attempt, batch_id)
+                          WHERE parent_run_id = @parent_run_id AND status IN (0, 1);
+
+                          SELECT id, attempt, batch_id FROM @cancelled;
+                          """;
+        cmd.Parameters.Add(CreateParameter("@parent_run_id", parentRunId));
+        cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
+
+        var cancelledIds = new List<string>();
+        var cancelledBatchIds = new Dictionary<string, int>();
+        var statusEvents = new List<RunEvent>();
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var runId = reader.GetString(0);
+                cancelledIds.Add(runId);
+                statusEvents.Add(RunStatusEvents.Create(
+                    runId,
+                    reader.GetInt32(1),
+                    JobStatus.Cancelled,
+                    timeProvider.GetUtcNow()));
+                var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (bId is { })
+                {
+                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                }
+            }
+        }
+
+        await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
+
+        foreach (var (batchId, cnt) in cancelledBatchIds)
+        {
+            await using var incrCmd = CreateCommand(conn);
+            incrCmd.Transaction = tx;
+            incrCmd.CommandText = """
+                                  UPDATE dbo.surefire_batches
+                                  SET cancelled = cancelled + @cnt
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  WHERE id = @id AND status NOT IN (2, 4, 5)
+                                  """;
+            incrCmd.Parameters.Add(CreateParameter("@id", batchId));
+            incrCmd.Parameters.Add(CreateParameter("@cnt", cnt));
+            await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
+
+            if (await batchReader.ReadAsync(cancellationToken))
+            {
+                var total = batchReader.GetInt32(0);
+                var succeeded = batchReader.GetInt32(1);
+                var failed = batchReader.GetInt32(2);
+                var cancelled = batchReader.GetInt32(3);
+
+                if (succeeded + failed + cancelled >= total)
+                {
+                    var batchStatus = failed > 0 ? JobStatus.Failed
+                        : cancelled > 0 ? JobStatus.Cancelled
+                        : JobStatus.Succeeded;
+                    var completedAt = timeProvider.GetUtcNow();
+
+                    await batchReader.CloseAsync();
+
+                    await using var completeCmd = CreateCommand(conn);
+                    completeCmd.Transaction = tx;
+                    completeCmd.CommandText = """
+                                              UPDATE dbo.surefire_batches
+                                              SET status = @status, completed_at = @completed_at
+                                              WHERE id = @id AND status NOT IN (2, 4, 5)
+                                              """;
+                    completeCmd.Parameters.Add(CreateParameter("@id", batchId));
+                    completeCmd.Parameters.Add(CreateParameter("@status", (short)batchStatus));
+                    completeCmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return cancelledIds;
+    }
+
+    public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          SELECT b.id FROM dbo.surefire_batches b
+                          WHERE b.status NOT IN (2, 4, 5)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM dbo.surefire_runs r
+                              WHERE r.batch_id = b.id AND r.status NOT IN (2, 4, 5)
+                          )
+                          """;
+        var result = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(reader.GetString(0));
+        }
+
+        return result;
+    }
+
+    public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
+    {
+        if (events.Count == 0)
+        {
+            return;
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+
+        await InsertEventsAsync(conn, tx, events, cancellationToken);
+
+        await tx.CommitAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
+        RunEventType[]? types = null, int? attempt = null, int? take = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+
+        var sb = new StringBuilder("SELECT * FROM dbo.surefire_events WHERE run_id = @run_id AND id > @since_id");
+        cmd.Parameters.Add(CreateParameter("@run_id", runId));
+        cmd.Parameters.Add(CreateParameter("@since_id", sinceId));
+
+        if (types is { Length: > 0 })
+        {
+            var typeParams = types.Select((t, i) =>
+            {
+                var name = $"@et{i}";
+                cmd.Parameters.Add(CreateParameter(name, (short)t));
+                return name;
+            }).ToList();
+            sb.Append($" AND event_type IN ({string.Join(",", typeParams)})");
+        }
+
+        if (attempt is { })
+        {
+            sb.Append(" AND (attempt = @attempt OR attempt = 0)");
+            cmd.Parameters.Add(CreateParameter("@attempt", attempt.Value));
+        }
+
+        sb.Append(" ORDER BY id");
+
+        if (take is { })
+        {
+            sb.Append(" OFFSET 0 ROWS FETCH NEXT @take ROWS ONLY");
+            cmd.Parameters.Add(CreateParameter("@take", take.Value));
+        }
+
+        cmd.CommandText = sb.ToString();
+
+        var results = new List<RunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadEvent(reader));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0,
+        int take = 200, CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          SELECT TOP (@take) e.*
+                          FROM dbo.surefire_events e
+                          INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
+                          WHERE r.batch_id = @batch_id
+                              AND e.event_type = @event_type
+                              AND e.id > @since_event_id
+                          ORDER BY e.id ASC
+                          """;
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
+        cmd.Parameters.Add(CreateParameter("@event_type", (short)RunEventType.Output));
+        cmd.Parameters.Add(CreateParameter("@since_event_id", sinceEventId));
+        cmd.Parameters.Add(CreateParameter("@take", take));
+
+        var results = new List<RunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadEvent(reader));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0,
+        int take = 200, CancellationToken cancellationToken = default)
+    {
+        if (take <= 0)
+        {
+            return [];
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          SELECT TOP (@take) e.*
+                          FROM dbo.surefire_events e
+                          INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
+                          WHERE r.batch_id = @batch_id
+                              AND e.id > @since_event_id
+                          ORDER BY e.id ASC
+                          """;
+        cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
+        cmd.Parameters.Add(CreateParameter("@since_event_id", sinceEventId));
+        cmd.Parameters.Add(CreateParameter("@take", take));
+
+        var results = new List<RunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadEvent(reader));
+        }
+
+        return results;
+    }
+
+    public async Task HeartbeatAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, IReadOnlyCollection<string> activeRunIds,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+
+        await using var nodeCmd = CreateCommand(conn);
+        nodeCmd.Transaction = tx;
+        nodeCmd.CommandText = """
+                              MERGE dbo.surefire_nodes WITH (HOLDLOCK) AS target
+                              USING (SELECT @name AS name) AS source ON target.name = source.name
+                              WHEN MATCHED THEN UPDATE SET
+                                  last_heartbeat_at = SYSUTCDATETIME(),
+                                  running_count = @running_count,
+                                  registered_job_names = @job_names,
+                                  registered_queue_names = @queue_names
+                              WHEN NOT MATCHED THEN INSERT (name, started_at, last_heartbeat_at, running_count, registered_job_names, registered_queue_names)
+                                  VALUES (@name, SYSUTCDATETIME(), SYSUTCDATETIME(), @running_count, @job_names, @queue_names);
+                              """;
+        nodeCmd.Parameters.Add(CreateParameter("@name", nodeName));
+        nodeCmd.Parameters.Add(CreateParameter("@running_count", activeRunIds.Count));
+        nodeCmd.Parameters.Add(CreateParameter("@job_names", JsonSerializer.Serialize(jobNames)));
+        nodeCmd.Parameters.Add(CreateParameter("@queue_names", JsonSerializer.Serialize(queueNames)));
+        await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        if (activeRunIds.Count > 0)
+        {
+            const int maxRunIdsPerBatch = 2000;
+            var activeRunIdsList = activeRunIds as IList<string> ?? activeRunIds.ToList();
+
+            foreach (var chunk in activeRunIdsList.Chunk(maxRunIdsPerBatch))
+            {
+                await using var runCmd = CreateCommand(conn);
+                runCmd.Transaction = tx;
+                var idList = string.Join(", ", chunk.Select((_, i) => $"@rid_{i}"));
+                runCmd.CommandText = $"""
+                                      UPDATE dbo.surefire_runs SET last_heartbeat_at = SYSUTCDATETIME()
+                                      WHERE id IN ({idList}) AND node_name = @node AND status NOT IN (2, 4, 5)
+                                      """;
+                runCmd.Parameters.Add(CreateParameter("@node", nodeName));
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    runCmd.Parameters.Add(CreateParameter($"@rid_{i}", chunk[i]));
+                }
+
+                await runCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> GetExternallyStoppedRunIdsAsync(IReadOnlyCollection<string> runIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (runIds.Count == 0)
+        {
+            return [];
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+
+        var idList = new List<string>();
+        var idsArr = runIds as IList<string> ?? runIds.ToList();
+        for (var i = 0; i < idsArr.Count; i++)
+        {
+            var p = $"@rid_{i}";
+            idList.Add(p);
+            cmd.Parameters.Add(CreateParameter(p, idsArr[i]));
+        }
+
+        var inClause = string.Join(", ", idList);
+        // Returns input IDs that no longer correspond to a Running row, including IDs that were
+        // deleted entirely.
+        cmd.CommandText = $"""
+                           SELECT input_id
+                           FROM (VALUES {string.Join(", ", idList.Select(p => $"({p})"))}) AS i(input_id)
+                           LEFT JOIN dbo.surefire_runs r ON r.id = i.input_id
+                           WHERE r.id IS NULL OR r.status <> 1
+                           """;
+
+        var results = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(reader.GetString(0));
+        }
+
+        return results;
+    }
+
+    public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = "SELECT * FROM dbo.surefire_nodes";
+
+        var results = new List<NodeInfo>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadNode(reader));
+        }
+
+        return results;
+    }
+
+    public async Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = "SELECT TOP (1) * FROM dbo.surefire_nodes WHERE name = @name";
+        cmd.Parameters.Add(CreateParameter("@name", name));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return ReadNode(reader);
+        }
+
+        return null;
+    }
+
+    public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          MERGE dbo.surefire_queues WITH (HOLDLOCK) AS target
+                          USING (SELECT @name AS name) AS source ON target.name = source.name
+                          WHEN MATCHED THEN UPDATE SET
+                              priority = @priority,
+                              max_concurrency = @max_concurrency,
+                              rate_limit_name = @rate_limit_name,
+                              last_heartbeat_at = SYSUTCDATETIME()
+                          WHEN NOT MATCHED THEN INSERT (name, priority, max_concurrency, rate_limit_name, last_heartbeat_at)
+                              VALUES (@name, @priority, @max_concurrency, @rate_limit_name, SYSUTCDATETIME());
+
+                          UPDATE r SET r.queue_priority = @priority
+                          FROM dbo.surefire_runs r
+                          JOIN dbo.surefire_jobs j ON j.name = r.job_name
+                          WHERE ISNULL(j.queue, 'default') = @name AND r.status = 0
+                              AND r.queue_priority != @priority;
+                          """;
+
+        cmd.Parameters.Add(CreateParameter("@name", queue.Name));
+        cmd.Parameters.Add(CreateParameter("@priority", queue.Priority));
+        cmd.Parameters.Add(CreateParameter("@max_concurrency",
+            queue.MaxConcurrency.HasValue ? queue.MaxConcurrency.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@rate_limit_name", (object?)queue.RateLimitName ?? DBNull.Value));
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = "SELECT * FROM dbo.surefire_queues";
+
+        var results = new List<QueueDefinition>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadQueue(reader));
+        }
+
+        return results;
+    }
+
+    public async Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          MERGE dbo.surefire_queues WITH (HOLDLOCK) AS target
+                          USING (SELECT @name AS name) AS source ON target.name = source.name
+                          WHEN MATCHED THEN UPDATE SET is_paused = @is_paused
+                          WHEN NOT MATCHED THEN INSERT (name, priority, max_concurrency, is_paused, rate_limit_name, last_heartbeat_at)
+                              VALUES (@name, 0, NULL, @is_paused, NULL, NULL);
+                          """;
+        cmd.Parameters.Add(CreateParameter("@name", name));
+        cmd.Parameters.Add(CreateParameter("@is_paused", isPaused));
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          MERGE dbo.surefire_rate_limits WITH (HOLDLOCK) AS target
+                          USING (SELECT @name AS name) AS source ON target.name = source.name
+                          WHEN MATCHED THEN UPDATE SET
+                              type = @type,
+                              max_permits = @max_permits,
+                              [window] = @window,
+                              last_heartbeat_at = SYSUTCDATETIME()
+                          WHEN NOT MATCHED THEN INSERT (name, type, max_permits, [window], last_heartbeat_at)
+                              VALUES (@name, @type, @max_permits, @window, SYSUTCDATETIME());
+                          """;
+
+        cmd.Parameters.Add(CreateParameter("@name", rateLimit.Name));
+        cmd.Parameters.Add(CreateParameter("@type", (int)rateLimit.Type));
+        cmd.Parameters.Add(CreateParameter("@max_permits", rateLimit.MaxPermits));
+        cmd.Parameters.Add(CreateParameter("@window", rateLimit.Window.Ticks));
+
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL, batch_id NVARCHAR(450));
+
+                          UPDATE dbo.surefire_runs SET
+                              status = 4,
+                              cancelled_at = @now,
+                              completed_at = @now,
+                              reason = @reason
+                          OUTPUT inserted.id, inserted.attempt, inserted.batch_id INTO @cancelled(id, attempt, batch_id)
+                          WHERE status = 0
+                              AND not_after IS NOT NULL
+                              AND not_after < @now;
+
+                          SELECT id, attempt, batch_id FROM @cancelled;
+                          """;
+        cmd.Parameters.Add(CreateParameter("@reason", "Run expired past NotAfter deadline."));
+
+        var cancelledIds = new List<string>();
+        var cancelledBatchIds = new Dictionary<string, int>();
+        var statusEvents = new List<RunEvent>();
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var runId = reader.GetString(0);
+                cancelledIds.Add(runId);
+                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Cancelled,
+                    timeProvider.GetUtcNow()));
+                var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (bId is { })
+                {
+                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                }
+            }
+        }
+
+        await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
+
+        foreach (var (batchId, cnt) in cancelledBatchIds)
+        {
+            await using var incrCmd = CreateCommand(conn);
+            incrCmd.Transaction = tx;
+            incrCmd.CommandText = """
+                                  UPDATE dbo.surefire_batches
+                                  SET cancelled = cancelled + @cnt
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  WHERE id = @id AND status NOT IN (2, 4, 5)
+                                  """;
+            incrCmd.Parameters.Add(CreateParameter("@id", batchId));
+            incrCmd.Parameters.Add(CreateParameter("@cnt", cnt));
+            await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
+
+            if (await batchReader.ReadAsync(cancellationToken))
+            {
+                var total = batchReader.GetInt32(0);
+                var succeeded = batchReader.GetInt32(1);
+                var failed = batchReader.GetInt32(2);
+                var cancelled = batchReader.GetInt32(3);
+
+                if (succeeded + failed + cancelled >= total)
+                {
+                    var batchStatus = failed > 0 ? JobStatus.Failed
+                        : cancelled > 0 ? JobStatus.Cancelled
+                        : JobStatus.Succeeded;
+                    var completedAt = timeProvider.GetUtcNow();
+
+                    await batchReader.CloseAsync();
+
+                    await using var completeCmd = CreateCommand(conn);
+                    completeCmd.Transaction = tx;
+                    completeCmd.CommandText = """
+                                              UPDATE dbo.surefire_batches
+                                              SET status = @status, completed_at = @completed_at
+                                              WHERE id = @id AND status NOT IN (2, 4, 5)
+                                              """;
+                    completeCmd.Parameters.Add(CreateParameter("@id", batchId));
+                    completeCmd.Parameters.Add(CreateParameter("@status", (short)batchStatus));
+                    completeCmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return cancelledIds;
+    }
+
+    public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        while (true)
+        {
+            await using var runCmd = CreateCommand(conn);
+            runCmd.CommandText = """
+                                 DELETE TOP (1000) FROM dbo.surefire_runs
+                                 WHERE (status IN (2, 4, 5)
+                                     AND completed_at < @threshold
+                                     AND (batch_id IS NULL OR EXISTS (
+                                         SELECT 1 FROM dbo.surefire_batches b
+                                         WHERE b.id = dbo.surefire_runs.batch_id
+                                             AND b.status IN (2, 4, 5)
+                                             AND b.completed_at IS NOT NULL
+                                             AND b.completed_at < @threshold
+                                     )))
+                                     OR (status = 0 AND not_before < @threshold)
+                                 """;
+            runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+            if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
+            {
+                break;
+            }
+        }
+
+        await using var jobCmd = CreateCommand(conn);
+        jobCmd.CommandText = """
+                             DELETE FROM dbo.surefire_jobs
+                             WHERE last_heartbeat_at < @threshold
+                                 AND NOT EXISTS (SELECT 1 FROM dbo.surefire_runs r WHERE r.job_name = dbo.surefire_jobs.name AND r.status NOT IN (2, 4, 5))
+                             """;
+        jobCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+        await jobCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var queueCmd = CreateCommand(conn);
+        queueCmd.CommandText = "DELETE FROM dbo.surefire_queues WHERE last_heartbeat_at < @threshold";
+        queueCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+        await queueCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var rlCmd = CreateCommand(conn);
+        rlCmd.CommandText = "DELETE FROM dbo.surefire_rate_limits WHERE last_heartbeat_at < @threshold";
+        rlCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+        await rlCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var batchCmd = CreateCommand(conn);
+        batchCmd.CommandText =
+            "DELETE FROM dbo.surefire_batches WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold";
+        batchCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+        await batchCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var nodeCmd = CreateCommand(conn);
+        nodeCmd.CommandText = "DELETE FROM dbo.surefire_nodes WHERE last_heartbeat_at < @threshold";
+        nodeCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+        await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<DashboardStats> GetDashboardStatsAsync(DateTimeOffset? since = null, int bucketMinutes = 60,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        var now = timeProvider.GetUtcNow();
+        if (bucketMinutes <= 0)
+        {
+            bucketMinutes = 60;
+        }
+
+        var rawSince = since ?? now.AddHours(-24);
+        var sinceTime = new DateTimeOffset(rawSince.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute,
+            rawSince.Offset);
+
+        await using var statsCmd = CreateCommand(conn);
+        statsCmd.CommandText = """
+                               SELECT
+                                   (SELECT COUNT(*) FROM dbo.surefire_jobs) AS total_jobs,
+                                   (SELECT COUNT(*) FROM dbo.surefire_nodes WHERE last_heartbeat_at >= DATEADD(MINUTE, -2, @now)) AS node_count,
+                                   COUNT(*) AS total_runs,
+                                   ISNULL(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) AS pending,
+                                   ISNULL(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), 0) AS running,
+                                   ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS succeeded,
+                                   ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS cancelled,
+                                   ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS failed
+                               FROM dbo.surefire_runs
+                               WHERE created_at >= @since AND created_at <= @now
+                               """;
+        statsCmd.Parameters.Add(CreateParameter("@now", now));
+        statsCmd.Parameters.Add(CreateParameter("@since", sinceTime));
+
+        int totalJobs = 0, totalRuns = 0, activeRuns = 0, nodeCount = 0;
+        var runsByStatus = new Dictionary<string, int>();
+        double successRate = 0;
+        await using (var reader = await statsCmd.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                totalJobs = reader.GetInt32(reader.GetOrdinal("total_jobs"));
+                nodeCount = reader.GetInt32(reader.GetOrdinal("node_count"));
+                totalRuns = reader.GetInt32(reader.GetOrdinal("total_runs"));
+
+                var pending = reader.GetInt32(reader.GetOrdinal("pending"));
+                var running = reader.GetInt32(reader.GetOrdinal("running"));
+                var succeeded = reader.GetInt32(reader.GetOrdinal("succeeded"));
+                var cancelled = reader.GetInt32(reader.GetOrdinal("cancelled"));
+                var failed = reader.GetInt32(reader.GetOrdinal("failed"));
+
+                activeRuns = pending + running;
+
+                if (pending > 0)
+                {
+                    runsByStatus["Pending"] = pending;
+                }
+
+                if (running > 0)
+                {
+                    runsByStatus["Running"] = running;
+                }
+
+                if (succeeded > 0)
+                {
+                    runsByStatus["Succeeded"] = succeeded;
+                }
+
+                if (cancelled > 0)
+                {
+                    runsByStatus["Cancelled"] = cancelled;
+                }
+
+                if (failed > 0)
+                {
+                    runsByStatus["Failed"] = failed;
+                }
+
+                var terminalCount = succeeded + cancelled + failed;
+                successRate = terminalCount > 0 ? succeeded / (double)terminalCount : 0.0;
+            }
+        }
+
+        await using var bucketCmd = CreateCommand(conn);
+        bucketCmd.CommandText = """
+                                 SELECT
+                                     DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since) AS bucket_start,
+                                     SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS pending,
+                                     SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS running,
+                                     SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
+                                     SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS cancelled,
+                                     SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed
+                                FROM dbo.surefire_runs
+                                WHERE created_at >= @since AND created_at <= @now
+                                GROUP BY DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since)
+                                ORDER BY bucket_start
+                                """;
+        bucketCmd.Parameters.Add(CreateParameter("@since", sinceTime));
+        bucketCmd.Parameters.Add(CreateParameter("@bucket_minutes", bucketMinutes));
+        bucketCmd.Parameters.Add(CreateParameter("@now", now));
+
+        var bucketMap = new Dictionary<DateTimeOffset, TimelineBucket>();
+        await using (var reader = await bucketCmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var start = reader.GetDateTimeOffset(0);
+                bucketMap[start] = new()
+                {
+                    Start = start,
+                    Pending = reader.GetInt32(1),
+                    Running = reader.GetInt32(2),
+                    Succeeded = reader.GetInt32(3),
+                    Cancelled = reader.GetInt32(4),
+                    Failed = reader.GetInt32(5)
+                };
+            }
+        }
+
+        var buckets = new List<TimelineBucket>();
+        var bucketStart = sinceTime;
+        var bucketSpan = TimeSpan.FromMinutes(bucketMinutes);
+        while (bucketStart <= now)
+        {
+            if (bucketMap.TryGetValue(bucketStart, out var bucket))
+            {
+                buckets.Add(bucket);
+            }
+            else
+            {
+                buckets.Add(new() { Start = bucketStart });
+            }
+
+            bucketStart += bucketSpan;
+        }
+
+        return new()
+        {
+            TotalJobs = totalJobs,
+            TotalRuns = totalRuns,
+            ActiveRuns = activeRuns,
+            SuccessRate = successRate,
+            NodeCount = nodeCount,
+            RunsByStatus = runsByStatus,
+            Timeline = buckets
+        };
+    }
+
+    public async Task<JobStats> GetJobStatsAsync(string jobName, CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          SELECT
+                              COUNT(*) AS total_runs,
+                              SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
+                              SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed,
+                              CASE
+                                  WHEN SUM(CASE WHEN status IN (2, 4, 5) THEN 1 ELSE 0 END) > 0
+                                  THEN CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN status IN (2, 4, 5) THEN 1 ELSE 0 END)
+                                  ELSE 0
+                              END AS success_rate,
+                              AVG(CASE WHEN status = 2 AND started_at IS NOT NULL AND completed_at IS NOT NULL
+                                  THEN CAST(DATEDIFF_BIG(MICROSECOND, started_at, completed_at) AS FLOAT) / 1000000.0
+                                  ELSE NULL END) AS avg_duration_secs,
+                              MAX(started_at) AS last_run_at
+                          FROM dbo.surefire_runs WHERE job_name = @job_name
+                          """;
+        cmd.Parameters.Add(CreateParameter("@job_name", jobName));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+
+        return new()
+        {
+            TotalRuns = reader.GetInt32(0),
+            SucceededRuns = reader.GetInt32(1),
+            FailedRuns = reader.GetInt32(2),
+            SuccessRate = reader.GetDouble(3),
+            AvgDuration = !reader.IsDBNull(4)
+                ? TimeSpan.FromSeconds(reader.GetDouble(4))
+                : null,
+            LastRunAt = !reader.IsDBNull(5)
+                ? reader.GetDateTimeOffset(5)
+                : null
+        };
+    }
+
+    public async Task<IReadOnlyDictionary<string, QueueStats>> GetQueueStatsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          WITH queue_names AS (
+                              SELECT name FROM dbo.surefire_queues
+                              UNION
+                              SELECT ISNULL(j.queue, 'default') AS name
+                              FROM dbo.surefire_runs r
+                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
+                              WHERE r.status = 0
+                              UNION
+                              SELECT ISNULL(j.queue, 'default') AS name
+                              FROM dbo.surefire_runs r
+                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
+                              WHERE r.status = 1
+                          ),
+                          pending AS (
+                              SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
+                              FROM dbo.surefire_runs r
+                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
+                              WHERE r.status = 0
+                              GROUP BY ISNULL(j.queue, 'default')
+                          ),
+                          running AS (
+                              SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
+                              FROM dbo.surefire_runs r
+                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
+                              WHERE r.status = 1
+                              GROUP BY ISNULL(j.queue, 'default')
+                          )
+                          SELECT
+                              qn.name,
+                              ISNULL(pending.cnt, 0) AS pending_count,
+                              ISNULL(running.cnt, 0) AS running_count
+                          FROM queue_names qn
+                          LEFT JOIN pending ON pending.queue_name = qn.name
+                          LEFT JOIN running ON running.queue_name = qn.name
+                          ORDER BY qn.name
+                          """;
+
+        var results = new Dictionary<string, QueueStats>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results[reader.GetString(0)] = new()
+            {
+                PendingCount = reader.GetInt32(1),
+                RunningCount = reader.GetInt32(2)
+            };
+        }
+
+        return results;
+    }
+
+    public bool IsTransientException(Exception ex) =>
+        ex is SqlException sql && sql.Number is
+            -2 // command timeout
+            or 1205 // deadlock victim
+            or 1222 // lock request timeout exceeded
+            or 8645 // memory grant timeout
+            or 8651 // low memory
+            or 40197 // Azure SQL: service-induced error
+            or 40501 // Azure SQL: service busy
+            or 40613 // Azure SQL: database unavailable
+            or 49918 // Azure SQL: not enough resources
+            or 49919 // Azure SQL: too many CREATE/UPDATE operations
+            or 49920; // Azure SQL: too many operations in progress
+
+    private async Task<JobRun?> ClaimRunCoreAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken)
+    {
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
@@ -537,12 +2020,12 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         var queueParams = new List<string>();
 
         // Lock rate limit rows to serialize concurrent claims
-        await using var lockRlCmd = conn.CreateCommand();
+        await using var lockRlCmd = CreateCommand(conn);
         lockRlCmd.Transaction = tx;
         for (var i = 0; i < jobNamesArr.Count; i++)
         {
             jobParams.Add($"@jn_{i}");
-            lockRlCmd.Parameters.AddWithValue($"@jn_{i}", jobNamesArr[i]);
+            lockRlCmd.Parameters.Add(CreateParameter($"@jn_{i}", jobNamesArr[i]));
         }
 
         var jobNamesIn = string.Join(", ", jobParams);
@@ -568,45 +2051,54 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                  """;
         await lockRlCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
         for (var i = 0; i < jobNamesArr.Count; i++)
         {
-            cmd.Parameters.AddWithValue($"@jn_{i}", jobNamesArr[i]);
+            cmd.Parameters.Add(CreateParameter($"@jn_{i}", jobNamesArr[i]));
         }
 
         for (var i = 0; i < queueNamesArr.Count; i++)
         {
             queueParams.Add($"@qn_{i}");
-            cmd.Parameters.AddWithValue($"@qn_{i}", queueNamesArr[i]);
+            cmd.Parameters.Add(CreateParameter($"@qn_{i}", queueNamesArr[i]));
         }
 
         var queueNamesIn = string.Join(", ", queueParams);
         cmd.CommandText = $"""
                            DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
-                           WITH candidate AS (
+                           ;WITH jobs_at_capacity AS (
+                               SELECT cr.job_name
+                               FROM dbo.surefire_runs cr
+                               JOIN dbo.surefire_jobs cj ON cj.name = cr.job_name
+                               WHERE cr.status = 1 AND cj.max_concurrency IS NOT NULL
+                               GROUP BY cr.job_name, cj.max_concurrency
+                               HAVING COUNT(*) >= cj.max_concurrency
+                           ),
+                           queues_at_capacity AS (
+                               SELECT ISNULL(cj.queue, 'default') AS queue_name
+                               FROM dbo.surefire_runs cr
+                               JOIN dbo.surefire_jobs cj ON cj.name = cr.job_name
+                               JOIN dbo.surefire_queues cq ON cq.name = ISNULL(cj.queue, 'default')
+                               WHERE cr.status = 1 AND cq.max_concurrency IS NOT NULL
+                               GROUP BY ISNULL(cj.queue, 'default'), cq.max_concurrency
+                               HAVING COUNT(*) >= cq.max_concurrency
+                           ),
+                           candidate AS (
                                SELECT TOP 1 r.id, r.job_name
                                FROM dbo.surefire_runs r WITH (UPDLOCK, READPAST)
                                JOIN dbo.surefire_jobs j ON j.name = r.job_name
                                LEFT JOIN dbo.surefire_queues q ON q.name = ISNULL(j.queue, 'default')
                                WHERE r.status = 0
-                                   AND r.batch_total IS NULL
                                    AND r.not_before <= @now
                                    AND (r.not_after IS NULL OR r.not_after > @now)
                                    AND r.job_name IN ({jobNamesIn})
                                    AND ISNULL(j.queue, 'default') IN ({queueNamesIn})
                                    AND ISNULL(q.is_paused, 0) = 0
-                                   AND (j.max_concurrency IS NULL OR (
-                                       SELECT COUNT(*) FROM dbo.surefire_runs cr
-                                       WHERE cr.job_name = r.job_name AND cr.status = 1
-                                   ) < j.max_concurrency)
-                                   AND (q.max_concurrency IS NULL OR (
-                                       SELECT COUNT(*) FROM dbo.surefire_runs cr
-                                       JOIN dbo.surefire_jobs cj ON cj.name = cr.job_name
-                                       WHERE ISNULL(cj.queue, 'default') = ISNULL(j.queue, 'default') AND cr.status = 1
-                                   ) < q.max_concurrency)
+                                   AND (j.max_concurrency IS NULL OR r.job_name NOT IN (SELECT job_name FROM jobs_at_capacity))
+                                   AND (q.max_concurrency IS NULL OR ISNULL(j.queue, 'default') NOT IN (SELECT queue_name FROM queues_at_capacity))
                                    AND (j.rate_limit_name IS NULL OR NOT EXISTS (
                                        SELECT 1 FROM dbo.surefire_rate_limits rl
                                        WHERE rl.name = j.rate_limit_name
@@ -669,7 +2161,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                            FROM dbo.surefire_runs INNER JOIN candidate ON dbo.surefire_runs.id = candidate.id;
                            """;
 
-        cmd.Parameters.AddWithValue("@node_name", nodeName);
+        cmd.Parameters.Add(CreateParameter("@node_name", nodeName));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         JobRun? claimed = null;
@@ -682,6 +2174,10 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
         if (claimed is { })
         {
+            await InsertEventsAsync(conn, tx,
+                [RunStatusEvents.Create(claimed.Id, claimed.Attempt, claimed.Status, timeProvider.GetUtcNow())],
+                cancellationToken);
+
             var job = await GetJobInternalAsync(conn, tx, claimed.JobName, cancellationToken);
             if (job is { })
             {
@@ -706,653 +2202,6 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         return claimed;
     }
 
-    public async Task<BatchCounters> IncrementBatchCounterAsync(string batchRunId, bool isFailed,
-        CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-                          UPDATE dbo.surefire_runs SET
-                              batch_completed = batch_completed + CASE WHEN @is_failed = 0 THEN 1 ELSE 0 END,
-                              batch_failed = batch_failed + CASE WHEN @is_failed = 1 THEN 1 ELSE 0 END,
-                              progress = CASE WHEN batch_total = 0 THEN 1.0 ELSE CAST(ISNULL(batch_completed, 0) + ISNULL(batch_failed, 0) + 1 AS FLOAT) / batch_total END
-                          OUTPUT INSERTED.batch_total, INSERTED.batch_completed, INSERTED.batch_failed
-                          WHERE id = @id AND status NOT IN (2, 4, 5) AND batch_total IS NOT NULL
-                          """;
-
-        cmd.Parameters.AddWithValue("@id", batchRunId);
-        cmd.Parameters.AddWithValue("@is_failed", isFailed);
-
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
-        {
-            return new(
-                reader.GetInt32(reader.GetOrdinal("batch_total")),
-                reader.GetInt32(reader.GetOrdinal("batch_completed")),
-                reader.GetInt32(reader.GetOrdinal("batch_failed")));
-        }
-
-        await reader.CloseAsync();
-
-        await using var fallback = conn.CreateCommand();
-        fallback.CommandText = """
-                               SELECT batch_total, batch_completed, batch_failed
-                               FROM dbo.surefire_runs WHERE id = @id
-                               """;
-        fallback.Parameters.AddWithValue("@id", batchRunId);
-
-        await using var fr = await fallback.ExecuteReaderAsync(cancellationToken);
-        if (!await fr.ReadAsync(cancellationToken))
-        {
-            throw new InvalidOperationException($"Run '{batchRunId}' not found.");
-        }
-
-        if (fr.IsDBNull(fr.GetOrdinal("batch_total")))
-        {
-            throw new InvalidOperationException($"Run '{batchRunId}' is not a batch coordinator.");
-        }
-
-        return new(
-            fr.GetInt32(fr.GetOrdinal("batch_total")),
-            fr.GetInt32(fr.GetOrdinal("batch_completed")),
-            fr.GetInt32(fr.GetOrdinal("batch_failed")));
-    }
-
-    public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
-    {
-        if (events.Count == 0)
-        {
-            return;
-        }
-
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
-
-        await InsertEventsAsync(conn, tx, events, cancellationToken);
-
-        await tx.CommitAsync(cancellationToken);
-    }
-
-    public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
-        RunEventType[]? types = null, int? attempt = null, CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-
-        var sb = new StringBuilder("SELECT * FROM dbo.surefire_events WHERE run_id = @run_id AND id > @since_id");
-        cmd.Parameters.AddWithValue("@run_id", runId);
-        cmd.Parameters.AddWithValue("@since_id", sinceId);
-
-        if (types is { Length: > 0 })
-        {
-            var typeParams = types.Select((t, i) =>
-            {
-                var name = $"@et{i}";
-                cmd.Parameters.AddWithValue(name, (short)t);
-                return name;
-            }).ToList();
-            sb.Append($" AND event_type IN ({string.Join(",", typeParams)})");
-        }
-
-        if (attempt is { })
-        {
-            sb.Append(" AND (attempt = @attempt OR attempt = 0)");
-            cmd.Parameters.AddWithValue("@attempt", attempt.Value);
-        }
-
-        sb.Append(" ORDER BY id");
-        cmd.CommandText = sb.ToString();
-
-        var results = new List<RunEvent>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            results.Add(ReadEvent(reader));
-        }
-
-        return results;
-    }
-
-    public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchRunId, long sinceEventId = 0,
-        int take = 200, CancellationToken cancellationToken = default)
-    {
-        if (take <= 0)
-        {
-            return [];
-        }
-
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-                          SELECT TOP (@take) e.*
-                          FROM dbo.surefire_events e
-                          INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
-                          WHERE r.parent_run_id = @batch_run_id
-                              AND e.event_type = @event_type
-                              AND e.id > @since_event_id
-                          ORDER BY e.id ASC
-                          """;
-        cmd.Parameters.AddWithValue("@batch_run_id", batchRunId);
-        cmd.Parameters.AddWithValue("@event_type", (short)RunEventType.Output);
-        cmd.Parameters.AddWithValue("@since_event_id", sinceEventId);
-        cmd.Parameters.AddWithValue("@take", take);
-
-        var results = new List<RunEvent>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            results.Add(ReadEvent(reader));
-        }
-
-        return results;
-    }
-
-    public async Task HeartbeatAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, IReadOnlyCollection<string> activeRunIds,
-        CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
-
-        await using var nodeCmd = conn.CreateCommand();
-        nodeCmd.Transaction = tx;
-        nodeCmd.CommandText = """
-                              MERGE dbo.surefire_nodes WITH (HOLDLOCK) AS target
-                              USING (SELECT @name AS name) AS source ON target.name = source.name
-                              WHEN MATCHED THEN UPDATE SET
-                                  last_heartbeat_at = SYSUTCDATETIME(),
-                                  running_count = @running_count,
-                                  registered_job_names = @job_names,
-                                  registered_queue_names = @queue_names
-                              WHEN NOT MATCHED THEN INSERT (name, started_at, last_heartbeat_at, running_count, registered_job_names, registered_queue_names)
-                                  VALUES (@name, SYSUTCDATETIME(), SYSUTCDATETIME(), @running_count, @job_names, @queue_names);
-                              """;
-        nodeCmd.Parameters.AddWithValue("@name", nodeName);
-        nodeCmd.Parameters.AddWithValue("@running_count", activeRunIds.Count);
-        nodeCmd.Parameters.AddWithValue("@job_names", JsonSerializer.Serialize(jobNames));
-        nodeCmd.Parameters.AddWithValue("@queue_names", JsonSerializer.Serialize(queueNames));
-        await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        if (activeRunIds.Count > 0)
-        {
-            const int maxRunIdsPerBatch = 2000;
-            var activeRunIdsList = activeRunIds as IList<string> ?? activeRunIds.ToList();
-
-            foreach (var chunk in activeRunIdsList.Chunk(maxRunIdsPerBatch))
-            {
-                await using var runCmd = conn.CreateCommand();
-                runCmd.Transaction = tx;
-                var idList = string.Join(", ", chunk.Select((_, i) => $"@rid_{i}"));
-                runCmd.CommandText = $"""
-                                      UPDATE dbo.surefire_runs SET last_heartbeat_at = SYSUTCDATETIME()
-                                      WHERE id IN ({idList}) AND node_name = @node AND status NOT IN (2, 4, 5)
-                                      """;
-                runCmd.Parameters.AddWithValue("@node", nodeName);
-                for (var i = 0; i < chunk.Length; i++)
-                {
-                    runCmd.Parameters.AddWithValue($"@rid_{i}", chunk[i]);
-                }
-
-                await runCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-        }
-
-        await tx.CommitAsync(cancellationToken);
-    }
-
-    public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM dbo.surefire_nodes";
-
-        var results = new List<NodeInfo>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            results.Add(ReadNode(reader));
-        }
-
-        return results;
-    }
-
-    public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = """
-                          MERGE dbo.surefire_queues WITH (HOLDLOCK) AS target
-                          USING (SELECT @name AS name) AS source ON target.name = source.name
-                          WHEN MATCHED THEN UPDATE SET
-                              priority = @priority,
-                              max_concurrency = @max_concurrency,
-                              rate_limit_name = @rate_limit_name,
-                              last_heartbeat_at = SYSUTCDATETIME()
-                          WHEN NOT MATCHED THEN INSERT (name, priority, max_concurrency, rate_limit_name, last_heartbeat_at)
-                              VALUES (@name, @priority, @max_concurrency, @rate_limit_name, SYSUTCDATETIME());
-
-                          UPDATE r SET r.queue_priority = @priority
-                          FROM dbo.surefire_runs r
-                          JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                          WHERE ISNULL(j.queue, 'default') = @name AND r.status = 0
-                              AND r.batch_total IS NULL AND r.queue_priority != @priority;
-                          """;
-
-        cmd.Parameters.AddWithValue("@name", queue.Name);
-        cmd.Parameters.AddWithValue("@priority", queue.Priority);
-        cmd.Parameters.AddWithValue("@max_concurrency",
-            queue.MaxConcurrency.HasValue ? queue.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@rate_limit_name", (object?)queue.RateLimitName ?? DBNull.Value);
-
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
-        await tx.CommitAsync(cancellationToken);
-    }
-
-    public async Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM dbo.surefire_queues";
-
-        var results = new List<QueueDefinition>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            results.Add(ReadQueue(reader));
-        }
-
-        return results;
-    }
-
-    public async Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE dbo.surefire_queues SET is_paused = @is_paused WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
-        cmd.Parameters.AddWithValue("@is_paused", isPaused);
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    public async Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-                          MERGE dbo.surefire_rate_limits WITH (HOLDLOCK) AS target
-                          USING (SELECT @name AS name) AS source ON target.name = source.name
-                          WHEN MATCHED THEN UPDATE SET
-                              type = @type,
-                              max_permits = @max_permits,
-                              [window] = @window,
-                              last_heartbeat_at = SYSUTCDATETIME()
-                          WHEN NOT MATCHED THEN INSERT (name, type, max_permits, [window], last_heartbeat_at)
-                              VALUES (@name, @type, @max_permits, @window, SYSUTCDATETIME());
-                          """;
-
-        cmd.Parameters.AddWithValue("@name", rateLimit.Name);
-        cmd.Parameters.AddWithValue("@type", (int)rateLimit.Type);
-        cmd.Parameters.AddWithValue("@max_permits", rateLimit.MaxPermits);
-        cmd.Parameters.AddWithValue("@window", rateLimit.Window.Ticks);
-
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    public async Task<int> CancelExpiredRunsAsync(CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-                          DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          UPDATE dbo.surefire_runs SET
-                              status = 4,
-                              cancelled_at = @now,
-                              completed_at = @now
-                          WHERE status IN (0, 3)
-                              AND batch_total IS NULL
-                              AND not_after IS NOT NULL
-                              AND not_after < @now
-                          """;
-
-        return await cmd.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-
-        while (true)
-        {
-            await using var runCmd = conn.CreateCommand();
-            runCmd.CommandText = """
-                                 DELETE TOP(1000)
-                                 FROM dbo.surefire_runs
-                                 WHERE status IN (2, 4, 5)
-                                     AND completed_at < @threshold
-                                     AND NOT EXISTS (
-                                         SELECT 1
-                                         FROM dbo.surefire_runs parent
-                                         WHERE parent.id = dbo.surefire_runs.parent_run_id
-                                             AND parent.batch_total IS NOT NULL
-                                             AND (
-                                                 parent.status NOT IN (2, 4, 5)
-                                                 OR parent.completed_at IS NULL
-                                                 OR parent.completed_at >= @threshold
-                                             )
-                                     )
-                                 """;
-            runCmd.Parameters.AddWithValue("@threshold", threshold);
-            if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
-            {
-                break;
-            }
-        }
-
-        while (true)
-        {
-            await using var runCmd = conn.CreateCommand();
-            runCmd.CommandText = """
-                                 DELETE TOP(1000) FROM dbo.surefire_runs WHERE status IN (0, 3) AND not_before < @threshold
-                                 """;
-            runCmd.Parameters.AddWithValue("@threshold", threshold);
-            if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
-            {
-                break;
-            }
-        }
-
-        await using var jobCmd = conn.CreateCommand();
-        jobCmd.CommandText = """
-                             DELETE FROM dbo.surefire_jobs
-                             WHERE last_heartbeat_at < @threshold
-                                 AND NOT EXISTS (SELECT 1 FROM dbo.surefire_runs r WHERE r.job_name = dbo.surefire_jobs.name AND r.status NOT IN (2, 4, 5))
-                             """;
-        jobCmd.Parameters.AddWithValue("@threshold", threshold);
-        await jobCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        await using var queueCmd = conn.CreateCommand();
-        queueCmd.CommandText = "DELETE FROM dbo.surefire_queues WHERE last_heartbeat_at < @threshold";
-        queueCmd.Parameters.AddWithValue("@threshold", threshold);
-        await queueCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        await using var rlCmd = conn.CreateCommand();
-        rlCmd.CommandText = "DELETE FROM dbo.surefire_rate_limits WHERE last_heartbeat_at < @threshold";
-        rlCmd.Parameters.AddWithValue("@threshold", threshold);
-        await rlCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        await using var nodeCmd = conn.CreateCommand();
-        nodeCmd.CommandText = "DELETE FROM dbo.surefire_nodes WHERE last_heartbeat_at < @threshold";
-        nodeCmd.Parameters.AddWithValue("@threshold", threshold);
-        await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    public async Task<DashboardStats> GetDashboardStatsAsync(DateTimeOffset? since = null, int bucketMinutes = 60,
-        CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-
-        var now = timeProvider.GetUtcNow();
-        if (bucketMinutes <= 0)
-        {
-            bucketMinutes = 60;
-        }
-
-        var rawSince = since ?? now.AddHours(-24);
-        var sinceTime = new DateTimeOffset(rawSince.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute,
-            rawSince.Offset);
-
-        await using var statsCmd = conn.CreateCommand();
-        statsCmd.CommandText = """
-                               SELECT
-                                   (SELECT COUNT(*) FROM dbo.surefire_jobs) AS total_jobs,
-                                   (SELECT COUNT(*) FROM dbo.surefire_nodes WHERE last_heartbeat_at >= DATEADD(MINUTE, -2, @now)) AS node_count,
-                                   COUNT(*) AS total_runs,
-                                   ISNULL(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) AS pending,
-                                   ISNULL(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), 0) AS running,
-                                   ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS completed,
-                                   ISNULL(SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END), 0) AS retrying,
-                                   ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS cancelled,
-                                   ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS dead_letter
-                               FROM dbo.surefire_runs
-                               """;
-        statsCmd.Parameters.AddWithValue("@now", now);
-
-        int totalJobs = 0, totalRuns = 0, activeRuns = 0, nodeCount = 0;
-        var runsByStatus = new Dictionary<string, int>();
-        double successRate = 0;
-        await using (var reader = await statsCmd.ExecuteReaderAsync(cancellationToken))
-        {
-            if (await reader.ReadAsync(cancellationToken))
-            {
-                totalJobs = reader.GetInt32(reader.GetOrdinal("total_jobs"));
-                nodeCount = reader.GetInt32(reader.GetOrdinal("node_count"));
-                totalRuns = reader.GetInt32(reader.GetOrdinal("total_runs"));
-
-                var pending = reader.GetInt32(reader.GetOrdinal("pending"));
-                var running = reader.GetInt32(reader.GetOrdinal("running"));
-                var completed = reader.GetInt32(reader.GetOrdinal("completed"));
-                var retrying = reader.GetInt32(reader.GetOrdinal("retrying"));
-                var cancelled = reader.GetInt32(reader.GetOrdinal("cancelled"));
-                var deadLetter = reader.GetInt32(reader.GetOrdinal("dead_letter"));
-
-                activeRuns = pending + running + retrying;
-
-                if (pending > 0)
-                {
-                    runsByStatus["Pending"] = pending;
-                }
-
-                if (running > 0)
-                {
-                    runsByStatus["Running"] = running;
-                }
-
-                if (completed > 0)
-                {
-                    runsByStatus["Completed"] = completed;
-                }
-
-                if (retrying > 0)
-                {
-                    runsByStatus["Retrying"] = retrying;
-                }
-
-                if (cancelled > 0)
-                {
-                    runsByStatus["Cancelled"] = cancelled;
-                }
-
-                if (deadLetter > 0)
-                {
-                    runsByStatus["DeadLetter"] = deadLetter;
-                }
-
-                var terminalCount = completed + cancelled + deadLetter;
-                successRate = terminalCount > 0 ? completed / (double)terminalCount : 0.0;
-            }
-        }
-
-        await using var bucketCmd = conn.CreateCommand();
-        bucketCmd.CommandText = """
-                                SELECT
-                                    DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since) AS bucket_start,
-                                    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS pending,
-                                    SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS running,
-                                    SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS completed,
-                                    SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) AS retrying,
-                                    SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS cancelled,
-                                    SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS dead_letter
-                                FROM dbo.surefire_runs
-                                WHERE created_at >= @since AND created_at < @now
-                                GROUP BY DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since)
-                                ORDER BY bucket_start
-                                """;
-        bucketCmd.Parameters.AddWithValue("@since", sinceTime);
-        bucketCmd.Parameters.AddWithValue("@bucket_minutes", bucketMinutes);
-        bucketCmd.Parameters.AddWithValue("@now", now);
-
-        var bucketMap = new Dictionary<DateTimeOffset, TimelineBucket>();
-        await using (var reader = await bucketCmd.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var start = reader.GetDateTimeOffset(0);
-                bucketMap[start] = new()
-                {
-                    Start = start,
-                    Pending = reader.GetInt32(1),
-                    Running = reader.GetInt32(2),
-                    Completed = reader.GetInt32(3),
-                    Retrying = reader.GetInt32(4),
-                    Cancelled = reader.GetInt32(5),
-                    DeadLetter = reader.GetInt32(6)
-                };
-            }
-        }
-
-        var buckets = new List<TimelineBucket>();
-        var bucketStart = sinceTime;
-        var bucketSpan = TimeSpan.FromMinutes(bucketMinutes);
-        while (bucketStart < now)
-        {
-            if (bucketMap.TryGetValue(bucketStart, out var bucket))
-            {
-                buckets.Add(bucket);
-            }
-            else
-            {
-                buckets.Add(new() { Start = bucketStart });
-            }
-
-            bucketStart += bucketSpan;
-        }
-
-        return new()
-        {
-            TotalJobs = totalJobs,
-            TotalRuns = totalRuns,
-            ActiveRuns = activeRuns,
-            SuccessRate = successRate,
-            NodeCount = nodeCount,
-            RunsByStatus = runsByStatus,
-            Timeline = buckets
-        };
-    }
-
-    public async Task<JobStats> GetJobStatsAsync(string jobName, CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-                          SELECT
-                              COUNT(*) AS total_runs,
-                              SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
-                              SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed,
-                              CASE
-                                  WHEN SUM(CASE WHEN status IN (2, 4, 5) THEN 1 ELSE 0 END) > 0
-                                  THEN CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN status IN (2, 4, 5) THEN 1 ELSE 0 END)
-                                  ELSE 0
-                              END AS success_rate,
-                              AVG(CASE WHEN status = 2 AND started_at IS NOT NULL AND completed_at IS NOT NULL
-                                  THEN CAST(DATEDIFF_BIG(MICROSECOND, started_at, completed_at) AS FLOAT) / 1000000.0
-                                  ELSE NULL END) AS avg_duration_secs,
-                              MAX(started_at) AS last_run_at
-                          FROM dbo.surefire_runs WHERE job_name = @job_name
-                          """;
-        cmd.Parameters.AddWithValue("@job_name", jobName);
-
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        await reader.ReadAsync(cancellationToken);
-
-        return new()
-        {
-            TotalRuns = reader.GetInt32(0),
-            SucceededRuns = reader.GetInt32(1),
-            FailedRuns = reader.GetInt32(2),
-            SuccessRate = reader.GetDouble(3),
-            AvgDuration = !reader.IsDBNull(4)
-                ? TimeSpan.FromSeconds(reader.GetDouble(4))
-                : null,
-            LastRunAt = !reader.IsDBNull(5)
-                ? reader.GetDateTimeOffset(5)
-                : null
-        };
-    }
-
-    public async Task<IReadOnlyDictionary<string, QueueStats>> GetQueueStatsAsync(
-        CancellationToken cancellationToken = default)
-    {
-        await using var conn = new SqlConnection(connectionString);
-        await conn.OpenAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-                          WITH queue_names AS (
-                              SELECT name FROM dbo.surefire_queues
-                              UNION
-                              SELECT ISNULL(j.queue, 'default') AS name
-                              FROM dbo.surefire_runs r
-                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                              WHERE r.status = 0 AND r.batch_total IS NULL
-                              UNION
-                              SELECT ISNULL(j.queue, 'default') AS name
-                              FROM dbo.surefire_runs r
-                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                              WHERE r.status = 1
-                          ),
-                          pending AS (
-                              SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
-                              FROM dbo.surefire_runs r
-                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                              WHERE r.status = 0 AND r.batch_total IS NULL
-                              GROUP BY ISNULL(j.queue, 'default')
-                          ),
-                          running AS (
-                              SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
-                              FROM dbo.surefire_runs r
-                              JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                              WHERE r.status = 1
-                              GROUP BY ISNULL(j.queue, 'default')
-                          )
-                          SELECT
-                              qn.name,
-                              ISNULL(pending.cnt, 0) AS pending_count,
-                              ISNULL(running.cnt, 0) AS running_count
-                          FROM queue_names qn
-                          LEFT JOIN pending ON pending.queue_name = qn.name
-                          LEFT JOIN running ON running.queue_name = qn.name
-                          ORDER BY qn.name
-                          """;
-
-        var results = new Dictionary<string, QueueStats>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            results[reader.GetString(0)] = new()
-            {
-                PendingCount = reader.GetInt32(1),
-                RunningCount = reader.GetInt32(2)
-            };
-        }
-
-        return results;
-    }
-
     private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -1362,7 +2211,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             return;
         }
 
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
 
@@ -1376,16 +2225,15 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             var sb = new StringBuilder();
             sb.Append("""
                       INSERT INTO dbo.surefire_runs (
-                          id, job_name, status, arguments, result, error, progress,
+                          id, job_name, status, arguments, result, reason, progress,
                           created_at, started_at, completed_at, cancelled_at, node_name,
-                          attempt, trace_id, span_id, parent_run_id, root_run_id,
+                          attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                           rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                          last_heartbeat_at, batch_total, batch_completed, batch_failed,
-                          queue_priority
+                          last_heartbeat_at, batch_id, queue_priority
                       ) VALUES
                       """);
 
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = CreateCommand(conn);
             cmd.Transaction = tx;
 
             for (var i = 0; i < chunk.Count; i++)
@@ -1398,11 +2246,11 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                 var p = $"@p{i}_";
                 sb.Append($"""
                            (
-                               {p}id, {p}job_name, {p}status, {p}arguments, {p}result, {p}error, {p}progress,
+                               {p}id, {p}job_name, {p}status, {p}arguments, {p}result, {p}reason, {p}progress,
                                {p}created_at, {p}started_at, {p}completed_at, {p}cancelled_at, {p}node_name,
-                               {p}attempt, {p}trace_id, {p}span_id, {p}parent_run_id, {p}root_run_id,
+                               {p}attempt, {p}trace_id, {p}span_id, {p}parent_trace_id, {p}parent_span_id, {p}parent_run_id, {p}root_run_id,
                                {p}rerun_of_run_id, {p}not_before, {p}not_after, {p}priority, {p}deduplication_id,
-                               {p}last_heartbeat_at, {p}batch_total, {p}batch_completed, {p}batch_failed,
+                               {p}last_heartbeat_at, {p}batch_id,
                                ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = {p}job_name), 'default')), 0)
                            )
                            """);
@@ -1425,18 +2273,18 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
-        await using var conn = new SqlConnection(connectionString);
+        await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
         if (maxActiveForJob is { })
         {
-            await using var lockCmd = conn.CreateCommand();
+            await using var lockCmd = CreateCommand(conn);
             lockCmd.Transaction = tx;
             lockCmd.CommandText = "SELECT 1 FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK) WHERE name = @name";
-            lockCmd.Parameters.AddWithValue("@name", run.JobName);
+            lockCmd.Parameters.Add(CreateParameter("@name", run.JobName));
             await lockCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -1451,7 +2299,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                                    AND status NOT IN (2, 4, 5)
                            )
                            """);
-            cmd.Parameters.AddWithValue("@dedup_id", run.DeduplicationId);
+            cmd.Parameters.Add(CreateParameter("@dedup_id", run.DeduplicationId));
         }
 
         if (maxActiveForJob is { })
@@ -1460,7 +2308,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                            (SELECT COUNT(*) FROM dbo.surefire_runs
                             WHERE job_name = @job_name AND status NOT IN (2, 4, 5)) < @max_active
                            """);
-            cmd.Parameters.AddWithValue("@max_active", maxActiveForJob.Value);
+            cmd.Parameters.Add(CreateParameter("@max_active", maxActiveForJob.Value));
             conditions.Add("""
                            ISNULL((SELECT is_enabled FROM dbo.surefire_jobs WHERE name = @job_name), 1) = 1
                            """);
@@ -1470,19 +2318,18 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         {
             cmd.CommandText = """
                               INSERT INTO dbo.surefire_runs (
-                                  id, job_name, status, arguments, result, error, progress,
+                                  id, job_name, status, arguments, result, reason, progress,
                                   created_at, started_at, completed_at, cancelled_at, node_name,
-                                  attempt, trace_id, span_id, parent_run_id, root_run_id,
+                                  attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                   rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                                  last_heartbeat_at, batch_total, batch_completed, batch_failed,
-                                  queue_priority
+                                  last_heartbeat_at, batch_id, queue_priority
                               )
                               SELECT
-                                  @id, @job_name, @status, @arguments, @result, @error, @progress,
+                                  @id, @job_name, @status, @arguments, @result, @reason, @progress,
                                   @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
-                                  @attempt, @trace_id, @span_id, @parent_run_id, @root_run_id,
+                                  @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                   @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                                  @last_heartbeat_at, @batch_total, @batch_completed, @batch_failed,
+                                  @last_heartbeat_at, @batch_id,
                                   ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = @job_name), 'default')), 0)
                               WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_runs WHERE id = @id)
                               """;
@@ -1492,19 +2339,18 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             var whereClause = string.Join(" AND ", conditions);
             cmd.CommandText = $"""
                                INSERT INTO dbo.surefire_runs (
-                                   id, job_name, status, arguments, result, error, progress,
+                                   id, job_name, status, arguments, result, reason, progress,
                                    created_at, started_at, completed_at, cancelled_at, node_name,
-                                   attempt, trace_id, span_id, parent_run_id, root_run_id,
+                                   attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                    rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                                   last_heartbeat_at, batch_total, batch_completed, batch_failed,
-                                   queue_priority
+                                   last_heartbeat_at, batch_id, queue_priority
                                )
                                SELECT
-                                   @id, @job_name, @status, @arguments, @result, @error, @progress,
+                                   @id, @job_name, @status, @arguments, @result, @reason, @progress,
                                    @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
-                                   @attempt, @trace_id, @span_id, @parent_run_id, @root_run_id,
+                                   @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                    @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                                   @last_heartbeat_at, @batch_total, @batch_completed, @batch_failed,
+                                   @last_heartbeat_at, @batch_id,
                                    ISNULL((SELECT q.priority FROM dbo.surefire_queues q WHERE q.name = ISNULL((SELECT j.queue FROM dbo.surefire_jobs j WHERE j.name = @job_name), 'default')), 0)
                                WHERE {whereClause}
                                """;
@@ -1523,12 +2369,12 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
             if (rows > 0 && lastCronFireAt is { } fireAt)
             {
-                await using var fireCmd = conn.CreateCommand();
+                await using var fireCmd = CreateCommand(conn);
                 fireCmd.Transaction = tx;
                 fireCmd.CommandText =
                     "UPDATE dbo.surefire_jobs SET last_cron_fire_at = @last_cron_fire_at WHERE name = @job_name";
-                fireCmd.Parameters.AddWithValue("@last_cron_fire_at", fireAt);
-                fireCmd.Parameters.AddWithValue("@job_name", run.JobName);
+                fireCmd.Parameters.Add(CreateParameter("@last_cron_fire_at", fireAt));
+                fireCmd.Parameters.Add(CreateParameter("@job_name", run.JobName));
                 await fireCmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -1541,7 +2387,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         }
     }
 
-    private static async Task InsertEventsAsync(SqlConnection conn, SqlTransaction tx,
+    private async Task InsertEventsAsync(SqlConnection conn, SqlTransaction tx,
         IReadOnlyList<RunEvent>? events, CancellationToken cancellationToken)
     {
         if (events is null || events.Count == 0)
@@ -1558,7 +2404,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             var sb = new StringBuilder();
             sb.Append("INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt) VALUES ");
 
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = CreateCommand(conn);
             cmd.Transaction = tx;
             for (var i = 0; i < chunk.Count; i++)
             {
@@ -1568,11 +2414,11 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                 }
 
                 sb.Append($"(@run_id_{i}, @event_type_{i}, @payload_{i}, @created_at_{i}, @attempt_{i})");
-                cmd.Parameters.AddWithValue($"@run_id_{i}", chunk[i].RunId);
-                cmd.Parameters.AddWithValue($"@event_type_{i}", (short)chunk[i].EventType);
-                cmd.Parameters.AddWithValue($"@payload_{i}", chunk[i].Payload);
-                cmd.Parameters.AddWithValue($"@created_at_{i}", chunk[i].CreatedAt);
-                cmd.Parameters.AddWithValue($"@attempt_{i}", chunk[i].Attempt);
+                cmd.Parameters.Add(CreateParameter($"@run_id_{i}", chunk[i].RunId));
+                cmd.Parameters.Add(CreateParameter($"@event_type_{i}", (short)chunk[i].EventType));
+                cmd.Parameters.Add(CreateParameter($"@payload_{i}", chunk[i].Payload));
+                cmd.Parameters.Add(CreateParameter($"@created_at_{i}", chunk[i].CreatedAt));
+                cmd.Parameters.Add(CreateParameter($"@attempt_{i}", chunk[i].Attempt));
             }
 
             cmd.CommandText = sb.ToString();
@@ -1585,7 +2431,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
         if (filter.Status is { })
         {
             parts.Add("status = @filter_status");
-            cmd.Parameters.AddWithValue("@filter_status", (int)filter.Status.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_status", (int)filter.Status.Value));
         }
 
         if (filter.JobName is { })
@@ -1593,62 +2439,61 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             if (filter.ExactJobName)
             {
                 parts.Add("job_name = @filter_job_name");
-                cmd.Parameters.AddWithValue("@filter_job_name", filter.JobName);
+                cmd.Parameters.Add(CreateParameter("@filter_job_name", filter.JobName));
             }
             else
             {
                 parts.Add("job_name LIKE '%' + @filter_job_name + '%'");
-                cmd.Parameters.AddWithValue("@filter_job_name", EscapeLike(filter.JobName));
+                cmd.Parameters.Add(CreateParameter("@filter_job_name", EscapeLike(filter.JobName)));
             }
         }
 
         if (filter.ParentRunId is { })
         {
             parts.Add("parent_run_id = @filter_parent");
-            cmd.Parameters.AddWithValue("@filter_parent", filter.ParentRunId);
+            cmd.Parameters.Add(CreateParameter("@filter_parent", filter.ParentRunId));
         }
 
         if (filter.RootRunId is { })
         {
             parts.Add("root_run_id = @filter_root");
-            cmd.Parameters.AddWithValue("@filter_root", filter.RootRunId);
+            cmd.Parameters.Add(CreateParameter("@filter_root", filter.RootRunId));
         }
 
         if (filter.NodeName is { })
         {
             parts.Add("node_name = @filter_node");
-            cmd.Parameters.AddWithValue("@filter_node", filter.NodeName);
+            cmd.Parameters.Add(CreateParameter("@filter_node", filter.NodeName));
         }
 
         if (filter.CreatedAfter is { })
         {
             parts.Add("created_at > @filter_created_after");
-            cmd.Parameters.AddWithValue("@filter_created_after", filter.CreatedAfter.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_created_after", filter.CreatedAfter.Value));
         }
 
         if (filter.CreatedBefore is { })
         {
             parts.Add("created_at < @filter_created_before");
-            cmd.Parameters.AddWithValue("@filter_created_before", filter.CreatedBefore.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_created_before", filter.CreatedBefore.Value));
         }
 
         if (filter.CompletedAfter is { })
         {
-            parts.Add("completed_at >= @filter_completed_after");
-            cmd.Parameters.AddWithValue("@filter_completed_after", filter.CompletedAfter.Value);
+            parts.Add("completed_at > @filter_completed_after");
+            cmd.Parameters.Add(CreateParameter("@filter_completed_after", filter.CompletedAfter.Value));
         }
 
         if (filter.LastHeartbeatBefore is { })
         {
             parts.Add("last_heartbeat_at < @filter_hb_before");
-            cmd.Parameters.AddWithValue("@filter_hb_before", filter.LastHeartbeatBefore.Value);
+            cmd.Parameters.Add(CreateParameter("@filter_hb_before", filter.LastHeartbeatBefore.Value));
         }
 
-        if (filter.IsBatchCoordinator is { })
+        if (filter.BatchId is { })
         {
-            parts.Add(filter.IsBatchCoordinator.Value
-                ? "batch_total IS NOT NULL"
-                : "batch_total IS NULL");
+            parts.Add("batch_id = @batch_id_filter");
+            cmd.Parameters.Add(CreateParameter("@batch_id_filter", filter.BatchId));
         }
 
         if (filter.IsTerminal is { })
@@ -1661,279 +2506,169 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
 
     private static void AddRunParams(SqlCommand cmd, string prefix, JobRun run)
     {
-        cmd.Parameters.AddWithValue($"{prefix}id", run.Id);
-        cmd.Parameters.AddWithValue($"{prefix}job_name", run.JobName);
-        cmd.Parameters.AddWithValue($"{prefix}status", (int)run.Status);
-        cmd.Parameters.AddWithValue($"{prefix}arguments", (object?)run.Arguments ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}result", (object?)run.Result ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}error", (object?)run.Error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}progress", run.Progress);
-        cmd.Parameters.AddWithValue($"{prefix}created_at", run.CreatedAt);
-        cmd.Parameters.AddWithValue($"{prefix}started_at", run.StartedAt.HasValue ? run.StartedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}completed_at",
-            run.CompletedAt.HasValue ? run.CompletedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}cancelled_at",
-            run.CancelledAt.HasValue ? run.CancelledAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}node_name", (object?)run.NodeName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}attempt", run.Attempt);
-        cmd.Parameters.AddWithValue($"{prefix}trace_id", (object?)run.TraceId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}span_id", (object?)run.SpanId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}parent_run_id", (object?)run.ParentRunId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}root_run_id", (object?)run.RootRunId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}rerun_of_run_id", (object?)run.RerunOfRunId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}not_before", run.NotBefore);
-        cmd.Parameters.AddWithValue($"{prefix}not_after", run.NotAfter.HasValue ? run.NotAfter.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}priority", run.Priority);
-        cmd.Parameters.AddWithValue($"{prefix}deduplication_id", (object?)run.DeduplicationId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}last_heartbeat_at",
-            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}batch_total",
-            run.BatchTotal.HasValue ? run.BatchTotal.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}batch_completed", run.BatchCompleted ?? 0);
-        cmd.Parameters.AddWithValue($"{prefix}batch_failed", run.BatchFailed ?? 0);
+        cmd.Parameters.Add(CreateParameter($"{prefix}id", run.Id));
+        cmd.Parameters.Add(CreateParameter($"{prefix}job_name", run.JobName));
+        cmd.Parameters.Add(CreateParameter($"{prefix}status", (int)run.Status));
+        cmd.Parameters.Add(CreateParameter($"{prefix}arguments", (object?)run.Arguments ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}result", (object?)run.Result ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}reason", (object?)run.Reason ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}progress", run.Progress));
+        cmd.Parameters.Add(CreateParameter($"{prefix}created_at", run.CreatedAt));
+        cmd.Parameters.Add(CreateParameter($"{prefix}started_at",
+            run.StartedAt.HasValue ? run.StartedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}completed_at",
+            run.CompletedAt.HasValue ? run.CompletedAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}cancelled_at",
+            run.CancelledAt.HasValue ? run.CancelledAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}node_name", (object?)run.NodeName ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}attempt", run.Attempt));
+        cmd.Parameters.Add(CreateParameter($"{prefix}trace_id", (object?)run.TraceId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}span_id", (object?)run.SpanId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}parent_trace_id", (object?)run.ParentTraceId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}parent_span_id", (object?)run.ParentSpanId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}parent_run_id", (object?)run.ParentRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}root_run_id", (object?)run.RootRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}rerun_of_run_id", (object?)run.RerunOfRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}not_before", run.NotBefore));
+        cmd.Parameters.Add(CreateParameter($"{prefix}not_after",
+            run.NotAfter.HasValue ? run.NotAfter.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}priority", run.Priority));
+        cmd.Parameters.Add(CreateParameter($"{prefix}deduplication_id", (object?)run.DeduplicationId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}last_heartbeat_at",
+            run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}batch_id", (object?)run.BatchId ?? DBNull.Value));
     }
 
-    private static JobRun ReadRun(SqlDataReader reader)
+    private static JobRun ReadRun(SqlDataReader reader) => new()
     {
-        var run = new JobRun
-        {
-            Id = reader.GetString(reader.GetOrdinal("id")),
-            JobName = reader.GetString(reader.GetOrdinal("job_name")),
-            Status = (JobStatus)reader.GetInt32(reader.GetOrdinal("status")),
-            Progress = reader.GetDouble(reader.GetOrdinal("progress")),
-            CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at")),
-            Attempt = reader.GetInt32(reader.GetOrdinal("attempt")),
-            NotBefore = reader.GetDateTimeOffset(reader.GetOrdinal("not_before")),
-            Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-            QueuePriority = reader.GetInt32(reader.GetOrdinal("queue_priority"))
-        };
+        Id = reader.GetString(reader.GetOrdinal("id")),
+        JobName = reader.GetString(reader.GetOrdinal("job_name")),
+        Status = (JobStatus)reader.GetInt32(reader.GetOrdinal("status")),
+        Progress = reader.GetDouble(reader.GetOrdinal("progress")),
+        CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at")),
+        Attempt = reader.GetInt32(reader.GetOrdinal("attempt")),
+        NotBefore = reader.GetDateTimeOffset(reader.GetOrdinal("not_before")),
+        Priority = reader.GetInt32(reader.GetOrdinal("priority")),
+        QueuePriority = reader.GetInt32(reader.GetOrdinal("queue_priority")),
+        Arguments = reader.IsDBNull(reader.GetOrdinal("arguments"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("arguments")),
+        Result = reader.IsDBNull(reader.GetOrdinal("result")) ? null : reader.GetString(reader.GetOrdinal("result")),
+        Reason = reader.IsDBNull(reader.GetOrdinal("reason")) ? null : reader.GetString(reader.GetOrdinal("reason")),
+        StartedAt = reader.IsDBNull(reader.GetOrdinal("started_at"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("started_at")),
+        CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("completed_at")),
+        CancelledAt = reader.IsDBNull(reader.GetOrdinal("cancelled_at"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("cancelled_at")),
+        NodeName = reader.IsDBNull(reader.GetOrdinal("node_name"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("node_name")),
+        TraceId = reader.IsDBNull(reader.GetOrdinal("trace_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("trace_id")),
+        SpanId = reader.IsDBNull(reader.GetOrdinal("span_id")) ? null : reader.GetString(reader.GetOrdinal("span_id")),
+        ParentTraceId = reader.IsDBNull(reader.GetOrdinal("parent_trace_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("parent_trace_id")),
+        ParentSpanId = reader.IsDBNull(reader.GetOrdinal("parent_span_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("parent_span_id")),
+        ParentRunId = reader.IsDBNull(reader.GetOrdinal("parent_run_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("parent_run_id")),
+        RootRunId = reader.IsDBNull(reader.GetOrdinal("root_run_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("root_run_id")),
+        RerunOfRunId = reader.IsDBNull(reader.GetOrdinal("rerun_of_run_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("rerun_of_run_id")),
+        NotAfter = reader.IsDBNull(reader.GetOrdinal("not_after"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("not_after")),
+        DeduplicationId = reader.IsDBNull(reader.GetOrdinal("deduplication_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("deduplication_id")),
+        LastHeartbeatAt = reader.IsDBNull(reader.GetOrdinal("last_heartbeat_at"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("last_heartbeat_at")),
+        BatchId = reader.IsDBNull(reader.GetOrdinal("batch_id"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("batch_id"))
+    };
 
-        var col = reader.GetOrdinal("arguments");
-        if (!reader.IsDBNull(col))
-        {
-            run.Arguments = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("result");
-        if (!reader.IsDBNull(col))
-        {
-            run.Result = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("error");
-        if (!reader.IsDBNull(col))
-        {
-            run.Error = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("started_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.StartedAt = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("completed_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.CompletedAt = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("cancelled_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.CancelledAt = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("node_name");
-        if (!reader.IsDBNull(col))
-        {
-            run.NodeName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("trace_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.TraceId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("span_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.SpanId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("parent_run_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.ParentRunId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("root_run_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.RootRunId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("rerun_of_run_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.RerunOfRunId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("not_after");
-        if (!reader.IsDBNull(col))
-        {
-            run.NotAfter = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("deduplication_id");
-        if (!reader.IsDBNull(col))
-        {
-            run.DeduplicationId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            run.LastHeartbeatAt = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("batch_total");
-        if (!reader.IsDBNull(col))
-        {
-            run.BatchTotal = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("batch_completed");
-        if (!reader.IsDBNull(col))
-        {
-            run.BatchCompleted = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("batch_failed");
-        if (!reader.IsDBNull(col))
-        {
-            run.BatchFailed = reader.GetInt32(col);
-        }
-
-        if (run.BatchTotal is null)
-        {
-            run.BatchCompleted = null;
-            run.BatchFailed = null;
-        }
-
-        return run;
-    }
+    private static JobBatch ReadBatch(SqlDataReader reader) => new()
+    {
+        Id = reader.GetString(reader.GetOrdinal("id")),
+        Status = (JobStatus)reader.GetInt16(reader.GetOrdinal("status")),
+        Total = reader.GetInt32(reader.GetOrdinal("total")),
+        Succeeded = reader.GetInt32(reader.GetOrdinal("succeeded")),
+        Failed = reader.GetInt32(reader.GetOrdinal("failed")),
+        Cancelled = reader.GetOrdinal("cancelled") is var cCol && !reader.IsDBNull(cCol) ? reader.GetInt32(cCol) : 0,
+        CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at")),
+        CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("completed_at"))
+    };
 
     private static JobDefinition ReadJob(SqlDataReader reader)
     {
-        var job = new JobDefinition
+        var limitCol = reader.GetOrdinal("fire_all_limit");
+        var descriptionCol = reader.GetOrdinal("description");
+        var cronCol = reader.GetOrdinal("cron_expression");
+        var timeZoneCol = reader.GetOrdinal("time_zone_id");
+        var timeoutCol = reader.GetOrdinal("timeout");
+        var maxConcurrencyCol = reader.GetOrdinal("max_concurrency");
+        var retryPolicyCol = reader.GetOrdinal("retry_policy");
+        var queueCol = reader.GetOrdinal("queue");
+        var rateLimitCol = reader.GetOrdinal("rate_limit_name");
+        var schemaCol = reader.GetOrdinal("arguments_schema");
+        var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
+        var cronFireCol = reader.GetOrdinal("last_cron_fire_at");
+
+        return new()
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Tags = JsonSerializer.Deserialize<string[]>(reader.GetString(reader.GetOrdinal("tags"))) ?? [],
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
             IsContinuous = reader.GetBoolean(reader.GetOrdinal("is_continuous")),
             IsEnabled = reader.GetBoolean(reader.GetOrdinal("is_enabled")),
-            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy"))
+            MisfirePolicy = (MisfirePolicy)reader.GetInt32(reader.GetOrdinal("misfire_policy")),
+            FireAllLimit = reader.IsDBNull(limitCol) ? null : reader.GetInt32(limitCol),
+            Description = reader.IsDBNull(descriptionCol) ? null : reader.GetString(descriptionCol),
+            CronExpression = reader.IsDBNull(cronCol) ? null : reader.GetString(cronCol),
+            TimeZoneId = reader.IsDBNull(timeZoneCol) ? null : reader.GetString(timeZoneCol),
+            Timeout = reader.IsDBNull(timeoutCol) ? null : TimeSpan.FromTicks(reader.GetInt64(timeoutCol)),
+            MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
+            RetryPolicy = reader.IsDBNull(retryPolicyCol)
+                ? new()
+                : DeserializeRetryPolicy(reader.GetString(retryPolicyCol)),
+            Queue = reader.IsDBNull(queueCol) ? null : reader.GetString(queueCol),
+            RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
+            ArgumentsSchema = reader.IsDBNull(schemaCol) ? null : reader.GetString(schemaCol),
+            LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetDateTimeOffset(heartbeatCol),
+            LastCronFireAt = reader.IsDBNull(cronFireCol) ? null : reader.GetDateTimeOffset(cronFireCol)
         };
-
-        var col = reader.GetOrdinal("description");
-        if (!reader.IsDBNull(col))
-        {
-            job.Description = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("cron_expression");
-        if (!reader.IsDBNull(col))
-        {
-            job.CronExpression = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("time_zone_id");
-        if (!reader.IsDBNull(col))
-        {
-            job.TimeZoneId = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("timeout");
-        if (!reader.IsDBNull(col))
-        {
-            job.Timeout = TimeSpan.FromTicks(reader.GetInt64(col));
-        }
-
-        col = reader.GetOrdinal("max_concurrency");
-        if (!reader.IsDBNull(col))
-        {
-            job.MaxConcurrency = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("retry_policy");
-        if (!reader.IsDBNull(col))
-        {
-            job.RetryPolicy = DeserializeRetryPolicy(reader.GetString(col));
-        }
-
-        col = reader.GetOrdinal("queue");
-        if (!reader.IsDBNull(col))
-        {
-            job.Queue = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("rate_limit_name");
-        if (!reader.IsDBNull(col))
-        {
-            job.RateLimitName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("arguments_schema");
-        if (!reader.IsDBNull(col))
-        {
-            job.ArgumentsSchema = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            job.LastHeartbeatAt = reader.GetDateTimeOffset(col);
-        }
-
-        col = reader.GetOrdinal("last_cron_fire_at");
-        if (!reader.IsDBNull(col))
-        {
-            job.LastCronFireAt = reader.GetDateTimeOffset(col);
-        }
-
-        return job;
     }
 
     private static QueueDefinition ReadQueue(SqlDataReader reader)
     {
-        var queue = new QueueDefinition
+        var maxConcurrencyCol = reader.GetOrdinal("max_concurrency");
+        var rateLimitCol = reader.GetOrdinal("rate_limit_name");
+        var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
+
+        return new()
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-            IsPaused = reader.GetBoolean(reader.GetOrdinal("is_paused"))
+            IsPaused = reader.GetBoolean(reader.GetOrdinal("is_paused")),
+            MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
+            RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
+            LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetDateTimeOffset(heartbeatCol)
         };
-
-        var col = reader.GetOrdinal("max_concurrency");
-        if (!reader.IsDBNull(col))
-        {
-            queue.MaxConcurrency = reader.GetInt32(col);
-        }
-
-        col = reader.GetOrdinal("rate_limit_name");
-        if (!reader.IsDBNull(col))
-        {
-            queue.RateLimitName = reader.GetString(col);
-        }
-
-        col = reader.GetOrdinal("last_heartbeat_at");
-        if (!reader.IsDBNull(col))
-        {
-            queue.LastHeartbeatAt = reader.GetDateTimeOffset(col);
-        }
-
-        return queue;
     }
 
     private static NodeInfo ReadNode(SqlDataReader reader) => new()
@@ -1961,10 +2696,10 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
     private async Task<JobDefinition?> GetJobInternalAsync(SqlConnection conn, SqlTransaction tx,
         string name, CancellationToken cancellationToken)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -1977,10 +2712,10 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
     private async Task<QueueDefinition?> GetQueueInternalAsync(SqlConnection conn, SqlTransaction tx,
         string name, CancellationToken cancellationToken)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = "SELECT * FROM dbo.surefire_queues WHERE name = @name";
-        cmd.Parameters.AddWithValue("@name", name);
+        cmd.Parameters.Add(CreateParameter("@name", name));
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -1993,7 +2728,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
     private async Task AcquireRateLimitAsync(SqlConnection conn, SqlTransaction tx,
         string rateLimitName, CancellationToken cancellationToken)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
@@ -2022,7 +2757,7 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
                               END
                           WHERE name = @name
                           """;
-        cmd.Parameters.AddWithValue("@name", rateLimitName);
+        cmd.Parameters.Add(CreateParameter("@name", rateLimitName));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -2048,6 +2783,114 @@ public sealed class SqlServerJobStore(string connectionString, TimeProvider time
             MaxDelay = TimeSpan.FromTicks(root.GetProperty("maxDelay").GetInt64()),
             Jitter = root.GetProperty("jitter").GetBoolean()
         };
+    }
+
+    private async Task ReleaseMigrationLockAsync(SqlConnection conn)
+    {
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = "EXEC sp_releaseapplock @Resource = 'surefire_migrate', @LockOwner = 'Session'";
+        await cmd.ExecuteNonQueryAsync(CancellationToken.None);
+    }
+
+    private SqlCommand CreateCommand(SqlConnection conn)
+    {
+        var command = conn.CreateCommand();
+        if (CommandTimeoutSeconds is { } timeoutSeconds)
+        {
+            command.CommandTimeout = timeoutSeconds;
+        }
+
+        return command;
+    }
+
+    private static SqlParameter CreateParameter(string name, object? value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        var parameter = new SqlParameter { ParameterName = name };
+
+        if (value is null || value == DBNull.Value)
+        {
+            parameter.SqlDbType = SqlDbType.NVarChar;
+            parameter.Size = -1;
+            parameter.Value = DBNull.Value;
+            return parameter;
+        }
+
+        switch (value)
+        {
+            case string text:
+                parameter.SqlDbType = SqlDbType.NVarChar;
+                parameter.Size = -1;
+                parameter.Value = text;
+                return parameter;
+
+            case bool bit:
+                parameter.SqlDbType = SqlDbType.Bit;
+                parameter.Value = bit;
+                return parameter;
+
+            case byte tinyInt:
+                parameter.SqlDbType = SqlDbType.TinyInt;
+                parameter.Value = tinyInt;
+                return parameter;
+
+            case short smallInt:
+                parameter.SqlDbType = SqlDbType.SmallInt;
+                parameter.Value = smallInt;
+                return parameter;
+
+            case int int32:
+                parameter.SqlDbType = SqlDbType.Int;
+                parameter.Value = int32;
+                return parameter;
+
+            case long int64:
+                parameter.SqlDbType = SqlDbType.BigInt;
+                parameter.Value = int64;
+                return parameter;
+
+            case float real:
+                parameter.SqlDbType = SqlDbType.Real;
+                parameter.Value = real;
+                return parameter;
+
+            case double dbl:
+                parameter.SqlDbType = SqlDbType.Float;
+                parameter.Value = dbl;
+                return parameter;
+
+            case decimal number:
+                parameter.SqlDbType = SqlDbType.Decimal;
+                parameter.Value = number;
+                return parameter;
+
+            case DateTimeOffset dto:
+                parameter.SqlDbType = SqlDbType.DateTimeOffset;
+                parameter.Value = dto;
+                return parameter;
+
+            case DateTime dt:
+                parameter.SqlDbType = SqlDbType.DateTime2;
+                parameter.Value = dt;
+                return parameter;
+
+            case Guid guid:
+                parameter.SqlDbType = SqlDbType.UniqueIdentifier;
+                parameter.Value = guid;
+                return parameter;
+
+            case byte[] bytes:
+                parameter.SqlDbType = SqlDbType.VarBinary;
+                parameter.Size = -1;
+                parameter.Value = bytes;
+                return parameter;
+
+            default:
+                parameter.SqlDbType = SqlDbType.Variant;
+                parameter.Value = value;
+                return parameter;
+        }
     }
 
     private static string EscapeLike(string input) =>

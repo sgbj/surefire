@@ -1,8 +1,24 @@
 const BASE = `${new URL(document.baseURI).pathname.replace(/\/$/, "")}/api`;
 
+interface ProblemDetailsLike {
+  title?: string;
+  detail?: string;
+}
+
 async function fetchApi<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
   if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/problem+json")) {
+      const problem = (await res
+        .json()
+        .catch(() => null)) as ProblemDetailsLike | null;
+      const title = problem?.title?.trim();
+      const detail = problem?.detail?.trim();
+      const message = [title, detail].filter(Boolean).join(": ");
+      throw new Error(message.length > 0 ? message : `API error ${res.status}`);
+    }
+
     const body = await res.text().catch(() => "");
     throw new Error(`API error ${res.status}: ${body}`);
   }
@@ -17,10 +33,9 @@ export interface TimelineBucket {
   start?: string;
   pending: number;
   running: number;
-  completed: number;
-  retrying: number;
+  succeeded: number;
   cancelled: number;
-  deadLetter: number;
+  failed: number;
 }
 
 export interface DashboardStats {
@@ -35,23 +50,20 @@ export interface DashboardStats {
 }
 
 function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
-  const successRate =
-    raw.successRate <= 1 ? raw.successRate * 100 : raw.successRate;
   const timeline = Array.isArray(raw.timeline)
     ? raw.timeline.map((bucket) => ({
         ...bucket,
         timestamp: bucket.timestamp ?? bucket.start ?? "",
         pending: bucket.pending ?? 0,
         running: bucket.running ?? 0,
-        completed: bucket.completed ?? 0,
-        retrying: bucket.retrying ?? 0,
+        succeeded: bucket.succeeded ?? 0,
         cancelled: bucket.cancelled ?? 0,
-        deadLetter: bucket.deadLetter ?? 0,
+        failed: bucket.failed ?? 0,
       }))
     : [];
   return {
     ...raw,
-    successRate,
+    successRate: raw.successRate ?? 0,
     recentRuns: Array.isArray(raw.recentRuns) ? raw.recentRuns : [],
     runsByStatus: raw.runsByStatus ?? {},
     timeline,
@@ -156,10 +168,10 @@ export interface RetryPolicy {
 export interface JobRun {
   id: string;
   jobName: string;
-  status: number;
+  status: JobStatus;
   arguments?: string;
   result?: string;
-  error?: string;
+  reason?: string;
   progress: number;
   createdAt: string;
   startedAt?: string;
@@ -170,16 +182,44 @@ export interface JobRun {
   traceId?: string;
   spanId?: string;
   parentRunId?: string;
+  rootRunId?: string;
   rerunOfRunId?: string;
   notBefore?: string;
   notAfter?: string;
   priority: number;
+  queuePriority?: number;
   deduplicationId?: string;
   lastHeartbeatAt?: string;
   batchTotal?: number;
   batchCompleted?: number;
   batchFailed?: number;
   streamBindings?: Record<string, string[]>;
+  /** Populated by the trace endpoint so the client can render the tree without rebuilding it. */
+  depth?: number;
+}
+
+/** Focused trace response returned by GET /api/runs/{id}/trace. */
+export interface RunTraceResponse {
+  /** Ancestors from root → immediate parent; each has `depth` starting at 0. */
+  ancestors: JobRun[];
+  /** Focus run; depth == ancestors.length. */
+  focus: JobRun;
+  /** Siblings ordered before the focus (same depth). */
+  siblingsBefore: JobRun[];
+  /** Siblings ordered after the focus (same depth). */
+  siblingsAfter: JobRun[];
+  /** Cursors for paginating siblings beyond the initial window in either direction. */
+  siblingsCursor?: { after?: string; before?: string };
+  /** First page of direct children of the focus (depth == focus.depth + 1). */
+  children: JobRun[];
+  /** Cursor for loading more children. */
+  childrenCursor?: string;
+}
+
+/** Direct children pagination response — GET /api/runs/{id}/children. */
+export interface RunChildrenResponse {
+  items: JobRun[];
+  nextCursor?: string;
 }
 
 export interface NodeResponse {
@@ -224,22 +264,34 @@ export interface RunLogEntry {
   category?: string;
 }
 
+export interface LogPage {
+  items: RunLogEntry[];
+  nextCursor: number | null;
+}
+
+export const JobStatus = {
+  Pending: 0,
+  Running: 1,
+  Succeeded: 2,
+  Cancelled: 4,
+  Failed: 5,
+} as const;
+export type JobStatus = (typeof JobStatus)[keyof typeof JobStatus];
+
 export const JobStatusLabels: Record<number, string> = {
-  0: "Pending",
-  1: "Running",
-  2: "Completed",
-  3: "Retrying",
-  4: "Cancelled",
-  5: "Dead letter",
+  [JobStatus.Pending]: "Pending",
+  [JobStatus.Running]: "Running",
+  [JobStatus.Succeeded]: "Succeeded",
+  [JobStatus.Cancelled]: "Cancelled",
+  [JobStatus.Failed]: "Failed",
 };
 
 export const JobStatusColors: Record<number, string> = {
-  0: "bg-status-pending/15 text-status-pending",
-  1: "bg-status-running/15 text-status-running",
-  2: "bg-status-completed/15 text-status-completed",
-  3: "bg-status-retrying/15 text-status-retrying",
-  4: "bg-status-cancelled/15 text-status-cancelled",
-  5: "bg-status-dead-letter/15 text-status-dead-letter",
+  [JobStatus.Pending]: "bg-status-pending/15 text-status-pending",
+  [JobStatus.Running]: "bg-status-running/15 text-status-running",
+  [JobStatus.Succeeded]: "bg-status-succeeded/15 text-status-succeeded",
+  [JobStatus.Cancelled]: "bg-status-cancelled/15 text-status-cancelled",
+  [JobStatus.Failed]: "bg-status-failed/15 text-status-failed",
 };
 
 export const LogLevelLabels: Record<number, string> = {
@@ -322,15 +374,60 @@ export const api = {
     const qs = search.toString();
     return fetchApi<PagedResult<JobRun>>(`/runs${qs ? `?${qs}` : ""}`);
   },
-  getRun: (id: string) => fetchApi<JobRun>(`/runs/${id}`),
+  getRun: (id: string) => fetchApi<JobRun>(`/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) =>
-    fetchApi<void>(`/runs/${id}/cancel`, { method: "POST" }),
-  rerunRun: (id: string) =>
-    fetchApi<{ runId?: string; RunId?: string }>(`/runs/${id}/rerun`, {
+    fetchApi<void>(`/runs/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
-    }).then(normalizeRunIdResponse),
-  getRunLogs: (id: string) => fetchApi<RunLogEntry[]>(`/runs/${id}/logs`),
-  getRunTrace: (id: string) => fetchApi<JobRun[]>(`/runs/${id}/trace`),
+    }),
+  rerunRun: (id: string) =>
+    fetchApi<{ runId?: string; RunId?: string }>(
+      `/runs/${encodeURIComponent(id)}/rerun`,
+      {
+        method: "POST",
+      },
+    ).then(normalizeRunIdResponse),
+  getRunLogs: async (id: string): Promise<RunLogEntry[]> => {
+    const all: RunLogEntry[] = [];
+    let cursor: number | null = null;
+    while (true) {
+      const params = new URLSearchParams({ take: "1000" });
+      if (cursor != null) params.set("sinceEventId", cursor.toString());
+      const page = await fetchApi<LogPage>(
+        `/runs/${encodeURIComponent(id)}/logs?${params}`,
+      );
+      all.push(...page.items);
+      if (page.nextCursor == null) break;
+      cursor = page.nextCursor;
+    }
+    return all;
+  },
+  getRunTrace: (
+    id: string,
+    params?: { siblingWindow?: number; childrenTake?: number },
+  ) => {
+    const search = new URLSearchParams();
+    if (params?.siblingWindow != null)
+      search.set("siblingWindow", params.siblingWindow.toString());
+    if (params?.childrenTake != null)
+      search.set("childrenTake", params.childrenTake.toString());
+    const qs = search.toString();
+    return fetchApi<RunTraceResponse>(
+      `/runs/${encodeURIComponent(id)}/trace${qs ? `?${qs}` : ""}`,
+    );
+  },
+  getRunChildren: (
+    id: string,
+    params?: { afterCursor?: string; beforeCursor?: string; take?: number },
+  ) => {
+    const search = new URLSearchParams();
+    if (params?.afterCursor) search.set("afterCursor", params.afterCursor);
+    if (params?.beforeCursor) search.set("beforeCursor", params.beforeCursor);
+    if (params?.take != null) search.set("take", params.take.toString());
+    const qs = search.toString();
+    return fetchApi<RunChildrenResponse>(
+      `/runs/${encodeURIComponent(id)}/children${qs ? `?${qs}` : ""}`,
+    );
+  },
   updateJob: (name: string, patch: { isEnabled?: boolean }) =>
     fetchApi<JobResponse>(`/jobs/${encodeURIComponent(name)}`, {
       method: "PATCH",
@@ -364,6 +461,8 @@ export const api = {
     if (sinceEventId && sinceEventId > 0)
       search.set("sinceEventId", sinceEventId.toString());
     const qs = search.toString();
-    return new EventSource(`${BASE}/runs/${id}/stream${qs ? `?${qs}` : ""}`);
+    return new EventSource(
+      `${BASE}/runs/${encodeURIComponent(id)}/stream${qs ? `?${qs}` : ""}`,
+    );
   },
 };

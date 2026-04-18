@@ -76,6 +76,13 @@ public sealed class JobDefinition
     public MisfirePolicy MisfirePolicy { get; set; }
 
     /// <summary>
+    ///     Gets or sets the maximum number of missed occurrences to schedule on each scheduler tick
+    ///     when <see cref="MisfirePolicy" /> is <see cref="Surefire.MisfirePolicy.FireAll" />.
+    ///     Null means unlimited.
+    /// </summary>
+    public int? FireAllLimit { get; set; }
+
+    /// <summary>
     ///     Gets or sets the JSON Schema describing the job's arguments.
     /// </summary>
     public string? ArgumentsSchema { get; set; }
@@ -89,4 +96,26 @@ public sealed class JobDefinition
     ///     Gets or sets the time of the last cron fire for this job.
     /// </summary>
     public DateTimeOffset? LastCronFireAt { get; set; }
+
+    internal JobDefinition Clone() => new()
+    {
+        Name = Name,
+        Description = Description,
+        Tags = [.. Tags],
+        CronExpression = CronExpression,
+        TimeZoneId = TimeZoneId,
+        Timeout = Timeout,
+        MaxConcurrency = MaxConcurrency,
+        Priority = Priority,
+        RetryPolicy = RetryPolicy with { },
+        IsContinuous = IsContinuous,
+        Queue = Queue,
+        RateLimitName = RateLimitName,
+        IsEnabled = IsEnabled,
+        MisfirePolicy = MisfirePolicy,
+        FireAllLimit = FireAllLimit,
+        ArgumentsSchema = ArgumentsSchema,
+        LastHeartbeatAt = LastHeartbeatAt,
+        LastCronFireAt = LastCronFireAt
+    };
 }

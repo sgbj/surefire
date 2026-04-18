@@ -2,6 +2,7 @@
     <PropertyGroup>
         <RootNamespace>Surefire.Dashboard</RootNamespace>
         <Description>Embedded web dashboard for monitoring Surefire jobs</Description>
+        <PackageTags>$(PackageTags);dashboard;monitoring;observability</PackageTags>
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
         <DashboardUiDir>$(MSBuildProjectDirectory)/ui</DashboardUiDir>
         <DashboardUiOutputDir>$(BaseIntermediateOutputPath)dashboard-ui</DashboardUiOutputDir>

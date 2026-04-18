@@ -13,7 +13,7 @@ await client.CancelAsync(runId);
 
 You can also cancel runs from the dashboard by clicking the cancel button on a running or pending job.
 
-Pending runs are cancelled immediately. Running runs receive a cancellation signal via `CancellationToken`. If a running job doesn't check its token, it will continue until it finishes or the process shuts down.
+Pending runs are cancelled immediately. Running runs first move into `Cancelling`, receive a cancellation signal via `CancellationToken`, and become `Cancelled` once the attempt has finished flushing its final observable events. If a running job doesn't check its token, it will continue until it finishes or the process shuts down.
 
 ## Cascade cancellation
 
@@ -43,7 +43,7 @@ Timeout is implemented via cancellation of the running attempt. In run history t
 
 ## Shutdown
 
-When the application shuts down, Surefire cancels all running jobs and waits up to `ShutdownTimeout` (default 15 seconds) for them to finish.
+When the application shuts down, Surefire interrupts in-flight running attempts and waits up to `ShutdownTimeout` (default 15 seconds) for shutdown work.
 
 ```csharp
 builder.Services.AddSurefire(options =>
@@ -52,7 +52,7 @@ builder.Services.AddSurefire(options =>
 });
 ```
 
-Shutdown sends cancellation to running jobs. Whether work is picked up again depends on recovery and retry settings.
+Shutdown interruptions are recorded as run failures with an explicit shutdown error and then follow normal retry policy. If retries remain, the run is scheduled again; otherwise it moves to dead-letter.
 
 ## Handling cancellation in jobs
 

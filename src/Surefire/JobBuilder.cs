@@ -5,7 +5,14 @@ namespace Surefire;
 /// </summary>
 public sealed class JobBuilder
 {
-    internal JobBuilder(JobDefinition definition) => Definition = definition;
+    private readonly Action _sync;
+
+    internal JobBuilder(JobDefinition definition, Action sync)
+    {
+        Definition = definition;
+        _sync = sync;
+    }
+
     internal JobDefinition Definition { get; }
     internal List<Type> FilterTypes { get; } = [];
     internal List<Delegate> OnSuccessCallbacks { get; } = [];
@@ -25,8 +32,10 @@ public sealed class JobBuilder
             throw new ArgumentException("Cron expression cannot be empty.", nameof(cronExpression));
         }
 
+        CronScheduleValidation.Validate(cronExpression, timeZoneId);
         Definition.CronExpression = cronExpression;
         Definition.TimeZoneId = timeZoneId;
+        _sync();
         return this;
     }
 
@@ -39,6 +48,7 @@ public sealed class JobBuilder
     {
         ArgumentNullException.ThrowIfNull(description);
         Definition.Description = description;
+        _sync();
         return this;
     }
 
@@ -56,6 +66,7 @@ public sealed class JobBuilder
         }
 
         Definition.Tags = tags;
+        _sync();
         return this;
     }
 
@@ -72,6 +83,7 @@ public sealed class JobBuilder
         }
 
         Definition.Timeout = timeout;
+        _sync();
         return this;
     }
 
@@ -84,18 +96,21 @@ public sealed class JobBuilder
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxConcurrency, 1);
         Definition.MaxConcurrency = maxConcurrency;
+        _sync();
         return this;
     }
 
     /// <summary>
     ///     Marks this job as continuous. A continuous job automatically restarts on completion.
-    ///     Sets <see cref="JobDefinition.MaxConcurrency" /> to 1 if not already configured.
+    ///     The default is one copy at a time; combine with <see cref="WithMaxConcurrency" /> to keep
+    ///     multiple copies running concurrently.
     /// </summary>
     /// <returns>This builder for chaining.</returns>
     public JobBuilder Continuous()
     {
         Definition.IsContinuous = true;
         Definition.MaxConcurrency ??= 1;
+        _sync();
         return this;
     }
 
@@ -107,6 +122,7 @@ public sealed class JobBuilder
     public JobBuilder WithPriority(int priority)
     {
         Definition.Priority = priority;
+        _sync();
         return this;
     }
 
@@ -123,6 +139,7 @@ public sealed class JobBuilder
         }
 
         Definition.Queue = queue;
+        _sync();
         return this;
     }
 
@@ -139,18 +156,21 @@ public sealed class JobBuilder
         }
 
         Definition.RateLimitName = rateLimitName;
+        _sync();
         return this;
     }
 
     /// <summary>
-    ///     Configures the job to retry on failure with the specified maximum number of retries.
+    ///     Configures the maximum number of retries on failure, preserving any previously configured
+    ///     backoff settings.
     /// </summary>
     /// <param name="maxRetries">The maximum number of retry attempts. 3 means up to 4 total executions.</param>
     /// <returns>This builder for chaining.</returns>
     public JobBuilder WithRetry(int maxRetries)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxRetries);
-        Definition.RetryPolicy = new() { MaxRetries = maxRetries };
+        Definition.RetryPolicy = Definition.RetryPolicy with { MaxRetries = maxRetries };
+        _sync();
         return this;
     }
 
@@ -165,6 +185,7 @@ public sealed class JobBuilder
         var policyBuilder = new RetryPolicyBuilder();
         configure(policyBuilder);
         Definition.RetryPolicy = policyBuilder.Build();
+        _sync();
         return this;
     }
 
@@ -172,10 +193,28 @@ public sealed class JobBuilder
     ///     Sets the misfire policy for this job's cron schedule.
     /// </summary>
     /// <param name="policy">The misfire policy.</param>
+    /// <param name="fireAllLimit">
+    ///     Optional per-tick limit for missed fires when <paramref name="policy" /> is
+    ///     <see cref="Surefire.MisfirePolicy.FireAll" />. Null means unlimited.
+    /// </param>
     /// <returns>This builder for chaining.</returns>
-    public JobBuilder WithMisfirePolicy(MisfirePolicy policy)
+    public JobBuilder WithMisfirePolicy(MisfirePolicy policy, int? fireAllLimit = null)
     {
+        if (fireAllLimit is { } limit && limit < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(fireAllLimit),
+                "fireAllLimit must be greater than zero when specified.");
+        }
+
+        if (policy != MisfirePolicy.FireAll && fireAllLimit is { })
+        {
+            throw new ArgumentException("fireAllLimit can only be set when policy is FireAll.",
+                nameof(fireAllLimit));
+        }
+
         Definition.MisfirePolicy = policy;
+        Definition.FireAllLimit = policy == MisfirePolicy.FireAll ? fireAllLimit : null;
+        _sync();
         return this;
     }
 
@@ -187,6 +226,7 @@ public sealed class JobBuilder
     public JobBuilder UseFilter<T>() where T : class, IJobFilter
     {
         FilterTypes.Add(typeof(T));
+        _sync();
         return this;
     }
 
@@ -197,7 +237,9 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder OnSuccess(Delegate callback)
     {
+        ArgumentNullException.ThrowIfNull(callback);
         OnSuccessCallbacks.Add(callback);
+        _sync();
         return this;
     }
 
@@ -208,7 +250,9 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder OnRetry(Delegate callback)
     {
+        ArgumentNullException.ThrowIfNull(callback);
         OnRetryCallbacks.Add(callback);
+        _sync();
         return this;
     }
 
@@ -219,7 +263,9 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder OnDeadLetter(Delegate callback)
     {
+        ArgumentNullException.ThrowIfNull(callback);
         OnDeadLetterCallbacks.Add(callback);
+        _sync();
         return this;
     }
 }

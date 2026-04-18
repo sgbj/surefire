@@ -14,7 +14,7 @@ The dashboard is embedded in the `Surefire.Dashboard` package — no extra files
 
 ## Authorization
 
-The dashboard endpoints have no authorization by default. In production, you should restrict access:
+The dashboard endpoints have no authorization by default. Treat the dashboard like any other privileged operational surface. In production, you should require authorization and avoid exposing it on a public route:
 
 ```csharp
 app.MapSurefireDashboard()
@@ -24,6 +24,13 @@ app.MapSurefireDashboard()
 `MapSurefireDashboard` returns an `IEndpointConventionBuilder`, so you can chain any ASP.NET Core endpoint convention including `RequireAuthorization`, `RequireCors`, or custom metadata.
 
 Without authorization, anyone who can reach the dashboard can view job arguments, trigger jobs, cancel runs, and manage queues.
+
+For production deployments, a common pattern is to mount the dashboard under an admin path and apply the same auth policy you use for the rest of your operational endpoints:
+
+```csharp
+app.MapSurefireDashboard("/admin/surefire")
+    .RequireAuthorization("AdminPolicy");
+```
 
 ## Home
 
@@ -111,7 +118,7 @@ GET   /api/runs?jobName=X&take=20                   # list runs with filters
 GET   /api/runs/{id}                                # get a single run
 GET   /api/runs/{id}/logs                           # get parsed log events
 GET   /api/runs/{id}/stream                         # live logs & progress (SSE)
-GET   /api/runs/{id}/trace                          # get the trace tree for a run
+GET   /api/runs/{id}/trace?skip=0&take=500          # paged trace (root + descendants)
 POST  /api/runs/{id}/cancel                         # cancel a running job
 POST  /api/runs/{id}/rerun                          # re-run a completed run
 GET   /api/queues                                   # list all queues

@@ -2,7 +2,7 @@ using Surefire.Tests.Conformance;
 
 namespace Surefire.Tests.SqlServer;
 
-[CollectionDefinition("SqlServer")]
+[CollectionDefinition("SqlServer", DisableParallelization = true)]
 public class SqlServerCollection : ICollectionFixture<SqlServerFixture>;
 
 [Collection("SqlServer")]
@@ -72,3 +72,7 @@ public sealed class SqlServerQueueStatsParityTests(SqlServerFixture fixture)
 [Collection("SqlServer")]
 public sealed class SqlServerRuntimeReliabilityTests(SqlServerFixture fixture)
     : FixtureBackedRuntimeReliabilityConformanceTests<SqlServerFixture>(fixture);
+
+[Collection("SqlServer")]
+public sealed class SqlServerTraceTests(SqlServerFixture fixture)
+    : FixtureBackedTraceConformanceTests<SqlServerFixture>(fixture);

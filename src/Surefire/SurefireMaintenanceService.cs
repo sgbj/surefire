@@ -10,19 +10,27 @@ internal sealed partial class SurefireMaintenanceService(
     ActiveRunTracker activeRuns,
     SurefireOptions options,
     TimeProvider timeProvider,
+    SurefireInstrumentation instrumentation,
+    BatchCompletionHandler batchCompletionHandler,
+    Backoff backoff,
     ILogger<SurefireMaintenanceService> logger) : BackgroundService
 {
+    private static readonly TimeSpan BackoffInitial = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(options.HeartbeatInterval);
+        using var timer = new PeriodicTimer(options.HeartbeatInterval, timeProvider);
 
         try
         {
+            var backoffAttempt = 0;
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
                 try
                 {
                     await RunMaintenanceTickAsync(stoppingToken);
+                    backoffAttempt = 0;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -30,7 +38,20 @@ internal sealed partial class SurefireMaintenanceService(
                 }
                 catch (Exception ex)
                 {
+                    if (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
                     Log.MaintenanceTickFailed(logger, ex);
+                    if (!store.IsTransientException(ex))
+                    {
+                        throw;
+                    }
+
+                    instrumentation.RecordStoreRetry("maintenance");
+                    await Task.Delay(backoff.NextDelay(backoffAttempt++, BackoffInitial, BackoffMax), timeProvider,
+                        stoppingToken);
                 }
             }
         }
@@ -69,29 +90,84 @@ internal sealed partial class SurefireMaintenanceService(
 
         foreach (var registered in registrations)
         {
-            await EnsureContinuousSeedCapacityAsync(registered.Definition, cancellationToken);
+            await ContinuousRunSeeder.EnsureCapacityAsync(
+                store,
+                notifications,
+                timeProvider,
+                registered.Definition,
+                cancellationToken);
         }
 
-        await store.CancelExpiredRunsAsync(cancellationToken);
+        var cancelledExpiredRunIds = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
+        await PublishExpiredCancellationNotificationsAsync(cancelledExpiredRunIds, cancellationToken);
+
+        await RecoverStuckBatchesAsync(cancellationToken);
+    }
+
+    private async Task PublishExpiredCancellationNotificationsAsync(IReadOnlyList<string> runIds,
+        CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var runId in runIds)
+        {
+            var run = await store.GetRunAsync(runId, cancellationToken);
+            if (run is { })
+            {
+                await batchCompletionHandler.AppendFailureEventAsync(
+                    run,
+                    RunFailureEnvelope.FromMessage(
+                        run.Attempt,
+                        timeProvider.GetUtcNow(),
+                        "Maintenance",
+                        "ExpiredCancellation",
+                        "Cancelled: run expired past its NotAfter deadline."),
+                    cancellationToken);
+            }
+
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
+
+            if (run?.BatchId is { } batchId)
+            {
+                await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId,
+                    cancellationToken);
+            }
+        }
+    }
+
+    private async Task RecoverStuckBatchesAsync(CancellationToken cancellationToken)
+    {
+        var batchIds = await store.GetCompletableBatchIdsAsync(cancellationToken);
+        foreach (var batchId in batchIds)
+        {
+            await batchCompletionHandler.RecoverBatchAsync(batchId, cancellationToken);
+        }
     }
 
     private async Task RecoverStaleRunningRunsAsync(CancellationToken cancellationToken)
     {
         var staleBefore = timeProvider.GetUtcNow() - options.InactiveThreshold;
-        var retryPolicyCache = new Dictionary<string, int>(StringComparer.Ordinal);
+        var retryPolicyCache = new Dictionary<string, RetryPolicy>(StringComparer.Ordinal);
+        const int take = 1000;
 
         while (true)
         {
+            // Always query from skip=0: recovered runs transition out of Running status,
+            // so the result set naturally shrinks each iteration.
             var page = await store.GetRunsAsync(
                 new()
                 {
                     Status = JobStatus.Running,
                     LastHeartbeatBefore = staleBefore,
-                    IsBatchCoordinator = false,
                     OrderBy = RunOrderBy.CreatedAt
                 },
                 0,
-                1000,
+                take,
                 cancellationToken);
 
             if (page.Items.Count == 0)
@@ -101,206 +177,106 @@ internal sealed partial class SurefireMaintenanceService(
 
             foreach (var run in page.Items)
             {
-                if (!await CanRetryAfterStaleRecoveryAsync(run.JobName, run.Attempt, retryPolicyCache,
-                        cancellationToken))
+                var retryPolicy = await GetRetryPolicyForStaleRecoveryAsync(run.JobName, retryPolicyCache,
+                    cancellationToken);
+
+                if (run.Attempt > retryPolicy.MaxRetries)
                 {
                     var now = timeProvider.GetUtcNow();
-                    var deadLetter = RunStatusTransition.RunningToDeadLetter(
+                    // Stale recovery dead-letter: detail lives on the AttemptFailure
+                    // event (see `StaleRecovery` message below). Preserve any non-exception
+                    // Reason the run already carried (e.g. set during a prior claim); don't
+                    // synthesize one here.
+                    var deadLetter = RunStatusTransition.RunningToFailed(
                         run.Id,
                         run.Attempt,
                         now,
                         run.NotBefore,
                         run.NodeName,
                         run.Progress,
-                        run.Error ?? "Run became stale and exhausted retry policy.",
+                        run.Reason,
                         run.Result,
                         run.StartedAt,
                         run.LastHeartbeatAt);
 
-                    if (!await store.TryTransitionRunAsync(deadLetter, cancellationToken))
+                    var result = await store.TryTransitionRunAsync(deadLetter, cancellationToken);
+                    if (!result.Transitioned)
                     {
                         continue;
                     }
 
-                    await notifications.PublishAsync(NotificationChannels.RunCompleted(run.Id), run.Id,
+                    await batchCompletionHandler.AppendFailureEventAsync(
+                        run,
+                        RunFailureEnvelope.FromMessage(
+                            run.Attempt,
+                            now,
+                            "Maintenance",
+                            "StaleRecovery",
+                            "Run became stale and exhausted retry policy."),
                         cancellationToken);
+
+                    await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
+                        cancellationToken);
+                    await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, cancellationToken);
                     await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-                    await MaybeCompleteBatchAsync(run.ParentRunId, run.Id, cancellationToken);
+                    if (run.BatchId is { } staleBatchId)
+                    {
+                        await notifications.PublishAsync(NotificationChannels.RunEvent(staleBatchId), run.Id,
+                            cancellationToken);
+                    }
+
+                    if (result.BatchCompletion is { } bc)
+                    {
+                        await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
+                            cancellationToken);
+                    }
+
                     continue;
                 }
 
-                var retrying = RunStatusTransition.RunningToRetrying(
+                var retryNotBefore = timeProvider.GetUtcNow() + backoff.NextDelay(run.Attempt - 1,
+                    retryPolicy.InitialDelay, retryPolicy.MaxDelay, retryPolicy.Jitter, retryPolicy.BackoffType);
+
+                var failureEvent = batchCompletionHandler.CreateFailureEvent(
+                    run,
+                    RunFailureEnvelope.FromMessage(
+                        run.Attempt,
+                        timeProvider.GetUtcNow(),
+                        "Maintenance",
+                        "StaleRecovery",
+                        "Run became stale and was recovered for retry."));
+
+                var pending = RunStatusTransition.RunningToPending(
                     run.Id,
                     run.Attempt,
-                    timeProvider.GetUtcNow(),
-                    run.NodeName,
-                    run.Progress,
-                    run.Error,
+                    retryNotBefore,
+                    run.Reason,
                     run.Result,
-                    run.LastHeartbeatAt);
+                    events: failureEvent is { } ? [failureEvent] : null);
 
-                if (!await store.TryTransitionRunAsync(retrying, cancellationToken))
+                var pendingResult = await store.TryTransitionRunAsync(pending, cancellationToken);
+                if (!pendingResult.Transitioned)
                 {
                     continue;
                 }
 
-                var pending = RunStatusTransition.RetryingToPending(
-                    run.Id,
-                    run.Attempt,
-                    timeProvider.GetUtcNow(),
-                    null,
-                    run.Progress,
-                    run.Error,
-                    run.Result);
-
-                if (!await store.TryTransitionRunAsync(pending, cancellationToken))
-                {
-                    continue;
-                }
-
-                await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
                 await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
+                await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
             }
         }
     }
 
-    private async Task<bool> CanRetryAfterStaleRecoveryAsync(string jobName, int currentAttempt,
-        Dictionary<string, int> retryPolicyCache, CancellationToken cancellationToken)
+    private async Task<RetryPolicy> GetRetryPolicyForStaleRecoveryAsync(string jobName,
+        Dictionary<string, RetryPolicy> retryPolicyCache, CancellationToken cancellationToken)
     {
-        if (!retryPolicyCache.TryGetValue(jobName, out var maxRetries))
+        if (!retryPolicyCache.TryGetValue(jobName, out var retryPolicy))
         {
             var job = await store.GetJobAsync(jobName, cancellationToken);
-            maxRetries = job?.RetryPolicy.MaxRetries ?? 0;
-            retryPolicyCache[jobName] = maxRetries;
+            retryPolicy = job?.RetryPolicy ?? new();
+            retryPolicyCache[jobName] = retryPolicy;
         }
 
-        return currentAttempt <= maxRetries;
-    }
-
-    private async Task MaybeCompleteBatchAsync(string? batchRunId, string childRunId,
-        CancellationToken cancellationToken)
-    {
-        if (batchRunId is null)
-        {
-            return;
-        }
-
-        var counters = await store.IncrementBatchCounterAsync(batchRunId, true, cancellationToken);
-        await notifications.PublishAsync(NotificationChannels.RunEvent(batchRunId), childRunId, cancellationToken);
-
-        if (counters.Completed + counters.Failed < counters.Total)
-        {
-            return;
-        }
-
-        var coordinator = await store.GetRunAsync(batchRunId, cancellationToken);
-        if (coordinator is null || coordinator.Status.IsTerminal)
-        {
-            return;
-        }
-
-        var coordinatorStartedAt = coordinator.StartedAt ??
-                                   await GetBatchEarliestChildStartedAtAsync(batchRunId, cancellationToken);
-
-        var now = timeProvider.GetUtcNow();
-        var transition = RunStatusTransition.RunningToDeadLetter(
-            coordinator.Id,
-            coordinator.Attempt,
-            now,
-            coordinator.NotBefore,
-            coordinator.NodeName,
-            1,
-            $"Batch completed with {counters.Failed} failed run(s).",
-            null,
-            coordinatorStartedAt,
-            now);
-
-        if (await store.TryTransitionRunAsync(transition, cancellationToken))
-        {
-            await notifications.PublishAsync(NotificationChannels.RunCompleted(coordinator.Id), coordinator.Id,
-                cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(coordinator.Id), coordinator.Id,
-                cancellationToken);
-        }
-    }
-
-    private async Task<DateTimeOffset?> GetBatchEarliestChildStartedAtAsync(string batchRunId,
-        CancellationToken cancellationToken)
-    {
-        DateTimeOffset? earliest = null;
-        var skip = 0;
-        const int take = 200;
-
-        while (true)
-        {
-            var page = await store.GetRunsAsync(
-                new()
-                {
-                    ParentRunId = batchRunId,
-                    OrderBy = RunOrderBy.CreatedAt
-                },
-                skip,
-                take,
-                cancellationToken);
-
-            if (page.Items.Count == 0)
-            {
-                break;
-            }
-
-            foreach (var child in page.Items)
-            {
-                if (child.StartedAt is not { } startedAt)
-                {
-                    continue;
-                }
-
-                earliest = earliest is null || startedAt < earliest
-                    ? startedAt
-                    : earliest;
-            }
-
-            skip += page.Items.Count;
-        }
-
-        return earliest;
-    }
-
-    private async Task EnsureContinuousSeedCapacityAsync(JobDefinition definition, CancellationToken cancellationToken)
-    {
-        if (!definition.IsContinuous || !definition.IsEnabled)
-        {
-            return;
-        }
-
-        var desired = Math.Max(definition.MaxConcurrency ?? 1, 1);
-        for (var i = 0; i < desired; i++)
-        {
-            var now = timeProvider.GetUtcNow();
-            var run = new JobRun
-            {
-                Id = Guid.CreateVersion7().ToString("N"),
-                JobName = definition.Name,
-                Status = JobStatus.Pending,
-                CreatedAt = now,
-                NotBefore = now,
-                Priority = definition.Priority,
-                QueuePriority = 0,
-                Progress = 0,
-                Attempt = 0
-            };
-
-            var created = await store.TryCreateRunAsync(
-                run,
-                desired,
-                cancellationToken: cancellationToken);
-            if (!created)
-            {
-                break;
-            }
-
-            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
-        }
+        return retryPolicy;
     }
 
     private static partial class Log

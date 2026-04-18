@@ -9,7 +9,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { CommandPalette } from "@/components/command-palette";
 import { useCommandPalette } from "@/hooks/use-command-palette";
 
-type Theme = "system" | "light" | "dark";
+export type Theme = "system" | "light" | "dark";
 
 function resolveTheme(theme: Theme): boolean {
   if (theme === "system")
@@ -63,15 +63,15 @@ export function Layout() {
         onOpenSearch={commandPalette.toggle}
       />
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-40 flex h-12 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
+        <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
           <SidebarTrigger />
-          <Link to="/" className="flex items-center gap-1.5">
+          <Link to="/" className="flex items-center gap-2">
             <img
               src={`${import.meta.env.BASE_URL}surefire.svg`}
               alt=""
-              className="size-5"
+              className="size-6"
             />
-            <span className="text-sm font-semibold tracking-tight">
+            <span className="text-base font-semibold tracking-tight">
               Surefire
             </span>
           </Link>

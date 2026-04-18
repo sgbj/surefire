@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
@@ -18,16 +19,29 @@ internal sealed class JobRegistry
                 parameterType == typeof(IServiceProvider)
                 || (serviceChecker?.IsService(parameterType) ?? false));
 
-        var builder = new JobBuilder(definition);
-        var registration = new RegisteredJob(name, handler, definition, builder.FilterTypes,
-            builder.OnSuccessCallbacks, builder.OnRetryCallbacks, builder.OnDeadLetterCallbacks);
+        var metadata = HandlerMetadata.Build(handler);
+        JobBuilder? builder = null;
 
-        _jobs[name] = registration;
+        void SyncRegistration()
+        {
+            _jobs[name] = new(
+                name,
+                handler,
+                definition.Clone(),
+                [.. builder!.FilterTypes],
+                builder.OnSuccessCallbacks.Select(CompiledCallback.Build).ToArray(),
+                builder.OnRetryCallbacks.Select(CompiledCallback.Build).ToArray(),
+                builder.OnDeadLetterCallbacks.Select(CompiledCallback.Build).ToArray(),
+                metadata);
+        }
+
+        builder = new(definition, SyncRegistration);
+        SyncRegistration();
         return builder;
     }
 
-    public bool TryGet(string name, out RegisteredJob registration) =>
-        _jobs.TryGetValue(name, out registration!);
+    public bool TryGet(string name, [MaybeNullWhen(false)] out RegisteredJob registration) =>
+        _jobs.TryGetValue(name, out registration);
 
     public IReadOnlyList<RegisteredJob> Snapshot() => [.. _jobs.Values];
 
@@ -50,6 +64,7 @@ internal sealed record RegisteredJob(
     Delegate Handler,
     JobDefinition Definition,
     IReadOnlyList<Type> FilterTypes,
-    IReadOnlyList<Delegate> OnSuccessCallbacks,
-    IReadOnlyList<Delegate> OnRetryCallbacks,
-    IReadOnlyList<Delegate> OnDeadLetterCallbacks);
+    IReadOnlyList<CompiledCallback> OnSuccessCallbacks,
+    IReadOnlyList<CompiledCallback> OnRetryCallbacks,
+    IReadOnlyList<CompiledCallback> OnDeadLetterCallbacks,
+    HandlerMetadata Metadata);

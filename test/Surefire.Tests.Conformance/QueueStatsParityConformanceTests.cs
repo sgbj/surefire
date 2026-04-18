@@ -5,17 +5,18 @@ public abstract class QueueStatsParityConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetQueueStats_IncludesImplicitDefaultQueue_WhenRunsExist()
     {
+        var ct = TestContext.Current.CancellationToken;
         var jobName = $"ImplicitDefault_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName));
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
 
         var pending = CreateRun(jobName);
         var running = CreateRun(jobName);
-        await Store.CreateRunsAsync([pending, running]);
+        await Store.CreateRunsAsync([pending, running], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"]);
+        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
         Assert.NotNull(claimed);
 
-        var stats = await Store.GetQueueStatsAsync();
+        var stats = await Store.GetQueueStatsAsync(ct);
 
         Assert.True(stats.ContainsKey("default"));
         Assert.Equal(1, stats["default"].PendingCount);
@@ -25,16 +26,17 @@ public abstract class QueueStatsParityConformanceTests : StoreConformanceBase
     [Fact]
     public async Task GetQueueStats_IncludesImplicitNamedQueue_WhenRunsExist()
     {
+        var ct = TestContext.Current.CancellationToken;
         var queueName = $"implicit-{Guid.CreateVersion7():N}";
         var jobName = $"ImplicitNamed_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.Queue = queueName;
-        await Store.UpsertJobAsync(job);
+        await Store.UpsertJobAsync(job, ct);
 
         var run = CreateRun(jobName);
-        await Store.CreateRunsAsync([run]);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var stats = await Store.GetQueueStatsAsync();
+        var stats = await Store.GetQueueStatsAsync(ct);
 
         Assert.True(stats.ContainsKey(queueName));
         Assert.Equal(1, stats[queueName].PendingCount);

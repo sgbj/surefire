@@ -7,7 +7,7 @@
         <ProjectReference Include="..\..\src\Surefire\Surefire.csproj"/>
     </ItemGroup>
     <ItemGroup>
-        <PackageReference Include="xunit"/>
-        <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing"/>
+        <PackageReference Include="xunit.v3.extensibility.core"/>
+        <PackageReference Include="xunit.v3.assert"/>
     </ItemGroup>
 </Project>

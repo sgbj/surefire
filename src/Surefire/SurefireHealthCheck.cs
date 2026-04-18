@@ -2,15 +2,29 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace Surefire;
 
-internal sealed class SurefireHealthCheck(IJobStore store, SurefireOptions options, TimeProvider timeProvider)
-    : IHealthCheck
+internal sealed class SurefireHealthCheck(
+    IJobStore store,
+    INotificationProvider notifications,
+    SurefireOptions options,
+    TimeProvider timeProvider) : IHealthCheck
 {
     public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            _ = await store.GetDashboardStatsAsync(cancellationToken: cancellationToken);
+            await store.PingAsync(cancellationToken);
+            try
+            {
+                await notifications.PingAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return HealthCheckResult.Degraded(
+                    "Surefire notification health probe failed. Distributed wakeups may be unavailable.",
+                    ex);
+            }
+
             var nodes = await store.GetNodesAsync(cancellationToken);
             var localNode =
                 nodes.FirstOrDefault(n => string.Equals(n.Name, options.NodeName, StringComparison.Ordinal));
