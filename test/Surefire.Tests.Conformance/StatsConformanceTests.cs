@@ -64,14 +64,14 @@ public abstract class StatsConformanceTests : StoreConformanceBase
 
         var r1 = CreateRun(jobName);
         await Store.CreateRunsAsync([r1], cancellationToken: ct);
-        var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var c1 = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(c1);
         c1 = c1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running), ct);
 
         var r2 = CreateRun(jobName);
         await Store.CreateRunsAsync([r2], cancellationToken: ct);
-        var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var c2 = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(c2);
         c2 = c2 with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow, Reason = "permanent failure" };
         await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running), ct);
@@ -84,6 +84,34 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         Assert.Equal(3, stats.TotalRuns);
         Assert.Equal(1, stats.SucceededRuns);
         Assert.Equal(1, stats.FailedRuns);
+    }
+
+    [Fact]
+    public async Task GetJobStats_NoRuns_ReturnsZeros()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"EmptyStatsJob_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var stats = await Store.GetJobStatsAsync(jobName, ct);
+
+        Assert.Equal(0, stats.TotalRuns);
+        Assert.Equal(0, stats.SucceededRuns);
+        Assert.Equal(0, stats.FailedRuns);
+        Assert.Equal(0.0, stats.SuccessRate);
+        Assert.Null(stats.AvgDuration);
+        Assert.Null(stats.LastRunAt);
+    }
+
+    [Fact]
+    public async Task GetJobStats_UnknownJob_ReturnsZeros()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var stats = await Store.GetJobStatsAsync($"DoesNotExist_{Guid.CreateVersion7():N}", ct);
+
+        Assert.Equal(0, stats.TotalRuns);
+        Assert.Equal(0, stats.SucceededRuns);
+        Assert.Equal(0, stats.FailedRuns);
     }
 
     [Fact]
@@ -105,7 +133,7 @@ public abstract class StatsConformanceTests : StoreConformanceBase
 
         var r1 = CreateRun(jobName);
         await Store.CreateRunsAsync([r1], cancellationToken: ct);
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         var queueStats = await Store.GetQueueStatsAsync(ct);
@@ -202,12 +230,12 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         var r2 = CreateRun(jobName);
         await Store.CreateRunsAsync([r1, r2], cancellationToken: ct);
 
-        var c1 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var c1 = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(c1);
         c1 = c1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(c1, JobStatus.Running), ct);
 
-        var c2 = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var c2 = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(c2);
         c2 = c2 with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow, Reason = "permanent failure" };
         await Store.TryTransitionRunAsync(Transition(c2, JobStatus.Running), ct);

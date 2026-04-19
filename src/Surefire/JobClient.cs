@@ -16,6 +16,7 @@ namespace Surefire;
 internal sealed partial class JobClient(
     IJobStore store,
     INotificationProvider notifications,
+    BatchedEventWriter eventWriter,
     TimeProvider timeProvider,
     SurefireOptions options,
     ILogger<JobClient> logger) : IJobClient
@@ -1891,8 +1892,7 @@ internal sealed partial class JobClient(
     private async Task AppendInputEventAsync(string runId, RunEventType eventType, InputEnvelope payload,
         CancellationToken cancellationToken)
     {
-        await store.AppendEventsAsync(
-        [
+        await eventWriter.EnqueueAsync(
             new()
             {
                 RunId = runId,
@@ -1900,10 +1900,9 @@ internal sealed partial class JobClient(
                 Payload = JsonSerializer.Serialize(payload, SurefireJsonContext.Default.InputEnvelope),
                 CreatedAt = timeProvider.GetUtcNow(),
                 Attempt = 0
-            }
-        ], cancellationToken);
-
-        await notifications.PublishAsync(NotificationChannels.RunInput(runId), runId, cancellationToken);
+            },
+            [new(NotificationChannels.RunInput(runId), runId)],
+            cancellationToken);
     }
 
     private async Task TryCancelOwnedRunAsync(string runId)

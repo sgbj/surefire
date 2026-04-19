@@ -11,14 +11,22 @@ dotnet add package Surefire.PostgreSql
 
 ## Setup
 
+Register an `NpgsqlDataSource` in DI (for example with `builder.AddNpgsqlDataSource("surefire")` from Aspire, or `builder.Services.AddNpgsqlDataSource(connectionString)`), then:
+
 ```csharp
 builder.Services.AddSurefire(options =>
 {
-    options.UsePostgreSql("Host=localhost;Database=myapp");
+    options.UsePostgreSql();
 });
 ```
 
 This registers both the job store and notification provider. Real-time notifications use PostgreSQL's `LISTEN`/`NOTIFY`, so workers pick up new jobs immediately instead of waiting for the next poll.
+
+Pass a factory to resolve the data source from a named registration or DI key:
+
+```csharp
+options.UsePostgreSql(sp => sp.GetRequiredKeyedService<NpgsqlDataSource>("surefire"));
+```
 
 ## Schema
 
@@ -27,11 +35,11 @@ The current provider uses the built-in `surefire_*` table names.
 
 ## Store and notifications separately
 
-In some setups you may want separate connections for the store and notification provider. For example, if you use PgBouncer in transaction mode for the store but need a direct connection for `LISTEN`/`NOTIFY`:
+In some setups you may want separate connections for the store and notification provider. For example, if you use PgBouncer in transaction mode for the store but need a direct connection for `LISTEN`/`NOTIFY`, register two keyed data sources and wire each side:
 
 ```csharp
-options.UsePostgreSqlStore("Host=pgbouncer;Database=myapp");
-options.UsePostgreSqlNotifications("Host=primary;Database=myapp");
+options.UsePostgreSqlStore(sp => sp.GetRequiredKeyedService<NpgsqlDataSource>("pgbouncer"));
+options.UsePostgreSqlNotifications(sp => sp.GetRequiredKeyedService<NpgsqlDataSource>("primary"));
 ```
 
 The PostgreSQL provider supports all Surefire features.

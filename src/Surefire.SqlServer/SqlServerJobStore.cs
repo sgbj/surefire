@@ -81,7 +81,9 @@ internal sealed class SqlServerJobStore(
                                       fire_all_limit INT,
                                       arguments_schema NVARCHAR(MAX),
                                       last_heartbeat_at DATETIMEOFFSET,
-                                      last_cron_fire_at DATETIMEOFFSET
+                                      last_cron_fire_at DATETIMEOFFSET,
+                                      running_count INT NOT NULL DEFAULT 0,
+                                      non_terminal_count INT NOT NULL DEFAULT 0
                                   );
 
                                   IF OBJECT_ID('dbo.surefire_runs', 'U') IS NULL
@@ -158,6 +160,21 @@ internal sealed class SqlServerJobStore(
                                   CREATE INDEX ix_surefire_runs_created
                                       ON dbo.surefire_runs (created_at DESC, id DESC);
 
+                                  -- Backs GetStaleRunningRunIdsAsync: oldest-heartbeat-first range scan
+                                  -- over Running rows, bounded by the result size.
+                                  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_stale_heartbeat')
+                                  CREATE INDEX ix_surefire_runs_stale_heartbeat
+                                      ON dbo.surefire_runs (last_heartbeat_at)
+                                      WHERE status = 1;
+
+                                  -- Backs CancelExpiredRunsWithIdsAsync: range seek over pending runs
+                                  -- with a deadline, so the cost is bounded by expired count, not
+                                  -- total pending count.
+                                  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_expiring')
+                                  CREATE INDEX ix_surefire_runs_expiring
+                                      ON dbo.surefire_runs (not_after)
+                                      WHERE status = 0 AND not_after IS NOT NULL;
+
                                   IF OBJECT_ID('dbo.surefire_batches', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_batches (
                                       id NVARCHAR(450) NOT NULL PRIMARY KEY,
@@ -202,8 +219,14 @@ internal sealed class SqlServerJobStore(
                                       max_concurrency INT,
                                       is_paused BIT NOT NULL DEFAULT 0,
                                       rate_limit_name NVARCHAR(450),
-                                      last_heartbeat_at DATETIMEOFFSET
+                                      last_heartbeat_at DATETIMEOFFSET,
+                                      running_count INT NOT NULL DEFAULT 0
                                   );
+
+                                  -- 'default' queue row is always present so per-queue running_count
+                                  -- maintenance has a target row even when no explicit queue is registered.
+                                  IF NOT EXISTS (SELECT 1 FROM dbo.surefire_queues WHERE name = 'default')
+                                      INSERT INTO dbo.surefire_queues (name) VALUES ('default');
 
                                   IF OBJECT_ID('dbo.surefire_rate_limits', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_rate_limits (
@@ -667,7 +690,14 @@ internal sealed class SqlServerJobStore(
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+
+        // Capture the affected job_name into @upd. running_count decrements when transitioning
+        // OUT of Running; non_terminal_count decrements when transitioning INTO a terminal status.
+        // Both decrements target the same surefire_jobs row, so they're merged into one UPDATE to
+        // minimize lock acquisitions — two separate UPDATEs double the deadlock surface.
         cmd.CommandText = """
+                          DECLARE @upd TABLE (job_name NVARCHAR(450) NOT NULL);
+
                           UPDATE dbo.surefire_runs SET
                               status = @new_status,
                               node_name = @node_name,
@@ -679,10 +709,33 @@ internal sealed class SqlServerJobStore(
                               progress = @progress,
                               not_before = @not_before,
                               last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at)
+                          OUTPUT INSERTED.job_name INTO @upd (job_name)
                           WHERE id = @id
                               AND status = @expected_status
                               AND attempt = @expected_attempt
-                              AND status NOT IN (2, 4, 5)
+                              AND status NOT IN (2, 4, 5);
+
+                          UPDATE dbo.surefire_jobs SET
+                              running_count = CASE WHEN @expected_status = 1
+                                  THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                                  ELSE running_count END,
+                              non_terminal_count = CASE WHEN @new_status IN (2, 4, 5)
+                                  THEN CASE WHEN non_terminal_count > 0 THEN non_terminal_count - 1 ELSE 0 END
+                                  ELSE non_terminal_count END
+                          FROM dbo.surefire_jobs INNER JOIN @upd u ON u.job_name = dbo.surefire_jobs.name;
+
+                          IF @expected_status = 1
+                          BEGIN
+                              UPDATE dbo.surefire_queues SET running_count =
+                                  CASE WHEN dbo.surefire_queues.running_count > 0 THEN dbo.surefire_queues.running_count - 1 ELSE 0 END
+                              FROM dbo.surefire_queues
+                              INNER JOIN (
+                                  SELECT ISNULL(j.queue, 'default') AS queue_name FROM @upd u
+                                  INNER JOIN dbo.surefire_jobs j ON j.name = u.job_name
+                              ) q ON q.queue_name = dbo.surefire_queues.name;
+                          END
+
+                          SELECT COUNT(*) FROM @upd;
                           """;
 
         cmd.Parameters.Add(CreateParameter("@id", transition.RunId));
@@ -703,7 +756,7 @@ internal sealed class SqlServerJobStore(
         cmd.Parameters.Add(CreateParameter("@expected_status", (int)transition.ExpectedStatus));
         cmd.Parameters.Add(CreateParameter("@expected_attempt", transition.ExpectedAttempt));
 
-        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
+        var updated = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
         if (updated)
         {
             var transitionEvents = new List<RunEvent>();
@@ -794,13 +847,17 @@ internal sealed class SqlServerJobStore(
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+        // Capture prior status in OUTPUT (via DELETED) so the follow-up counter UPDATEs only
+        // decrement when the row was Running. Pending → Cancelled is a no-op for counters.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
                           DECLARE @updated TABLE (
                               id NVARCHAR(450) NOT NULL,
                               attempt INT NOT NULL,
-                              batch_id NVARCHAR(450)
+                              batch_id NVARCHAR(450),
+                              prior_status INT NOT NULL,
+                              job_name NVARCHAR(450) NOT NULL
                           );
 
                           UPDATE dbo.surefire_runs SET
@@ -808,9 +865,29 @@ internal sealed class SqlServerJobStore(
                               cancelled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
-                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id INTO @updated(id, attempt, batch_id)
+                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status, INSERTED.job_name
+                              INTO @updated(id, attempt, batch_id, prior_status, job_name)
                           WHERE id = @id AND status NOT IN (2, 4, 5)
                               AND (@expected_attempt IS NULL OR attempt = @expected_attempt);
+
+                          -- non_terminal_count always decrements (we only cancelled non-terminal rows);
+                          -- running_count decrements only when prior was Running. Single UPDATE on
+                          -- surefire_jobs to avoid a second lock acquisition on the same row.
+                          UPDATE dbo.surefire_jobs SET
+                              running_count = CASE WHEN u.prior_status = 1
+                                  THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                                  ELSE running_count END,
+                              non_terminal_count = CASE WHEN non_terminal_count > 0 THEN non_terminal_count - 1 ELSE 0 END
+                          FROM dbo.surefire_jobs INNER JOIN @updated u ON u.job_name = dbo.surefire_jobs.name;
+
+                          UPDATE dbo.surefire_queues SET running_count =
+                              CASE WHEN dbo.surefire_queues.running_count > 0 THEN dbo.surefire_queues.running_count - 1 ELSE 0 END
+                          FROM dbo.surefire_queues
+                          INNER JOIN (
+                              SELECT ISNULL(j.queue, 'default') AS queue_name FROM @updated u
+                              INNER JOIN dbo.surefire_jobs j ON j.name = u.job_name
+                              WHERE u.prior_status = 1
+                          ) q ON q.queue_name = dbo.surefire_queues.name;
 
                           SELECT id, attempt, batch_id FROM @updated;
                           """;
@@ -897,15 +974,17 @@ internal sealed class SqlServerJobStore(
         return new(true, batchCompletion);
     }
 
-    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken cancellationToken = default)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxCount, 1);
+
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
-            return Task.FromResult<JobRun?>(null);
+            return Task.FromResult<IReadOnlyList<JobRun>>(Array.Empty<JobRun>());
         }
 
-        return ClaimRunCoreAsync(nodeName, jobNames, queueNames, cancellationToken);
+        return ClaimRunsCoreAsync(nodeName, jobNames, queueNames, maxCount, cancellationToken);
     }
 
 
@@ -977,6 +1056,39 @@ internal sealed class SqlServerJobStore(
 
             runCmd.CommandText = sb.ToString();
             await runCmd.ExecuteNonQueryAsync(cancellationToken);
+
+            // Maintain non_terminal_count atomically with the batch's child-run insert.
+            var increments = chunk
+                .Where(r => !r.Status.IsTerminal)
+                .GroupBy(r => r.JobName, StringComparer.Ordinal)
+                .Select(g => (JobName: g.Key, Count: g.Count()))
+                .ToList();
+            if (increments.Count > 0)
+            {
+                await using var incCmd = CreateCommand(conn);
+                incCmd.Transaction = tx;
+                var incSb = new StringBuilder();
+                incSb.Append("""
+                             UPDATE j SET non_terminal_count = j.non_terminal_count + v.cnt
+                             FROM dbo.surefire_jobs j
+                             INNER JOIN (VALUES
+                             """);
+                for (var i = 0; i < increments.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        incSb.Append(',');
+                    }
+
+                    incSb.Append($" (@n{i}, @c{i})");
+                    incCmd.Parameters.Add(CreateParameter($"@n{i}", increments[i].JobName));
+                    incCmd.Parameters.Add(CreateParameter($"@c{i}", increments[i].Count));
+                }
+
+                incSb.Append(") AS v(name, cnt) ON v.name = j.name;");
+                incCmd.CommandText = incSb.ToString();
+                await incCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
 
         await InsertEventsAsync(conn, tx, initialEvents, cancellationToken);
@@ -1029,17 +1141,55 @@ internal sealed class SqlServerJobStore(
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+        // Capture prior status (DELETED.status) so per-job/per-queue counters only decrement for
+        // the rows that were Running before the cancel. Aggregate counter UPDATEs run inside the
+        // same transaction so capacity stays consistent for the next claimer.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL);
+                          DECLARE @cancelled TABLE (
+                              id NVARCHAR(450) NOT NULL,
+                              attempt INT NOT NULL,
+                              prior_status INT NOT NULL,
+                              job_name NVARCHAR(450) NOT NULL
+                          );
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
                               cancelled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
-                          OUTPUT INSERTED.id, INSERTED.attempt INTO @cancelled(id, attempt)
+                          OUTPUT INSERTED.id, INSERTED.attempt, DELETED.status, INSERTED.job_name
+                              INTO @cancelled(id, attempt, prior_status, job_name)
                           WHERE batch_id = @batch_id AND status IN (0, 1);
+
+                          -- Per-job aggregates in one pass: running_count decrements by rows whose
+                          -- prior status was Running, non_terminal_count decrements by all rows.
+                          -- Single UPDATE on surefire_jobs to keep lock acquisitions minimal.
+                          UPDATE dbo.surefire_jobs SET
+                              running_count = CASE WHEN running_count > ag.running_cnt
+                                  THEN running_count - ag.running_cnt ELSE 0 END,
+                              non_terminal_count = CASE WHEN non_terminal_count > ag.nt_cnt
+                                  THEN non_terminal_count - ag.nt_cnt ELSE 0 END
+                          FROM dbo.surefire_jobs
+                          INNER JOIN (
+                              SELECT job_name,
+                                  SUM(CASE WHEN prior_status = 1 THEN 1 ELSE 0 END) AS running_cnt,
+                                  COUNT(*) AS nt_cnt
+                              FROM @cancelled GROUP BY job_name
+                          ) ag ON ag.job_name = dbo.surefire_jobs.name;
+
+                          UPDATE dbo.surefire_queues SET running_count =
+                              CASE WHEN dbo.surefire_queues.running_count > rq.cnt
+                                   THEN dbo.surefire_queues.running_count - rq.cnt
+                                   ELSE 0
+                              END
+                          FROM dbo.surefire_queues
+                          INNER JOIN (
+                              SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
+                              FROM @cancelled c INNER JOIN dbo.surefire_jobs j ON j.name = c.job_name
+                              WHERE c.prior_status = 1
+                              GROUP BY ISNULL(j.queue, 'default')
+                          ) rq ON rq.queue_name = dbo.surefire_queues.name;
 
                           SELECT id, attempt FROM @cancelled;
                           """;
@@ -1122,17 +1272,55 @@ internal sealed class SqlServerJobStore(
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+        // Capture prior status (DELETED.status) so per-job/per-queue counters only decrement for
+        // the rows that were Running before the cancel. Mirrors CancelBatchRunsAsync.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL, batch_id NVARCHAR(450));
+                          DECLARE @cancelled TABLE (
+                              id NVARCHAR(450) NOT NULL,
+                              attempt INT NOT NULL,
+                              batch_id NVARCHAR(450),
+                              prior_status INT NOT NULL,
+                              job_name NVARCHAR(450) NOT NULL
+                          );
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
                               cancelled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
-                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id INTO @cancelled(id, attempt, batch_id)
+                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status, INSERTED.job_name
+                              INTO @cancelled(id, attempt, batch_id, prior_status, job_name)
                           WHERE parent_run_id = @parent_run_id AND status IN (0, 1);
+
+                          -- Per-job aggregates in one pass: running_count decrements by rows whose
+                          -- prior status was Running, non_terminal_count decrements by all rows.
+                          -- Single UPDATE on surefire_jobs to keep lock acquisitions minimal.
+                          UPDATE dbo.surefire_jobs SET
+                              running_count = CASE WHEN running_count > ag.running_cnt
+                                  THEN running_count - ag.running_cnt ELSE 0 END,
+                              non_terminal_count = CASE WHEN non_terminal_count > ag.nt_cnt
+                                  THEN non_terminal_count - ag.nt_cnt ELSE 0 END
+                          FROM dbo.surefire_jobs
+                          INNER JOIN (
+                              SELECT job_name,
+                                  SUM(CASE WHEN prior_status = 1 THEN 1 ELSE 0 END) AS running_cnt,
+                                  COUNT(*) AS nt_cnt
+                              FROM @cancelled GROUP BY job_name
+                          ) ag ON ag.job_name = dbo.surefire_jobs.name;
+
+                          UPDATE dbo.surefire_queues SET running_count =
+                              CASE WHEN dbo.surefire_queues.running_count > rq.cnt
+                                   THEN dbo.surefire_queues.running_count - rq.cnt
+                                   ELSE 0
+                              END
+                          FROM dbo.surefire_queues
+                          INNER JOIN (
+                              SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
+                              FROM @cancelled c INNER JOIN dbo.surefire_jobs j ON j.name = c.job_name
+                              WHERE c.prior_status = 1
+                              GROUP BY ISNULL(j.queue, 'default')
+                          ) rq ON rq.queue_name = dbo.surefire_queues.name;
 
                           SELECT id, attempt, batch_id FROM @cancelled;
                           """;
@@ -1463,6 +1651,36 @@ internal sealed class SqlServerJobStore(
         return results;
     }
 
+    public async Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        // Backed by ix_surefire_runs_stale_heartbeat (filtered WHERE status = 1 on last_heartbeat_at).
+        // Returns IDs only; no COUNT, no total, no pagination state. Oldest heartbeat first so the
+        // caller's processing loop makes monotonic progress against a shrinking filter set.
+        cmd.CommandText = """
+                          SELECT TOP (@take) id
+                          FROM dbo.surefire_runs
+                          WHERE status = 1 AND last_heartbeat_at < @stale_before
+                          ORDER BY last_heartbeat_at ASC, id ASC
+                          """;
+        cmd.Parameters.Add(CreateParameter("@take", take));
+        cmd.Parameters.Add(CreateParameter("@stale_before", staleBefore));
+
+        var ids = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            ids.Add(reader.GetString(0));
+        }
+
+        return ids;
+    }
+
     public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(_connectionString);
@@ -1601,17 +1819,31 @@ internal sealed class SqlServerJobStore(
         cmd.Transaction = tx;
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL, batch_id NVARCHAR(450));
+                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL,
+                              batch_id NVARCHAR(450), job_name NVARCHAR(450) NOT NULL);
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
                               cancelled_at = @now,
                               completed_at = @now,
                               reason = @reason
-                          OUTPUT inserted.id, inserted.attempt, inserted.batch_id INTO @cancelled(id, attempt, batch_id)
+                          OUTPUT inserted.id, inserted.attempt, inserted.batch_id, inserted.job_name
+                              INTO @cancelled(id, attempt, batch_id, job_name)
                           WHERE status = 0
                               AND not_after IS NOT NULL
                               AND not_after < @now;
+
+                          -- Only pending rows are affected (status = 0), so running_count is untouched;
+                          -- non_terminal_count decrements once per cancelled row, grouped by job_name.
+                          UPDATE dbo.surefire_jobs SET non_terminal_count =
+                              CASE WHEN dbo.surefire_jobs.non_terminal_count > nj.cnt
+                                   THEN dbo.surefire_jobs.non_terminal_count - nj.cnt
+                                   ELSE 0
+                              END
+                          FROM dbo.surefire_jobs
+                          INNER JOIN (
+                              SELECT job_name, COUNT(*) AS cnt FROM @cancelled GROUP BY job_name
+                          ) nj ON nj.job_name = dbo.surefire_jobs.name;
 
                           SELECT id, attempt, batch_id FROM @cancelled;
                           """;
@@ -1694,9 +1926,18 @@ internal sealed class SqlServerJobStore(
 
         while (true)
         {
+            // DELETE + counter UPDATE in a single transaction so non_terminal_count stays
+            // consistent with the rows remaining in surefire_runs. Only non-terminal deletions
+            // (status = 0 pending-abandon branch) decrement the counter; terminal deletions
+            // don't contribute to non_terminal_count in the first place.
+            await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
             await using var runCmd = CreateCommand(conn);
+            runCmd.Transaction = tx;
             runCmd.CommandText = """
+                                 DECLARE @deleted TABLE (job_name NVARCHAR(450) NOT NULL, status INT NOT NULL);
+
                                  DELETE TOP (1000) FROM dbo.surefire_runs
+                                 OUTPUT DELETED.job_name, DELETED.status INTO @deleted (job_name, status)
                                  WHERE (status IN (2, 4, 5)
                                      AND completed_at < @threshold
                                      AND (batch_id IS NULL OR EXISTS (
@@ -1706,10 +1947,26 @@ internal sealed class SqlServerJobStore(
                                              AND b.completed_at IS NOT NULL
                                              AND b.completed_at < @threshold
                                      )))
-                                     OR (status = 0 AND not_before < @threshold)
+                                     OR (status = 0 AND not_before < @threshold);
+
+                                 UPDATE dbo.surefire_jobs SET non_terminal_count =
+                                     CASE WHEN dbo.surefire_jobs.non_terminal_count > nj.cnt
+                                          THEN dbo.surefire_jobs.non_terminal_count - nj.cnt
+                                          ELSE 0
+                                     END
+                                 FROM dbo.surefire_jobs
+                                 INNER JOIN (
+                                     SELECT job_name, COUNT(*) AS cnt FROM @deleted
+                                     WHERE status NOT IN (2, 4, 5)
+                                     GROUP BY job_name
+                                 ) nj ON nj.job_name = dbo.surefire_jobs.name;
+
+                                 SELECT COUNT(*) FROM @deleted;
                                  """;
             runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
-            if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
+            var deletedCount = Convert.ToInt32(await runCmd.ExecuteScalarAsync(cancellationToken));
+            await tx.CommitAsync(cancellationToken);
+            if (deletedCount == 0)
             {
                 break;
             }
@@ -1901,8 +2158,8 @@ internal sealed class SqlServerJobStore(
         cmd.CommandText = """
                           SELECT
                               COUNT(*) AS total_runs,
-                              SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
-                              SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed,
+                              ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS succeeded,
+                              ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS failed,
                               CASE
                                   WHEN SUM(CASE WHEN status IN (2, 4, 5) THEN 1 ELSE 0 END) > 0
                                   THEN CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS FLOAT) / SUM(CASE WHEN status IN (2, 4, 5) THEN 1 ELSE 0 END)
@@ -2006,8 +2263,9 @@ internal sealed class SqlServerJobStore(
             or 49919 // Azure SQL: too many CREATE/UPDATE operations
             or 49920; // Azure SQL: too many operations in progress
 
-    private async Task<JobRun?> ClaimRunCoreAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<JobRun>> ClaimRunsCoreAsync(string nodeName,
+        IReadOnlyCollection<string> jobNames, IReadOnlyCollection<string> queueNames, int maxCount,
+        CancellationToken cancellationToken)
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
@@ -2019,7 +2277,10 @@ internal sealed class SqlServerJobStore(
         var jobParams = new List<string>();
         var queueParams = new List<string>();
 
-        // Lock rate limit rows to serialize concurrent claims
+        // Serialize claims across nodes on the constrained config rows. We lock every
+        // job/queue/rate-limit even when unconstrained because running_count is now maintained on
+        // every job/queue and we need the row lock to safely INCREMENT it inside this same
+        // transaction against concurrent transition decrements.
         await using var lockRlCmd = CreateCommand(conn);
         lockRlCmd.Transaction = tx;
         for (var i = 0; i < jobNamesArr.Count; i++)
@@ -2031,15 +2292,14 @@ internal sealed class SqlServerJobStore(
         var jobNamesIn = string.Join(", ", jobParams);
         lockRlCmd.CommandText = $"""
                                  SELECT name FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK)
-                                 WHERE name IN ({jobNamesIn}) AND (max_concurrency IS NOT NULL OR rate_limit_name IS NOT NULL);
+                                 WHERE name IN ({jobNamesIn});
 
                                  SELECT name FROM dbo.surefire_queues WITH (UPDLOCK, ROWLOCK)
                                  WHERE name IN (
                                      SELECT ISNULL(j.queue, 'default') FROM dbo.surefire_jobs j WHERE j.name IN ({jobNamesIn})
-                                 )
-                                 AND max_concurrency IS NOT NULL;
+                                 );
 
-                                 SELECT * FROM dbo.surefire_rate_limits WITH (UPDLOCK)
+                                 SELECT name FROM dbo.surefire_rate_limits WITH (UPDLOCK)
                                  WHERE name IN (
                                      SELECT j.rate_limit_name FROM dbo.surefire_jobs j
                                      WHERE j.name IN ({jobNamesIn}) AND j.rate_limit_name IS NOT NULL
@@ -2066,28 +2326,89 @@ internal sealed class SqlServerJobStore(
         }
 
         var queueNamesIn = string.Join(", ", queueParams);
+
+        // Multi-statement claim batch under one transaction. Capacity reads come from the
+        // materialized j.running_count and q.running_count columns instead of scanning
+        // surefire_runs, which avoids U-lock-vs-write contention on the hot path.
+        // After the UPDATE captures claimed rows in @claimed, follow-up statements aggregate the
+        // counter increments and apply them against the locked job/queue/rate-limit config rows.
+        // ROW_NUMBER PARTITION BY enforces per-bucket capacity strictly. q_rl_rn check is skipped
+        // when the queue shares the job's rate limiter (same bucket → already capped by j_rl_rn).
         cmd.CommandText = $"""
                            DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
-                           ;WITH jobs_at_capacity AS (
-                               SELECT cr.job_name
-                               FROM dbo.surefire_runs cr
-                               JOIN dbo.surefire_jobs cj ON cj.name = cr.job_name
-                               WHERE cr.status = 1 AND cj.max_concurrency IS NOT NULL
-                               GROUP BY cr.job_name, cj.max_concurrency
-                               HAVING COUNT(*) >= cj.max_concurrency
+                           DECLARE @claimed TABLE (
+                               id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                               job_name NVARCHAR(450) NOT NULL,
+                               queue_name NVARCHAR(450) NOT NULL,
+                               j_rl NVARCHAR(450) NULL,
+                               q_rl NVARCHAR(450) NULL,
+                               status INT NOT NULL,
+                               attempt INT NOT NULL
+                           );
+
+                           ;WITH rl_state AS (
+                               SELECT rl.name,
+                                   CAST(CEILING(CASE WHEN rl.max_permits -
+                                       CASE
+                                           WHEN rl.type = 1 THEN
+                                               CASE
+                                                   WHEN rl.window_start IS NULL THEN 0
+                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] * 2 THEN 0
+                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN
+                                                       rl.current_count * IIF(
+                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window] > 0,
+                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window],
+                                                           0)
+                                                   ELSE
+                                                       rl.current_count + rl.previous_count * IIF(1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window] > 0,
+                                                           1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window], 0)
+                                               END
+                                           ELSE
+                                               CASE
+                                                   WHEN rl.window_start IS NULL THEN 0
+                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN 0
+                                                   ELSE rl.current_count
+                                               END
+                                       END > 0 THEN rl.max_permits -
+                                       CASE
+                                           WHEN rl.type = 1 THEN
+                                               CASE
+                                                   WHEN rl.window_start IS NULL THEN 0
+                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] * 2 THEN 0
+                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN
+                                                       rl.current_count * IIF(
+                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window] > 0,
+                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window],
+                                                           0)
+                                                   ELSE
+                                                       rl.current_count + rl.previous_count * IIF(1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window] > 0,
+                                                           1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window], 0)
+                                               END
+                                           ELSE
+                                               CASE
+                                                   WHEN rl.window_start IS NULL THEN 0
+                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN 0
+                                                   ELSE rl.current_count
+                                               END
+                                       END
+                                   ELSE 0 END) AS INT) AS available
+                               FROM dbo.surefire_rate_limits rl
                            ),
-                           queues_at_capacity AS (
-                               SELECT ISNULL(cj.queue, 'default') AS queue_name
-                               FROM dbo.surefire_runs cr
-                               JOIN dbo.surefire_jobs cj ON cj.name = cr.job_name
-                               JOIN dbo.surefire_queues cq ON cq.name = ISNULL(cj.queue, 'default')
-                               WHERE cr.status = 1 AND cq.max_concurrency IS NOT NULL
-                               GROUP BY ISNULL(cj.queue, 'default'), cq.max_concurrency
-                               HAVING COUNT(*) >= cq.max_concurrency
-                           ),
-                           candidate AS (
-                               SELECT TOP 1 r.id, r.job_name
+                           ranked AS (
+                               SELECT r.id, r.queue_priority, r.priority, r.not_before,
+                                   r.job_name AS run_job_name, ISNULL(j.queue, 'default') AS run_queue_name,
+                                   j.max_concurrency AS j_max, q.max_concurrency AS q_max,
+                                   j.running_count AS j_running, ISNULL(q.running_count, 0) AS q_running,
+                                   j.rate_limit_name AS j_rl, q.rate_limit_name AS q_rl,
+                                   ROW_NUMBER() OVER (PARTITION BY r.job_name
+                                       ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
+                                   ROW_NUMBER() OVER (PARTITION BY ISNULL(j.queue, 'default')
+                                       ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
+                                   ROW_NUMBER() OVER (PARTITION BY j.rate_limit_name
+                                       ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
+                                   ROW_NUMBER() OVER (PARTITION BY q.rate_limit_name
+                                       ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
                                FROM dbo.surefire_runs r WITH (UPDLOCK, READPAST)
                                JOIN dbo.surefire_jobs j ON j.name = r.job_name
                                LEFT JOIN dbo.surefire_queues q ON q.name = ISNULL(j.queue, 'default')
@@ -2097,58 +2418,16 @@ internal sealed class SqlServerJobStore(
                                    AND r.job_name IN ({jobNamesIn})
                                    AND ISNULL(j.queue, 'default') IN ({queueNamesIn})
                                    AND ISNULL(q.is_paused, 0) = 0
-                                   AND (j.max_concurrency IS NULL OR r.job_name NOT IN (SELECT job_name FROM jobs_at_capacity))
-                                   AND (q.max_concurrency IS NULL OR ISNULL(j.queue, 'default') NOT IN (SELECT queue_name FROM queues_at_capacity))
-                                   AND (j.rate_limit_name IS NULL OR NOT EXISTS (
-                                       SELECT 1 FROM dbo.surefire_rate_limits rl
-                                       WHERE rl.name = j.rate_limit_name
-                                       AND (CASE
-                                           WHEN rl.type = 1 THEN
-                                               CASE
-                                                   WHEN rl.window_start IS NULL THEN 0
-                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] * 2 THEN 0
-                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN
-                                                       rl.current_count * IIF(
-                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window] > 0,
-                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window],
-                                                           0)
-                                                   ELSE
-                                                       rl.current_count + rl.previous_count * IIF(1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window] > 0,
-                                                           1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window], 0)
-                                               END
-                                           ELSE
-                                               CASE
-                                                   WHEN rl.window_start IS NULL THEN 0
-                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN 0
-                                                   ELSE rl.current_count
-                                               END
-                                       END) >= rl.max_permits
-                                   ))
-                                   AND (q.rate_limit_name IS NULL OR q.rate_limit_name = j.rate_limit_name OR NOT EXISTS (
-                                       SELECT 1 FROM dbo.surefire_rate_limits rl
-                                       WHERE rl.name = q.rate_limit_name
-                                       AND (CASE
-                                           WHEN rl.type = 1 THEN
-                                               CASE
-                                                   WHEN rl.window_start IS NULL THEN 0
-                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] * 2 THEN 0
-                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN
-                                                       rl.current_count * IIF(
-                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window] > 0,
-                                                           1.0 - (CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) - rl.[window]) / rl.[window],
-                                                           0)
-                                                   ELSE
-                                                       rl.current_count + rl.previous_count * IIF(1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window] > 0,
-                                                           1.0 - CAST(DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 AS FLOAT) / rl.[window], 0)
-                                               END
-                                           ELSE
-                                               CASE
-                                                   WHEN rl.window_start IS NULL THEN 0
-                                                   WHEN DATEDIFF_BIG(MICROSECOND, rl.window_start, @now) * 10 >= rl.[window] THEN 0
-                                                   ELSE rl.current_count
-                                               END
-                                       END) >= rl.max_permits
-                                   ))
+                           ),
+                           candidate AS (
+                               SELECT TOP (@max_count) r.id, r.run_job_name, r.run_queue_name, r.j_rl, r.q_rl
+                               FROM ranked r
+                               LEFT JOIN rl_state jrl ON jrl.name = r.j_rl
+                               LEFT JOIN rl_state qrl ON qrl.name = r.q_rl
+                               WHERE (r.j_max IS NULL OR r.j_rn <= r.j_max - r.j_running)
+                                   AND (r.q_max IS NULL OR r.q_rn <= r.q_max - r.q_running)
+                                   AND (r.j_rl IS NULL OR jrl.available IS NULL OR r.j_rl_rn <= jrl.available)
+                                   AND (r.q_rl IS NULL OR r.q_rl = r.j_rl OR qrl.available IS NULL OR r.q_rl_rn <= qrl.available)
                                ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC
                            )
                            UPDATE dbo.surefire_runs SET
@@ -2157,45 +2436,87 @@ internal sealed class SqlServerJobStore(
                                started_at = @now,
                                last_heartbeat_at = @now,
                                attempt = dbo.surefire_runs.attempt + 1
-                           OUTPUT INSERTED.*
+                           OUTPUT INSERTED.id, INSERTED.job_name, candidate.run_queue_name, candidate.j_rl, candidate.q_rl, INSERTED.status, INSERTED.attempt
+                               INTO @claimed (id, job_name, queue_name, j_rl, q_rl, status, attempt)
                            FROM dbo.surefire_runs INNER JOIN candidate ON dbo.surefire_runs.id = candidate.id;
+
+                           -- Aggregate counter increments derived from the claimed batch and apply
+                           -- them against the locked config rows in three statements, all inside the
+                           -- same transaction so capacity is consistent for the next claimer.
+                           UPDATE dbo.surefire_jobs SET running_count = dbo.surefire_jobs.running_count + ji.cnt
+                           FROM dbo.surefire_jobs
+                           INNER JOIN (SELECT job_name, COUNT(*) AS cnt FROM @claimed GROUP BY job_name) ji
+                               ON ji.job_name = dbo.surefire_jobs.name;
+
+                           UPDATE dbo.surefire_queues SET running_count = dbo.surefire_queues.running_count + qi.cnt
+                           FROM dbo.surefire_queues
+                           INNER JOIN (SELECT queue_name, COUNT(*) AS cnt FROM @claimed GROUP BY queue_name) qi
+                               ON qi.queue_name = dbo.surefire_queues.name;
+
+                           ;WITH rl_pairs AS (
+                               SELECT j_rl AS rl_name FROM @claimed WHERE j_rl IS NOT NULL
+                               UNION ALL
+                               SELECT q_rl FROM @claimed WHERE q_rl IS NOT NULL AND q_rl <> ISNULL(j_rl, '')
+                           ),
+                           rl_increments AS (
+                               SELECT rl_name, COUNT(*) AS cnt FROM rl_pairs GROUP BY rl_name
+                           )
+                           UPDATE dbo.surefire_rate_limits SET
+                               previous_count = CASE
+                                   WHEN window_start IS NULL THEN 0
+                                   WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] * 2 THEN 0
+                                   WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] THEN current_count
+                                   ELSE previous_count
+                               END,
+                               current_count = CASE
+                                   WHEN window_start IS NULL THEN i.cnt
+                                   WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] THEN i.cnt
+                                   ELSE current_count + i.cnt
+                               END,
+                               window_start = CASE
+                                   WHEN window_start IS NULL THEN @now
+                                   WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] * 2 THEN
+                                       DATEADD(MICROSECOND,
+                                           CAST(((DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10) / [window]) * [window] / 10 AS INT),
+                                           window_start)
+                                   WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] THEN
+                                       DATEADD(MICROSECOND, CAST([window] / 10 AS INT), window_start)
+                                   ELSE window_start
+                               END
+                           FROM dbo.surefire_rate_limits
+                           INNER JOIN rl_increments i ON i.rl_name = dbo.surefire_rate_limits.name;
+
+                           SELECT r.id, r.job_name, r.status, r.arguments, r.result, r.reason, r.progress,
+                                  r.created_at, r.started_at, r.completed_at, r.cancelled_at, r.node_name, r.attempt,
+                                  r.trace_id, r.span_id, r.parent_trace_id, r.parent_span_id, r.parent_run_id,
+                                  r.root_run_id, r.rerun_of_run_id, r.not_before, r.not_after, r.priority,
+                                  r.deduplication_id, r.last_heartbeat_at, r.batch_id, r.queue_priority
+                           FROM dbo.surefire_runs r
+                           INNER JOIN @claimed c ON c.id = r.id;
                            """;
 
         cmd.Parameters.Add(CreateParameter("@node_name", nodeName));
+        cmd.Parameters.Add(CreateParameter("@max_count", maxCount));
 
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        JobRun? claimed = null;
-        if (await reader.ReadAsync(cancellationToken))
+        var claimed = new List<JobRun>();
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
-            claimed = ReadRun(reader);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                claimed.Add(ReadRun(reader));
+            }
         }
 
-        await reader.CloseAsync();
-
-        if (claimed is { })
+        if (claimed.Count > 0)
         {
-            await InsertEventsAsync(conn, tx,
-                [RunStatusEvents.Create(claimed.Id, claimed.Attempt, claimed.Status, timeProvider.GetUtcNow())],
-                cancellationToken);
-
-            var job = await GetJobInternalAsync(conn, tx, claimed.JobName, cancellationToken);
-            if (job is { })
+            var now = timeProvider.GetUtcNow();
+            var statusEvents = new List<RunEvent>(claimed.Count);
+            foreach (var run in claimed)
             {
-                var jobRateLimit = job.RateLimitName;
-                var queueName = job.Queue ?? "default";
-                var queueDef = await GetQueueInternalAsync(conn, tx, queueName, cancellationToken);
-                var queueRateLimit = queueDef?.RateLimitName;
-
-                if (jobRateLimit is { })
-                {
-                    await AcquireRateLimitAsync(conn, tx, jobRateLimit, cancellationToken);
-                }
-
-                if (queueRateLimit is { } && queueRateLimit != jobRateLimit)
-                {
-                    await AcquireRateLimitAsync(conn, tx, queueRateLimit, cancellationToken);
-                }
+                statusEvents.Add(RunStatusEvents.Create(run.Id, run.Attempt, run.Status, now));
             }
+
+            await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
         }
 
         await tx.CommitAsync(cancellationToken);
@@ -2261,6 +2582,39 @@ internal sealed class SqlServerJobStore(
 
             cmd.CommandText = sb.ToString();
             await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+            // Maintain non_terminal_count per job atomically with the insert chunk.
+            var increments = chunk
+                .Where(r => !r.Status.IsTerminal)
+                .GroupBy(r => r.JobName, StringComparer.Ordinal)
+                .Select(g => (JobName: g.Key, Count: g.Count()))
+                .ToList();
+            if (increments.Count > 0)
+            {
+                await using var incCmd = CreateCommand(conn);
+                incCmd.Transaction = tx;
+                var incSb = new StringBuilder();
+                incSb.Append("""
+                             UPDATE j SET non_terminal_count = j.non_terminal_count + v.cnt
+                             FROM dbo.surefire_jobs j
+                             INNER JOIN (VALUES
+                             """);
+                for (var i = 0; i < increments.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        incSb.Append(',');
+                    }
+
+                    incSb.Append($" (@n{i}, @c{i})");
+                    incCmd.Parameters.Add(CreateParameter($"@n{i}", increments[i].JobName));
+                    incCmd.Parameters.Add(CreateParameter($"@c{i}", increments[i].Count));
+                }
+
+                incSb.Append(") AS v(name, cnt) ON v.name = j.name;");
+                incCmd.CommandText = incSb.ToString();
+                await incCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
 
         await InsertEventsAsync(conn, tx, initialEvents, cancellationToken);
@@ -2304,14 +2658,15 @@ internal sealed class SqlServerJobStore(
 
         if (maxActiveForJob is { })
         {
+            // Capacity check reads the maintained counter on the already-UPDLOCK'd job row —
+            // no table scan, no deadlock with concurrent transitions. If the job row does not
+            // yet exist (late registration), ISNULL maps to the "enabled, zero active" defaults
+            // so the insert proceeds per the TryCreateRunAsync contract.
             conditions.Add("""
-                           (SELECT COUNT(*) FROM dbo.surefire_runs
-                            WHERE job_name = @job_name AND status NOT IN (2, 4, 5)) < @max_active
+                           ISNULL((SELECT non_terminal_count FROM dbo.surefire_jobs WHERE name = @job_name), 0) < @max_active
+                           AND ISNULL((SELECT is_enabled FROM dbo.surefire_jobs WHERE name = @job_name), 1) = 1
                            """);
             cmd.Parameters.Add(CreateParameter("@max_active", maxActiveForJob.Value));
-            conditions.Add("""
-                           ISNULL((SELECT is_enabled FROM dbo.surefire_jobs WHERE name = @job_name), 1) = 1
-                           """);
         }
 
         if (conditions.Count == 0)
@@ -2365,6 +2720,17 @@ internal sealed class SqlServerJobStore(
             if (rows > 0)
             {
                 await InsertEventsAsync(conn, tx, initialEvents, cancellationToken);
+
+                // Maintain non_terminal_count atomically with the insert.
+                if (!run.Status.IsTerminal)
+                {
+                    await using var countCmd = CreateCommand(conn);
+                    countCmd.Transaction = tx;
+                    countCmd.CommandText =
+                        "UPDATE dbo.surefire_jobs SET non_terminal_count = non_terminal_count + 1 WHERE name = @job_name";
+                    countCmd.Parameters.Add(CreateParameter("@job_name", run.JobName));
+                    await countCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
             }
 
             if (rows > 0 && lastCronFireAt is { } fireAt)
@@ -2692,74 +3058,6 @@ internal sealed class SqlServerJobStore(
         CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at")),
         Attempt = reader.GetInt32(reader.GetOrdinal("attempt"))
     };
-
-    private async Task<JobDefinition?> GetJobInternalAsync(SqlConnection conn, SqlTransaction tx,
-        string name, CancellationToken cancellationToken)
-    {
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = "SELECT * FROM dbo.surefire_jobs WHERE name = @name";
-        cmd.Parameters.Add(CreateParameter("@name", name));
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            return null;
-        }
-
-        return ReadJob(reader);
-    }
-
-    private async Task<QueueDefinition?> GetQueueInternalAsync(SqlConnection conn, SqlTransaction tx,
-        string name, CancellationToken cancellationToken)
-    {
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = "SELECT * FROM dbo.surefire_queues WHERE name = @name";
-        cmd.Parameters.Add(CreateParameter("@name", name));
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            return null;
-        }
-
-        return ReadQueue(reader);
-    }
-
-    private async Task AcquireRateLimitAsync(SqlConnection conn, SqlTransaction tx,
-        string rateLimitName, CancellationToken cancellationToken)
-    {
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = """
-                          DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-
-                          UPDATE dbo.surefire_rate_limits SET
-                              previous_count = CASE
-                                  WHEN window_start IS NULL THEN 0
-                                  WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] * 2 THEN 0
-                                  WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] THEN current_count
-                                  ELSE previous_count
-                              END,
-                              current_count = CASE
-                                  WHEN window_start IS NULL THEN 1
-                                  WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] THEN 1
-                                  ELSE current_count + 1
-                              END,
-                              window_start = CASE
-                                  WHEN window_start IS NULL THEN @now
-                                  WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] * 2 THEN
-                                      DATEADD(MICROSECOND,
-                                          (DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 / [window])
-                                          * [window] / 10, window_start)
-                                  WHEN DATEDIFF_BIG(MICROSECOND, window_start, @now) * 10 >= [window] THEN
-                                      DATEADD(MICROSECOND, [window] / 10, window_start)
-                                  ELSE window_start
-                              END
-                          WHERE name = @name
-                          """;
-        cmd.Parameters.Add(CreateParameter("@name", rateLimitName));
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
-    }
 
     private static string SerializeRetryPolicy(RetryPolicy policy) =>
         JsonSerializer.Serialize(new

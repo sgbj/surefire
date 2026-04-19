@@ -69,7 +69,9 @@ internal sealed class PostgreSqlJobStore(
                                   fire_all_limit INT,
                                   arguments_schema TEXT,
                                   last_heartbeat_at TIMESTAMPTZ,
-                                  last_cron_fire_at TIMESTAMPTZ
+                                  last_cron_fire_at TIMESTAMPTZ,
+                                  running_count INT NOT NULL DEFAULT 0,
+                                  non_terminal_count INT NOT NULL DEFAULT 0
                               );
 
                               CREATE TABLE IF NOT EXISTS surefire_runs (
@@ -137,6 +139,18 @@ internal sealed class PostgreSqlJobStore(
                               CREATE INDEX IF NOT EXISTS ix_surefire_runs_created
                                   ON surefire_runs (created_at DESC, id DESC);
 
+                              -- Backs GetStaleRunningRunIdsAsync: oldest-heartbeat-first range scan
+                              -- over Running rows, bounded by the result size.
+                              CREATE INDEX IF NOT EXISTS ix_surefire_runs_stale_heartbeat
+                                  ON surefire_runs (last_heartbeat_at)
+                                  WHERE status = 1;
+
+                              -- Backs CancelExpiredRunsWithIdsAsync: range seek over pending runs
+                              -- with a deadline, bounded by expired count rather than total pending.
+                              CREATE INDEX IF NOT EXISTS ix_surefire_runs_expiring
+                                  ON surefire_runs (not_after)
+                                  WHERE status = 0 AND not_after IS NOT NULL;
+
                               CREATE TABLE IF NOT EXISTS surefire_batches (
                                   id TEXT NOT NULL PRIMARY KEY,
                                   status SMALLINT NOT NULL DEFAULT 0,
@@ -176,8 +190,13 @@ internal sealed class PostgreSqlJobStore(
                                   max_concurrency INT,
                                   is_paused BOOLEAN NOT NULL DEFAULT FALSE,
                                   rate_limit_name TEXT,
-                                  last_heartbeat_at TIMESTAMPTZ
+                                  last_heartbeat_at TIMESTAMPTZ,
+                                  running_count INT NOT NULL DEFAULT 0
                               );
+
+                              -- 'default' queue row is always present so per-queue running_count
+                              -- maintenance has a target row even when no explicit queue is registered.
+                              INSERT INTO surefire_queues (name) VALUES ('default') ON CONFLICT DO NOTHING;
 
                               CREATE TABLE IF NOT EXISTS surefire_rate_limits (
                                   name TEXT PRIMARY KEY,
@@ -622,25 +641,109 @@ internal sealed class PostgreSqlJobStore(
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        // Pre-lock the run's job and queue rows before modifying anything. Acquires in the
+        // canonical order (jobs → queues) that every other mutating path obeys, which is what
+        // keeps transitions from deadlocking with concurrent claims or enqueues. Doing this
+        // inside the transition's multi-CTE is not sufficient: Postgres does not guarantee
+        // execution order between sibling data-modifying CTEs, so only a separate statement
+        // gives a deterministic lock-acquisition order. FOR UPDATE OF scopes each lock to the
+        // specific table. LEFT JOIN handles the (rare) case where the queue row doesn't exist.
+        await using var lockCmd = CreateCommand(conn);
+        lockCmd.Transaction = tx;
+        // INNER JOIN (not LEFT JOIN): FOR UPDATE cannot apply to the nullable side of an outer
+        // join. If the queue row doesn't exist the downstream queue_dec UPDATE matches zero rows
+        // anyway, so no lock is needed on a non-existent row. The job_lock CTE still runs and
+        // locks the job regardless of whether the queue row exists.
+        lockCmd.CommandText = """
+                              WITH job_lock AS (
+                                  SELECT j.name AS job_name, COALESCE(j.queue, 'default') AS queue_name
+                                  FROM surefire_jobs j
+                                  WHERE j.name = (SELECT job_name FROM surefire_runs WHERE id = @id)
+                                  FOR UPDATE OF j
+                              )
+                              SELECT q.name
+                              FROM job_lock jl
+                              JOIN surefire_queues q ON q.name = jl.queue_name
+                              FOR UPDATE OF q
+                              """;
+        lockCmd.Parameters.AddWithValue("id", transition.RunId);
+        await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-        cmd.CommandText = """
-                          UPDATE surefire_runs SET
-                              status = @new_status,
-                              node_name = @node_name,
-                              started_at = COALESCE(@started_at, started_at),
-                              completed_at = COALESCE(@completed_at, completed_at),
-                              cancelled_at = COALESCE(@cancelled_at, cancelled_at),
-                              reason = @reason,
-                              result = @result,
-                              progress = @progress,
-                              not_before = @not_before,
-                              last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at)
-                          WHERE id = @id
-                              AND status = @expected_status
-                              AND attempt = @expected_attempt
-                              AND status NOT IN (2, 4, 5)
-                          """;
+
+        // Always capture the affected job_name so we can maintain whichever counters this transition
+        // impacts, atomically with the row update. running_count tracks status=Running (decrement on
+        // transition OUT of Running); non_terminal_count tracks status NOT IN (2,4,5) (decrement on
+        // transition INTO a terminal status). Postgres forbids two data-modifying CTEs from
+        // targeting the same row in one statement, so both surefire_jobs decrements are merged
+        // into a single UPDATE that touches whichever columns this transition affects.
+        var decrementRunning = transition.ExpectedStatus == JobStatus.Running;
+        var decrementNonTerminal = transition.NewStatus is JobStatus.Succeeded or JobStatus.Failed
+            or JobStatus.Cancelled;
+
+        var sb = new StringBuilder();
+        sb.Append("""
+                  WITH updated AS (
+                      UPDATE surefire_runs SET
+                          status = @new_status,
+                          node_name = @node_name,
+                          started_at = COALESCE(@started_at, started_at),
+                          completed_at = COALESCE(@completed_at, completed_at),
+                          cancelled_at = COALESCE(@cancelled_at, cancelled_at),
+                          reason = @reason,
+                          result = @result,
+                          progress = @progress,
+                          not_before = @not_before,
+                          last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at)
+                      WHERE id = @id
+                          AND status = @expected_status
+                          AND attempt = @expected_attempt
+                          AND status NOT IN (2, 4, 5)
+                      RETURNING job_name
+                  )
+                  """);
+
+        if (decrementRunning || decrementNonTerminal)
+        {
+            // Single UPDATE against surefire_jobs touching only the columns this transition affects.
+            var setClauses = new List<string>();
+            if (decrementRunning)
+            {
+                setClauses.Add("running_count = GREATEST(0, surefire_jobs.running_count - 1)");
+            }
+
+            if (decrementNonTerminal)
+            {
+                setClauses.Add("non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - 1)");
+            }
+
+            sb.Append($"""
+                       , job_dec AS (
+                           UPDATE surefire_jobs SET {string.Join(", ", setClauses)}
+                           FROM updated WHERE surefire_jobs.name = updated.job_name
+                           RETURNING 1
+                       )
+                       """);
+        }
+
+        if (decrementRunning)
+        {
+            // surefire_queues is a different table — safe to put in its own CTE.
+            sb.Append("""
+                      , queue_dec AS (
+                          UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - 1)
+                          FROM updated u
+                          JOIN surefire_jobs j ON j.name = u.job_name
+                          WHERE surefire_queues.name = COALESCE(j.queue, 'default')
+                          RETURNING 1
+                      )
+                      """);
+        }
+
+        sb.Append(" SELECT COUNT(*) FROM updated");
+        cmd.CommandText = sb.ToString();
 
         cmd.Parameters.AddWithValue("id", transition.RunId);
         cmd.Parameters.AddWithValue("new_status", (int)transition.NewStatus);
@@ -660,7 +763,7 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.AddWithValue("expected_status", (int)transition.ExpectedStatus);
         cmd.Parameters.AddWithValue("expected_attempt", transition.ExpectedAttempt);
 
-        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
+        var updated = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
         if (updated)
         {
             var transitionEvents = new List<RunEvent>();
@@ -748,15 +851,80 @@ internal sealed class PostgreSqlJobStore(
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        // Pre-lock config rows in canonical order (jobs → queues) before the cancel CTE. Same
+        // rationale as TryTransitionRunAsync: keeps every mutating path aligned on the same
+        // lock order and eliminates the deadlock class with concurrent claims/enqueues.
+        await using var lockCmd = CreateCommand(conn);
+        lockCmd.Transaction = tx;
+        // INNER JOIN (not LEFT JOIN): FOR UPDATE cannot apply to the nullable side of an outer
+        // join. If the queue row doesn't exist the downstream queue_dec UPDATE matches zero rows
+        // anyway, so no lock is needed on a non-existent row. The job_lock CTE still runs and
+        // locks the job regardless of whether the queue row exists.
+        lockCmd.CommandText = """
+                              WITH job_lock AS (
+                                  SELECT j.name AS job_name, COALESCE(j.queue, 'default') AS queue_name
+                                  FROM surefire_jobs j
+                                  WHERE j.name = (SELECT job_name FROM surefire_runs WHERE id = @id)
+                                  FOR UPDATE OF j
+                              )
+                              SELECT q.name
+                              FROM job_lock jl
+                              JOIN surefire_queues q ON q.name = jl.queue_name
+                              FOR UPDATE OF q
+                              """;
+        lockCmd.Parameters.AddWithValue("id", runId);
+        await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+
+        // The cancellation may apply to either Pending (status=0) or Running (status=1). The
+        // `prior` CTE captures the row under U-lock and exposes the prior status; the UPDATE then
+        // transitions, and downstream CTEs decrement running_count only when the prior status was
+        // Running. SKIP LOCKED is not applied — the caller targets a specific run and expects the
+        // cancellation to wait for any concurrent transition rather than silently miss.
         cmd.CommandText = """
-                          UPDATE surefire_runs SET
-                              status = 4, cancelled_at = NOW(), completed_at = NOW(),
-                              reason = COALESCE(@reason, reason)
-                          WHERE id = @id AND status NOT IN (2, 4, 5)
-                              AND (@expected_attempt::int IS NULL OR attempt = @expected_attempt)
-                          RETURNING id, attempt, batch_id
+                          WITH prior AS (
+                              SELECT id, status, attempt, job_name, batch_id
+                              FROM surefire_runs
+                              WHERE id = @id
+                                AND status NOT IN (2, 4, 5)
+                                AND (@expected_attempt::int IS NULL OR attempt = @expected_attempt)
+                              FOR UPDATE
+                          ),
+                          upd AS (
+                              UPDATE surefire_runs SET
+                                  status = 4, cancelled_at = NOW(), completed_at = NOW(),
+                                  reason = COALESCE(@reason, surefire_runs.reason)
+                              FROM prior
+                              WHERE surefire_runs.id = prior.id
+                              RETURNING surefire_runs.id, prior.attempt, surefire_runs.batch_id,
+                                        prior.status AS prior_status, prior.job_name
+                          ),
+                          -- Single UPDATE against surefire_jobs: non_terminal_count always
+                          -- decrements (every cancel targets a non-terminal row); running_count
+                          -- decrements only when the prior status was Running. Merged into one
+                          -- statement because Postgres forbids two data-modifying CTEs from
+                          -- touching the same row in a single SQL statement.
+                          job_dec AS (
+                              UPDATE surefire_jobs SET
+                                  non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - 1),
+                                  running_count = CASE WHEN upd.prior_status = 1
+                                      THEN GREATEST(0, surefire_jobs.running_count - 1)
+                                      ELSE surefire_jobs.running_count END
+                              FROM upd WHERE surefire_jobs.name = upd.job_name
+                              RETURNING 1
+                          ),
+                          queue_dec AS (
+                              UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - 1)
+                              FROM upd u
+                              JOIN surefire_jobs j ON j.name = u.job_name
+                              WHERE surefire_queues.name = COALESCE(j.queue, 'default')
+                                AND u.prior_status = 1
+                              RETURNING 1
+                          )
+                          SELECT id, attempt, batch_id FROM upd
                           """;
 
         cmd.Parameters.AddWithValue("id", runId);
@@ -841,15 +1009,17 @@ internal sealed class PostgreSqlJobStore(
         return new(true, batchCompletion);
     }
 
-    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken cancellationToken = default)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxCount, 1);
+
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
-            return Task.FromResult<JobRun?>(null);
+            return Task.FromResult<IReadOnlyList<JobRun>>(Array.Empty<JobRun>());
         }
 
-        return ClaimRunCoreAsync(nodeName, jobNames, queueNames, cancellationToken);
+        return ClaimRunsCoreAsync(nodeName, jobNames, queueNames, maxCount, cancellationToken);
     }
 
     public async Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
@@ -927,13 +1097,51 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
-                          UPDATE surefire_runs SET
-                              status = 4,
-                              cancelled_at = NOW(),
-                              completed_at = NOW(),
-                              reason = COALESCE(@reason, reason)
-                          WHERE batch_id = @batch_id AND status IN (0, 1)
-                          RETURNING id, attempt
+                          WITH prior AS (
+                              SELECT id, status, attempt, job_name
+                              FROM surefire_runs
+                              WHERE batch_id = @batch_id AND status IN (0, 1)
+                              FOR UPDATE
+                          ),
+                          upd AS (
+                              UPDATE surefire_runs SET
+                                  status = 4,
+                                  cancelled_at = NOW(),
+                                  completed_at = NOW(),
+                                  reason = COALESCE(@reason, surefire_runs.reason)
+                              FROM prior
+                              WHERE surefire_runs.id = prior.id
+                              RETURNING surefire_runs.id, prior.attempt, prior.status AS prior_status, prior.job_name
+                          ),
+                          running_queues AS (
+                              SELECT COALESCE(j.queue, 'default') AS queue_name, COUNT(*)::int AS cnt
+                              FROM upd u JOIN surefire_jobs j ON j.name = u.job_name
+                              WHERE u.prior_status = 1
+                              GROUP BY COALESCE(j.queue, 'default')
+                          ),
+                          -- Per-job aggregates: non_terminal_count decrements by total cancelled
+                          -- count regardless of prior status, running_count decrements only for
+                          -- rows whose prior status was Running. Merged into a single UPDATE
+                          -- against surefire_jobs per the Postgres "one row per statement" rule.
+                          nt_by_job AS (
+                              SELECT job_name,
+                                  COUNT(*)::int AS nt_cnt,
+                                  COUNT(*) FILTER (WHERE prior_status = 1)::int AS running_cnt
+                              FROM upd GROUP BY job_name
+                          ),
+                          job_dec AS (
+                              UPDATE surefire_jobs SET
+                                  non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.nt_cnt),
+                                  running_count = GREATEST(0, surefire_jobs.running_count - nt.running_cnt)
+                              FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
+                              RETURNING 1
+                          ),
+                          queue_dec AS (
+                              UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - rq.cnt)
+                              FROM running_queues rq WHERE surefire_queues.name = rq.queue_name
+                              RETURNING 1
+                          )
+                          SELECT id, attempt FROM upd
                           """;
         cmd.Parameters.AddWithValue("batch_id", batchId);
         cmd.Parameters.AddWithValue("reason", (object?)reason ?? DBNull.Value);
@@ -1013,14 +1221,55 @@ internal sealed class PostgreSqlJobStore(
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+        // Capture prior status under U-lock so we know which rows were Running and need
+        // running_count decremented; aggregate decrements per job and per queue and apply each in
+        // a single UPDATE within the same statement.
         cmd.CommandText = """
-                          UPDATE surefire_runs SET
-                              status = 4,
-                              cancelled_at = NOW(),
-                              completed_at = NOW(),
-                              reason = COALESCE(@reason, reason)
-                          WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
-                          RETURNING id, attempt, batch_id
+                          WITH prior AS (
+                              SELECT id, status, attempt, batch_id, job_name
+                              FROM surefire_runs
+                              WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
+                              FOR UPDATE
+                          ),
+                          upd AS (
+                              UPDATE surefire_runs SET
+                                  status = 4,
+                                  cancelled_at = NOW(),
+                                  completed_at = NOW(),
+                                  reason = COALESCE(@reason, surefire_runs.reason)
+                              FROM prior
+                              WHERE surefire_runs.id = prior.id
+                              RETURNING surefire_runs.id, prior.attempt, surefire_runs.batch_id,
+                                        prior.status AS prior_status, prior.job_name
+                          ),
+                          running_queues AS (
+                              SELECT COALESCE(j.queue, 'default') AS queue_name, COUNT(*)::int AS cnt
+                              FROM upd u JOIN surefire_jobs j ON j.name = u.job_name
+                              WHERE u.prior_status = 1
+                              GROUP BY COALESCE(j.queue, 'default')
+                          ),
+                          -- Per-job aggregates: non_terminal_count decrements by total cancelled
+                          -- count, running_count decrements only for Running priors. Merged into
+                          -- one UPDATE per the Postgres "one row per statement" rule.
+                          nt_by_job AS (
+                              SELECT job_name,
+                                  COUNT(*)::int AS nt_cnt,
+                                  COUNT(*) FILTER (WHERE prior_status = 1)::int AS running_cnt
+                              FROM upd GROUP BY job_name
+                          ),
+                          job_dec AS (
+                              UPDATE surefire_jobs SET
+                                  non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.nt_cnt),
+                                  running_count = GREATEST(0, surefire_jobs.running_count - nt.running_cnt)
+                              FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
+                              RETURNING 1
+                          ),
+                          queue_dec AS (
+                              UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - rq.cnt)
+                              FROM running_queues rq WHERE surefire_queues.name = rq.queue_name
+                              RETURNING 1
+                          )
+                          SELECT id, attempt, batch_id FROM upd
                           """;
         cmd.Parameters.AddWithValue("parent_run_id", parentRunId);
         cmd.Parameters.AddWithValue("reason", (object?)reason ?? DBNull.Value);
@@ -1317,6 +1566,35 @@ internal sealed class PostgreSqlJobStore(
         return results;
     }
 
+    public async Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
+
+        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        // Backed by ix_surefire_runs_stale_heartbeat (partial WHERE status = 1 on last_heartbeat_at).
+        // Returns IDs only; no COUNT, no total, no pagination state. Oldest heartbeat first so the
+        // caller's processing loop makes monotonic progress against a shrinking filter set.
+        cmd.CommandText = """
+                          SELECT id FROM surefire_runs
+                          WHERE status = 1 AND last_heartbeat_at < @stale_before
+                          ORDER BY last_heartbeat_at ASC, id ASC
+                          LIMIT @take
+                          """;
+        cmd.Parameters.AddWithValue("take", take);
+        cmd.Parameters.AddWithValue("stale_before", staleBefore);
+
+        var ids = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            ids.Add(reader.GetString(0));
+        }
+
+        return ids;
+    }
+
     public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -1436,16 +1714,29 @@ internal sealed class PostgreSqlJobStore(
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
+        // Only pending rows (status = 0) are touched, so running_count is unaffected.
+        // non_terminal_count decrements once per cancelled row, grouped by job_name in the final CTE.
         cmd.CommandText = """
-                          UPDATE surefire_runs SET
-                              status = 4,
-                              cancelled_at = NOW(),
-                              completed_at = NOW(),
-                              reason = @reason
-                          WHERE status = 0
-                              AND not_after IS NOT NULL
-                              AND not_after < NOW()
-                          RETURNING id, attempt, batch_id
+                          WITH upd AS (
+                              UPDATE surefire_runs SET
+                                  status = 4,
+                                  cancelled_at = NOW(),
+                                  completed_at = NOW(),
+                                  reason = @reason
+                              WHERE status = 0
+                                  AND not_after IS NOT NULL
+                                  AND not_after < NOW()
+                              RETURNING id, attempt, batch_id, job_name
+                          ),
+                          nt_by_job AS (
+                              SELECT job_name, COUNT(*)::int AS cnt FROM upd GROUP BY job_name
+                          ),
+                          nt_dec AS (
+                              UPDATE surefire_jobs SET non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.cnt)
+                              FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
+                              RETURNING 1
+                          )
+                          SELECT id, attempt, batch_id FROM upd
                           """;
         cmd.Parameters.AddWithValue("reason", "Run expired past NotAfter deadline.");
 
@@ -1525,25 +1816,43 @@ internal sealed class PostgreSqlJobStore(
 
         while (true)
         {
+            // DELETE + non_terminal_count adjustment share a single statement via CTEs so
+            // the counter stays consistent with the rows remaining in surefire_runs.
+            // Only non-terminal deletions (status = 0 pending-abandon branch) decrement the counter.
             await using var runCmd = CreateCommand(conn);
             runCmd.CommandText = """
-                                 DELETE FROM surefire_runs WHERE id IN (
-                                     SELECT id FROM surefire_runs
-                                     WHERE (status IN (2, 4, 5)
-                                         AND completed_at < @threshold
-                                         AND (batch_id IS NULL OR EXISTS (
-                                             SELECT 1 FROM surefire_batches b
-                                             WHERE b.id = surefire_runs.batch_id
-                                                 AND b.status IN (2, 4, 5)
-                                                 AND b.completed_at IS NOT NULL
-                                                 AND b.completed_at < @threshold
-                                         )))
-                                         OR (status = 0 AND not_before < @threshold)
-                                     LIMIT 1000
+                                 WITH deleted AS (
+                                     DELETE FROM surefire_runs WHERE id IN (
+                                         SELECT id FROM surefire_runs
+                                         WHERE (status IN (2, 4, 5)
+                                             AND completed_at < @threshold
+                                             AND (batch_id IS NULL OR EXISTS (
+                                                 SELECT 1 FROM surefire_batches b
+                                                 WHERE b.id = surefire_runs.batch_id
+                                                     AND b.status IN (2, 4, 5)
+                                                     AND b.completed_at IS NOT NULL
+                                                     AND b.completed_at < @threshold
+                                             )))
+                                             OR (status = 0 AND not_before < @threshold)
+                                         LIMIT 1000
+                                     )
+                                     RETURNING id, status, job_name
+                                 ),
+                                 nt_by_job AS (
+                                     SELECT job_name, COUNT(*)::int AS cnt FROM deleted
+                                     WHERE status NOT IN (2, 4, 5)
+                                     GROUP BY job_name
+                                 ),
+                                 nt_dec AS (
+                                     UPDATE surefire_jobs SET non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.cnt)
+                                     FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
+                                     RETURNING 1
                                  )
+                                 SELECT COUNT(*) FROM deleted
                                  """;
             runCmd.Parameters.AddWithValue("threshold", threshold);
-            if (await runCmd.ExecuteNonQueryAsync(cancellationToken) == 0)
+            var deletedCount = Convert.ToInt32(await runCmd.ExecuteScalarAsync(cancellationToken));
+            if (deletedCount == 0)
             {
                 break;
             }
@@ -1834,8 +2143,14 @@ internal sealed class PostgreSqlJobStore(
         return results;
     }
 
+    // NpgsqlException.IsTransient covers connection-level failures (network, timeout) but does
+    // not include 40P01 (deadlock_detected) or 40001 (serialization_failure) — both of which are
+    // safe to retry after the victim transaction rolls back. Including them here lets callers
+    // retry transitions and event writes through deadlock races instead of surfacing the run as
+    // failed when it merely lost a lock-cycle.
     public bool IsTransientException(Exception ex) =>
-        ex is NpgsqlException { IsTransient: true };
+        ex is NpgsqlException { IsTransient: true }
+        || ex is PostgresException { SqlState: "40P01" or "40001" };
 
     private NpgsqlCommand CreateCommand(NpgsqlConnection conn)
     {
@@ -1884,38 +2199,53 @@ internal sealed class PostgreSqlJobStore(
         }
     }
 
-    private async Task<JobRun?> ClaimRunCoreAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<JobRun>> ClaimRunsCoreAsync(string nodeName,
+        IReadOnlyCollection<string> jobNames, IReadOnlyCollection<string> queueNames, int maxCount,
+        CancellationToken cancellationToken)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
+        // Serialize claims across nodes on the constrained config rows. Without these locks two
+        // nodes could independently compute remaining capacity from the same committed snapshot
+        // and over-claim (both see 5 permits free → both claim 5 → 10 total). We lock every job
+        // and its queue/rate-limit even when unconstrained because running_count is now
+        // maintained on every job/queue and we need the row lock to safely INCREMENT it inside
+        // this same statement against concurrent transition decrements.
+        //
+        // Three invariants that keep this deadlock-free across the whole store:
+        //   (1) Canonical acquisition order is config-first: jobs → queues → rate_limits → runs.
+        //       Every mutating path (claim, enqueue, transition, cancel) obeys this.
+        //   (2) ORDER BY on multi-row FOR UPDATE makes concurrent callers acquire in the same
+        //       deterministic order, eliminating the classic set-intersection deadlock.
+        //   (3) FOR UPDATE OF <alias> scopes the lock to the outer table. Without OF, Postgres
+        //       also locks rows in subquery-referenced tables, re-locking jobs here in a second
+        //       non-deterministic order and deadlocking with concurrent transitions.
         await using var lockJobCmd = CreateCommand(conn);
         lockJobCmd.Transaction = tx;
         lockJobCmd.CommandText =
-            "SELECT name FROM surefire_jobs WHERE name = ANY(@job_names) AND (max_concurrency IS NOT NULL OR rate_limit_name IS NOT NULL) FOR UPDATE";
+            "SELECT name FROM surefire_jobs WHERE name = ANY(@job_names) ORDER BY name FOR UPDATE";
         lockJobCmd.Parameters.AddWithValue("job_names", jobNames.ToArray());
         await lockJobCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await using var lockQueueCmd = CreateCommand(conn);
         lockQueueCmd.Transaction = tx;
         lockQueueCmd.CommandText = """
-                                   SELECT name FROM surefire_queues
-                                   WHERE name IN (
+                                   SELECT q.name FROM surefire_queues q
+                                   WHERE q.name IN (
                                        SELECT COALESCE(j.queue, 'default') FROM surefire_jobs j WHERE j.name = ANY(@job_names)
                                    )
-                                   AND max_concurrency IS NOT NULL
-                                   FOR UPDATE
+                                   ORDER BY q.name
+                                   FOR UPDATE OF q
                                    """;
         lockQueueCmd.Parameters.AddWithValue("job_names", jobNames.ToArray());
         await lockQueueCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        // Lock rate limit rows to serialize concurrent claims
         await using var lockRlCmd = CreateCommand(conn);
         lockRlCmd.Transaction = tx;
         lockRlCmd.CommandText = """
-                                SELECT * FROM surefire_rate_limits
-                                WHERE name IN (
+                                SELECT rl.name FROM surefire_rate_limits rl
+                                WHERE rl.name IN (
                                     SELECT j.rate_limit_name FROM surefire_jobs j
                                     WHERE j.name = ANY(@job_names) AND j.rate_limit_name IS NOT NULL
                                     UNION
@@ -1923,7 +2253,8 @@ internal sealed class PostgreSqlJobStore(
                                     JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
                                     WHERE j.name = ANY(@job_names) AND q.rate_limit_name IS NOT NULL
                                 )
-                                FOR UPDATE
+                                ORDER BY rl.name
+                                FOR UPDATE OF rl
                                 """;
         lockRlCmd.Parameters.AddWithValue("job_names", jobNames.ToArray());
         await lockRlCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -1931,49 +2262,51 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
-        // Rate-limit availability is computed once per limiter in `rl_state` so the candidate
-        // scan doesn't re-evaluate the sliding/fixed-window math per row.
+        // Single-statement chained-CTE claim. ranked uses materialized j.running_count and
+        // q.running_count instead of scanning surefire_runs, which keeps the three SQL stores
+        // symmetric and removes O(running) scans on every claim. After the claim UPDATE returns
+        // claimed runs, downstream CTEs aggregate per-job, per-queue, and per-rate-limit
+        // increments and apply them in the same statement — one round trip total.
+        // ROW_NUMBER PARTITION BY enforces per-bucket capacity strictly. queue_rl_rn check is
+        // skipped when the queue shares the job's rate limiter (same bucket → already capped).
         cmd.CommandText = """
-                          WITH jobs_at_capacity AS (
-                              SELECT cr.job_name
-                              FROM surefire_runs cr
-                              JOIN surefire_jobs cj ON cj.name = cr.job_name
-                              WHERE cr.status = 1 AND cj.max_concurrency IS NOT NULL
-                              GROUP BY cr.job_name, cj.max_concurrency
-                              HAVING COUNT(*) >= cj.max_concurrency
-                          ),
-                          queues_at_capacity AS (
-                              SELECT COALESCE(cj.queue, 'default') AS queue_name
-                              FROM surefire_runs cr
-                              JOIN surefire_jobs cj ON cj.name = cr.job_name
-                              JOIN surefire_queues cq ON cq.name = COALESCE(cj.queue, 'default')
-                              WHERE cr.status = 1 AND cq.max_concurrency IS NOT NULL
-                              GROUP BY COALESCE(cj.queue, 'default'), cq.max_concurrency
-                              HAVING COUNT(*) >= cq.max_concurrency
-                          ),
-                          rl_state AS (
+                          WITH rl_state AS (
                               SELECT rl.name,
-                                  CASE
-                                      WHEN rl.type = 1 THEN
-                                          CASE
-                                              WHEN rl.window_start IS NULL THEN 0
-                                              WHEN EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 >= rl."window" * 2 THEN 0
-                                              WHEN EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 >= rl."window" THEN
-                                                  rl.current_count * GREATEST(0, 1.0 - (EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 - rl."window") / rl."window")
-                                              ELSE
-                                                  rl.current_count + rl.previous_count * GREATEST(0, 1.0 - (EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 / rl."window"))
-                                          END
-                                      ELSE
-                                          CASE
-                                              WHEN rl.window_start IS NULL THEN 0
-                                              WHEN EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 >= rl."window" THEN 0
-                                              ELSE rl.current_count
-                                          END
-                                  END < rl.max_permits AS has_room
+                                  CEIL(GREATEST(0, rl.max_permits - (
+                                      CASE
+                                          WHEN rl.type = 1 THEN
+                                              CASE
+                                                  WHEN rl.window_start IS NULL THEN 0
+                                                  WHEN EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 >= rl."window" * 2 THEN 0
+                                                  WHEN EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 >= rl."window" THEN
+                                                      rl.current_count * GREATEST(0, 1.0 - (EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 - rl."window") / rl."window")
+                                                  ELSE
+                                                      rl.current_count + rl.previous_count * GREATEST(0, 1.0 - (EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 / rl."window"))
+                                              END
+                                          ELSE
+                                              CASE
+                                                  WHEN rl.window_start IS NULL THEN 0
+                                                  WHEN EXTRACT(EPOCH FROM (NOW() - rl.window_start)) * 10000000 >= rl."window" THEN 0
+                                                  ELSE rl.current_count
+                                              END
+                                      END
+                                  )))::int AS available
                               FROM surefire_rate_limits rl
                           ),
-                          candidate AS (
-                              SELECT r.id, r.job_name
+                          ranked AS (
+                              SELECT r.id, r.queue_priority, r.priority, r.not_before,
+                                  r.job_name AS run_job_name, COALESCE(j.queue, 'default') AS run_queue_name,
+                                  j.max_concurrency AS j_max, q.max_concurrency AS q_max,
+                                  j.running_count AS j_running, COALESCE(q.running_count, 0) AS q_running,
+                                  j.rate_limit_name AS j_rl, q.rate_limit_name AS q_rl,
+                                  ROW_NUMBER() OVER (PARTITION BY r.job_name
+                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
+                                  ROW_NUMBER() OVER (PARTITION BY COALESCE(j.queue, 'default')
+                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
+                                  ROW_NUMBER() OVER (PARTITION BY j.rate_limit_name
+                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
+                                  ROW_NUMBER() OVER (PARTITION BY q.rate_limit_name
+                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
                               FROM surefire_runs r
                               JOIN surefire_jobs j ON j.name = r.job_name
                               LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
@@ -1983,64 +2316,129 @@ internal sealed class PostgreSqlJobStore(
                                   AND r.job_name = ANY(@job_names)
                                   AND COALESCE(j.queue, 'default') = ANY(@queue_names)
                                   AND COALESCE(q.is_paused, FALSE) = FALSE
-                                  AND (j.max_concurrency IS NULL OR r.job_name NOT IN (SELECT job_name FROM jobs_at_capacity))
-                                  AND (q.max_concurrency IS NULL OR COALESCE(j.queue, 'default') NOT IN (SELECT queue_name FROM queues_at_capacity))
-                                  AND (j.rate_limit_name IS NULL
-                                       OR COALESCE((SELECT has_room FROM rl_state WHERE name = j.rate_limit_name), TRUE))
-                                  AND (q.rate_limit_name IS NULL OR q.rate_limit_name = j.rate_limit_name
-                                       OR COALESCE((SELECT has_room FROM rl_state WHERE name = q.rate_limit_name), TRUE))
+                          ),
+                          eligible AS (
+                              SELECT r.id, r.run_job_name, r.run_queue_name, r.j_rl, r.q_rl,
+                                     r.queue_priority, r.priority, r.not_before
+                              FROM ranked r
+                              LEFT JOIN rl_state jrl ON jrl.name = r.j_rl
+                              LEFT JOIN rl_state qrl ON qrl.name = r.q_rl
+                              WHERE (r.j_max IS NULL OR r.j_rn <= r.j_max - r.j_running)
+                                  AND (r.q_max IS NULL OR r.q_rn <= r.q_max - r.q_running)
+                                  AND (r.j_rl IS NULL OR jrl.available IS NULL OR r.j_rl_rn <= jrl.available)
+                                  AND (r.q_rl IS NULL OR r.q_rl = r.j_rl OR qrl.available IS NULL OR r.q_rl_rn <= qrl.available)
                               ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC
-                              LIMIT 1
+                              LIMIT @max_count
+                          ),
+                          locked AS (
+                              -- status=0 / not_before re-checks are critical: Postgres EvalPlanQual
+                              -- re-evaluates these predicates when SKIP LOCKED encounters a row whose
+                              -- state changed since the statement snapshot. Without them, a row another
+                              -- tx claimed between eligible and this lock could be re-claimed.
+                              SELECT r.id, e.run_job_name, e.run_queue_name, e.j_rl, e.q_rl
+                              FROM surefire_runs r
+                              JOIN eligible e ON e.id = r.id
+                              WHERE r.status = 0
+                                AND r.not_before <= NOW()
+                                AND (r.not_after IS NULL OR r.not_after > NOW())
                               FOR UPDATE OF r SKIP LOCKED
+                          ),
+                          claimed AS (
+                              UPDATE surefire_runs SET
+                                  status = 1,
+                                  node_name = @node_name,
+                                  started_at = NOW(),
+                                  last_heartbeat_at = NOW(),
+                                  attempt = surefire_runs.attempt + 1
+                              FROM locked
+                              WHERE surefire_runs.id = locked.id
+                              RETURNING surefire_runs.*,
+                                  locked.run_job_name AS claim_job_name,
+                                  locked.run_queue_name AS claim_queue_name,
+                                  locked.j_rl AS claim_j_rl,
+                                  locked.q_rl AS claim_q_rl
+                          ),
+                          job_increments AS (
+                              SELECT claim_job_name, COUNT(*)::int AS cnt FROM claimed GROUP BY claim_job_name
+                          ),
+                          queue_increments AS (
+                              SELECT claim_queue_name, COUNT(*)::int AS cnt FROM claimed GROUP BY claim_queue_name
+                          ),
+                          rl_pairs AS (
+                              SELECT claim_j_rl AS rl_name FROM claimed WHERE claim_j_rl IS NOT NULL
+                              UNION ALL
+                              SELECT claim_q_rl FROM claimed
+                              WHERE claim_q_rl IS NOT NULL AND claim_q_rl <> COALESCE(claim_j_rl, '')
+                          ),
+                          rl_increments AS (
+                              SELECT rl_name, COUNT(*)::int AS cnt FROM rl_pairs GROUP BY rl_name
+                          ),
+                          job_inc AS (
+                              UPDATE surefire_jobs SET running_count = surefire_jobs.running_count + ji.cnt
+                              FROM job_increments ji WHERE surefire_jobs.name = ji.claim_job_name
+                              RETURNING 1
+                          ),
+                          queue_inc AS (
+                              UPDATE surefire_queues SET running_count = surefire_queues.running_count + qi.cnt
+                              FROM queue_increments qi WHERE surefire_queues.name = qi.claim_queue_name
+                              RETURNING 1
+                          ),
+                          rl_inc AS (
+                              UPDATE surefire_rate_limits SET
+                                  previous_count = CASE
+                                      WHEN window_start IS NULL THEN 0
+                                      WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" * 2 THEN 0
+                                      WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" THEN current_count
+                                      ELSE previous_count
+                                  END,
+                                  current_count = CASE
+                                      WHEN window_start IS NULL THEN i.cnt
+                                      WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" THEN i.cnt
+                                      ELSE current_count + i.cnt
+                                  END,
+                                  window_start = CASE
+                                      WHEN window_start IS NULL THEN NOW()
+                                      WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" * 2 THEN
+                                          window_start + (FLOOR(EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 / "window") * "window" / 10000000.0) * INTERVAL '1 second'
+                                      WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" THEN
+                                          window_start + ("window" / 10000000.0) * INTERVAL '1 second'
+                                      ELSE window_start
+                                  END
+                              FROM rl_increments i WHERE surefire_rate_limits.name = i.rl_name
+                              RETURNING 1
                           )
-                          UPDATE surefire_runs SET
-                              status = 1,
-                              node_name = @node_name,
-                              started_at = NOW(),
-                              last_heartbeat_at = NOW(),
-                              attempt = surefire_runs.attempt + 1
-                          FROM candidate
-                          WHERE surefire_runs.id = candidate.id
-                          RETURNING surefire_runs.*
+                          SELECT id, job_name, status, arguments, result, reason, progress,
+                              created_at, started_at, completed_at, cancelled_at, node_name, attempt,
+                              trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id,
+                              root_run_id, rerun_of_run_id, not_before, not_after, priority,
+                              deduplication_id, last_heartbeat_at, queue_priority, batch_id
+                          FROM claimed
                           """;
 
         cmd.Parameters.AddWithValue("node_name", nodeName);
         cmd.Parameters.AddWithValue("job_names", jobNames.ToArray());
         cmd.Parameters.AddWithValue("queue_names", queueNames.ToArray());
+        cmd.Parameters.AddWithValue("max_count", maxCount);
 
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        JobRun? claimed = null;
-        if (await reader.ReadAsync(cancellationToken))
+        var claimed = new List<JobRun>();
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
-            claimed = ReadRun(reader);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                claimed.Add(ReadRun(reader));
+            }
         }
 
-        await reader.CloseAsync();
-
-        if (claimed is { })
+        if (claimed.Count > 0)
         {
-            await InsertEventsAsync(conn, tx,
-                [RunStatusEvents.Create(claimed.Id, claimed.Attempt, claimed.Status, timeProvider.GetUtcNow())],
-                cancellationToken);
-
-            var job = await GetJobInternalAsync(conn, tx, claimed.JobName, cancellationToken);
-            if (job is { })
+            var now = timeProvider.GetUtcNow();
+            var statusEvents = new List<RunEvent>(claimed.Count);
+            foreach (var run in claimed)
             {
-                var jobRateLimit = job.RateLimitName;
-                var queueName = job.Queue ?? "default";
-                var queueDef = await GetQueueInternalAsync(conn, tx, queueName, cancellationToken);
-                var queueRateLimit = queueDef?.RateLimitName;
-
-                if (jobRateLimit is { })
-                {
-                    await AcquireRateLimitAsync(conn, tx, jobRateLimit, cancellationToken);
-                }
-
-                if (queueRateLimit is { } && queueRateLimit != jobRateLimit)
-                {
-                    await AcquireRateLimitAsync(conn, tx, queueRateLimit, cancellationToken);
-                }
+                statusEvents.Add(RunStatusEvents.Create(run.Id, run.Attempt, run.Status, now));
             }
+
+            await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
         }
 
         await tx.CommitAsync(cancellationToken);
@@ -2196,6 +2594,35 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.AddWithValue("last_heartbeat_ats", lastHeartbeatAts);
         cmd.Parameters.AddWithValue("batch_ids", batchIds);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+        // Maintain non_terminal_count atomically with the run inserts. Group inserted non-terminal
+        // runs per job and apply a single UPDATE per unique job_name.
+        var increments = runs
+            .Where(r => !r.Status.IsTerminal)
+            .GroupBy(r => r.JobName, StringComparer.Ordinal)
+            .Select(g => (JobName: g.Key, Count: g.Count()))
+            .ToList();
+        if (increments.Count > 0)
+        {
+            var incJobNames = new string[increments.Count];
+            var incCounts = new int[increments.Count];
+            for (var i = 0; i < increments.Count; i++)
+            {
+                incJobNames[i] = increments[i].JobName;
+                incCounts[i] = increments[i].Count;
+            }
+
+            await using var incCmd = CreateCommand(conn);
+            incCmd.Transaction = tx;
+            incCmd.CommandText = """
+                                 UPDATE surefire_jobs SET non_terminal_count = surefire_jobs.non_terminal_count + v.cnt
+                                 FROM (SELECT * FROM UNNEST(@inc_names, @inc_counts) AS t(name, cnt)) v
+                                 WHERE surefire_jobs.name = v.name
+                                 """;
+            incCmd.Parameters.AddWithValue("inc_names", incJobNames);
+            incCmd.Parameters.AddWithValue("inc_counts", incCounts);
+            await incCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
@@ -2232,14 +2659,15 @@ internal sealed class PostgreSqlJobStore(
 
         if (maxActiveForJob is { })
         {
+            // Capacity check reads the maintained counter on the already-locked job row —
+            // no table scan, no deadlock with concurrent transitions. If the job row does not
+            // yet exist (late registration), COALESCE maps to the "enabled, zero active" defaults
+            // so the insert proceeds per the TryCreateRunAsync contract.
             conditions.Add("""
-                           (SELECT COUNT(*) FROM surefire_runs
-                            WHERE job_name = @job_name AND status NOT IN (2, 4, 5)) < @max_active
+                           COALESCE((SELECT non_terminal_count FROM surefire_jobs WHERE name = @job_name), 0) < @max_active
+                           AND COALESCE((SELECT is_enabled FROM surefire_jobs WHERE name = @job_name), TRUE) = TRUE
                            """);
             cmd.Parameters.AddWithValue("max_active", maxActiveForJob.Value);
-            conditions.Add("""
-                           COALESCE((SELECT is_enabled FROM surefire_jobs WHERE name = @job_name), TRUE) = TRUE
-                           """);
         }
 
         if (conditions.Count == 0)
@@ -2294,6 +2722,17 @@ internal sealed class PostgreSqlJobStore(
         if (rows > 0)
         {
             await InsertEventsAsync(conn, tx, initialEvents, cancellationToken);
+
+            // Maintain non_terminal_count atomically with the insert.
+            if (!run.Status.IsTerminal)
+            {
+                await using var countCmd = CreateCommand(conn);
+                countCmd.Transaction = tx;
+                countCmd.CommandText =
+                    "UPDATE surefire_jobs SET non_terminal_count = non_terminal_count + 1 WHERE name = @job_name";
+                countCmd.Parameters.AddWithValue("job_name", run.JobName);
+                await countCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
 
         if (rows > 0 && lastCronFireAt is { } fireAt)
@@ -2604,70 +3043,6 @@ internal sealed class PostgreSqlJobStore(
             CreatedAt = reader.GetFieldValue<DateTimeOffset>(ord.CreatedAt),
             Attempt = reader.GetInt32(ord.Attempt)
         };
-    }
-
-    private async Task<JobDefinition?> GetJobInternalAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        string name, CancellationToken cancellationToken)
-    {
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = "SELECT * FROM surefire_jobs WHERE name = @name";
-        cmd.Parameters.AddWithValue("name", name);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            return null;
-        }
-
-        return ReadJob(reader);
-    }
-
-    private async Task<QueueDefinition?> GetQueueInternalAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        string name, CancellationToken cancellationToken)
-    {
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = "SELECT * FROM surefire_queues WHERE name = @name";
-        cmd.Parameters.AddWithValue("name", name);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            return null;
-        }
-
-        return ReadQueue(reader);
-    }
-
-    private async Task AcquireRateLimitAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        string rateLimitName, CancellationToken cancellationToken)
-    {
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = """
-                          UPDATE surefire_rate_limits SET
-                              previous_count = CASE
-                                  WHEN window_start IS NULL THEN 0
-                                  WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" * 2 THEN 0
-                                  WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" THEN current_count
-                                  ELSE previous_count
-                              END,
-                              current_count = CASE
-                                  WHEN window_start IS NULL THEN 1
-                                  WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" THEN 1
-                                  ELSE current_count + 1
-                              END,
-                              window_start = CASE
-                                  WHEN window_start IS NULL THEN NOW()
-                                  WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" * 2 THEN
-                                      window_start + (FLOOR(EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 / "window") * "window" / 10000000.0) * INTERVAL '1 second'
-                                  WHEN EXTRACT(EPOCH FROM (NOW() - window_start)) * 10000000 >= "window" THEN
-                                      window_start + ("window" / 10000000.0) * INTERVAL '1 second'
-                                  ELSE window_start
-                              END
-                          WHERE name = @name
-                          """;
-        cmd.Parameters.AddWithValue("name", rateLimitName);
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static string SerializeRetryPolicy(RetryPolicy policy) =>

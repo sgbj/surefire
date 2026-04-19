@@ -476,7 +476,7 @@ public sealed class HydrationContractTests
         await harness.StartAsync(ct);
 
         using var ownerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var runTask = harness.Client.RunAsync<int>("Hang", null, cancellationToken: ownerCts.Token);
+        var runTask = harness.Client.RunAsync<int>("Hang", cancellationToken: ownerCts.Token);
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
 
         ownerCts.Cancel();
@@ -659,9 +659,9 @@ public sealed class HydrationContractTests
         public Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId, string? reason = null,
             CancellationToken ct = default) => inner.CancelChildRunsAsync(parentRunId, reason, ct);
 
-        public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-            IReadOnlyCollection<string> queueNames, CancellationToken ct = default) =>
-            inner.ClaimRunAsync(nodeName, jobNames, queueNames, ct);
+        public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+            IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken ct = default) =>
+            inner.ClaimRunsAsync(nodeName, jobNames, queueNames, maxCount, ct);
 
         public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
             IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken ct = default) =>
@@ -696,6 +696,9 @@ public sealed class HydrationContractTests
 
         public Task<IReadOnlyList<string>> GetExternallyStoppedRunIdsAsync(IReadOnlyCollection<string> runIds,
             CancellationToken ct = default) => inner.GetExternallyStoppedRunIdsAsync(runIds, ct);
+
+        public Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+            CancellationToken ct = default) => inner.GetStaleRunningRunIdsAsync(staleBefore, take, ct);
 
         public Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken ct = default) => inner.GetNodesAsync(ct);
 

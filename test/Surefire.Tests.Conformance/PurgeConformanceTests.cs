@@ -16,7 +16,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = OldTime };
@@ -105,7 +105,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
     }
 
@@ -167,7 +167,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         await Store.PurgeAsync(Threshold, ct);
@@ -221,7 +221,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         // Purge with future threshold to remove the rate limit
@@ -242,7 +242,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
 
         var run2 = CreateRun(jobName);
         await Store.CreateRunsAsync([run2], cancellationToken: ct);
-        var claimed2 = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed2 = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed2);
     }
 
@@ -257,10 +257,10 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
-        // Purge with a future threshold — job heartbeat is stale, but it has a running run
+        // Purge with a future threshold â€” job heartbeat is stale, but it has a running run
         var futureThreshold = DateTimeOffset.UtcNow.AddMinutes(5);
         await Store.PurgeAsync(futureThreshold, ct);
 
@@ -288,7 +288,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         // Walk every child to terminal so the batch itself completes atomically inside the store.
         foreach (var run in runs)
         {
-            var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+            var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(claimed);
             var succeeded = claimed with { Status = JobStatus.Succeeded, CompletedAt = OldTime };
             await Store.TryTransitionRunAsync(Transition(succeeded, JobStatus.Running), ct);
@@ -353,7 +353,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
             new() { Id = batchId, CreatedAt = OldTime, Total = 1, Status = JobStatus.Pending },
             [run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         await Store.AppendEventsAsync([
             new() { RunId = run.Id, EventType = RunEventType.Log, Payload = "batch-log", CreatedAt = OldTime }
@@ -387,7 +387,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         };
         Assert.True(await Store.TryCreateRunAsync(first, cancellationToken: ct));
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         var succeeded = claimed with { Status = JobStatus.Succeeded, CompletedAt = OldTime };
         await Store.TryTransitionRunAsync(Transition(succeeded, JobStatus.Running), ct);
@@ -420,7 +420,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         // If counters leaked, the MaxConcurrency slot would stay consumed and this claim would fail.
         var fresh = CreateRun(jobName);
         await Store.CreateRunsAsync([fresh], cancellationToken: ct);
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         Assert.Equal(fresh.Id, claimed.Id);
     }
@@ -447,7 +447,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
             };
             Assert.True(await Store.TryCreateRunAsync(run, cancellationToken: ct));
 
-            var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+            var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(claimed);
 
             await Store.AppendEventsAsync([
@@ -468,7 +468,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         // MaxConcurrency=1 would block the claim; if the dedup index leaked, the create would fail.
         var tail = CreateRun(jobName) with { DeduplicationId = "cycle-tail" };
         Assert.True(await Store.TryCreateRunAsync(tail, cancellationToken: ct));
-        var finalClaim = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var finalClaim = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(finalClaim);
         Assert.Equal(tail.Id, finalClaim.Id);
     }

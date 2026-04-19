@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Data;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -17,8 +18,17 @@ internal sealed class PostgreSqlNotificationProvider(
     ILogger<PostgreSqlNotificationProvider> logger)
     : INotificationProvider, IAsyncDisposable
 {
+    private const int MaxPublishBatch = 500;
+    private const int OutgoingQueueCapacity = MaxPublishBatch * 16;
     private static readonly TimeSpan ReconnectBackoffInitial = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan ReconnectBackoffMax = TimeSpan.FromSeconds(30);
+
+    // Outgoing publish coalescing: PublishAsync enqueues instead of executing immediately; a
+    // single background loop drains the queue, deduplicates (channel, message) pairs inside a
+    // 2 ms idle window, and emits the surviving set as one multi-statement pg_notify round trip.
+    // A burst of 40 completion notifications (runs firing RunEvent + RunTerminated + RunAvailable)
+    // collapses to 3 wire calls — one per distinct channel — or a single call when identical.
+    private static readonly TimeSpan PublishFlushInterval = TimeSpan.FromMilliseconds(2);
 
     private readonly Channel<DispatchWorkItem> _dispatchQueue =
         Channel.CreateUnbounded<DispatchWorkItem>(new()
@@ -29,17 +39,50 @@ internal sealed class PostgreSqlNotificationProvider(
 
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<Guid, Func<string?, Task>>> _handlers = new();
     private readonly Lock _lock = new();
+
+    // Bounded with Wait so a producer cannot outrun the flush loop indefinitely. Under a slow or
+    // broken PG connection, EnqueueAsync-style callers apply real backpressure instead of the
+    // queue growing unbounded.
+    private readonly Channel<OutgoingPublish> _outgoingQueue =
+        Channel.CreateBounded<OutgoingPublish>(new BoundedChannelOptions(OutgoingQueueCapacity)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+
     private readonly ConcurrentQueue<string> _pendingListens = new();
     private readonly ConcurrentQueue<string> _pendingUnlistens = new();
     private CancellationTokenSource? _cts;
     private Task? _dispatchLoop;
+    private long _lastPublishFailureUnixTicks;
     private NpgsqlConnection? _listenConnection;
     private CancellationTokenSource? _listenInterrupt;
     private Task? _listenLoop;
+
+    private long _publishFailureCount;
+    private Task? _publishLoop;
     private int _reconnectAttempt;
 
     public async ValueTask DisposeAsync()
     {
+        // Drain outgoing publishes before cancelling anything. Completing the writer makes the
+        // publish loop exit naturally when the queue empties; the in-flight flush continues
+        // through its retry/error handling. Only AFTER the drain do we cancel inbound loops,
+        // because cancelling the shared CTS first would terminate the publish loop mid-drain
+        // and lose queued notifications.
+        _outgoingQueue.Writer.TryComplete();
+        if (_publishLoop is { } publishLoop)
+        {
+            try
+            {
+                await publishLoop;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
         if (_cts is { })
         {
             await _cts.CancelAsync();
@@ -85,6 +128,14 @@ internal sealed class PostgreSqlNotificationProvider(
         }
     }
 
+    public NotificationPublishHealth GetPublishHealth()
+    {
+        var ticks = Interlocked.Read(ref _lastPublishFailureUnixTicks);
+        return new(
+            Interlocked.Read(ref _publishFailureCount),
+            ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero));
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         _cts = new();
@@ -92,6 +143,10 @@ internal sealed class PostgreSqlNotificationProvider(
         RegisterNotificationHandler(_listenConnection);
         _dispatchLoop = DispatchLoopAsync(_cts.Token);
         _listenLoop = ListenLoopAsync(_cts.Token);
+        // Publish loop uses CancellationToken.None by design: DisposeAsync stops it by completing
+        // the writer, which drains the queue naturally. Cancelling via _cts would leave queued
+        // notifications unflushed.
+        _publishLoop = PublishLoopAsync(CancellationToken.None);
     }
 
     public async Task PingAsync(CancellationToken cancellationToken = default)
@@ -102,27 +157,11 @@ internal sealed class PostgreSqlNotificationProvider(
         await cmd.ExecuteScalarAsync(cancellationToken);
     }
 
-    public async Task PublishAsync(string channel, string? message = null,
+    public Task PublishAsync(string channel, string? message = null,
         CancellationToken cancellationToken = default)
     {
         NotificationChannels.ValidateChannel(channel);
-
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-
-        if (message is null)
-        {
-            cmd.CommandText = "SELECT pg_notify(@channel, NULL)";
-            cmd.Parameters.AddWithValue("channel", channel);
-        }
-        else
-        {
-            cmd.CommandText = "SELECT pg_notify(@channel, @payload)";
-            cmd.Parameters.AddWithValue("channel", channel);
-            cmd.Parameters.AddWithValue("payload", message);
-        }
-
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return _outgoingQueue.Writer.WriteAsync(new(channel, message), cancellationToken).AsTask();
     }
 
     public Task<IAsyncDisposable> SubscribeAsync(string channel, Func<string?, Task> handler,
@@ -140,6 +179,115 @@ internal sealed class PostgreSqlNotificationProvider(
             _listenInterrupt?.Cancel();
 
             return Task.FromResult<IAsyncDisposable>(new Subscription(this, channel, subscriptionId));
+        }
+    }
+
+    private async Task PublishLoopAsync(CancellationToken cancellationToken)
+    {
+        var reader = _outgoingQueue.Reader;
+        var batch = new List<OutgoingPublish>(MaxPublishBatch);
+        var seen = new HashSet<(string Channel, string? Message)>();
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (!await reader.WaitToReadAsync(cancellationToken))
+                {
+                    return;
+                }
+
+                var deadline = Environment.TickCount64 + (long)PublishFlushInterval.TotalMilliseconds;
+                while (batch.Count < MaxPublishBatch)
+                {
+                    if (reader.TryRead(out var item))
+                    {
+                        if (seen.Add((item.Channel, item.Message)))
+                        {
+                            batch.Add(item);
+                        }
+
+                        continue;
+                    }
+
+                    var remaining = deadline - Environment.TickCount64;
+                    if (remaining <= 0 || batch.Count == 0)
+                    {
+                        break;
+                    }
+
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(remaining));
+                    try
+                    {
+                        if (!await reader.WaitToReadAsync(timeoutCts.Token))
+                        {
+                            break;
+                        }
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                }
+
+                if (batch.Count > 0)
+                {
+                    await FlushPublishesAsync(batch, cancellationToken);
+                    batch.Clear();
+                    seen.Clear();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task FlushPublishesAsync(List<OutgoingPublish> batch, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var cmd = conn.CreateCommand();
+
+            // One SELECT returning N pg_notify() calls — single round trip, N distinct channel
+            // activations on the server. pg_notify returns void; PostgreSQL coalesces identical
+            // (channel, payload) pairs within the same transaction as well, so duplicates that
+            // slipped past our HashSet dedup are still collapsed server-side.
+            var sql = new StringBuilder("SELECT ");
+            for (var i = 0; i < batch.Count; i++)
+            {
+                if (i > 0)
+                {
+                    sql.Append(", ");
+                }
+
+                var channelParam = $"@c{i}";
+                cmd.Parameters.AddWithValue(channelParam, batch[i].Channel);
+                if (batch[i].Message is { } message)
+                {
+                    var payloadParam = $"@p{i}";
+                    cmd.Parameters.AddWithValue(payloadParam, message);
+                    sql.Append("pg_notify(").Append(channelParam).Append(", ").Append(payloadParam).Append(')');
+                }
+                else
+                {
+                    sql.Append("pg_notify(").Append(channelParam).Append(", NULL)");
+                }
+            }
+
+            cmd.CommandText = sql.ToString();
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Increment(ref _publishFailureCount);
+            Interlocked.Exchange(ref _lastPublishFailureUnixTicks, timeProvider.GetUtcNow().UtcTicks);
+            logger.LogWarning(ex, "Failed to flush {Count} coalesced PostgreSQL notifications.", batch.Count);
         }
     }
 
@@ -333,6 +481,8 @@ internal sealed class PostgreSqlNotificationProvider(
 
         return Task.CompletedTask;
     }
+
+    private readonly record struct OutgoingPublish(string Channel, string? Message);
 
     private readonly record struct DispatchWorkItem(Func<string?, Task> Handler, string? Payload, string Channel);
 }

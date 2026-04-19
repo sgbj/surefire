@@ -63,7 +63,9 @@ internal sealed class SqliteJobStore(
                                                          fire_all_limit INTEGER,
                                                          arguments_schema TEXT,
                                                          last_heartbeat_at TEXT,
-                                                         last_cron_fire_at TEXT
+                                                         last_cron_fire_at TEXT,
+                                                         running_count INTEGER NOT NULL DEFAULT 0,
+                                                         non_terminal_count INTEGER NOT NULL DEFAULT 0
                                                      );
                                                      CREATE TABLE IF NOT EXISTS surefire_runs (
                                                          id TEXT PRIMARY KEY,
@@ -126,6 +128,10 @@ internal sealed class SqliteJobStore(
                                                          ON surefire_runs (not_after) WHERE status = 0 AND not_after IS NOT NULL;
                                                      CREATE INDEX IF NOT EXISTS ix_runs_batch_id
                                                          ON surefire_runs (batch_id);
+                                                     -- Backs GetStaleRunningRunIdsAsync: oldest-heartbeat-first
+                                                     -- range scan over Running rows, bounded by the result size.
+                                                     CREATE INDEX IF NOT EXISTS ix_runs_stale_heartbeat
+                                                         ON surefire_runs (last_heartbeat_at) WHERE status = 1;
                                                      CREATE TABLE IF NOT EXISTS surefire_events (
                                                          id INTEGER PRIMARY KEY AUTOINCREMENT,
                                                          run_id TEXT NOT NULL,
@@ -151,8 +157,13 @@ internal sealed class SqliteJobStore(
                                                          max_concurrency INTEGER,
                                                          is_paused INTEGER NOT NULL DEFAULT 0,
                                                          rate_limit_name TEXT,
-                                                         last_heartbeat_at TEXT
+                                                         last_heartbeat_at TEXT,
+                                                         running_count INTEGER NOT NULL DEFAULT 0
                                                      );
+
+                                                     -- 'default' queue row is always present so per-queue running_count
+                                                     -- maintenance has a target row even when no explicit queue is registered.
+                                                     INSERT OR IGNORE INTO surefire_queues (name) VALUES ('default');
                                                      CREATE TABLE IF NOT EXISTS surefire_rate_limits (
                                                          name TEXT PRIMARY KEY,
                                                          type INTEGER NOT NULL DEFAULT 0,
@@ -612,6 +623,9 @@ internal sealed class SqliteJobStore(
 
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var tx = conn.BeginTransaction(false);
+        // RETURNING captures the affected row's job_name so the follow-up counter UPDATEs can
+        // target the right rows. Only Running → X transitions need running_count maintenance;
+        // Pending → X is a no-op for counters and skips the extra updates.
         await using var cmd = CreateCommand(conn, """
                                                   UPDATE surefire_runs
                                                   SET status = @s, reason = @e, result = @r, progress = @p,
@@ -623,6 +637,7 @@ internal sealed class SqliteJobStore(
                                                       not_before = @nb
                                                   WHERE id = @id AND status = @es AND attempt = @ea
                                                       AND status NOT IN (2, 4, 5)
+                                                  RETURNING job_name
                                                   """, tx);
         cmd.Parameters.AddWithValue("@id", transition.RunId);
         cmd.Parameters.AddWithValue("@s", (int)transition.NewStatus);
@@ -637,7 +652,30 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@nb", FormatTimestamp(transition.NotBefore));
         cmd.Parameters.AddWithValue("@es", (int)transition.ExpectedStatus);
         cmd.Parameters.AddWithValue("@ea", transition.ExpectedAttempt);
-        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
+
+        string? affectedJobName = null;
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                affectedJobName = reader.GetString(0);
+            }
+        }
+
+        var updated = affectedJobName is { };
+        if (updated && transition.ExpectedStatus == JobStatus.Running)
+        {
+            await DecrementRunningCountAsync(conn, tx, affectedJobName!, cancellationToken);
+        }
+
+        // Transition INTO a terminal status always decrements non_terminal_count, regardless of
+        // prior status (covers Pending → Cancelled as well as Running → terminal).
+        if (updated && transition.NewStatus is JobStatus.Succeeded or JobStatus.Failed
+                or JobStatus.Cancelled)
+        {
+            await DecrementNonTerminalCountAsync(conn, tx, affectedJobName!, cancellationToken);
+        }
+
         if (updated)
         {
             var transitionEvents = new List<RunEvent>();
@@ -727,28 +765,30 @@ internal sealed class SqliteJobStore(
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var tx = conn.BeginTransaction(false);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
-        await using var cmd = CreateCommand(conn, """
-                                                  UPDATE surefire_runs
-                                                  SET status = 4, cancelled_at = @now, completed_at = @now,
-                                                      reason = COALESCE(@reason, reason)
-                                                  WHERE id = @id AND status NOT IN (2, 4, 5)
-                                                      AND (@expected_attempt IS NULL OR attempt = @expected_attempt)
-                                                  RETURNING id, attempt, batch_id
-                                                  """, tx);
-        cmd.Parameters.AddWithValue("@id", runId);
-        cmd.Parameters.AddWithValue("@now", now);
-        cmd.Parameters.AddWithValue("@reason", (object?)reason ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@expected_attempt",
+        // Capture prior status so the counter decrement only fires for rows that were Running.
+        // SQLite RETURNING reflects post-update column values; we read status separately first.
+        await using var priorCmd = CreateCommand(conn, """
+                                                       SELECT status, attempt, job_name, batch_id
+                                                       FROM surefire_runs
+                                                       WHERE id = @id AND status NOT IN (2, 4, 5)
+                                                         AND (@expected_attempt IS NULL OR attempt = @expected_attempt)
+                                                       """, tx);
+        priorCmd.Parameters.AddWithValue("@id", runId);
+        priorCmd.Parameters.AddWithValue("@expected_attempt",
             expectedAttempt.HasValue ? expectedAttempt.Value : DBNull.Value);
 
+        int? priorStatus = null;
         int? attempt = null;
+        string? jobName = null;
         string? batchId = null;
-        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        await using (var pr = await priorCmd.ExecuteReaderAsync(cancellationToken))
         {
-            if (await reader.ReadAsync(cancellationToken))
+            if (await pr.ReadAsync(cancellationToken))
             {
-                attempt = reader.GetInt32(1);
-                batchId = reader.IsDBNull(2) ? null : reader.GetString(2);
+                priorStatus = pr.GetInt32(0);
+                attempt = pr.GetInt32(1);
+                jobName = pr.GetString(2);
+                batchId = pr.IsDBNull(3) ? null : pr.GetString(3);
             }
         }
 
@@ -756,6 +796,31 @@ internal sealed class SqliteJobStore(
         {
             await tx.CommitAsync(cancellationToken);
             return RunTransitionResult.NotApplied;
+        }
+
+        await using var cmd = CreateCommand(conn, """
+                                                  UPDATE surefire_runs
+                                                  SET status = 4, cancelled_at = @now, completed_at = @now,
+                                                      reason = COALESCE(@reason, reason)
+                                                  WHERE id = @id AND status NOT IN (2, 4, 5)
+                                                      AND (@expected_attempt IS NULL OR attempt = @expected_attempt)
+                                                  """, tx);
+        cmd.Parameters.AddWithValue("@id", runId);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.Parameters.AddWithValue("@reason", (object?)reason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@expected_attempt",
+            expectedAttempt.HasValue ? expectedAttempt.Value : DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+        if (priorStatus == 1 && jobName is { })
+        {
+            await DecrementRunningCountAsync(conn, tx, jobName, cancellationToken);
+        }
+
+        // Every cancel transitions a non-terminal row to Cancelled, so non_terminal_count always decrements.
+        if (jobName is { })
+        {
+            await DecrementNonTerminalCountAsync(conn, tx, jobName, cancellationToken);
         }
 
         var allEvents = new List<RunEvent>();
@@ -814,18 +879,21 @@ internal sealed class SqliteJobStore(
         return new(true, batchCompletion);
     }
 
-    public Task<JobRun?> ClaimRunAsync(
+    public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(
         string nodeName,
         IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames,
+        int maxCount,
         CancellationToken cancellationToken = default)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxCount, 1);
+
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
-            return Task.FromResult<JobRun?>(null);
+            return Task.FromResult<IReadOnlyList<JobRun>>(Array.Empty<JobRun>());
         }
 
-        return ClaimRunCoreAsync(nodeName, jobNames, queueNames, cancellationToken);
+        return ClaimRunsCoreAsync(nodeName, jobNames, queueNames, maxCount, cancellationToken);
     }
 
     public async Task CreateBatchAsync(
@@ -853,11 +921,17 @@ internal sealed class SqliteJobStore(
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        var increments = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var run in runs)
         {
             await InsertRunAsync(conn, run, cancellationToken, tx);
+            if (!run.Status.IsTerminal)
+            {
+                increments[run.JobName] = increments.GetValueOrDefault(run.JobName) + 1;
+            }
         }
 
+        await IncrementNonTerminalCountsAsync(conn, tx, increments, cancellationToken);
         await InsertEventsAsync(conn, initialEvents, cancellationToken, tx);
 
         await tx.CommitAsync(cancellationToken);
@@ -916,6 +990,31 @@ internal sealed class SqliteJobStore(
         await using var tx = conn.BeginTransaction(false);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
 
+        // Snapshot prior status + job_name BEFORE the cancel UPDATE. SQLite RETURNING reflects
+        // post-update values, so the snapshot is the only way to observe the prior status; we
+        // need both Running (→ running_count decrement) and all non-terminal (→ non_terminal_count
+        // decrement) populations.
+        var priorRunning = new Dictionary<string, int>(StringComparer.Ordinal);
+        var priorNonTerminal = new Dictionary<string, int>(StringComparer.Ordinal);
+        await using (var snapshotCmd = CreateCommand(conn, """
+                                                           SELECT job_name, status FROM surefire_runs
+                                                           WHERE batch_id = @batch_id AND status IN (0, 1)
+                                                           """, tx))
+        {
+            snapshotCmd.Parameters.AddWithValue("@batch_id", batchId);
+            await using var snapReader = await snapshotCmd.ExecuteReaderAsync(cancellationToken);
+            while (await snapReader.ReadAsync(cancellationToken))
+            {
+                var jn = snapReader.GetString(0);
+                var st = snapReader.GetInt32(1);
+                priorNonTerminal[jn] = priorNonTerminal.GetValueOrDefault(jn) + 1;
+                if (st == 1)
+                {
+                    priorRunning[jn] = priorRunning.GetValueOrDefault(jn) + 1;
+                }
+            }
+        }
+
         var cancelledIds = new List<string>();
         var statusEvents = new List<RunEvent>();
         await using (var cmd = CreateCommand(conn, """
@@ -945,6 +1044,8 @@ internal sealed class SqliteJobStore(
         }
 
         await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
+        await DecrementRunningCountsAsync(conn, tx, priorRunning, cancellationToken);
+        await DecrementNonTerminalCountsAsync(conn, tx, priorNonTerminal, cancellationToken);
 
         if (cancelledIds.Count > 0)
         {
@@ -1000,6 +1101,29 @@ internal sealed class SqliteJobStore(
         await using var tx = conn.BeginTransaction(false);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
 
+        // Snapshot prior status + job_name BEFORE the cancel UPDATE so we know which rows were
+        // Running and need their materialized counters decremented. Mirrors CancelBatchRunsAsync.
+        var priorRunning = new Dictionary<string, int>(StringComparer.Ordinal);
+        var priorNonTerminal = new Dictionary<string, int>(StringComparer.Ordinal);
+        await using (var snapshotCmd = CreateCommand(conn, """
+                                                           SELECT job_name, status FROM surefire_runs
+                                                           WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
+                                                           """, tx))
+        {
+            snapshotCmd.Parameters.AddWithValue("@parent_run_id", parentRunId);
+            await using var snapReader = await snapshotCmd.ExecuteReaderAsync(cancellationToken);
+            while (await snapReader.ReadAsync(cancellationToken))
+            {
+                var jn = snapReader.GetString(0);
+                var st = snapReader.GetInt32(1);
+                priorNonTerminal[jn] = priorNonTerminal.GetValueOrDefault(jn) + 1;
+                if (st == 1)
+                {
+                    priorRunning[jn] = priorRunning.GetValueOrDefault(jn) + 1;
+                }
+            }
+        }
+
         var cancelledIds = new List<string>();
         var cancelledBatchIds = new Dictionary<string, int>();
         var statusEvents = new List<RunEvent>();
@@ -1035,6 +1159,8 @@ internal sealed class SqliteJobStore(
         }
 
         await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
+        await DecrementRunningCountsAsync(conn, tx, priorRunning, cancellationToken);
+        await DecrementNonTerminalCountsAsync(conn, tx, priorNonTerminal, cancellationToken);
 
         foreach (var (batchId, cnt) in cancelledBatchIds)
         {
@@ -1368,6 +1494,34 @@ internal sealed class SqliteJobStore(
         return stopped;
     }
 
+    public async Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
+
+        await using var conn = await CreateConnectionAsync(cancellationToken);
+        // Backed by ix_runs_stale_heartbeat (partial WHERE status = 1 on last_heartbeat_at).
+        // Returns IDs only; oldest heartbeat first so the caller's processing loop makes monotonic
+        // progress against a shrinking filter set.
+        await using var cmd = CreateCommand(conn, """
+                                                  SELECT id FROM surefire_runs
+                                                  WHERE status = 1 AND last_heartbeat_at < @stale_before
+                                                  ORDER BY last_heartbeat_at ASC, id ASC
+                                                  LIMIT @take
+                                                  """);
+        cmd.Parameters.AddWithValue("@take", take);
+        cmd.Parameters.AddWithValue("@stale_before", FormatTimestamp(staleBefore));
+
+        var ids = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            ids.Add(reader.GetString(0));
+        }
+
+        return ids;
+    }
+
     public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(
         CancellationToken cancellationToken = default)
     {
@@ -1514,6 +1668,7 @@ internal sealed class SqliteJobStore(
         var statusEvents = new List<RunEvent>();
 
         var cancelledBatchIds = new Dictionary<string, int>();
+        var expiredByJob = new Dictionary<string, int>(StringComparer.Ordinal);
         await using (var updateCmd = CreateCommand(conn, """
                                                          UPDATE surefire_runs
                                                          SET status = 4,
@@ -1523,7 +1678,7 @@ internal sealed class SqliteJobStore(
                                                          WHERE status = 0
                                                              AND not_after IS NOT NULL
                                                              AND not_after < @now
-                                                         RETURNING id, attempt, batch_id
+                                                         RETURNING id, attempt, batch_id, job_name
                                                          """, tx))
         {
             updateCmd.Parameters.AddWithValue("@now", now);
@@ -1540,10 +1695,16 @@ internal sealed class SqliteJobStore(
                 {
                     cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
                 }
+
+                var jn = reader.GetString(3);
+                expiredByJob[jn] = expiredByJob.GetValueOrDefault(jn) + 1;
             }
         }
 
         await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
+        // Only pending rows (status = 0) were touched, so running_count is unaffected;
+        // non_terminal_count decrements once per cancelled row, grouped by job_name.
+        await DecrementNonTerminalCountsAsync(conn, tx, expiredByJob, cancellationToken);
 
         foreach (var (batchId, cnt) in cancelledBatchIds)
         {
@@ -1599,6 +1760,9 @@ internal sealed class SqliteJobStore(
         while (true)
         {
             await using var tx = conn.BeginTransaction(false);
+            // DELETE ... RETURNING captures the deleted rows' status + job_name so we can decrement
+            // non_terminal_count for any non-terminal rows removed (pending-abandon branch).
+            // Terminal deletions don't contribute to non_terminal_count in the first place.
             await using var cmd = CreateCommand(conn, """
                                                       DELETE FROM surefire_runs WHERE rowid IN (
                                                           SELECT rowid FROM surefire_runs
@@ -1614,9 +1778,29 @@ internal sealed class SqliteJobStore(
                                                               OR (status = 0 AND not_before < @b)
                                                           LIMIT 1000
                                                       )
+                                                      RETURNING status, job_name
                                                       """, tx);
             cmd.Parameters.AddWithValue("@b", thresholdStr);
-            var deleted = await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+            var nonTerminalByJob = new Dictionary<string, int>(StringComparer.Ordinal);
+            var deleted = 0;
+            await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    deleted++;
+                    var status = reader.GetInt32(0);
+                    if (status is 2 or 4 or 5)
+                    {
+                        continue;
+                    }
+
+                    var jn = reader.GetString(1);
+                    nonTerminalByJob[jn] = nonTerminalByJob.GetValueOrDefault(jn) + 1;
+                }
+            }
+
+            await DecrementNonTerminalCountsAsync(conn, tx, nonTerminalByJob, cancellationToken);
             await tx.CommitAsync(cancellationToken);
             if (deleted < 1000)
             {
@@ -1917,10 +2101,11 @@ internal sealed class SqliteJobStore(
     public bool IsTransientException(Exception ex) =>
         ex is SqliteException sqlite && sqlite.SqliteErrorCode is 5 or 6;
 
-    private async Task<JobRun?> ClaimRunCoreAsync(
+    private async Task<IReadOnlyList<JobRun>> ClaimRunsCoreAsync(
         string nodeName,
         IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames,
+        int maxCount,
         CancellationToken cancellationToken)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
@@ -1929,29 +2114,59 @@ internal sealed class SqliteJobStore(
         var jobNameParams = BuildInClause("@jn", jobNames, out var jobNameClause);
         var queueNameParams = BuildInClause("@qn", queueNames, out var queueNameClause);
 
+        // ROW_NUMBER PARTITION BY enforces per-constraint-bucket capacity strictly. Capacity
+        // reads come from the materialized j.running_count and q.running_count columns (no scan
+        // of surefire_runs). RETURNING includes the joined rate-limit names so the in-process
+        // aggregation that follows can apply per-limiter increments without a per-row lookup
+        // (eliminates the previous N+1). q_rl_rn check is skipped when queue shares the job's
+        // rate limiter (same bucket → already capped). SQLite serializes writers so no SKIP
+        // LOCKED is needed; transaction isolation alone is sufficient.
         var claimSql = $"""
-                        WITH jobs_at_capacity AS (
-                            SELECT r2.job_name
-                            FROM surefire_runs r2
-                            JOIN surefire_jobs j2 ON j2.name = r2.job_name
-                            WHERE r2.status = 1 AND j2.max_concurrency IS NOT NULL
-                            GROUP BY r2.job_name, j2.max_concurrency
-                            HAVING COUNT(*) >= j2.max_concurrency
+                        WITH rl_remaining AS (
+                            SELECT rl.name,
+                                MAX(0, rl.max_permits - (
+                                    CASE
+                                        WHEN rl.window_start IS NULL THEN 0
+                                        WHEN (julianday(@now) - julianday(rl.window_start))
+                                            * 864000000000.0 >= CAST(rl."window" AS REAL) * 2 THEN 0
+                                        WHEN rl.type = 1 AND julianday(rl.window_start)
+                                            + CAST(rl."window" AS REAL) / 864000000000.0 <= julianday(@now) THEN
+                                            rl.current_count * MAX(0, 1.0 - ((julianday(@now) - julianday(rl.window_start))
+                                                * 864000000000.0 - CAST(rl."window" AS REAL)) / CAST(rl."window" AS REAL))
+                                        WHEN julianday(rl.window_start)
+                                            + CAST(rl."window" AS REAL) / 864000000000.0 <= julianday(@now) THEN 0
+                                        WHEN rl.type = 1 THEN
+                                            COALESCE(rl.previous_count, 0) * MAX(0, 1.0 - (julianday(@now)
+                                                - julianday(rl.window_start)) * 864000000000.0
+                                                / CAST(rl."window" AS REAL)) + rl.current_count
+                                        ELSE rl.current_count
+                                    END
+                                )) AS remaining
+                            FROM surefire_rate_limits rl
                         ),
-                        queues_at_capacity AS (
-                            SELECT COALESCE(j2.queue, 'default') AS queue_name
-                            FROM surefire_runs r2
-                            JOIN surefire_jobs j2 ON j2.name = r2.job_name
-                            JOIN surefire_queues q2 ON q2.name = COALESCE(j2.queue, 'default')
-                            WHERE r2.status = 1 AND q2.max_concurrency IS NOT NULL
-                            GROUP BY COALESCE(j2.queue, 'default'), q2.max_concurrency
-                            HAVING COUNT(*) >= q2.max_concurrency
-                        )
-                        UPDATE surefire_runs
-                        SET status = 1, node_name = @nn, started_at = @now,
-                            last_heartbeat_at = @now, attempt = attempt + 1
-                        WHERE id = (
-                            SELECT r.id
+                        rl_state AS (
+                            -- SQLite lacks a scalar CEIL, so emulate: trunc + (1 if fractional else 0).
+                            -- Matches the single-claim "used < max_permits" rule, which allowed one
+                            -- more claim even when remaining capacity was fractional (e.g.,
+                            -- sliding-window decay leaves 0.44 permits → still allow 1 claim).
+                            SELECT name,
+                                CAST(remaining AS INTEGER) + IIF(remaining > CAST(remaining AS INTEGER), 1, 0) AS available
+                            FROM rl_remaining
+                        ),
+                        ranked AS (
+                            SELECT r.id, r.queue_priority, r.priority, r.not_before,
+                                r.job_name AS run_job_name, COALESCE(j.queue, 'default') AS run_queue_name,
+                                j.max_concurrency AS j_max, q.max_concurrency AS q_max,
+                                j.running_count AS j_running, COALESCE(q.running_count, 0) AS q_running,
+                                j.rate_limit_name AS j_rl, q.rate_limit_name AS q_rl,
+                                ROW_NUMBER() OVER (PARTITION BY r.job_name
+                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
+                                ROW_NUMBER() OVER (PARTITION BY COALESCE(j.queue, 'default')
+                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
+                                ROW_NUMBER() OVER (PARTITION BY j.rate_limit_name
+                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
+                                ROW_NUMBER() OVER (PARTITION BY q.rate_limit_name
+                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
                             FROM surefire_runs r
                             JOIN surefire_jobs j ON j.name = r.job_name
                             LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
@@ -1961,136 +2176,166 @@ internal sealed class SqliteJobStore(
                                 AND r.job_name IN ({jobNameClause})
                                 AND COALESCE(j.queue, 'default') IN ({queueNameClause})
                                 AND COALESCE(q.is_paused, 0) = 0
-                                AND (j.max_concurrency IS NULL
-                                    OR r.job_name NOT IN (SELECT job_name FROM jobs_at_capacity))
-                                AND (q.max_concurrency IS NULL
-                                    OR COALESCE(j.queue, 'default') NOT IN (SELECT queue_name FROM queues_at_capacity))
-                                AND (j.rate_limit_name IS NULL
-                                    OR NOT EXISTS (
-                                        SELECT 1 FROM surefire_rate_limits WHERE name = j.rate_limit_name)
-                                    OR EXISTS (
-                                        SELECT 1 FROM surefire_rate_limits rl
-                                        WHERE rl.name = j.rate_limit_name
-                                            AND CASE
-                                                WHEN rl.window_start IS NULL THEN 1
-                                                WHEN (julianday(@now) - julianday(rl.window_start))
-                                                    * 864000000000.0 >= CAST(rl."window" AS REAL) * 2
-                                                THEN 1
-                                                WHEN rl.type = 1 AND julianday(rl.window_start)
-                                                    + CAST(rl."window" AS REAL) / 864000000000.0
-                                                    <= julianday(@now)
-                                                THEN rl.current_count
-                                                    * MAX(0, 1.0 - ((julianday(@now) - julianday(rl.window_start))
-                                                        * 864000000000.0 - CAST(rl."window" AS REAL))
-                                                        / CAST(rl."window" AS REAL))
-                                                    < rl.max_permits
-                                                WHEN julianday(rl.window_start)
-                                                    + CAST(rl."window" AS REAL) / 864000000000.0
-                                                    <= julianday(@now)
-                                                THEN 1
-                                                WHEN rl.type = 0
-                                                THEN rl.current_count < rl.max_permits
-                                                WHEN rl.type = 1
-                                                THEN (COALESCE(rl.previous_count, 0)
-                                                    * MAX(0, 1.0 - (julianday(@now)
-                                                        - julianday(rl.window_start))
-                                                        * 864000000000.0
-                                                        / CAST(rl."window" AS REAL))
-                                                    + rl.current_count) < rl.max_permits
-                                                ELSE rl.current_count < rl.max_permits
-                                            END = 1))
-                                AND (q.rate_limit_name IS NULL
-                                    OR NOT EXISTS (
-                                        SELECT 1 FROM surefire_rate_limits WHERE name = q.rate_limit_name)
-                                    OR EXISTS (
-                                        SELECT 1 FROM surefire_rate_limits rl
-                                        WHERE rl.name = q.rate_limit_name
-                                            AND CASE
-                                                WHEN rl.window_start IS NULL THEN 1
-                                                WHEN (julianday(@now) - julianday(rl.window_start))
-                                                    * 864000000000.0 >= CAST(rl."window" AS REAL) * 2
-                                                THEN 1
-                                                WHEN rl.type = 1 AND julianday(rl.window_start)
-                                                    + CAST(rl."window" AS REAL) / 864000000000.0
-                                                    <= julianday(@now)
-                                                THEN rl.current_count
-                                                    * MAX(0, 1.0 - ((julianday(@now) - julianday(rl.window_start))
-                                                        * 864000000000.0 - CAST(rl."window" AS REAL))
-                                                        / CAST(rl."window" AS REAL))
-                                                    < rl.max_permits
-                                                WHEN julianday(rl.window_start)
-                                                    + CAST(rl."window" AS REAL) / 864000000000.0
-                                                    <= julianday(@now)
-                                                THEN 1
-                                                WHEN rl.type = 0
-                                                THEN rl.current_count < rl.max_permits
-                                                WHEN rl.type = 1
-                                                THEN (COALESCE(rl.previous_count, 0)
-                                                    * MAX(0, 1.0 - (julianday(@now)
-                                                        - julianday(rl.window_start))
-                                                        * 864000000000.0
-                                                        / CAST(rl."window" AS REAL))
-                                                    + rl.current_count) < rl.max_permits
-                                                ELSE rl.current_count < rl.max_permits
-                                            END = 1))
-                            ORDER BY r.queue_priority DESC, r.priority DESC,
-                                r.not_before ASC, r.id ASC
-                            LIMIT 1
                         )
-                        RETURNING *
+                        SELECT r.id, r.run_job_name, r.run_queue_name, r.j_rl, r.q_rl
+                        FROM ranked r
+                        LEFT JOIN rl_state jrl ON jrl.name = r.j_rl
+                        LEFT JOIN rl_state qrl ON qrl.name = r.q_rl
+                        WHERE (r.j_max IS NULL OR r.j_rn <= r.j_max - r.j_running)
+                            AND (r.q_max IS NULL OR r.q_rn <= r.q_max - r.q_running)
+                            AND (r.j_rl IS NULL OR jrl.available IS NULL OR r.j_rl_rn <= jrl.available)
+                            AND (r.q_rl IS NULL OR r.q_rl = r.j_rl OR qrl.available IS NULL OR r.q_rl_rn <= qrl.available)
+                        ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC
+                        LIMIT @max_count
                         """;
 
-        JobRun? result;
-        await using (var claimCmd = CreateCommand(conn, claimSql, tx))
+        // Phase 1 (within the same write-locked transaction): SELECT the eligible candidates
+        // with their job/queue/rate-limit names. SQLite forbids referencing FROM columns in
+        // RETURNING, so we capture the metadata here and then UPDATE-by-id in a second statement.
+        // The transaction is BEGIN IMMEDIATE so the read sees a consistent snapshot and writers
+        // are serialized; no other transaction can interleave between SELECT and UPDATE.
+        var claimed = new List<(string Id, string JobName, string QueueName, string? JobRl, string? QueueRl)>();
+        await using (var selectCmd = CreateCommand(conn, claimSql, tx))
         {
-            claimCmd.Parameters.AddWithValue("@now", now);
-            claimCmd.Parameters.AddWithValue("@nn", nodeName);
+            selectCmd.Parameters.AddWithValue("@now", now);
+            selectCmd.Parameters.AddWithValue("@max_count", maxCount);
             foreach (var p in jobNameParams)
             {
-                claimCmd.Parameters.Add(p);
+                selectCmd.Parameters.Add(p);
             }
 
             foreach (var p in queueNameParams)
             {
-                claimCmd.Parameters.Add(p);
+                selectCmd.Parameters.Add(p);
             }
 
-            await using var reader = await claimCmd.ExecuteReaderAsync(cancellationToken);
-            result = await reader.ReadAsync(cancellationToken) ? ReadRun(reader) : null;
+            await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var id = reader.GetString(0);
+                var jobName = reader.GetString(1);
+                var queueName = reader.GetString(2);
+                var jobRl = reader.IsDBNull(3) ? null : reader.GetString(3);
+                var queueRl = reader.IsDBNull(4) ? null : reader.GetString(4);
+                claimed.Add((id, jobName, queueName, jobRl, queueRl));
+            }
         }
 
-        if (result is null)
+        if (claimed.Count == 0)
         {
             await tx.CommitAsync(cancellationToken);
-            return null;
+            return Array.Empty<JobRun>();
         }
 
-        await AcquireRateLimitAsync(conn,
-            "SELECT rate_limit_name FROM surefire_jobs WHERE name = @name",
-            [new("@name", result.JobName)], now, tx, cancellationToken);
-
-        await AcquireRateLimitAsync(conn,
-            """
-            SELECT q.rate_limit_name
-            FROM surefire_jobs j
-            LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
-            WHERE j.name = @name
-                AND q.rate_limit_name IS NOT NULL
-                AND q.rate_limit_name != COALESCE(j.rate_limit_name, '')
-            """,
-            [new("@name", result.JobName)], now, tx, cancellationToken);
-
-        if (result is { })
+        // Phase 2: claim the selected runs by id. Use UPDATE...WHERE id IN (?,?,...) RETURNING *
+        // so we get the full updated row back without the SQLite RETURNING-FROM restriction.
+        var idParams = new List<string>(claimed.Count);
+        var idCmd = CreateCommand(conn, "", tx);
+        for (var i = 0; i < claimed.Count; i++)
         {
-            await InsertEventsAsync(
-                conn,
-                [RunStatusEvents.Create(result.Id, result.Attempt, result.Status, timeProvider.GetUtcNow())],
-                cancellationToken,
-                tx);
+            var name = $"@id_{i}";
+            idParams.Add(name);
+            idCmd.Parameters.AddWithValue(name, claimed[i].Id);
+        }
+
+        idCmd.Parameters.AddWithValue("@now", now);
+        idCmd.Parameters.AddWithValue("@nn", nodeName);
+        idCmd.CommandText = $"""
+                             UPDATE surefire_runs
+                             SET status = 1, node_name = @nn, started_at = @now,
+                                 last_heartbeat_at = @now, attempt = attempt + 1
+                             WHERE id IN ({string.Join(",", idParams)})
+                             RETURNING *
+                             """;
+
+        var claimedRuns = new List<JobRun>(claimed.Count);
+        await using (var idReader = await idCmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await idReader.ReadAsync(cancellationToken))
+            {
+                claimedRuns.Add(ReadRun(idReader));
+            }
+        }
+
+        await idCmd.DisposeAsync();
+
+        var jobIncrements = new Dictionary<string, int>(StringComparer.Ordinal);
+        var queueIncrements = new Dictionary<string, int>(StringComparer.Ordinal);
+        Dictionary<string, int>? rateLimitIncrements = null;
+        var nowOffset = timeProvider.GetUtcNow();
+        var statusEvents = new List<RunEvent>(claimedRuns.Count);
+
+        // Pair each claimed run with the metadata captured in phase 1; both lists are in the same
+        // order because phase 2's UPDATE...WHERE id IN (...) RETURNING * preserves no order, so we
+        // index by id from a small lookup. (Counts are bounded by max_count, typically ≤32.)
+        var metadataById = new Dictionary<string, (string QueueName, string? JobRl, string? QueueRl)>(
+            claimed.Count, StringComparer.Ordinal);
+        foreach (var (id, _, queueName, jobRl, queueRl) in claimed)
+        {
+            metadataById[id] = (queueName, jobRl, queueRl);
+        }
+
+        foreach (var run in claimedRuns)
+        {
+            statusEvents.Add(RunStatusEvents.Create(run.Id, run.Attempt, run.Status, nowOffset));
+            jobIncrements[run.JobName] = jobIncrements.GetValueOrDefault(run.JobName) + 1;
+            var meta = metadataById[run.Id];
+            queueIncrements[meta.QueueName] = queueIncrements.GetValueOrDefault(meta.QueueName) + 1;
+
+            if (meta.JobRl is { })
+            {
+                rateLimitIncrements ??= new(StringComparer.Ordinal);
+                rateLimitIncrements[meta.JobRl] = rateLimitIncrements.GetValueOrDefault(meta.JobRl) + 1;
+            }
+
+            if (meta.QueueRl is { } && meta.QueueRl != meta.JobRl)
+            {
+                rateLimitIncrements ??= new(StringComparer.Ordinal);
+                rateLimitIncrements[meta.QueueRl] = rateLimitIncrements.GetValueOrDefault(meta.QueueRl) + 1;
+            }
+        }
+
+        await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
+
+        // SQLite lacks UPDATE FROM (VALUES ...), so we issue one targeted UPDATE per distinct
+        // job/queue. The map sizes are bounded by the number of distinct job/queue names in this
+        // claim batch (typically 1-2 in practice), so this remains O(distinct names), not O(runs).
+        await using (var jobIncCmd = CreateCommand(conn,
+                         "UPDATE surefire_jobs SET running_count = running_count + @cnt WHERE name = @name", tx))
+        {
+            var jobNameParam = jobIncCmd.Parameters.AddWithValue("@name", DBNull.Value);
+            var jobCntParam = jobIncCmd.Parameters.AddWithValue("@cnt", 0);
+            foreach (var (jn, cnt) in jobIncrements)
+            {
+                jobNameParam.Value = jn;
+                jobCntParam.Value = cnt;
+                await jobIncCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        await using (var queueIncCmd = CreateCommand(conn,
+                         "UPDATE surefire_queues SET running_count = running_count + @cnt WHERE name = @name", tx))
+        {
+            var queueNameParam = queueIncCmd.Parameters.AddWithValue("@name", DBNull.Value);
+            var queueCntParam = queueIncCmd.Parameters.AddWithValue("@cnt", 0);
+            foreach (var (qn, cnt) in queueIncrements)
+            {
+                queueNameParam.Value = qn;
+                queueCntParam.Value = cnt;
+                await queueIncCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        if (rateLimitIncrements is { })
+        {
+            foreach (var (rateLimitName, count) in rateLimitIncrements)
+            {
+                await AcquireRateLimitByNameAsync(conn, rateLimitName, count, now, tx, cancellationToken);
+            }
         }
 
         await tx.CommitAsync(cancellationToken);
-        return result;
+        return claimedRuns;
     }
 
     private async Task CreateRunsCoreAsync(
@@ -2105,11 +2350,17 @@ internal sealed class SqliteJobStore(
 
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var tx = conn.BeginTransaction(false);
+        var increments = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var run in runs)
         {
             await InsertRunAsync(conn, run, cancellationToken, tx);
+            if (!run.Status.IsTerminal)
+            {
+                increments[run.JobName] = increments.GetValueOrDefault(run.JobName) + 1;
+            }
         }
 
+        await IncrementNonTerminalCountsAsync(conn, tx, increments, cancellationToken);
         await InsertEventsAsync(conn, initialEvents, cancellationToken, tx);
 
         await tx.CommitAsync(cancellationToken);
@@ -2142,33 +2393,39 @@ internal sealed class SqliteJobStore(
 
         if (maxActiveForJob is { })
         {
-            await using var enabledCmd = CreateCommand(conn, """
-                                                             SELECT is_enabled FROM surefire_jobs WHERE name = @n
-                                                             """, tx);
-            enabledCmd.Parameters.AddWithValue("@n", run.JobName);
-            var enabledValue = await enabledCmd.ExecuteScalarAsync(cancellationToken);
-            if (enabledValue is long enabledLong && enabledLong == 0)
+            // Capacity check reads the maintained counter on the job row — no table scan. If the
+            // job row does not yet exist (late registration), treat as enabled with zero active
+            // runs (per the TryCreateRunAsync contract for unknown jobs).
+            await using var checkCmd = CreateCommand(conn, """
+                                                           SELECT is_enabled, non_terminal_count
+                                                           FROM surefire_jobs WHERE name = @n
+                                                           """, tx);
+            checkCmd.Parameters.AddWithValue("@n", run.JobName);
+            await using (var reader = await checkCmd.ExecuteReaderAsync(cancellationToken))
             {
-                await tx.CommitAsync(cancellationToken);
-                return false;
-            }
-
-            await using var activeCmd = CreateCommand(conn, """
-                                                            SELECT COUNT(*)
-                                                            FROM surefire_runs
-                                                            WHERE job_name = @j AND status NOT IN (2, 4, 5)
-                                                            """, tx);
-            activeCmd.Parameters.AddWithValue("@j", run.JobName);
-            if ((long)(await activeCmd.ExecuteScalarAsync(cancellationToken))! >= maxActiveForJob.Value)
-            {
-                await tx.CommitAsync(cancellationToken);
-                return false;
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    var isEnabled = reader.GetInt64(0) != 0;
+                    var nonTerminal = reader.GetInt32(1);
+                    if (!isEnabled || nonTerminal >= maxActiveForJob.Value)
+                    {
+                        await tx.CommitAsync(cancellationToken);
+                        return false;
+                    }
+                }
+                // else: job not registered yet — treated as enabled with 0 non-terminal runs.
             }
         }
 
         try
         {
             await InsertRunAsync(conn, run, cancellationToken, tx);
+
+            // Maintain non_terminal_count atomically with the insert.
+            if (!run.Status.IsTerminal)
+            {
+                await IncrementNonTerminalCountAsync(conn, tx, run.JobName, cancellationToken);
+            }
 
             if (lastCronFireAt is { })
             {
@@ -2533,6 +2790,187 @@ internal sealed class SqliteJobStore(
         acquireCmd.Parameters.AddWithValue("@name", rateLimitName);
         acquireCmd.Parameters.AddWithValue("@now", now);
         await acquireCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    // Decrement materialized running_count counters for a single Running → terminal transition.
+    // Both updates happen inside the supplied transaction; the queue lookup uses COALESCE so
+    // jobs without an explicit queue still target the always-present 'default' queue row.
+    private async Task DecrementRunningCountAsync(SqliteConnection conn, SqliteTransaction tx,
+        string jobName, CancellationToken cancellationToken)
+    {
+        await using var jobCmd = CreateCommand(conn, """
+                                                     UPDATE surefire_jobs
+                                                     SET running_count = MAX(0, running_count - 1)
+                                                     WHERE name = @name
+                                                     """, tx);
+        jobCmd.Parameters.AddWithValue("@name", jobName);
+        await jobCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var queueCmd = CreateCommand(conn, """
+                                                       UPDATE surefire_queues
+                                                       SET running_count = MAX(0, running_count - 1)
+                                                       WHERE name = (
+                                                           SELECT COALESCE(j.queue, 'default')
+                                                           FROM surefire_jobs j WHERE j.name = @name
+                                                       )
+                                                       """, tx);
+        queueCmd.Parameters.AddWithValue("@name", jobName);
+        await queueCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    // Adjust non_terminal_count on surefire_jobs. Mirrors the running_count helpers but tracks the
+    // broader "non-terminal" set (status NOT IN (2,4,5)), incremented on run create and decremented
+    // on transition INTO a terminal status or purge of a non-terminal row.
+    private async Task IncrementNonTerminalCountAsync(SqliteConnection conn, SqliteTransaction tx,
+        string jobName, CancellationToken cancellationToken)
+    {
+        await using var cmd = CreateCommand(conn,
+            "UPDATE surefire_jobs SET non_terminal_count = non_terminal_count + 1 WHERE name = @name", tx);
+        cmd.Parameters.AddWithValue("@name", jobName);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task IncrementNonTerminalCountsAsync(SqliteConnection conn, SqliteTransaction tx,
+        IReadOnlyDictionary<string, int> jobNameToCount, CancellationToken cancellationToken)
+    {
+        if (jobNameToCount.Count == 0)
+        {
+            return;
+        }
+
+        await using var cmd = CreateCommand(conn,
+            "UPDATE surefire_jobs SET non_terminal_count = non_terminal_count + @cnt WHERE name = @name", tx);
+        var nameParam = cmd.Parameters.AddWithValue("@name", DBNull.Value);
+        var cntParam = cmd.Parameters.AddWithValue("@cnt", 0);
+
+        foreach (var (jn, cnt) in jobNameToCount)
+        {
+            nameParam.Value = jn;
+            cntParam.Value = cnt;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    private async Task DecrementNonTerminalCountAsync(SqliteConnection conn, SqliteTransaction tx,
+        string jobName, CancellationToken cancellationToken)
+    {
+        await using var cmd = CreateCommand(conn,
+            "UPDATE surefire_jobs SET non_terminal_count = MAX(0, non_terminal_count - 1) WHERE name = @name", tx);
+        cmd.Parameters.AddWithValue("@name", jobName);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task DecrementNonTerminalCountsAsync(SqliteConnection conn, SqliteTransaction tx,
+        IReadOnlyDictionary<string, int> jobNameToCount, CancellationToken cancellationToken)
+    {
+        if (jobNameToCount.Count == 0)
+        {
+            return;
+        }
+
+        await using var cmd = CreateCommand(conn,
+            "UPDATE surefire_jobs SET non_terminal_count = MAX(0, non_terminal_count - @cnt) WHERE name = @name", tx);
+        var nameParam = cmd.Parameters.AddWithValue("@name", DBNull.Value);
+        var cntParam = cmd.Parameters.AddWithValue("@cnt", 0);
+
+        foreach (var (jn, cnt) in jobNameToCount)
+        {
+            nameParam.Value = jn;
+            cntParam.Value = cnt;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    // Aggregate decrement for batch cancellations. Issues one job/queue UPDATE per distinct
+    // job_name in the input map; the cardinality is bounded by the number of distinct jobs
+    // touched by the cancellation (typically very small in practice).
+    private async Task DecrementRunningCountsAsync(SqliteConnection conn, SqliteTransaction tx,
+        IReadOnlyDictionary<string, int> jobNameToCount, CancellationToken cancellationToken)
+    {
+        if (jobNameToCount.Count == 0)
+        {
+            return;
+        }
+
+        await using var jobCmd = CreateCommand(conn,
+            "UPDATE surefire_jobs SET running_count = MAX(0, running_count - @cnt) WHERE name = @name", tx);
+        var jobNameParam = jobCmd.Parameters.AddWithValue("@name", DBNull.Value);
+        var jobCntParam = jobCmd.Parameters.AddWithValue("@cnt", 0);
+        await using var queueCmd = CreateCommand(conn,
+            """
+            UPDATE surefire_queues
+            SET running_count = MAX(0, running_count - @cnt)
+            WHERE name = (
+                SELECT COALESCE(j.queue, 'default')
+                FROM surefire_jobs j WHERE j.name = @name
+            )
+            """, tx);
+        var queueNameParam = queueCmd.Parameters.AddWithValue("@name", DBNull.Value);
+        var queueCntParam = queueCmd.Parameters.AddWithValue("@cnt", 0);
+
+        foreach (var (jn, cnt) in jobNameToCount)
+        {
+            jobNameParam.Value = jn;
+            jobCntParam.Value = cnt;
+            await jobCmd.ExecuteNonQueryAsync(cancellationToken);
+
+            queueNameParam.Value = jn;
+            queueCntParam.Value = cnt;
+            await queueCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    private async Task AcquireRateLimitByNameAsync(
+        SqliteConnection conn,
+        string rateLimitName,
+        int count,
+        string now,
+        SqliteTransaction tx,
+        CancellationToken cancellationToken)
+    {
+        await using var cmd = CreateCommand(conn, """
+                                                  UPDATE surefire_rate_limits
+                                                  SET previous_count = CASE
+                                                          WHEN window_start IS NULL THEN 0
+                                                          WHEN (julianday(@now) - julianday(window_start))
+                                                              * 864000000000.0 >= CAST("window" AS REAL) * 2
+                                                          THEN 0
+                                                          WHEN julianday(window_start)
+                                                              + CAST("window" AS REAL) / 864000000000.0
+                                                              <= julianday(@now)
+                                                          THEN current_count
+                                                          ELSE previous_count
+                                                      END,
+                                                      current_count = CASE
+                                                          WHEN window_start IS NULL THEN @count
+                                                          WHEN julianday(window_start)
+                                                              + CAST("window" AS REAL) / 864000000000.0
+                                                              <= julianday(@now)
+                                                          THEN @count
+                                                          ELSE current_count + @count
+                                                      END,
+                                                      window_start = CASE
+                                                          WHEN window_start IS NULL THEN @now
+                                                          WHEN (julianday(@now) - julianday(window_start))
+                                                              * 864000000000.0 >= CAST("window" AS REAL) * 2
+                                                          THEN strftime('%Y-%m-%dT%H:%M:%fZ', julianday(window_start)
+                                                              + CAST("window" AS REAL) * CAST(
+                                                                  (julianday(@now) - julianday(window_start)) * 864000000000.0
+                                                                  / CAST("window" AS REAL) AS INTEGER)
+                                                              / 864000000000.0)
+                                                          WHEN julianday(window_start)
+                                                              + CAST("window" AS REAL) / 864000000000.0
+                                                              <= julianday(@now)
+                                                          THEN strftime('%Y-%m-%dT%H:%M:%fZ', julianday(window_start)
+                                                              + CAST("window" AS REAL) / 864000000000.0)
+                                                          ELSE window_start
+                                                      END
+                                                  WHERE name = @name
+                                                  """, tx);
+        cmd.Parameters.AddWithValue("@name", rateLimitName);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.Parameters.AddWithValue("@count", count);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static string EscapeLike(string input) =>

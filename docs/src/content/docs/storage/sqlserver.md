@@ -14,9 +14,25 @@ dotnet add package Surefire.SqlServer
 ```csharp
 builder.Services.AddSurefire(options =>
 {
-    options.UseSqlServer("Server=localhost;Database=myapp;Trusted_Connection=true");
+    options.UseSqlServer(builder.Configuration.GetConnectionString("surefire")!);
 });
 ```
+
+Or pass the connection string directly:
+
+```csharp
+options.UseSqlServer("Server=localhost;Database=myapp;Trusted_Connection=true");
+```
+
+Point Surefire at a dedicated user database — not `master`, `tempdb`, `model`, or `msdb`. The principal used for migration needs permission to create tables; at runtime `db_datareader`/`db_datawriter` is enough.
+
+For best performance, enable `READ_COMMITTED_SNAPSHOT` on the database. This prevents dashboard reads from blocking writers and reduces lock contention between claims, inserts, and maintenance under load:
+
+```sql
+ALTER DATABASE [YourDb] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
+```
+
+This requires `ALTER` on the database and exclusive access (hence `ROLLBACK IMMEDIATE`), so run it once during provisioning.
 
 ## Schema
 
@@ -31,13 +47,13 @@ The SQL Server provider does not include a real-time notification provider. Work
 options.PollingInterval = TimeSpan.FromSeconds(1);
 ```
 
-For lower latency, you can combine the SQL Server store with a separate notification provider like Redis:
+For lower latency, you can combine the SQL Server store with Redis as the notification provider. Register an `IConnectionMultiplexer` in DI (e.g. `builder.AddRedisClient("notifications")`) then:
 
 ```csharp
 builder.Services.AddSurefire(options =>
 {
     options.UseSqlServer("Server=localhost;Database=myapp;Trusted_Connection=true");
-    options.UseRedisNotifications("localhost:6379");
+    options.UseRedisNotifications();
 });
 ```
 

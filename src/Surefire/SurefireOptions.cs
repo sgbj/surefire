@@ -8,21 +8,6 @@ namespace Surefire;
 /// </summary>
 public sealed class SurefireOptions
 {
-    private TimeSpan _heartbeatInterval = TimeSpan.FromSeconds(30);
-    private TimeSpan _inactiveThreshold = TimeSpan.FromMinutes(2);
-    private int? _maxNodeConcurrency;
-    private string _nodeName = Environment.MachineName;
-    private TimeSpan _pollingInterval = TimeSpan.FromSeconds(5);
-    private TimeSpan _retentionCheckInterval = TimeSpan.FromMinutes(5);
-    private TimeSpan? _retentionPeriod = TimeSpan.FromDays(7);
-
-    private JsonSerializerOptions _serializerOptions = new(JsonSerializerOptions.Web)
-    {
-        AllowOutOfOrderMetadataProperties = true
-    };
-
-    private TimeSpan _shutdownTimeout = TimeSpan.FromSeconds(15);
-
     internal List<Delegate> OnSuccessCallbacks { get; } = [];
     internal List<Delegate> OnRetryCallbacks { get; } = [];
     internal List<Delegate> OnDeadLetterCallbacks { get; } = [];
@@ -35,11 +20,14 @@ public sealed class SurefireOptions
     internal List<Action<IServiceCollection>> ServiceConfigurators { get; } = [];
 
     /// <summary>
-    ///     Gets or sets the name of this processing node. Defaults to the machine name.
+    ///     Gets or sets the name of this processing node. Must be unique per process — two processes
+    ///     sharing a <c>NodeName</c> still run correctly but can't be distinguished in the dashboard.
+    ///     Defaults to <c>{MachineName}:{ProcessId}:{8-char random}</c>, which is unique across
+    ///     replicas, containers, and restarts while remaining human-readable.
     /// </summary>
     public string NodeName
     {
-        get => _nodeName;
+        get;
         set
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -47,16 +35,16 @@ public sealed class SurefireOptions
                 throw new ArgumentException("NodeName cannot be empty.", nameof(value));
             }
 
-            _nodeName = value;
+            field = value;
         }
-    }
+    } = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid().ToString("N")[..8]}";
 
     /// <summary>
     ///     Gets or sets the interval between polling attempts when no notifications are available.
     /// </summary>
     public TimeSpan PollingInterval
     {
-        get => _pollingInterval;
+        get;
         set
         {
             if (value <= TimeSpan.Zero)
@@ -64,16 +52,16 @@ public sealed class SurefireOptions
                 throw new ArgumentOutOfRangeException(nameof(value), "PollingInterval must be greater than zero.");
             }
 
-            _pollingInterval = value;
+            field = value;
         }
-    }
+    } = TimeSpan.FromSeconds(5);
 
     /// <summary>
     ///     Gets or sets the interval between heartbeat updates sent to the store.
     /// </summary>
     public TimeSpan HeartbeatInterval
     {
-        get => _heartbeatInterval;
+        get;
         set
         {
             if (value <= TimeSpan.Zero)
@@ -82,16 +70,16 @@ public sealed class SurefireOptions
                     "HeartbeatInterval must be greater than zero.");
             }
 
-            _heartbeatInterval = value;
+            field = value;
         }
-    }
+    } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     ///     Gets or sets the duration after which a node or entity with no heartbeat is considered inactive.
     /// </summary>
     public TimeSpan InactiveThreshold
     {
-        get => _inactiveThreshold;
+        get;
         set
         {
             if (value <= TimeSpan.Zero)
@@ -100,9 +88,9 @@ public sealed class SurefireOptions
                     "InactiveThreshold must be greater than zero.");
             }
 
-            _inactiveThreshold = value;
+            field = value;
         }
-    }
+    } = TimeSpan.FromMinutes(2);
 
     /// <summary>
     ///     Gets or sets how long completed runs are retained before being purged.
@@ -110,7 +98,7 @@ public sealed class SurefireOptions
     /// </summary>
     public TimeSpan? RetentionPeriod
     {
-        get => _retentionPeriod;
+        get;
         set
         {
             if (value is { } retention && retention < TimeSpan.Zero)
@@ -119,16 +107,16 @@ public sealed class SurefireOptions
                     "RetentionPeriod must be greater than or equal to zero when specified.");
             }
 
-            _retentionPeriod = value;
+            field = value;
         }
-    }
+    } = TimeSpan.FromDays(7);
 
     /// <summary>
     ///     Gets or sets the interval between retention purge checks.
     /// </summary>
     public TimeSpan RetentionCheckInterval
     {
-        get => _retentionCheckInterval;
+        get;
         set
         {
             if (value <= TimeSpan.Zero)
@@ -137,16 +125,16 @@ public sealed class SurefireOptions
                     "RetentionCheckInterval must be greater than zero.");
             }
 
-            _retentionCheckInterval = value;
+            field = value;
         }
-    }
+    } = TimeSpan.FromMinutes(5);
 
     /// <summary>
     ///     Gets or sets the maximum time to wait for running jobs to complete during shutdown.
     /// </summary>
     public TimeSpan ShutdownTimeout
     {
-        get => _shutdownTimeout;
+        get;
         set
         {
             if (value <= TimeSpan.Zero)
@@ -154,26 +142,26 @@ public sealed class SurefireOptions
                 throw new ArgumentOutOfRangeException(nameof(value), "ShutdownTimeout must be greater than zero.");
             }
 
-            _shutdownTimeout = value;
+            field = value;
         }
-    }
+    } = TimeSpan.FromSeconds(15);
 
     /// <summary>
     ///     Gets or sets the JSON serializer options used for all argument and result serialization.
     /// </summary>
     public JsonSerializerOptions SerializerOptions
     {
-        get => _serializerOptions;
-        set => _serializerOptions = value ?? throw new ArgumentNullException(nameof(value));
-    }
+        get;
+        set => field = value ?? throw new ArgumentNullException(nameof(value));
+    } = new(JsonSerializerOptions.Web) { AllowOutOfOrderMetadataProperties = true };
 
     /// <summary>
     ///     Gets or sets the maximum number of runs executing simultaneously on this node.
-    ///     Null means unlimited.
+    ///     Defaults to <c>min(ProcessorCount * 5, 20)</c>. Set to <c>null</c> for unlimited.
     /// </summary>
     public int? MaxNodeConcurrency
     {
-        get => _maxNodeConcurrency;
+        get;
         set
         {
             if (value is { } max && max < 1)
@@ -181,9 +169,9 @@ public sealed class SurefireOptions
                 throw new ArgumentOutOfRangeException(nameof(value), "MaxNodeConcurrency must be greater than zero.");
             }
 
-            _maxNodeConcurrency = value;
+            field = value;
         }
-    }
+    } = Math.Min(Environment.ProcessorCount * 5, 20);
 
     /// <summary>
     ///     Gets or sets whether to run database migrations automatically on startup.

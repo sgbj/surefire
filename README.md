@@ -92,16 +92,16 @@ app.MapSurefireDashboard();
 app.Run();
 ```
 
-Provider packages expose strongly typed options, including command timeout configuration:
+Provider packages resolve their underlying client (`NpgsqlDataSource`, `IConnectionMultiplexer`) from DI. Register it
+however you like — `builder.AddNpgsqlDataSource("surefire")` from Aspire, `AddNpgsqlDataSource(connectionString)`
+directly — then enable the provider:
 
 ```csharp
+builder.AddNpgsqlDataSource("surefire");
+
 builder.Services.AddSurefire(options =>
 {
-    options.UsePostgreSql(new PostgreSqlOptions
-    {
-        ConnectionString = builder.Configuration.GetConnectionString("surefire-postgres")!,
-        CommandTimeout = TimeSpan.FromSeconds(30)
-    });
+    options.UsePostgreSql(commandTimeout: TimeSpan.FromSeconds(30));
 });
 ```
 

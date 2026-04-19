@@ -15,6 +15,7 @@ public sealed class RedisNotificationProviderTests
             "localhost:1,abortConnect=false,connectTimeout=100");
         var provider = new RedisNotificationProvider(
             connection,
+            TimeProvider.System,
             NullLogger<RedisNotificationProvider>.Instance);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -34,6 +35,7 @@ public sealed class RedisNotificationProviderTests
         await using var connection = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());
         var provider = new RedisNotificationProvider(
             connection,
+            TimeProvider.System,
             NullLogger<RedisNotificationProvider>.Instance);
         await provider.InitializeAsync(ct);
 

@@ -25,6 +25,18 @@ internal sealed class SurefireHealthCheck(
                     ex);
             }
 
+            // Notification publishing is a separate signal from ping liveness: the server can be
+            // reachable while queued publishes fail (auth change, permission revoked, server-side
+            // rejection). Treat recent publish failures as a Degraded condition so operators see it.
+            var publishHealth = notifications.GetPublishHealth();
+            if (publishHealth.LastFailureAt is { } failedAt
+                && timeProvider.GetUtcNow() - failedAt < options.HeartbeatInterval)
+            {
+                return HealthCheckResult.Degraded(
+                    $"Surefire notification publish failed {publishHealth.FailureCount} time(s); " +
+                    $"most recent at {failedAt:O}. Subscribers may experience elevated wakeup latency.");
+            }
+
             var nodes = await store.GetNodesAsync(cancellationToken);
             var localNode =
                 nodes.FirstOrDefault(n => string.Equals(n.Name, options.NodeName, StringComparison.Ordinal));

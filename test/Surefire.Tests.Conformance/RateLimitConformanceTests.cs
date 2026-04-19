@@ -28,13 +28,13 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([run1], cancellationToken: ct);
         await Store.CreateRunsAsync([run2], cancellationToken: ct);
 
-        var claimed1 = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var claimed1 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed1);
 
         claimed1 = claimed1 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(claimed1, JobStatus.Running), ct);
 
-        var claimed2 = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var claimed2 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.Null(claimed2);
 
         await Store.UpsertRateLimitAsync(new()
@@ -45,7 +45,7 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
             Window = TimeSpan.FromHours(1)
         }, ct);
 
-        var claimed3 = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var claimed3 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed3);
     }
 
@@ -72,7 +72,7 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
 
         var run1 = CreateRun(jobName);
         await Store.CreateRunsAsync([run1], cancellationToken: ct);
-        var c1 = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var c1 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(c1);
 
         await Store.UpsertRateLimitAsync(new()
@@ -85,7 +85,7 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
 
         var run2 = CreateRun(jobName);
         await Store.CreateRunsAsync([run2], cancellationToken: ct);
-        var c2 = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var c2 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.Null(c2);
     }
 
@@ -117,13 +117,13 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([run2], cancellationToken: ct);
         await Store.CreateRunsAsync([run3], cancellationToken: ct);
 
-        var c1 = await Store.ClaimRunAsync("node", [jobName], [queueName], ct);
-        var c2 = await Store.ClaimRunAsync("node", [jobName], [queueName], ct);
+        var c1 = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
+        var c2 = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(c1);
         Assert.NotNull(c2);
 
         // With 2 permits used, a 3rd should be blocked
-        var c3 = await Store.ClaimRunAsync("node", [jobName], [queueName], ct);
+        var c3 = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.Null(c3);
     }
 
@@ -165,15 +165,15 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var run2 = CreateRun(jobName);
         await Store.CreateRunsAsync([run1, run2], cancellationToken: ct);
 
-        var claimed1 = await Store.ClaimRunAsync("node", [jobName], [queueName], ct);
+        var claimed1 = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed1);
 
-        var blocked = await Store.ClaimRunAsync("node", [jobName], [queueName], ct);
+        var blocked = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.Null(blocked);
 
         await Task.Delay(260, ct);
 
-        var claimedAfterWindow = await Store.ClaimRunAsync("node", [jobName], [queueName], ct);
+        var claimedAfterWindow = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimedAfterWindow);
         Assert.NotEqual(claimed1.Id, claimedAfterWindow.Id);
         Assert.Contains(claimedAfterWindow.Id, new[] { run1.Id, run2.Id });

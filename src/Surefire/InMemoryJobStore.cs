@@ -471,17 +471,31 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
     }
 
-    public Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken cancellationToken = default)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxCount, 1);
+
         lock (_gate)
         {
             var now = _timeProvider.GetUtcNow();
             var jobNameSet = jobNames as ISet<string> ?? new HashSet<string>(jobNames);
             var queueNameSet = queueNames as ISet<string> ?? new HashSet<string>(queueNames);
 
-            foreach (var key in _pendingIndex)
+            // Snapshot the pending index keys; the loop mutates _pendingIndex via RemoveFromPendingIndex.
+            // Running/pending counters and rate-limit state are updated in place so subsequent iterations
+            // see the effect of earlier claims in this same call — this preserves per-job/queue concurrency
+            // and rate-limit guarantees when batch-claiming.
+            var keys = _pendingIndex.ToArray();
+            var claimed = new List<JobRun>(Math.Min(maxCount, keys.Length));
+
+            foreach (var key in keys)
             {
+                if (claimed.Count >= maxCount)
+                {
+                    break;
+                }
+
                 if (!_runs.TryGetValue(key.Id, out var run))
                 {
                     continue;
@@ -538,8 +552,6 @@ internal sealed class InMemoryJobStore : IJobStore
                     continue;
                 }
 
-                // Rate limit: check both job and queue limits, then acquire both.
-                // All under _lock so no race between check and acquire.
                 var jobRateLimit = job.RateLimitName;
                 var queueRateLimit = queueDef?.RateLimitName;
 
@@ -561,7 +573,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
                 RemoveFromPendingIndex(run.Id);
                 DecrementCount(_pendingCountByQueue, queueName);
-                var claimed = run with
+                var claimedRun = run with
                 {
                     Status = JobStatus.Running,
                     NodeName = nodeName,
@@ -569,16 +581,16 @@ internal sealed class InMemoryJobStore : IJobStore
                     LastHeartbeatAt = now,
                     Attempt = run.Attempt + 1
                 };
-                _runs[run.Id] = claimed;
+                _runs[run.Id] = claimedRun;
 
-                IncrementCount(_runningCountByJob, claimed.JobName);
+                IncrementCount(_runningCountByJob, claimedRun.JobName);
                 IncrementCount(_runningCountByQueue, queueName);
-                AppendStatusEventCore(claimed.Id, claimed.Attempt, claimed.Status);
+                AppendStatusEventCore(claimedRun.Id, claimedRun.Attempt, claimedRun.Status);
 
-                return Task.FromResult<JobRun?>(claimed);
+                claimed.Add(claimedRun);
             }
 
-            return Task.FromResult<JobRun?>(null);
+            return Task.FromResult<IReadOnlyList<JobRun>>(claimed);
         }
     }
 
@@ -1415,6 +1427,27 @@ internal sealed class InMemoryJobStore : IJobStore
             }
 
             return Task.FromResult<IReadOnlyList<string>>(stopped);
+        }
+    }
+
+    public Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
+
+        lock (_gate)
+        {
+            var ids = _runs.Values
+                .Where(r => r.Status == JobStatus.Running
+                            && r.LastHeartbeatAt is { } hb
+                            && hb < staleBefore)
+                .OrderBy(r => r.LastHeartbeatAt!.Value)
+                .ThenBy(r => r.Id, StringComparer.Ordinal)
+                .Take(take)
+                .Select(r => r.Id)
+                .ToList();
+
+            return Task.FromResult<IReadOnlyList<string>>(ids);
         }
     }
 

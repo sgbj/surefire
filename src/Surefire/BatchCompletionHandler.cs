@@ -6,6 +6,7 @@ namespace Surefire;
 internal sealed partial class BatchCompletionHandler(
     IJobStore store,
     INotificationProvider notifications,
+    BatchedEventWriter eventWriter,
     TimeProvider timeProvider,
     ILogger<BatchCompletionHandler> logger)
 {
@@ -64,8 +65,15 @@ internal sealed partial class BatchCompletionHandler(
         {
             var payload = JsonSerializer.Serialize(envelope, SurefireJsonContext.Default.RunFailureEnvelope);
 
-            await store.AppendEventsAsync(
-            [
+            BatchedEventWriter.NotificationPublish[] channels = run.BatchId is { } batchId
+                ?
+                [
+                    new(NotificationChannels.RunEvent(run.Id), run.Id),
+                    new(NotificationChannels.RunEvent(batchId), run.Id)
+                ]
+                : [new(NotificationChannels.RunEvent(run.Id), run.Id)];
+
+            await eventWriter.EnqueueAsync(
                 new()
                 {
                     RunId = run.Id,
@@ -73,14 +81,9 @@ internal sealed partial class BatchCompletionHandler(
                     Payload = payload,
                     CreatedAt = timeProvider.GetUtcNow(),
                     Attempt = run.Attempt
-                }
-            ], cancellationToken);
-
-            await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-            if (run.BatchId is { } batchId)
-            {
-                await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), run.Id, cancellationToken);
-            }
+                },
+                channels,
+                cancellationToken);
         }
         catch (Exception ex)
         {

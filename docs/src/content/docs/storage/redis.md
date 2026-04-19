@@ -11,24 +11,23 @@ dotnet add package Surefire.Redis
 
 ## Setup
 
+Register an `IConnectionMultiplexer` in DI (for example with `builder.AddRedisClient("surefire")` from Aspire, or `builder.Services.AddSingleton<IConnectionMultiplexer>(...)`), then:
+
 ```csharp
 builder.Services.AddSurefire(options =>
 {
-    options.UseRedis("localhost:6379");
+    options.UseRedis();
 });
 ```
 
 This registers both the job store and the notification provider. Notifications use Redis Pub/Sub for real-time event delivery.
 
-## Using an existing connection
+## Using a specific connection
 
-If you already have an `IConnectionMultiplexer` registered in DI:
+Pass a factory to resolve a keyed or named multiplexer:
 
 ```csharp
-builder.Services.AddSurefire(options =>
-{
-    options.UseRedis(connection);
-});
+options.UseRedis(sp => sp.GetRequiredKeyedService<IConnectionMultiplexer>("surefire"));
 ```
 
 ## When to use Redis

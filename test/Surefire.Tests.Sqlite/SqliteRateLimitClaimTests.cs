@@ -50,8 +50,12 @@ public sealed class SqliteRateLimitClaimTests
 
             var claimTasks = new[]
             {
-                Task.Run(() => storeA.ClaimRunAsync("node-a", [jobName], ["default"], ct), ct),
-                Task.Run(() => storeB.ClaimRunAsync("node-b", [jobName], ["default"], ct), ct)
+                Task.Run(
+                    async () => (await storeA.ClaimRunsAsync("node-a", [jobName], ["default"], 1, ct)).FirstOrDefault(),
+                    ct),
+                Task.Run(
+                    async () => (await storeB.ClaimRunsAsync("node-b", [jobName], ["default"], 1, ct)).FirstOrDefault(),
+                    ct)
             };
             var claims = await Task.WhenAll(claimTasks);
             Assert.Equal(1, claims.Count(c => c is { }));
@@ -68,7 +72,7 @@ public sealed class SqliteRateLimitClaimTests
             };
             await storeA.CreateRunsAsync([secondRun], cancellationToken: ct);
 
-            var secondClaim = await storeA.ClaimRunAsync("node-c", [jobName], ["default"], ct);
+            var secondClaim = (await storeA.ClaimRunsAsync("node-c", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(secondClaim);
             Assert.Equal(secondRun.Id, secondClaim!.Id);
         }

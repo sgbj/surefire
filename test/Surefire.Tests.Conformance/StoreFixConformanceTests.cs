@@ -84,12 +84,12 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
         Assert.True(created);
 
-        var beforeRegistration = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var beforeRegistration = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.Null(beforeRegistration);
 
         await Store.UpsertJobAsync(CreateJob(jobName), ct);
 
-        var afterRegistration = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var afterRegistration = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(afterRegistration);
         Assert.Equal(run.Id, afterRegistration.Id);
     }
@@ -137,7 +137,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(CreateJob(job1Name), ct);
         await Store.UpsertJobAsync(CreateJob(job2Name), ct);
 
-        // Search for literal "_a_" — should not treat _ as single-char wildcard
+        // Search for literal "_a_" â€” should not treat _ as single-char wildcard
         var results = await Store.GetJobsAsync(new() { Name = $"_a_{suffix}" }, ct);
 
         Assert.Single(results);
@@ -187,7 +187,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         await Store.UpsertJobAsync(job, ct);
 
         // The pending run should still be claimable when the node registers for both queues
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["low", "high"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["low", "high"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
     }
 
@@ -212,11 +212,11 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
             await Store.CreateRunsAsync([run], cancellationToken: ct);
         }
 
-        // Claim concurrently from 10 threads — only 2 should succeed due to queue max_concurrency=2
+        // Claim concurrently from 10 threads â€” only 2 should succeed due to queue max_concurrency=2
         var results = new ConcurrentBag<JobRun?>();
         var tasks = Enumerable.Range(0, 10).Select(t => Task.Run(async () =>
         {
-            var claimed = await Store.ClaimRunAsync($"node-{t}", jobNames, [queueName]);
+            var claimed = (await Store.ClaimRunsAsync($"node-{t}", jobNames, [queueName], 1)).FirstOrDefault();
             results.Add(claimed);
         }));
         await Task.WhenAll(tasks);
@@ -249,7 +249,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         Assert.Equal(3, stats1[queueName].PendingCount);
 
         // Claim and complete the unrelated run
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], [queueName], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         await Store.TryTransitionRunAsync(RunStatusTransition.RunningToSucceeded(

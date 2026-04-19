@@ -153,30 +153,30 @@ internal sealed partial class SurefireMaintenanceService(
     {
         var staleBefore = timeProvider.GetUtcNow() - options.InactiveThreshold;
         var retryPolicyCache = new Dictionary<string, RetryPolicy>(StringComparer.Ordinal);
-        const int take = 1000;
+        const int take = 500;
 
         while (true)
         {
-            // Always query from skip=0: recovered runs transition out of Running status,
-            // so the result set naturally shrinks each iteration.
-            var page = await store.GetRunsAsync(
-                new()
-                {
-                    Status = JobStatus.Running,
-                    LastHeartbeatBefore = staleBefore,
-                    OrderBy = RunOrderBy.CreatedAt
-                },
-                0,
-                take,
-                cancellationToken);
+            // Dedicated maintenance query: returns IDs only, ordered oldest-heartbeat first,
+            // backed by a filtered index on (last_heartbeat_at) WHERE status = Running.
+            // Each processed run transitions out of Running, so the filter set shrinks
+            // monotonically; we loop until fewer than `take` IDs come back.
+            var staleIds = await store.GetStaleRunningRunIdsAsync(staleBefore, take, cancellationToken);
 
-            if (page.Items.Count == 0)
+            if (staleIds.Count == 0)
             {
                 break;
             }
 
-            foreach (var run in page.Items)
+            var staleRuns = await store.GetRunsByIdsAsync(staleIds, cancellationToken);
+
+            foreach (var run in staleRuns)
             {
+                if (run.Status != JobStatus.Running)
+                {
+                    continue;
+                }
+
                 var retryPolicy = await GetRetryPolicyForStaleRecoveryAsync(run.JobName, retryPolicyCache,
                     cancellationToken);
 

@@ -13,7 +13,7 @@ public abstract class QueueStatsParityConformanceTests : StoreConformanceBase
         var running = CreateRun(jobName);
         await Store.CreateRunsAsync([pending, running], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         var stats = await Store.GetQueueStatsAsync(ct);

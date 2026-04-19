@@ -201,18 +201,19 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Atomically finds and claims the highest-priority pending run that matches the node's
-    ///     registered jobs and queues. The claim operation verifies max concurrency (job and queue),
-    ///     rate limits, and queue pause status in a single atomic operation. The run's attempt is
-    ///     incremented as part of the claim.
+    ///     Atomically finds and claims up to <paramref name="maxCount" /> highest-priority pending runs
+    ///     that match the node's registered jobs and queues. The claim operation verifies max concurrency
+    ///     (job and queue), rate limits, and queue pause status in a single atomic operation. Each
+    ///     claimed run's attempt is incremented as part of the claim.
     /// </summary>
     /// <param name="nodeName">The name of the claiming node.</param>
     /// <param name="jobNames">The job names this node is registered to process.</param>
     /// <param name="queueNames">The queue names this node is registered to process.</param>
+    /// <param name="maxCount">The maximum number of runs to claim in this call. Must be at least 1.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The claimed run with updated status, node, and attempt; or null if no eligible run was found.</returns>
-    Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default);
+    /// <returns>The claimed runs with updated status, node, and attempt; empty when no eligible run was found.</returns>
+    Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Inserts a batch record and its child runs atomically. The batch starts with
@@ -389,6 +390,22 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    ///     Returns up to <paramref name="take" /> IDs of runs in <see cref="JobStatus.Running" /> whose
+    ///     <c>LastHeartbeatAt</c> is strictly less than <paramref name="staleBefore" />, ordered oldest first.
+    ///     Dedicated maintenance query: returns IDs only (no row materialization) and never scans the full
+    ///     table or computes totals. Implementations must be backed by an index that covers the
+    ///     <c>(status = Running, LastHeartbeatAt)</c> predicate so the query cost is bounded by the
+    ///     result size. Callers drain stale runs by calling this in a loop until it returns fewer than
+    ///     <paramref name="take" /> rows (each processed run transitions out of Running, leaving the filter set).
+    /// </summary>
+    /// <param name="staleBefore">Heartbeat cutoff; runs with <c>LastHeartbeatAt &lt; staleBefore</c> are returned.</param>
+    /// <param name="take">Maximum number of IDs to return. Must be greater than 0.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>IDs of stale running runs ordered oldest heartbeat first.</returns>
+    Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     ///     Returns all known nodes, including inactive ones that have not been purged.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
@@ -429,7 +446,7 @@ public interface IJobStore
 
     /// <summary>
     ///     Inserts or updates a rate limit definition. Does not reset runtime counters on update.
-    ///     Rate limit acquisition is embedded inside <see cref="ClaimRunAsync" /> -- there is no
+    ///     Rate limit acquisition is embedded inside <see cref="ClaimRunsAsync" /> -- there is no
     ///     standalone acquire method.
     /// </summary>
     /// <param name="rateLimit">The rate limit definition to upsert.</param>

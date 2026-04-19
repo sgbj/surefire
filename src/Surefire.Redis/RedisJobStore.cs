@@ -187,6 +187,8 @@ internal sealed partial class RedisJobStore(
                                                                       elseif run.status == 1 then
                                                                           redis.call('SADD', '{surefire}:running:' .. run.job_name, run_id)
                                                                           redis.call('SADD', '{surefire}:running_q:' .. qname, run_id)
+                                                                          local hb = (run.last_heartbeat_at and run.last_heartbeat_at ~= cjson.null) and tonumber(run.last_heartbeat_at) or tonumber(run.created_at)
+                                                                          redis.call('ZADD', '{surefire}:heartbeat:running', hb, run_id)
                                                                           if run.node_name and run.node_name ~= cjson.null and run.node_name ~= '' then
                                                                               redis.call('SADD', '{surefire}:node_runs:' .. run.node_name, run_id)
                                                                           end
@@ -1007,6 +1009,7 @@ internal sealed partial class RedisJobStore(
                                                     if is_active(old_status) then
                                                         redis.call('SREM', '{surefire}:running:' .. r.job_name, id)
                                                         redis.call('SREM', '{surefire}:running_q:' .. queue_name, id)
+                                                        redis.call('ZREM', '{surefire}:heartbeat:running', id)
                                                         if old_node ~= '' then
                                                             redis.call('SREM', '{surefire}:node_runs:' .. old_node, id)
                                                         end
@@ -1034,6 +1037,8 @@ internal sealed partial class RedisJobStore(
                                                     if is_active(new_status) then
                                                         redis.call('SADD', '{surefire}:running:' .. r.job_name, id)
                                                         redis.call('SADD', '{surefire}:running_q:' .. queue_name, id)
+                                                        local hb = (r.last_heartbeat_at and r.last_heartbeat_at ~= cjson.null) and tonumber(r.last_heartbeat_at) or tonumber(r.created_at)
+                                                        redis.call('ZADD', '{surefire}:heartbeat:running', hb, id)
                                                         if r.started_at and r.started_at ~= cjson.null then
                                                             redis.call('ZADD', '{surefire}:job_started:' .. r.job_name, tonumber(r.started_at), id)
                                                         end
@@ -1265,6 +1270,7 @@ internal sealed partial class RedisJobStore(
                               elseif old_status == 1 then
                                   redis.call('SREM', '{surefire}:running:' .. r.job_name, id)
                                   redis.call('SREM', '{surefire}:running_q:' .. queue_name, id)
+                                  redis.call('ZREM', '{surefire}:heartbeat:running', id)
                                   local old_node = r.node_name
                                   if old_node and old_node ~= cjson.null and old_node ~= '' then
                                       redis.call('SREM', '{surefire}:node_runs:' .. old_node, id)
@@ -1377,15 +1383,17 @@ internal sealed partial class RedisJobStore(
         return new(true, new(batchId, batchStatus, completedAt));
     }
 
-    public async Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken cancellationToken = default)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxCount, 1);
+
         if (jobNames.Count == 0 || queueNames.Count == 0)
         {
-            return null;
+            return Array.Empty<JobRun>();
         }
 
-        // ARGV[1]=job_names_json, ARGV[2]=queue_names_json, ARGV[3]=node_name, ARGV[4]=now_ms
+        // ARGV[1]=job_names_json, ARGV[2]=queue_names_json, ARGV[3]=node_name, ARGV[4]=now_ms, ARGV[5]=max_count
         const string fullScript = """
                                   local function _check_rate_limit(rl_name, now_ms)
                                       local rl_data = redis.call('HGETALL', '{surefire}:rate_limit:' .. rl_name)
@@ -1420,6 +1428,9 @@ internal sealed partial class RedisJobStore(
                                   end
 
                                   local function _acquire_rate_limit(rl_name, now_ms)
+                                      -- Invoked once per claim; batch iterations call this once per run so the
+                                      -- in-script counter state is consistent across iterations. HGET-after-HSET
+                                      -- reads our own writes because Lua scripts are atomic on the server.
                                       local key = '{surefire}:rate_limit:' .. rl_name
                                       if redis.call('EXISTS', key) == 0 then return end
                                       local window_ticks = tonumber(redis.call('HGET', key, 'window'))
@@ -1442,6 +1453,7 @@ internal sealed partial class RedisJobStore(
                                   end
 
                                   local now_ms = tonumber(ARGV[4])
+                                  local max_count = tonumber(ARGV[5])
                                   local job_names = cjson.decode(ARGV[1])
                                   local queue_names = cjson.decode(ARGV[2])
                                   local node_name = ARGV[3]
@@ -1584,84 +1596,100 @@ internal sealed partial class RedisJobStore(
                                       return nil
                                   end
 
-                                  local idx = 1
-                                  while idx <= #ordered_queues do
-                                      local tier_priority = ordered_queues[idx][2]
-                                      local tier_end = idx
-                                      while tier_end + 1 <= #ordered_queues and ordered_queues[tier_end + 1][2] == tier_priority do
-                                          tier_end = tier_end + 1
-                                      end
-
+                                  -- Batch claim: repeatedly find the highest-priority claimable candidate
+                                  -- and claim it, up to max_count. Since Redis executes Lua scripts atomically,
+                                  -- the SADD/HINCRBY/ZREM mutations in one iteration are visible to subsequent
+                                  -- iterations via SCARD/HGET/ZRANGE — no external bookkeeping needed. Per-job
+                                  -- max_concurrency, per-queue max_concurrency, and rate-limit capacity are
+                                  -- therefore respected across the whole batch without double-claiming.
+                                  local claimed = {}
+                                  while #claimed < max_count do
+                                      local idx = 1
                                       local best = nil
-                                      for i = idx, tier_end do
-                                          local queue_name = ordered_queues[i][1]
-                                          local queue = queue_cache[queue_name]
-                                          local candidate = find_best_for_queue(queue_name, queue)
-                                          if candidate and is_better_candidate(candidate, best) then
-                                              best = candidate
+                                      while idx <= #ordered_queues do
+                                          local tier_priority = ordered_queues[idx][2]
+                                          local tier_end = idx
+                                          while tier_end + 1 <= #ordered_queues and ordered_queues[tier_end + 1][2] == tier_priority do
+                                              tier_end = tier_end + 1
                                           end
+
+                                          for i = idx, tier_end do
+                                              local queue_name = ordered_queues[i][1]
+                                              local queue = queue_cache[queue_name]
+                                              local candidate = find_best_for_queue(queue_name, queue)
+                                              if candidate and is_better_candidate(candidate, best) then
+                                                  best = candidate
+                                              end
+                                          end
+
+                                          if best then
+                                              break
+                                          end
+
+                                          idx = tier_end + 1
                                       end
 
-                                      if best then
-                                          if best.job_rl_name ~= '' then
-                                              _acquire_rate_limit(best.job_rl_name, now_ms)
-                                          end
-                                          if best.queue_rl_name ~= '' and best.queue_rl_name ~= best.job_rl_name then
-                                              _acquire_rate_limit(best.queue_rl_name, now_ms)
-                                          end
-
-                                          local old_node = best.run.node_name
-                                          if old_node and old_node ~= cjson.null and old_node ~= node_name then
-                                              redis.call('SREM', '{surefire}:node_runs:' .. old_node, best.run_id)
-                                          end
-
-                                          best.run.status = 1
-                                          best.run.node_name = node_name
-                                          best.run.started_at = tonumber(now_ms)
-                                          best.run.last_heartbeat_at = tonumber(now_ms)
-                                          best.run.attempt = best.run.attempt + 1
-
-                                          redis.call('SET', '{surefire}:run:' .. best.run_id, cjson.encode(best.run))
-                                          redis.call('ZADD', '{surefire}:job_started:' .. best.run.job_name, tonumber(now_ms), best.run_id)
-                                          redis.call('ZREM', '{surefire}:pending_q:' .. best.queue_name, best.entry)
-                                          redis.call('DEL', '{surefire}:pending_member:' .. best.run_id)
-                                          redis.call('SADD', '{surefire}:running:' .. best.run.job_name, best.run_id)
-                                          redis.call('SADD', '{surefire}:running_q:' .. best.queue_name, best.run_id)
-
-                                          redis.call('ZREM', '{surefire}:status:0', best.run_id)
-                                          redis.call('ZADD', '{surefire}:status:1', best.run.created_at, best.run_id)
-                                          redis.call('HINCRBY', '{surefire}:status_counts', '0', -1)
-                                          redis.call('HINCRBY', '{surefire}:status_counts', '1', 1)
-                                          redis.call('SADD', '{surefire}:node_runs:' .. node_name, best.run_id)
-
-                                          local event_id = redis.call('INCR', '{surefire}:event_seq')
-                                          local evt = {
-                                              id = event_id,
-                                              run_id = best.run.id,
-                                              event_type = 0,
-                                              payload = '1',
-                                              created_at = tonumber(now_ms),
-                                              attempt = best.run.attempt
-                                          }
-                                          local payload = cjson.encode(evt)
-                                          local event_id_str = tostring(event_id)
-                                          redis.call('SET', '{surefire}:event:' .. event_id_str, payload)
-                                          redis.call('ZADD', '{surefire}:events:run:' .. best.run.id, event_id, event_id_str)
-                                          redis.call('ZADD', '{surefire}:events:run_type:' .. best.run.id .. ':0', event_id, event_id_str)
-                                          redis.call('ZADD', '{surefire}:events:run_attempt:' .. best.run.id .. ':' .. tostring(best.run.attempt), event_id, event_id_str)
-                                          redis.call('SADD', '{surefire}:events:run_types:' .. best.run.id, '0')
-                                          redis.call('SADD', '{surefire}:events:run_attempts:' .. best.run.id, tostring(best.run.attempt))
-                                          if best.run.batch_id and best.run.batch_id ~= cjson.null and best.run.batch_id ~= '' then
-                                              redis.call('ZADD', '{surefire}:events:batch:' .. best.run.batch_id, event_id, event_id_str)
-                                          end
-
-                                          return cjson.encode(best.run)
+                                      if best == nil then
+                                          break
                                       end
 
-                                      idx = tier_end + 1
+                                      if best.job_rl_name ~= '' then
+                                          _acquire_rate_limit(best.job_rl_name, now_ms)
+                                      end
+                                      if best.queue_rl_name ~= '' and best.queue_rl_name ~= best.job_rl_name then
+                                          _acquire_rate_limit(best.queue_rl_name, now_ms)
+                                      end
+
+                                      local old_node = best.run.node_name
+                                      if old_node and old_node ~= cjson.null and old_node ~= node_name then
+                                          redis.call('SREM', '{surefire}:node_runs:' .. old_node, best.run_id)
+                                      end
+
+                                      best.run.status = 1
+                                      best.run.node_name = node_name
+                                      best.run.started_at = tonumber(now_ms)
+                                      best.run.last_heartbeat_at = tonumber(now_ms)
+                                      best.run.attempt = best.run.attempt + 1
+
+                                      redis.call('SET', '{surefire}:run:' .. best.run_id, cjson.encode(best.run))
+                                      redis.call('ZADD', '{surefire}:job_started:' .. best.run.job_name, tonumber(now_ms), best.run_id)
+                                      redis.call('ZREM', '{surefire}:pending_q:' .. best.queue_name, best.entry)
+                                      redis.call('DEL', '{surefire}:pending_member:' .. best.run_id)
+                                      redis.call('SADD', '{surefire}:running:' .. best.run.job_name, best.run_id)
+                                      redis.call('SADD', '{surefire}:running_q:' .. best.queue_name, best.run_id)
+                                      redis.call('ZADD', '{surefire}:heartbeat:running', tonumber(now_ms), best.run_id)
+
+                                      redis.call('ZREM', '{surefire}:status:0', best.run_id)
+                                      redis.call('ZADD', '{surefire}:status:1', best.run.created_at, best.run_id)
+                                      redis.call('HINCRBY', '{surefire}:status_counts', '0', -1)
+                                      redis.call('HINCRBY', '{surefire}:status_counts', '1', 1)
+                                      redis.call('SADD', '{surefire}:node_runs:' .. node_name, best.run_id)
+
+                                      local event_id = redis.call('INCR', '{surefire}:event_seq')
+                                      local evt = {
+                                          id = event_id,
+                                          run_id = best.run.id,
+                                          event_type = 0,
+                                          payload = '1',
+                                          created_at = tonumber(now_ms),
+                                          attempt = best.run.attempt
+                                      }
+                                      local payload = cjson.encode(evt)
+                                      local event_id_str = tostring(event_id)
+                                      redis.call('SET', '{surefire}:event:' .. event_id_str, payload)
+                                      redis.call('ZADD', '{surefire}:events:run:' .. best.run.id, event_id, event_id_str)
+                                      redis.call('ZADD', '{surefire}:events:run_type:' .. best.run.id .. ':0', event_id, event_id_str)
+                                      redis.call('ZADD', '{surefire}:events:run_attempt:' .. best.run.id .. ':' .. tostring(best.run.attempt), event_id, event_id_str)
+                                      redis.call('SADD', '{surefire}:events:run_types:' .. best.run.id, '0')
+                                      redis.call('SADD', '{surefire}:events:run_attempts:' .. best.run.id, tostring(best.run.attempt))
+                                      if best.run.batch_id and best.run.batch_id ~= cjson.null and best.run.batch_id ~= '' then
+                                          redis.call('ZADD', '{surefire}:events:batch:' .. best.run.batch_id, event_id, event_id_str)
+                                      end
+
+                                      claimed[#claimed + 1] = cjson.encode(best.run)
                                   end
 
-                                  return nil
+                                  return claimed
                                   """;
 
         var result = await EvaluateScriptAsync(fullScript,
@@ -1670,15 +1698,28 @@ internal sealed partial class RedisJobStore(
                 JsonSerializer.Serialize(jobNames),
                 JsonSerializer.Serialize(queueNames),
                 nodeName,
-                timeProvider.GetUtcNow().ToUnixTimeMilliseconds().ToString()
+                timeProvider.GetUtcNow().ToUnixTimeMilliseconds().ToString(),
+                maxCount.ToString()
             ]);
 
-        if (result.IsNull)
+        if (result.IsNull || result.Resp2Type != ResultType.Array)
         {
-            return null;
+            return Array.Empty<JobRun>();
         }
 
-        return DeserializeRun(result.ToString()!);
+        var rows = (RedisResult[])result!;
+        if (rows.Length == 0)
+        {
+            return Array.Empty<JobRun>();
+        }
+
+        var runs = new List<JobRun>(rows.Length);
+        foreach (var row in rows)
+        {
+            runs.Add(DeserializeRun(row.ToString()!));
+        }
+
+        return runs;
     }
 
     public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
@@ -1819,6 +1860,7 @@ internal sealed partial class RedisJobStore(
                                               local q_field = redis.call('HGET', '{surefire}:job:' .. r.job_name, 'queue')
                                               local qname = (q_field and q_field ~= '') and q_field or 'default'
                                               redis.call('SREM', '{surefire}:running_q:' .. qname, run_id)
+                                              redis.call('ZREM', '{surefire}:heartbeat:running', run_id)
                                               local old_node = r.node_name
                                               if old_node and old_node ~= cjson.null and old_node ~= '' then
                                                   redis.call('SREM', '{surefire}:node_runs:' .. old_node, run_id)
@@ -1940,6 +1982,7 @@ internal sealed partial class RedisJobStore(
                                               local q_field = redis.call('HGET', '{surefire}:job:' .. r.job_name, 'queue')
                                               local qname = (q_field and q_field ~= '') and q_field or 'default'
                                               redis.call('SREM', '{surefire}:running_q:' .. qname, run_id)
+                                              redis.call('ZREM', '{surefire}:heartbeat:running', run_id)
                                               local old_node = r.node_name
                                               if old_node and old_node ~= cjson.null and old_node ~= '' then
                                                   redis.call('SREM', '{surefire}:node_runs:' .. old_node, run_id)
@@ -2245,6 +2288,12 @@ internal sealed partial class RedisJobStore(
                                           and r.node_name == node_name then
                                           r.last_heartbeat_at = now_ms
                                           redis.call('SET', key, cjson.encode(r))
+                                          -- Maintain the heartbeat-sorted index used by
+                                          -- GetStaleRunningRunIdsAsync. Update only for Running rows
+                                          -- so non-running rows don't drift into the index.
+                                          if r.status == 1 then
+                                              redis.call('ZADD', '{surefire}:heartbeat:running', now_ms, ARGV[i])
+                                          end
                                       end
                                   end
                               end
@@ -2302,6 +2351,37 @@ internal sealed partial class RedisJobStore(
         }
 
         return stopped;
+    }
+
+    public async Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
+
+        // Backed by the {surefire}:heartbeat:running ZSET (score = last_heartbeat_at in ms),
+        // maintained on every transition into/out of Running status and on each heartbeat tick.
+        // ZRANGEBYSCORE is O(log N + K) where K is the result size, so the cost is bounded by
+        // `take` rather than by total running runs.
+        var staleBeforeMs = staleBefore.ToUnixTimeMilliseconds();
+        var values = await Db.SortedSetRangeByScoreAsync(
+            $"{P}heartbeat:running",
+            double.NegativeInfinity,
+            staleBeforeMs,
+            Exclude.None,
+            Order.Ascending,
+            0,
+            take);
+
+        var result = new List<string>(values.Length);
+        foreach (var value in values)
+        {
+            if (!value.IsNullOrEmpty)
+            {
+                result.Add(value!);
+            }
+        }
+
+        return result;
     }
 
     public async Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken cancellationToken = default)
@@ -2753,6 +2833,7 @@ internal sealed partial class RedisJobStore(
                                            end
                                            redis.call('SREM', '{surefire}:running:' .. r.job_name, run_id)
                                            redis.call('SREM', '{surefire}:running_q:' .. queue_name, run_id)
+                                           redis.call('ZREM', '{surefire}:heartbeat:running', run_id)
 
                                            redis.call('ZREM', '{surefire}:runs:created', run_id)
                                            redis.call('ZREM', '{surefire}:runs:completed', run_id)
@@ -3739,6 +3820,8 @@ internal sealed partial class RedisJobStore(
                                                     if tonumber(run.status) == 1 then
                                                         redis.call('SADD', '{surefire}:running:' .. job_name, ARGV[1])
                                                         redis.call('SADD', '{surefire}:running_q:' .. qname, ARGV[1])
+                                                        local hb = (run.last_heartbeat_at and run.last_heartbeat_at ~= cjson.null) and tonumber(run.last_heartbeat_at) or tonumber(run.created_at)
+                                                        redis.call('ZADD', '{surefire}:heartbeat:running', hb, ARGV[1])
                                                         if node_name_arg ~= '' then
                                                             redis.call('SADD', '{surefire}:node_runs:' .. node_name_arg, ARGV[1])
                                                         end

@@ -20,16 +20,47 @@ internal sealed partial class SurefireExecutorService(
     TimeProvider timeProvider,
     SurefireInstrumentation instrumentation,
     BatchCompletionHandler batchCompletionHandler,
+    BatchedEventWriter eventWriter,
     Backoff backoff,
     ILogger<SurefireExecutorService> logger) : BackgroundService
 {
+    // Caps how many runs a single claim round trip will request. This bounds per-claim latency,
+    // memory for the returned list, and lock duration on the claim path.
+    private const int MaxBatchClaim = 32;
     private static readonly TimeSpan BackoffInitial = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
+
+    // Deadlocks and serialization failures are typically resolved in milliseconds after the
+    // victim transaction rolls back, so transient-retry uses a tighter schedule than the
+    // loop-level backoff. Retry is bounded only by the caller's cancellation token — deadlocks
+    // clear on retry; anything that doesn't clear is not transient and won't match IsTransientException.
+    private static readonly TimeSpan TransientRetryInitial = TimeSpan.FromMilliseconds(10);
+    private static readonly TimeSpan TransientRetryMax = TimeSpan.FromSeconds(1);
 
     private readonly ConcurrentDictionary<string, Task> _activeTasks = new(StringComparer.Ordinal);
 
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _runCancellation =
         new(StringComparer.Ordinal);
+
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        // Start the batched event writer before the executor loop so any event enqueued by the
+        // first claimed run lands on a running worker. Ownership here — not as IHostedService —
+        // is deliberate: shutdown must drain the writer AFTER all active runs have stopped
+        // enqueueing, and tying both to this service's lifecycle guarantees that ordering
+        // regardless of HostOptions.ServicesStopConcurrently.
+        await eventWriter.StartAsync(cancellationToken);
+        await base.StartAsync(cancellationToken);
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        // Base stops the executor loop and waits for _activeTasks to drain (via ExecuteAsync's
+        // own WaitForActiveRunsAsync). Only once no handler will enqueue another event do we
+        // stop the writer — guaranteeing every accepted event is persisted or explicitly failed.
+        await base.StopAsync(cancellationToken);
+        await eventWriter.StopAsync(cancellationToken);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -52,41 +83,51 @@ internal sealed partial class SurefireExecutorService(
             {
                 try
                 {
-                    if (options.MaxNodeConcurrency is { } max && _activeTasks.Count >= max)
+                    var capacity = options.MaxNodeConcurrency is { } max
+                        ? max - _activeTasks.Count
+                        : MaxBatchClaim;
+
+                    if (capacity <= 0)
                     {
                         await WaitForWakeupAsync(wakeup, stoppingToken);
                         continue;
                     }
 
+                    var batchSize = Math.Min(capacity, MaxBatchClaim);
+
                     var claimStartedAt = Stopwatch.GetTimestamp();
-                    var claimed = await store.ClaimRunAsync(
+                    var claimed = await store.ClaimRunsAsync(
                         options.NodeName,
                         registry.GetJobNames(),
                         registry.GetQueueNames(),
+                        batchSize,
                         stoppingToken);
                     instrumentation.RecordStoreOperation("claim",
                         Stopwatch.GetElapsedTime(claimStartedAt).TotalMilliseconds);
 
-                    if (claimed is null)
+                    if (claimed.Count == 0)
                     {
                         await WaitForWakeupAsync(wakeup, stoppingToken);
                         continue;
                     }
 
-                    instrumentation.RecordRunClaimed(claimed.JobName);
+                    foreach (var run in claimed)
+                    {
+                        instrumentation.RecordRunClaimed(run.JobName);
 
-                    var executionTask = ExecuteClaimedRunAsync(claimed, stoppingToken);
-                    _activeTasks[claimed.Id] = executionTask;
-                    _ = executionTask.ContinueWith(_ =>
-                        {
-                            _activeTasks.TryRemove(claimed.Id, out var _);
-                            _runCancellation.TryRemove(claimed.Id, out var _);
-                            activeRunTracker.Remove(claimed.Id);
-                            logEventPump.DropRunState(claimed.Id);
-                        },
-                        CancellationToken.None,
-                        TaskContinuationOptions.None,
-                        TaskScheduler.Default);
+                        var executionTask = ExecuteClaimedRunAsync(run, stoppingToken);
+                        _activeTasks[run.Id] = executionTask;
+                        _ = executionTask.ContinueWith(_ =>
+                            {
+                                _activeTasks.TryRemove(run.Id, out var _);
+                                _runCancellation.TryRemove(run.Id, out var _);
+                                activeRunTracker.Remove(run.Id);
+                                logEventPump.DropRunState(run.Id);
+                            },
+                            CancellationToken.None,
+                            TaskContinuationOptions.None,
+                            TaskScheduler.Default);
+                    }
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -201,11 +242,13 @@ internal sealed partial class SurefireExecutorService(
         }
 
         // Declared outside the try so the OCE catch can tell timeout apart from other cancellations.
-        // Disposed explicitly in finally.
+        // Disposed explicitly in finally. `context` is declared here so failure paths can flush any
+        // pending trailing-edge progress report before transitioning the run to terminal.
         CancellationTokenSource? timeoutCts = null;
         CancellationTokenSource? executionCts = null;
         IDisposable? jobContextScope = null;
         TimeSpan? configuredTimeout = null;
+        JobContext? context = null;
 
         try
         {
@@ -227,20 +270,10 @@ internal sealed partial class SurefireExecutorService(
                 if (options.CompiledOnDeadLetterCallbacks.Count > 0)
                 {
                     await using var callbackScope = scopeFactory.CreateAsyncScope();
-                    var callbackContext = new JobContext
-                    {
-                        RunId = run.Id,
-                        RootRunId = run.RootRunId ?? run.Id,
-                        JobName = run.JobName,
-                        Attempt = run.Attempt,
-                        BatchId = run.BatchId,
-                        CancellationToken = deadLetterToken,
-                        Store = store,
-                        Notifications = notifications,
-                        TimeProvider = timeProvider,
-                        NodeName = run.NodeName ?? options.NodeName,
-                        Exception = new InvalidOperationException("No handler registered for this job.")
-                    };
+                    var callbackContext = CreateJobContext(
+                        run,
+                        deadLetterToken,
+                        new InvalidOperationException("No handler registered for this job."));
 
                     await InvokeLifecycleCallbacksAsync(
                         options.CompiledOnDeadLetterCallbacks,
@@ -263,6 +296,7 @@ internal sealed partial class SurefireExecutorService(
                     noHandlerFailureEvent is { } ? [noHandlerFailureEvent] : null);
 
                 var dlResult = await FlushAndTransitionTerminalAsync(
+                    null,
                     run,
                     noHandlerTransition,
                     deadLetterToken);
@@ -301,19 +335,7 @@ internal sealed partial class SurefireExecutorService(
 
             var executionToken = executionCts?.Token ?? runCts.Token;
 
-            var context = new JobContext
-            {
-                RunId = run.Id,
-                RootRunId = run.RootRunId ?? run.Id,
-                JobName = run.JobName,
-                Attempt = run.Attempt,
-                BatchId = run.BatchId,
-                CancellationToken = executionToken,
-                Store = store,
-                Notifications = notifications,
-                TimeProvider = timeProvider,
-                NodeName = run.NodeName ?? options.NodeName
-            };
+            context = CreateJobContext(run, executionToken);
             jobContextScope = JobContext.EnterScope(context);
 
             // Resolve handler/filter dependencies in a per-run scope (for scoped services).
@@ -339,7 +361,7 @@ internal sealed partial class SurefireExecutorService(
             using var completionCts = CreateBestEffortWorkCts(stoppingToken);
             var completionToken = completionCts.Token;
 
-            var transitionResult = await FlushAndTransitionTerminalAsync(run, completed, completionToken);
+            var transitionResult = await FlushAndTransitionTerminalAsync(context, run, completed, completionToken);
             if (transitionResult.Transitioned)
             {
                 instrumentation.RecordRunCompleted(run.JobName, run.StartedAt, completedAt);
@@ -354,13 +376,14 @@ internal sealed partial class SurefireExecutorService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await HandleRunFailureAsync(run, ex, stoppingToken);
+            await HandleRunFailureAsync(context, run, ex, stoppingToken);
         }
         catch (OperationCanceledException ex)
         {
             if (stoppingToken.IsCancellationRequested)
             {
                 await HandleRunFailureAsync(
+                    context,
                     run,
                     new ShutdownInterruptedException(ex),
                     stoppingToken);
@@ -373,6 +396,7 @@ internal sealed partial class SurefireExecutorService(
             if (timeoutCts is { IsCancellationRequested: true })
             {
                 await HandleRunFailureAsync(
+                    context,
                     run,
                     new TimeoutException(
                         $"Job execution timed out after {configuredTimeout}.", ex),
@@ -422,12 +446,21 @@ internal sealed partial class SurefireExecutorService(
                     "RunCancelled",
                     cancelReason));
 
+            if (context is { })
+            {
+                await context.FlushPendingProgressAsync(bestEffortToken);
+            }
+
             await logEventPump.FlushRunAsync(run.Id, bestEffortToken);
-            var cancelResult = await store.TryCancelRunAsync(
-                run.Id,
-                run.Attempt,
-                cancelReason,
-                cancelEvent is { } ? [cancelEvent] : null,
+            await eventWriter.FlushAsync(bestEffortToken);
+            var cancelResult = await InvokeStoreWithTransientRetryAsync(
+                ct => store.TryCancelRunAsync(
+                    run.Id,
+                    run.Attempt,
+                    cancelReason,
+                    cancelEvent is { } ? [cancelEvent] : null,
+                    ct),
+                "cancel",
                 bestEffortToken);
 
             if (cancelResult.Transitioned)
@@ -467,7 +500,8 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    private async Task HandleRunFailureAsync(JobRun run, Exception ex, CancellationToken stoppingToken)
+    private async Task HandleRunFailureAsync(JobContext? context, JobRun run, Exception ex,
+        CancellationToken stoppingToken)
     {
         using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
         var bestEffortToken = bestEffortCts.Token;
@@ -503,20 +537,7 @@ internal sealed partial class SurefireExecutorService(
                 }
 
                 await using var retryScope = scopeFactory.CreateAsyncScope();
-                var retryContext = new JobContext
-                {
-                    RunId = run.Id,
-                    RootRunId = run.RootRunId ?? run.Id,
-                    JobName = run.JobName,
-                    Attempt = run.Attempt,
-                    BatchId = run.BatchId,
-                    CancellationToken = bestEffortToken,
-                    Store = store,
-                    Notifications = notifications,
-                    TimeProvider = timeProvider,
-                    NodeName = run.NodeName ?? options.NodeName,
-                    Exception = ex
-                };
+                var retryContext = CreateJobContext(run, bestEffortToken, ex);
 
                 await InvokeLifecycleCallbacksAsync(
                     [.. options.CompiledOnRetryCallbacks, .. job.OnRetryCallbacks],
@@ -544,7 +565,22 @@ internal sealed partial class SurefireExecutorService(
                     run.Result,
                     events: retryFailureEvent is { } ? [retryFailureEvent] : null);
 
-                if ((await store.TryTransitionRunAsync(pending, bestEffortToken)).Transitioned)
+                // Drain the same async-write paths a terminal transition would before transitioning
+                // to pending; the retry attempt starts fresh, so any pending trailing-edge progress
+                // belongs to the attempt that just failed and must land first.
+                if (context is { })
+                {
+                    await context.FlushPendingProgressAsync(bestEffortToken);
+                }
+
+                await logEventPump.FlushRunAsync(run.Id, bestEffortToken);
+                await eventWriter.FlushAsync(bestEffortToken);
+
+                var pendingResult = await InvokeStoreWithTransientRetryAsync(
+                    ct => store.TryTransitionRunAsync(pending, ct),
+                    "transition-retry",
+                    bestEffortToken);
+                if (pendingResult.Transitioned)
                 {
                     await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
                         bestEffortToken);
@@ -558,20 +594,7 @@ internal sealed partial class SurefireExecutorService(
         if (options.CompiledOnDeadLetterCallbacks.Count > 0 || jobDeadLetterCallbacks.Count > 0)
         {
             await using var callbackScope = scopeFactory.CreateAsyncScope();
-            var callbackContext = new JobContext
-            {
-                RunId = run.Id,
-                RootRunId = run.RootRunId ?? run.Id,
-                JobName = run.JobName,
-                Attempt = run.Attempt,
-                BatchId = run.BatchId,
-                CancellationToken = bestEffortToken,
-                Store = store,
-                Notifications = notifications,
-                TimeProvider = timeProvider,
-                NodeName = run.NodeName ?? options.NodeName,
-                Exception = ex
-            };
+            var callbackContext = CreateJobContext(run, bestEffortToken, ex);
 
             await InvokeLifecycleCallbacksAsync(
                 [.. options.CompiledOnDeadLetterCallbacks, .. jobDeadLetterCallbacks],
@@ -618,7 +641,7 @@ internal sealed partial class SurefireExecutorService(
                 run.Attempt);
         }
 
-        var transitionResult = await FlushAndTransitionTerminalAsync(run, deadLetter, bestEffortToken);
+        var transitionResult = await FlushAndTransitionTerminalAsync(context, run, deadLetter, bestEffortToken);
         if (transitionResult.Transitioned)
         {
             instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
@@ -669,6 +692,23 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
+    private JobContext CreateJobContext(JobRun run, CancellationToken cancellationToken, Exception? exception = null) =>
+        new()
+        {
+            RunId = run.Id,
+            RootRunId = run.RootRunId ?? run.Id,
+            JobName = run.JobName,
+            Attempt = run.Attempt,
+            BatchId = run.BatchId,
+            CancellationToken = cancellationToken,
+            Store = store,
+            Notifications = notifications,
+            EventWriter = eventWriter,
+            TimeProvider = timeProvider,
+            NodeName = run.NodeName ?? options.NodeName,
+            Exception = exception
+        };
+
     private static ActivityContext? ResolveParentActivityContext(JobRun run)
         => TryParseActivityContext(run.ParentTraceId, run.ParentSpanId, out var context)
             ? context
@@ -697,11 +737,50 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    private async Task<RunTransitionResult> FlushAndTransitionTerminalAsync(JobRun run, RunStatusTransition transition,
+    private async Task<RunTransitionResult> FlushAndTransitionTerminalAsync(JobContext? context, JobRun run,
+        RunStatusTransition transition, CancellationToken cancellationToken)
+    {
+        // Flush in dependency order: pending trailing-edge progress → log pump → event writer → transition.
+        // Each layer is an async-write path; draining them in order guarantees readers never see the
+        // terminal status while prior progress/log/output events are still in flight.
+        if (context is { })
+        {
+            await context.FlushPendingProgressAsync(cancellationToken);
+        }
+
+        await logEventPump.FlushRunAsync(run.Id, cancellationToken);
+        await eventWriter.FlushAsync(cancellationToken);
+
+        // Retry transient errors (deadlock/serialization) around the terminal transition. Without
+        // this, a deadlock victim would propagate out as a failure and route the run through
+        // HandleRunFailureAsync — marking an already-succeeded run as failed. The event writer
+        // above has its own retry loop; this one is specific to the status-row write.
+        return await InvokeStoreWithTransientRetryAsync(
+            ct => store.TryTransitionRunAsync(transition, ct),
+            "transition",
+            cancellationToken);
+    }
+
+    private async Task<T> InvokeStoreWithTransientRetryAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        string operationName,
         CancellationToken cancellationToken)
     {
-        await logEventPump.FlushRunAsync(run.Id, cancellationToken);
-        return await store.TryTransitionRunAsync(transition, cancellationToken);
+        var attempt = 0;
+        while (true)
+        {
+            try
+            {
+                return await operation(cancellationToken);
+            }
+            catch (Exception ex) when (store.IsTransientException(ex))
+            {
+                Log.StoreCallTransientRetrying(logger, ex, operationName, attempt);
+                instrumentation.RecordStoreRetry(operationName);
+                await Task.Delay(backoff.NextDelay(attempt++, TransientRetryInitial, TransientRetryMax),
+                    timeProvider, cancellationToken);
+            }
+        }
     }
 
 
@@ -1086,8 +1165,7 @@ internal sealed partial class SurefireExecutorService(
     private async Task AppendOutputEventAsync(JobRun run, string payload,
         CancellationToken cancellationToken)
     {
-        await store.AppendEventsAsync(
-        [
+        await eventWriter.EnqueueAsync(
             new()
             {
                 RunId = run.Id,
@@ -1095,20 +1173,14 @@ internal sealed partial class SurefireExecutorService(
                 Payload = payload,
                 CreatedAt = timeProvider.GetUtcNow(),
                 Attempt = run.Attempt
-            }
-        ], cancellationToken);
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.BatchId is { } batchId1)
-        {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId1), run.Id, cancellationToken);
-        }
+            },
+            BuildRunEventNotifications(run),
+            cancellationToken);
     }
 
     private async Task AppendOutputCompleteEventAsync(JobRun run, CancellationToken cancellationToken)
     {
-        await store.AppendEventsAsync(
-        [
+        await eventWriter.EnqueueAsync(
             new()
             {
                 RunId = run.Id,
@@ -1116,15 +1188,15 @@ internal sealed partial class SurefireExecutorService(
                 Payload = "{}",
                 CreatedAt = timeProvider.GetUtcNow(),
                 Attempt = run.Attempt
-            }
-        ], cancellationToken);
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-        if (run.BatchId is { } batchId2)
-        {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId2), run.Id, cancellationToken);
-        }
+            },
+            BuildRunEventNotifications(run),
+            cancellationToken);
     }
+
+    private static BatchedEventWriter.NotificationPublish[] BuildRunEventNotifications(JobRun run) =>
+        run.BatchId is { } batchId
+            ? [new(NotificationChannels.RunEvent(run.Id), run.Id), new(NotificationChannels.RunEvent(batchId), run.Id)]
+            : [new(NotificationChannels.RunEvent(run.Id), run.Id)];
 
     private async Task TryCreateContinuousRunAsync(RegisteredJob job, JobRun completedRun,
         CancellationToken cancellationToken)
@@ -1205,16 +1277,25 @@ internal sealed partial class SurefireExecutorService(
     private async Task InvokeLifecycleCallbacksAsync(IReadOnlyList<CompiledCallback> callbacks, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
-        foreach (var callback in callbacks)
+        try
         {
-            try
+            foreach (var callback in callbacks)
             {
-                await callback.InvokeAsync(context, services, cancellationToken);
+                try
+                {
+                    await callback.InvokeAsync(context, services, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    Log.LifecycleCallbackFailed(logger, ex, context.JobName);
+                }
             }
-            catch (Exception ex)
-            {
-                Log.LifecycleCallbackFailed(logger, ex, context.JobName);
-            }
+        }
+        finally
+        {
+            // If a callback reported progress, flush the trailing pending value synchronously so a
+            // queued timer can't fire after the callback scope disposes. Safe when nothing is pending.
+            await context.FlushPendingProgressAsync(cancellationToken);
         }
     }
 
@@ -1313,6 +1394,11 @@ internal sealed partial class SurefireExecutorService(
                 "Post-handler bookkeeping failed for run '{RunId}' (job '{JobName}'). The run will remain in Running status for maintenance recovery.")]
         public static partial void PostHandlerBookkeepingFailed(ILogger logger, Exception exception, string runId,
             string jobName);
+
+        [LoggerMessage(EventId = 1110, Level = LogLevel.Debug,
+            Message = "Store call '{Operation}' hit transient error; retrying (attempt {Attempt}).")]
+        public static partial void StoreCallTransientRetrying(ILogger logger, Exception exception, string operation,
+            int attempt);
     }
 
     private sealed record InvocationResult(

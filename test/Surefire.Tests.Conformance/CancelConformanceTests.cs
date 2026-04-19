@@ -35,7 +35,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         var result = await Store.TryCancelRunAsync(run.Id, cancellationToken: ct);
@@ -81,7 +81,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
@@ -124,7 +124,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([parent, child1, child2, child3], cancellationToken: ct);
 
         // Claim and complete one child so it's terminal (whichever the store picks first)
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         var completedChildId = claimed.Id;
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
@@ -208,7 +208,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
             var run = CreateRun(jobName);
             await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-            var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+            var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(claimed);
 
             var cancelResults = new ConcurrentBag<bool>();

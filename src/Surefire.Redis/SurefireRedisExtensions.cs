@@ -39,6 +39,7 @@ public static class SurefireRedisExtensions
             services.RemoveAll<INotificationProvider>();
             services.AddSingleton<INotificationProvider>(sp =>
                 new RedisNotificationProvider(connectionFactory(sp),
+                    sp.GetRequiredService<TimeProvider>(),
                     sp.GetRequiredService<ILogger<RedisNotificationProvider>>()));
         });
     }
@@ -89,6 +90,7 @@ public static class SurefireRedisExtensions
             services.RemoveAll<INotificationProvider>();
             services.AddSingleton<INotificationProvider>(sp =>
                 new RedisNotificationProvider(connectionFactory(sp),
+                    sp.GetRequiredService<TimeProvider>(),
                     sp.GetRequiredService<ILogger<RedisNotificationProvider>>()));
         });
     }

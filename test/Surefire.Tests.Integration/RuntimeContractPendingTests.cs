@@ -14,7 +14,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -46,7 +47,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -68,7 +70,7 @@ public sealed class RuntimeContractPendingTests
 
         var run = await WaitForRunAsync(store, jobName, marker, ct);
 
-        var claimed1 = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed1 = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed1);
         Assert.Equal(run.Id, claimed1.Id);
 
@@ -92,7 +94,7 @@ public sealed class RuntimeContractPendingTests
             claimed1.Result);
         Assert.True((await store.TryTransitionRunAsync(pending, ct)).Transitioned);
 
-        var claimed2 = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed2 = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed2);
         Assert.Equal(2, claimed2.Attempt);
 
@@ -141,7 +143,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -164,7 +167,7 @@ public sealed class RuntimeContractPendingTests
 
         await Task.Delay(50, ct);
 
-        var claimedA = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimedA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimedA);
         var completeA = RunStatusTransition.RunningToSucceeded(
             claimedA.Id,
@@ -179,7 +182,7 @@ public sealed class RuntimeContractPendingTests
             claimedA.LastHeartbeatAt);
         Assert.True((await store.TryTransitionRunAsync(completeA, ct)).Transitioned);
 
-        var claimedB = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimedB = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimedB);
         var completeB = RunStatusTransition.RunningToSucceeded(
             claimedB.Id,
@@ -210,7 +213,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -233,7 +237,7 @@ public sealed class RuntimeContractPendingTests
             return (finalRun, events);
         }, ct);
 
-        var claimed = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         await store.AppendEventsAsync(
@@ -274,7 +278,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -307,7 +312,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -341,7 +347,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -367,7 +374,7 @@ public sealed class RuntimeContractPendingTests
 
         for (var i = 0; i < args.Length; i++)
         {
-            var claimed = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+            var claimed = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(claimed);
 
             var complete = RunStatusTransition.RunningToSucceeded(
@@ -402,7 +409,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -411,8 +419,8 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
-        var childA = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
-        var childB = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var childA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
+        var childB = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(childA);
         Assert.NotNull(childB);
 
@@ -485,7 +493,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -494,8 +503,8 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
-        var childA = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
-        var childB = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var childA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
+        var childB = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(childA);
         Assert.NotNull(childB);
 
@@ -570,7 +579,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -586,7 +596,7 @@ public sealed class RuntimeContractPendingTests
         var claimed = new List<JobRun>(childCount);
         for (var i = 0; i < childCount; i++)
         {
-            var run = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+            var run = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(run);
             claimed.Add(run);
         }
@@ -647,7 +657,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(25) },
             NullLogger<JobClient>.Instance);
 
@@ -656,7 +667,7 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }], ct);
-        var child = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var child = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(child);
 
         var streamTask = Task.Run(async () =>
@@ -713,7 +724,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -722,8 +734,8 @@ public sealed class RuntimeContractPendingTests
         await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
-        var childA = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
-        var childB = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var childA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
+        var childB = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(childA);
         Assert.NotNull(childB);
 
@@ -790,7 +802,7 @@ public sealed class RuntimeContractPendingTests
             await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId, ct);
         }
 
-        // Resume at the cursor — should see only events with Id > cursorId, including childB's Output
+        // Resume at the cursor â€” should see only events with Id > cursorId, including childB's Output
         // and both children's terminal Status events. Events pre-cursor are skipped.
         var resumedOutputs = new List<(string RunId, string Payload)>();
         await foreach (var @event in client.ObserveBatchEventsAsync(batchId, cursorId, ct))
@@ -812,7 +824,8 @@ public sealed class RuntimeContractPendingTests
         var ct = TestContext.Current.CancellationToken;
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -825,7 +838,7 @@ public sealed class RuntimeContractPendingTests
         var claimed = new List<JobRun>();
         for (var i = 0; i < 3; i++)
         {
-            var run = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+            var run = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(run);
             claimed.Add(run);
         }
@@ -873,10 +886,11 @@ public sealed class RuntimeContractPendingTests
     {
         var ct = TestContext.Current.CancellationToken;
         // Verifies the cleaned-up termination logic: once batch is terminal AND we've observed
-        // all child runs in a single drain pass, we exit immediately — no extra polling delay.
+        // all child runs in a single drain pass, we exit immediately â€” no extra polling delay.
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        var client = new JobClient(store, notifications, TimeProvider.System,
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromSeconds(30) }, // intentionally large
             NullLogger<JobClient>.Instance);
 
@@ -887,8 +901,8 @@ public sealed class RuntimeContractPendingTests
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
 
         // Complete BOTH runs and the batch BEFORE WaitEachAsync starts.
-        var claimedA = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
-        var claimedB = await store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimedA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
+        var claimedB = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimedA);
         Assert.NotNull(claimedB);
 

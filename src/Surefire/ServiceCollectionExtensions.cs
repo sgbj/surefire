@@ -42,6 +42,11 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<INotificationProvider, InMemoryNotificationProvider>();
         services.TryAddSingleton<IJobClient, JobClient>();
         services.TryAddSingleton<BatchCompletionHandler>();
+        // BatchedEventWriter is NOT registered as IHostedService: its lifecycle is owned by
+        // SurefireExecutorService.StartAsync/StopAsync so draining is strictly ordered around the
+        // executor's active runs. Registering it as IHostedService would race under
+        // HostOptions.ServicesStopConcurrently = true and risk lost enqueues during shutdown.
+        services.TryAddSingleton<BatchedEventWriter>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, SurefireInitializationService>());
         services.TryAddEnumerable(

@@ -23,23 +23,11 @@ public static class SurefireSqlServerExtensions
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        return options.UseSqlServer(_ => connectionString, commandTimeout);
-    }
-
-    /// <summary>
-    ///     Configures Surefire to use SQL Server for job storage using a factory that resolves the
-    ///     connection string at service-resolution time.
-    /// </summary>
-    public static SurefireOptions UseSqlServer(this SurefireOptions options,
-        Func<IServiceProvider, string> connectionStringFactory, TimeSpan? commandTimeout = null)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(connectionStringFactory);
         return options.ConfigureServices(services =>
         {
             services.RemoveAll<IJobStore>();
             services.AddSingleton<IJobStore>(sp =>
-                new SqlServerJobStore(connectionStringFactory(sp), commandTimeout,
+                new SqlServerJobStore(connectionString, commandTimeout,
                     sp.GetRequiredService<TimeProvider>()));
         });
     }

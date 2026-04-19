@@ -9,19 +9,21 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracing => tracing.AddSource(SurefireDiagnostics.ActivitySourceName))
     .WithMetrics(metrics => metrics.AddMeter(SurefireDiagnostics.MeterName));
 
-builder.AddNpgsqlDataSource("surefire");
+builder.AddNpgsqlDataSource("surefire",
+    configureDataSourceBuilder: dsBuilder => { dsBuilder.ConnectionStringBuilder.IncludeErrorDetail = true; });
 //builder.AddSqlServerClient("surefire");
 //builder.AddRedisClient("surefire");
 
 builder.Services.AddSurefire(options =>
 {
-    options.NodeName = $"{Guid.NewGuid():N}";
     options.RetentionPeriod = TimeSpan.FromHours(1);
+    options.MaxNodeConcurrency = 50;
+
     options.AddFixedWindowLimiter("Fibonacci", 10, TimeSpan.FromSeconds(10));
     options.UseFilter<StopwatchJobFilter>();
 
     options.UsePostgreSql();
-    //options.UseSqlServer(sp => sp.GetRequiredService<IConfiguration>().GetConnectionString("surefire")!);
+    //options.UseSqlServer(builder.Configuration.GetConnectionString("surefire")!);
     //options.UseRedis();
     //options.UseSqlite("Data Source=surefire.db");
 });
@@ -42,7 +44,7 @@ app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
     })
     .WithDescription("Adds two random numbers by calling the Add job")
     .WithTags("max-concurrency")
-    .WithMaxConcurrency(50);
+    .WithMaxConcurrency(25);
 
 app.AddJob("DataImport", async (JobContext context, ILogger<Program> logger, CancellationToken ct, int count = 10) =>
     {
@@ -156,14 +158,14 @@ app.AddJob("AlwaysRunning", async (ILogger<Program> logger, CancellationToken ct
 app.AddJob("Batch", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {
         var results =
-            await client.RunBatchAsync<AddRandomResult>("AddRandom", new object?[10000], cancellationToken: ct);
+            await client.RunBatchAsync<AddRandomResult>("AddRandom", new object?[1_000], cancellationToken: ct);
         return results.Sum(r => (long)r.Sum);
     })
     .WithTags("batch");
 
 app.AddJob("StreamBatch", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {
-        var results = client.StreamBatchAsync<AddRandomResult>("AddRandom", new object?[10000], cancellationToken: ct);
+        var results = client.StreamBatchAsync<AddRandomResult>("AddRandom", new object?[1_000], cancellationToken: ct);
         var sum = 0L;
 
         await foreach (var result in results)

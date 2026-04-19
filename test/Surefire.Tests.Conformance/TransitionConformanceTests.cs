@@ -38,7 +38,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Running };
@@ -57,7 +57,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
@@ -80,7 +80,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Pending, NotBefore = DateTimeOffset.UtcNow };
@@ -103,7 +103,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
@@ -126,7 +126,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         Assert.Equal(1, claimed.Attempt);
 
@@ -157,7 +157,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         Assert.NotNull(claimed.StartedAt);
 
@@ -219,7 +219,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = null };
@@ -271,7 +271,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
             var run = CreateRun(jobName);
             await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-            var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+            var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
             Assert.NotNull(claimed);
 
             var results = new ConcurrentBag<bool>();
@@ -312,7 +312,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with
@@ -338,7 +338,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [job.Name], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Failed, CompletedAt = DateTimeOffset.UtcNow };

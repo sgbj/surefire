@@ -22,23 +22,11 @@ public static class SurefireSqliteExtensions
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        return options.UseSqlite(_ => connectionString, commandTimeout);
-    }
-
-    /// <summary>
-    ///     Configures Surefire to use SQLite for job storage using a factory that resolves the
-    ///     connection string at service-resolution time.
-    /// </summary>
-    public static SurefireOptions UseSqlite(this SurefireOptions options,
-        Func<IServiceProvider, string> connectionStringFactory, TimeSpan? commandTimeout = null)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(connectionStringFactory);
         return options.ConfigureServices(services =>
         {
             services.RemoveAll<IJobStore>();
             services.AddSingleton<IJobStore>(sp =>
-                new SqliteJobStore(connectionStringFactory(sp), commandTimeout,
+                new SqliteJobStore(connectionString, commandTimeout,
                     sp.GetRequiredService<TimeProvider>()));
         });
     }

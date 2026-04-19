@@ -129,7 +129,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         var before = await Store.GetRunAsync(run.Id, ct);
@@ -155,7 +155,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
@@ -243,7 +243,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.Equal(JobStatus.Cancelled, loaded.Status);
     }
 
-    // ── GetExternallyStoppedRunIdsAsync ─────────────────────────────────────
+    // â”€â”€ GetExternallyStoppedRunIdsAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [Fact]
     public async Task GetExternallyStoppedRunIds_EmptyInput_ReturnsEmpty()
@@ -263,7 +263,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         var stopped = await Store.GetExternallyStoppedRunIdsAsync([claimed.Id], ct);
@@ -315,10 +315,10 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
-        // Cancel the running run (Running → Cancelled, direct)
+        // Cancel the running run (Running â†’ Cancelled, direct)
         Assert.True((await Store.TryCancelRunAsync(claimed.Id, cancellationToken: ct)).Transitioned);
 
         var stopped = await Store.GetExternallyStoppedRunIdsAsync([claimed.Id], ct);
@@ -333,7 +333,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var jobName = $"StoppedDeleted_{Guid.CreateVersion7():N}";
         await Store.UpsertJobAsync(CreateJob(jobName), ct);
 
-        // Use an ID that was never inserted — simulates a purged run
+        // Use an ID that was never inserted â€” simulates a purged run
         var fakeId = Guid.CreateVersion7().ToString("N");
 
         var stopped = await Store.GetExternallyStoppedRunIdsAsync([fakeId], ct);
@@ -354,7 +354,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         // Running run (should NOT be returned)
         var runA = CreateRun(jobName);
         await Store.CreateRunsAsync([runA], cancellationToken: ct);
-        var claimedA = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimedA = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimedA);
 
         // Terminal run (should be returned)
@@ -377,7 +377,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.DoesNotContain(claimedA.Id, stopped);
     }
 
-    // ── CancelExpiredRuns batch counter integration ────────────────────────
+    // â”€â”€ CancelExpiredRuns batch counter integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [Fact]
     public async Task CancelExpiredRuns_BatchChild_IncrementsBatchCancelledCounter()
@@ -438,7 +438,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
             updatedBatch.Succeeded + updatedBatch.Failed + updatedBatch.Cancelled);
     }
 
-    // ── Purge ────────────────────────────────────────────────────────────────
+    // â”€â”€ Purge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [Fact]
     public async Task PurgeAsync_DoesNotRemoveTerminalBatchChildren_WhenBatchIsNotPurgeEligible()
@@ -450,7 +450,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
 
-        // Batch is still Running (not terminal) — children should not be purged
+        // Batch is still Running (not terminal) â€” children should not be purged
         var batch = new JobBatch
         {
             Id = Guid.CreateVersion7().ToString("N"),
@@ -512,5 +512,210 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         var childAfter = await Store.GetRunAsync(child.Id, ct);
         Assert.Null(childAfter);
+    }
+
+    // ── GetStaleRunningRunIdsAsync ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetStaleRunningRunIds_ReturnsOldestFirst()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"StaleOrder_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var oldest = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "node1", StartedAt = now.AddMinutes(-30), LastHeartbeatAt = now.AddMinutes(-30)
+        };
+        var middle = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "node1", StartedAt = now.AddMinutes(-20), LastHeartbeatAt = now.AddMinutes(-20)
+        };
+        var newest = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "node1", StartedAt = now.AddMinutes(-10), LastHeartbeatAt = now.AddMinutes(-10)
+        };
+        await Store.CreateRunsAsync([newest, oldest, middle], cancellationToken: ct);
+
+        var ids = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 10, ct);
+
+        Assert.Equal(3, ids.Count);
+        Assert.Equal(oldest.Id, ids[0]);
+        Assert.Equal(middle.Id, ids[1]);
+        Assert.Equal(newest.Id, ids[2]);
+    }
+
+    [Fact]
+    public async Task GetStaleRunningRunIds_ExcludesPendingAndFutureScheduled()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"StalePending_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var running = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "n", StartedAt = now.AddMinutes(-30), LastHeartbeatAt = now.AddMinutes(-30)
+        };
+        var pending = CreateRun(jobName);
+        var futureScheduled = CreateRun(jobName) with { NotBefore = now.AddHours(1) };
+
+        await Store.CreateRunsAsync([running, pending, futureScheduled], cancellationToken: ct);
+
+        var ids = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 10, ct);
+
+        Assert.Single(ids);
+        Assert.Equal(running.Id, ids[0]);
+    }
+
+    [Fact]
+    public async Task GetStaleRunningRunIds_ExcludesFreshHeartbeats()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"StaleFresh_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var stale = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "n", StartedAt = now.AddMinutes(-30), LastHeartbeatAt = now.AddMinutes(-30)
+        };
+        var fresh = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "n", StartedAt = now.AddSeconds(-10), LastHeartbeatAt = now.AddSeconds(-10)
+        };
+        await Store.CreateRunsAsync([stale, fresh], cancellationToken: ct);
+
+        var ids = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 10, ct);
+
+        Assert.Single(ids);
+        Assert.Equal(stale.Id, ids[0]);
+    }
+
+    [Fact]
+    public async Task GetStaleRunningRunIds_RespectsTake()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"StaleTake_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var runs = new List<JobRun>();
+        for (var i = 0; i < 5; i++)
+        {
+            runs.Add(CreateRun(jobName, JobStatus.Running) with
+            {
+                NodeName = "n",
+                StartedAt = now.AddMinutes(-30 - i),
+                LastHeartbeatAt = now.AddMinutes(-30 - i)
+            });
+        }
+
+        await Store.CreateRunsAsync(runs, cancellationToken: ct);
+
+        var ids = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 3, ct);
+
+        Assert.Equal(3, ids.Count);
+    }
+
+    [Fact]
+    public async Task GetStaleRunningRunIds_RemovesRecoveredRunsFromNextCall()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"StaleDrain_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var run = CreateRun(jobName, JobStatus.Running) with
+        {
+            NodeName = "n", StartedAt = now.AddMinutes(-30), LastHeartbeatAt = now.AddMinutes(-30)
+        };
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        var first = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 10, ct);
+        Assert.Single(first);
+
+        var transition = RunStatusTransition.RunningToPending(
+            run.Id, run.Attempt, run.NotBefore, run.Reason, run.Result, run.Progress, run.LastHeartbeatAt);
+        var result = await Store.TryTransitionRunAsync(transition, ct);
+        Assert.True(result.Transitioned);
+
+        var second = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 10, ct);
+        Assert.Empty(second);
+    }
+
+    // ── non_terminal_count invariant (via maxActiveForJob behavior) ──────────
+
+    [Fact]
+    public async Task MaxActiveForJob_DecrementsOnTerminalTransition()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"NTTerminalDec_{Guid.CreateVersion7():N}";
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var first = CreateRun(jobName);
+        Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
+
+        var second = CreateRun(jobName);
+        Assert.False(await Store.TryCreateRunAsync(second, 1, cancellationToken: ct));
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var toRunning = CreateRun(jobName, JobStatus.Running) with
+        {
+            Id = first.Id, NodeName = "n", StartedAt = now, LastHeartbeatAt = now, Attempt = first.Attempt
+        };
+        Assert.True((await Store.TryTransitionRunAsync(Transition(toRunning, JobStatus.Pending), ct)).Transitioned);
+
+        var toTerminal = toRunning with
+        {
+            Status = JobStatus.Succeeded, CompletedAt = now, Attempt = toRunning.Attempt
+        };
+        Assert.True((await Store.TryTransitionRunAsync(Transition(toTerminal, JobStatus.Running), ct)).Transitioned);
+
+        var third = CreateRun(jobName);
+        Assert.True(await Store.TryCreateRunAsync(third, 1, cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task MaxActiveForJob_DecrementsOnCancel()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"NTCancelDec_{Guid.CreateVersion7():N}";
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var first = CreateRun(jobName);
+        Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
+
+        var blocked = CreateRun(jobName);
+        Assert.False(await Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
+
+        Assert.True((await Store.TryCancelRunAsync(first.Id, cancellationToken: ct)).Transitioned);
+
+        var third = CreateRun(jobName);
+        Assert.True(await Store.TryCreateRunAsync(third, 1, cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task MaxActiveForJob_DecrementsOnPurgeOfPending()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"NTPurgeDec_{Guid.CreateVersion7():N}";
+        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+
+        var old = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-2));
+        var abandoned = CreateRun(jobName) with { CreatedAt = old, NotBefore = old };
+        Assert.True(await Store.TryCreateRunAsync(abandoned, 1, cancellationToken: ct));
+
+        var blocked = CreateRun(jobName);
+        Assert.False(await Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
+
+        await Store.PurgeAsync(DateTimeOffset.UtcNow.AddHours(-1), ct);
+
+        var fresh = CreateRun(jobName);
+        Assert.True(await Store.TryCreateRunAsync(fresh, 1, cancellationToken: ct));
     }
 }

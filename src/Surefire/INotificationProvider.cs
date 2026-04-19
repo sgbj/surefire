@@ -42,4 +42,23 @@ public interface INotificationProvider
     /// <returns>A disposable that unsubscribes from the channel when disposed.</returns>
     Task<IAsyncDisposable> SubscribeAsync(string channel, Func<string?, Task> handler,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the number of publish flushes that failed since startup and the timestamp of
+    ///     the most recent failure. Providers that batch publishes expose this so callers and
+    ///     health checks can detect a degraded publish pipeline independent of ping liveness.
+    /// </summary>
+    NotificationPublishHealth GetPublishHealth() => default;
 }
+
+/// <summary>
+///     Publish-side health signal reported by <see cref="INotificationProvider.GetPublishHealth" />.
+/// </summary>
+/// <param name="FailureCount">
+///     Total number of publish flushes that failed since startup. Zero for providers that publish
+///     synchronously.
+/// </param>
+/// <param name="LastFailureAt">
+///     Timestamp of the most recent publish failure, or <c>null</c> if none has occurred.
+/// </param>
+public readonly record struct NotificationPublishHealth(long FailureCount, DateTimeOffset? LastFailureAt);

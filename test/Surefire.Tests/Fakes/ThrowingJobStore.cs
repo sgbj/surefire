@@ -58,8 +58,9 @@ internal abstract class ThrowingJobStore : IJobStore
     public virtual Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId, string? reason = null,
         CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
-    public virtual Task<JobRun?> ClaimRunAsync(string nodeName, IReadOnlyCollection<string> jobNames,
-        IReadOnlyCollection<string> queueNames, CancellationToken ct = default) => throw new NotImplementedException();
+    public virtual Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
+        IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken ct = default) =>
+        throw new NotImplementedException();
 
     public virtual Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken ct = default) =>
@@ -89,6 +90,9 @@ internal abstract class ThrowingJobStore : IJobStore
         CancellationToken ct = default) => throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<string>> GetExternallyStoppedRunIdsAsync(IReadOnlyCollection<string> runIds,
+        CancellationToken cancellationToken = default) => throw new NotImplementedException();
+
+    public virtual Task<IReadOnlyList<string>> GetStaleRunningRunIdsAsync(DateTimeOffset staleBefore, int take,
         CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<NodeInfo>> GetNodesAsync(CancellationToken ct = default) =>

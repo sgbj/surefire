@@ -231,7 +231,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var result1 = await Store.TryCreateRunAsync(run1, cancellationToken: ct);
         Assert.True(result1);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
@@ -854,7 +854,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node-1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
         claimed = claimed with { NodeName = "wrong-node", Progress = 0.5 };
@@ -1034,7 +1034,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         };
         Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow.AddDays(-30) };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
@@ -1067,7 +1067,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         await Store.CreateRunsAsync([oldPending, recentPending], cancellationToken: ct);
 
-        var claimed = await Store.ClaimRunAsync("node1", [jobName], ["default"], ct);
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         claimed = claimed with { Status = JobStatus.Succeeded, CompletedAt = now };
         await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
