@@ -44,15 +44,17 @@ internal sealed partial class BatchedEventWriter(
 
     // FlushAsync ordering: each Enqueue stamps a monotonic sequence. After a batch flushes
     // successfully the worker advances _flushedSeq to the batch's max sequence and signals any
-    // waiters. On a permanent failure the exception is captured along with the failing sequence
-    // so FlushAsync callers at or below that sequence observe the failure instead of a false
-    // "durable" signal. Transient errors never reach this field; the worker retries indefinitely
-    // with backoff until the store recovers.
+    // waiters. On a permanent failure the exception is captured along with the failing batch's
+    // MIN sequence so FlushAsync callers whose target has reached or passed that earliest known
+    // failure observe the captured exception. Tracking the min (not the max) keeps the guard
+    // correct even after later batches succeed: the min bounds `[1, min]` as "some earlier event
+    // permanently failed," which is the condition a FlushAsync caller must see. Transient errors
+    // never reach this field; the worker retries indefinitely with backoff until the store recovers.
     private readonly Lock _flushGate = new();
     private TaskCompletionSource _batchFlushedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private long _enqueueSeq;
     private ExceptionDispatchInfo? _error;
-    private long _errorSeq;
+    private long _errorMinSeq;
     private long _flushedSeq;
 
     private CancellationTokenSource? _runCts;
@@ -138,7 +140,12 @@ internal sealed partial class BatchedEventWriter(
             TaskCompletionSource tcs;
             lock (_flushGate)
             {
-                if (_error is { } err && _errorSeq >= target)
+                // Throw when the caller's target has reached or passed the first permanently-
+                // failed batch's MIN sequence. That condition means the caller's range `[1, target]`
+                // overlaps — at minimum — the earliest known failure, so claiming durability
+                // would be a lie. Tracking min (not max) stays correct after later batches succeed
+                // and advance _flushedSeq past the failure.
+                if (_error is { } err && target >= _errorMinSeq)
                 {
                     err.Throw();
                 }
@@ -247,12 +254,26 @@ internal sealed partial class BatchedEventWriter(
 
     private async Task FlushBatchAsync(List<EventRequest> batch, CancellationToken cancellationToken)
     {
-        long maxSeq = 0;
-        for (var i = 0; i < batch.Count; i++)
+        // All call sites guard with `batch.Count > 0`; the check here makes the invariant
+        // explicit and lets SignalBatchCompleted drop its own maxSeq == 0 short-circuit.
+        if (batch.Count == 0)
         {
-            if (batch[i].Sequence > maxSeq)
+            return;
+        }
+
+        var minSeq = batch[0].Sequence;
+        var maxSeq = batch[0].Sequence;
+        for (var i = 1; i < batch.Count; i++)
+        {
+            var seq = batch[i].Sequence;
+            if (seq < minSeq)
             {
-                maxSeq = batch[i].Sequence;
+                minSeq = seq;
+            }
+
+            if (seq > maxSeq)
+            {
+                maxSeq = seq;
             }
         }
 
@@ -276,7 +297,7 @@ internal sealed partial class BatchedEventWriter(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                SignalBatchCompleted(maxSeq,
+                SignalBatchCompleted(minSeq, maxSeq,
                     ExceptionDispatchInfo.Capture(new OperationCanceledException(cancellationToken)));
                 return;
             }
@@ -290,7 +311,7 @@ internal sealed partial class BatchedEventWriter(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    SignalBatchCompleted(maxSeq,
+                    SignalBatchCompleted(minSeq, maxSeq,
                         ExceptionDispatchInfo.Capture(new OperationCanceledException(cancellationToken)));
                     return;
                 }
@@ -298,7 +319,7 @@ internal sealed partial class BatchedEventWriter(
             catch (Exception ex)
             {
                 Log.EventFlushFailed(logger, ex, events.Length);
-                SignalBatchCompleted(maxSeq, ExceptionDispatchInfo.Capture(ex));
+                SignalBatchCompleted(minSeq, maxSeq, ExceptionDispatchInfo.Capture(ex));
                 return;
             }
         }
@@ -324,7 +345,7 @@ internal sealed partial class BatchedEventWriter(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    SignalBatchCompleted(maxSeq, null);
+                    SignalBatchCompleted(minSeq, maxSeq, null);
                     return;
                 }
                 catch (Exception ex)
@@ -334,16 +355,11 @@ internal sealed partial class BatchedEventWriter(
             }
         }
 
-        SignalBatchCompleted(maxSeq, null);
+        SignalBatchCompleted(minSeq, maxSeq, null);
     }
 
-    private void SignalBatchCompleted(long maxSeq, ExceptionDispatchInfo? error)
+    private void SignalBatchCompleted(long minSeq, long maxSeq, ExceptionDispatchInfo? error)
     {
-        if (maxSeq == 0)
-        {
-            return;
-        }
-
         TaskCompletionSource completed;
         lock (_flushGate)
         {
@@ -354,16 +370,15 @@ internal sealed partial class BatchedEventWriter(
                     _flushedSeq = maxSeq;
                 }
             }
-            else
+            else if (_error is null)
             {
-                // Preserve the first error and its sequence. Later successful flushes do not
-                // retroactively clear it; they can only advance _flushedSeq past their own seqs,
-                // and the FlushAsync check compares target against _errorSeq directly.
-                if (_error is null || maxSeq > _errorSeq)
-                {
-                    _error = error;
-                    _errorSeq = maxSeq;
-                }
+                // Sticky first-failure capture. Record the failing batch's MIN sequence so the
+                // FlushAsync guard can correctly observe: any caller whose target has reached or
+                // passed this min has a `[1, target]` range that overlaps the permanently-failed
+                // range. Later permanent failures never replace the first one — the earliest
+                // known failure is what bounds durability.
+                _error = error;
+                _errorMinSeq = minSeq;
             }
 
             completed = _batchFlushedTcs;

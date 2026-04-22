@@ -23,6 +23,7 @@ internal sealed class SurefireInstrumentation : IDisposable
         StoreOperationsFailed = _meter.CreateCounter<long>("surefire.store.operation.failed");
         LogEntriesDropped = _meter.CreateCounter<long>("surefire.log_entries.dropped");
         StoreRetries = _meter.CreateCounter<long>("surefire.store.retries");
+        LoopErrors = _meter.CreateCounter<long>("surefire.loop.errors");
     }
 
     public ActivitySource ActivitySource { get; }
@@ -44,6 +45,8 @@ internal sealed class SurefireInstrumentation : IDisposable
     public Counter<long> LogEntriesDropped { get; }
 
     public Counter<long> StoreRetries { get; }
+
+    public Counter<long> LoopErrors { get; }
 
     public void Dispose()
     {
@@ -109,5 +112,11 @@ internal sealed class SurefireInstrumentation : IDisposable
     {
         var tags = new TagList { { "surefire.store.operation", operation } };
         StoreOperationsFailed.Add(1, tags);
+    }
+
+    public void RecordLoopError(string loop)
+    {
+        var tags = new TagList { { "surefire.loop", loop } };
+        LoopErrors.Add(1, tags);
     }
 }

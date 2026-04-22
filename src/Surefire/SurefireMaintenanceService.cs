@@ -11,15 +11,18 @@ internal sealed partial class SurefireMaintenanceService(
     SurefireOptions options,
     TimeProvider timeProvider,
     SurefireInstrumentation instrumentation,
+    LoopHealthTracker loopHealth,
     BatchCompletionHandler batchCompletionHandler,
     Backoff backoff,
     ILogger<SurefireMaintenanceService> logger) : BackgroundService
 {
+    internal const string LoopName = "maintenance";
     private static readonly TimeSpan BackoffInitial = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        loopHealth.Register(LoopName, options.HeartbeatInterval);
         using var timer = new PeriodicTimer(options.HeartbeatInterval, timeProvider);
 
         try
@@ -30,6 +33,7 @@ internal sealed partial class SurefireMaintenanceService(
                 try
                 {
                     await RunMaintenanceTickAsync(stoppingToken);
+                    loopHealth.RecordSuccess(LoopName);
                     backoffAttempt = 0;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -43,13 +47,12 @@ internal sealed partial class SurefireMaintenanceService(
                         break;
                     }
 
+                    // A job scheduler should never crash the host on a single bad tick. Log the
+                    // exception, record instrumentation, back off and continue so operators see
+                    // the failure via metrics/health-check while the host stays up.
                     Log.MaintenanceTickFailed(logger, ex);
-                    if (!store.IsTransientException(ex))
-                    {
-                        throw;
-                    }
-
-                    instrumentation.RecordStoreRetry("maintenance");
+                    instrumentation.RecordLoopError(LoopName);
+                    loopHealth.RecordFailure(LoopName);
                     await Task.Delay(backoff.NextDelay(backoffAttempt++, BackoffInitial, BackoffMax), timeProvider,
                         stoppingToken);
                 }
@@ -64,20 +67,29 @@ internal sealed partial class SurefireMaintenanceService(
     {
         var registrations = registry.Snapshot();
 
-        foreach (var registered in registrations)
+        await store.UpsertJobsAsync(
+            registrations.Select(r => r.Definition).ToList(),
+            cancellationToken);
+
+        // UpsertQueuesAsync is a bulk upsert that also refreshes last_heartbeat_at, so per-tick
+        // calls double as the heartbeat that keeps retention from sweeping queues this node
+        // serves. Upsert both explicitly configured queues and any registry-derived queues
+        // (e.g. the implicit "default") so all queues visited by claim stay alive.
+        var configuredQueueNames = new HashSet<string>(
+            options.Queues.Select(q => q.Name), StringComparer.Ordinal);
+        var queuesToUpsert = new List<QueueDefinition>(options.Queues);
+        foreach (var name in registry.GetQueueNames())
         {
-            await store.UpsertJobAsync(registered.Definition, cancellationToken);
+            if (configuredQueueNames.Contains(name))
+            {
+                continue;
+            }
+
+            queuesToUpsert.Add(new() { Name = name });
         }
 
-        foreach (var queue in options.Queues)
-        {
-            await store.UpsertQueueAsync(queue, cancellationToken);
-        }
-
-        foreach (var rateLimit in options.RateLimits)
-        {
-            await store.UpsertRateLimitAsync(rateLimit, cancellationToken);
-        }
+        await store.UpsertQueuesAsync(queuesToUpsert, cancellationToken);
+        await store.UpsertRateLimitsAsync(options.RateLimits.ToList(), cancellationToken);
 
         await store.HeartbeatAsync(
             options.NodeName,

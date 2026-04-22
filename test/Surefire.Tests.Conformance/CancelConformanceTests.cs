@@ -9,7 +9,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -30,7 +30,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -54,7 +54,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -76,7 +76,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -106,7 +106,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         // Create a parent + 3 children (ParentRunId relationship)
         var parent = CreateRun(job.Name, JobStatus.Running) with
@@ -158,7 +158,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -173,7 +173,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var parent = CreateRun(job.Name, JobStatus.Running) with
         {
@@ -203,7 +203,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         {
             var jobName = "ConcurrentCancel_" + Guid.CreateVersion7().ToString("N");
             var job = CreateJob(jobName);
-            await Store.UpsertJobAsync(job, ct);
+            await Store.UpsertJobsAsync([job], ct);
 
             var run = CreateRun(jobName);
             await Store.CreateRunsAsync([run], cancellationToken: ct);

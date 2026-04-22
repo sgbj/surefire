@@ -7,7 +7,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ExpireJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -27,7 +27,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ExpireIds_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var expiredPending = CreateRun(jobName) with { NotAfter = now.AddMinutes(-1) };
@@ -72,7 +72,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TerminalJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run = CreateRun(jobName, JobStatus.Succeeded) with
@@ -99,7 +99,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"RunningExpired_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run = CreateRun(jobName, JobStatus.Running) with
@@ -124,7 +124,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"HeartbeatJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -150,7 +150,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"HeartbeatTerminal_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -175,7 +175,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PendingExpired_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run = CreateRun(jobName) with
@@ -196,7 +196,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ExpireCount_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var past = now.AddMinutes(-10);
@@ -228,7 +228,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"RetryAfterExpired_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -258,8 +258,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StoppedRunning_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -275,8 +275,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StoppedTerminal_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var succeeded = CreateRun(jobName, JobStatus.Succeeded) with
@@ -310,8 +310,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StoppedCancelled_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -331,7 +331,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StoppedDeleted_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         // Use an ID that was never inserted â€” simulates a purged run
         var fakeId = Guid.CreateVersion7().ToString("N");
@@ -346,8 +346,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StoppedMixed_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
 
@@ -384,7 +384,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ExpireBatchCounter_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var expiringRun = CreateRun(jobName) with { NotAfter = now.AddMinutes(-1) };
@@ -415,7 +415,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ExpireBatchComplete_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run = CreateRun(jobName) with { NotAfter = now.AddMinutes(-1) };
@@ -445,7 +445,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PurgeBatchKeep_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
@@ -482,7 +482,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PurgeBatchRemove_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
@@ -521,7 +521,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StaleOrder_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var oldest = CreateRun(jobName, JobStatus.Running) with
@@ -551,7 +551,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StalePending_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var running = CreateRun(jobName, JobStatus.Running) with
@@ -574,7 +574,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StaleFresh_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var stale = CreateRun(jobName, JobStatus.Running) with
@@ -598,7 +598,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StaleTake_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var runs = new List<JobRun>();
@@ -624,7 +624,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StaleDrain_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run = CreateRun(jobName, JobStatus.Running) with
@@ -652,8 +652,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NTTerminalDec_{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var first = CreateRun(jobName);
         Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
@@ -683,8 +683,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NTCancelDec_{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var first = CreateRun(jobName);
         Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
@@ -703,8 +703,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NTPurgeDec_{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var old = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-2));
         var abandoned = CreateRun(jobName) with { CreatedAt = old, NotBefore = old };

@@ -19,14 +19,16 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "TriggerMaxConcurrency_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new()
-        {
-            Name = jobName,
-            Queue = "default",
-            MaxConcurrency = 1
-        }, ct);
+        await store.UpsertJobsAsync([
+            new()
+            {
+                Name = jobName,
+                Queue = "default",
+                MaxConcurrency = 1
+            }
+        ], ct);
 
         var runId1 = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId2 = await client.TriggerAsync(jobName, cancellationToken: ct);
@@ -52,9 +54,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "StreamRetry_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var marker = Guid.CreateVersion7().ToString("N");
         var streamTask = Task.Run(async () =>
@@ -148,9 +150,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchWait_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
 
@@ -218,9 +220,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "ObserveFallback_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var run = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = run.Id;
@@ -283,9 +285,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "EmptyBatch_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, Array.Empty<object?>(), ct);
         var batch = await store.GetBatchAsync(batchId, ct);
@@ -317,9 +319,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "EmptyBatch_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var newBatch = await client.TriggerBatchAsync(jobName, Array.Empty<object?>(), cancellationToken: ct);
         var batchId = newBatch.Id;
@@ -352,9 +354,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchWaitLarge_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var args = Enumerable.Range(1, 260).Select(i => (object?)new { x = i }).ToArray();
         var batchId = await client.TriggerAllAsync(jobName, args, ct);
@@ -414,9 +416,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchStreamOrder_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
         var childA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
@@ -498,9 +500,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchEventOrder_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
         var childA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
@@ -584,9 +586,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchEventStress_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         const int childCount = 96;
         const int eventsPerChild = 4;
@@ -662,9 +664,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(25) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchEventGrace_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }], ct);
         var child = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
@@ -729,9 +731,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchStreamResume_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
         var childA = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
@@ -829,9 +831,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchWaitOrder_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }], ct);
 
@@ -894,9 +896,9 @@ public sealed class RuntimeContractPendingTests
             new() { PollingInterval = TimeSpan.FromSeconds(30) }, // intentionally large
             NullLogger<JobClient>.Instance);
 
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
         var jobName = "BatchWaitFastPath_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { x = 1 }, new { x = 2 }], ct);
 

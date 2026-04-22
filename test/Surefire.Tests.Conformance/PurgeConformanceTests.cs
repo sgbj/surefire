@@ -11,7 +11,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PurgeJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -40,7 +40,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StaleJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var futureThreshold = DateTimeOffset.UtcNow.AddMinutes(5);
         await Store.PurgeAsync(futureThreshold, ct);
@@ -71,7 +71,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var queueName = $"stale-queue-{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var futureThreshold = DateTimeOffset.UtcNow.AddMinutes(5);
         await Store.PurgeAsync(futureThreshold, ct);
@@ -85,13 +85,15 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var rlName = $"stale-rl-{Guid.CreateVersion7():N}";
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = rlName,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 10,
-            Window = TimeSpan.FromMinutes(1)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = rlName,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 10,
+                Window = TimeSpan.FromMinutes(1)
+            }
+        ], ct);
 
         var futureThreshold = DateTimeOffset.UtcNow.AddMinutes(5);
         await Store.PurgeAsync(futureThreshold, ct);
@@ -99,8 +101,8 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"RLJob_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.RateLimitName = rlName;
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -114,7 +116,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"AbandonedJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -130,7 +132,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PurgeOldPending_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { NotBefore = OldTime, CreatedAt = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -146,7 +148,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"FutureJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { NotBefore = DateTimeOffset.UtcNow.AddHours(1) };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -162,7 +164,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"RunningJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -182,10 +184,10 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ActiveJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var queueName = $"active-queue-{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var nodeName = $"active-node-{Guid.CreateVersion7():N}";
         await Store.HeartbeatAsync(nodeName, [jobName], [queueName], [], ct);
@@ -210,14 +212,16 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var rateLimitName = $"rl_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.RateLimitName = rateLimitName;
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = rateLimitName,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 1,
-            Window = TimeSpan.FromHours(1)
-        }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = rateLimitName,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 1,
+                Window = TimeSpan.FromHours(1)
+            }
+        ], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -228,17 +232,19 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         await Store.PurgeAsync(DateTimeOffset.UtcNow.AddDays(1), ct);
 
         // Re-create the rate limit and a new run - should succeed if window state was cleaned up
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = rateLimitName,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 1,
-            Window = TimeSpan.FromHours(1)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = rateLimitName,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 1,
+                Window = TimeSpan.FromHours(1)
+            }
+        ], ct);
 
         var job2 = CreateJob(jobName);
         job2.RateLimitName = rateLimitName;
-        await Store.UpsertJobAsync(job2, ct);
+        await Store.UpsertJobsAsync([job2], ct);
 
         var run2 = CreateRun(jobName);
         await Store.CreateRunsAsync([run2], cancellationToken: ct);
@@ -251,8 +257,8 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ActiveRunJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var run = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -273,7 +279,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batchId = Guid.CreateVersion7().ToString("N");
         var runs = new[]
@@ -311,7 +317,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"OpenBatchJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         // Child's NotBefore is in the future so the "abandoned pending" rule can't harvest it;
         // this isolates the test to the batch-status purge rule.
@@ -345,7 +351,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchEventsJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batchId = Guid.CreateVersion7().ToString("N");
         var run = CreateRun(jobName) with { BatchId = batchId, CreatedAt = OldTime, NotBefore = OldTime };
@@ -377,7 +383,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DedupPurge_{Guid.CreateVersion7():N}";
         var dedupId = $"once-{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var first = CreateRun(jobName) with
         {
@@ -408,7 +414,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"ConcurrencyPurge_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.MaxConcurrency = 1;
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         // Orphan a pending run: sits at the concurrency boundary without ever being claimed.
         var orphan = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
@@ -432,7 +438,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"LoopPurge_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.MaxConcurrency = 1;
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         // Run many short cycles, each backdated so every purge sweep can clean up every
         // artifact the prior cycle produced. If any index, counter, or table leaks per cycle,

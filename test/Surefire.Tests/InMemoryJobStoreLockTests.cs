@@ -10,7 +10,7 @@ public sealed class InMemoryJobStoreLockTests
 
     private static async Task<JobRun> SeedRunAsync(InMemoryJobStore store, string jobName, CancellationToken ct)
     {
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
         var run = new JobRun
         {
             Id = Guid.CreateVersion7().ToString("N"),
@@ -107,7 +107,7 @@ public sealed class InMemoryJobStoreLockTests
         var ct = TestContext.Current.CancellationToken;
         var store = CreateStore();
         var jobName = "RwlsConcurrent_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(10));

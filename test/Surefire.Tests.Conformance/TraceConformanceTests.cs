@@ -13,8 +13,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"Trace_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -48,8 +48,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TracePage_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -98,8 +98,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
         // must have NextCursor == null without requiring an extra empty fetch.
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceBoundary_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -136,8 +136,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceTieAfter_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -186,8 +186,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceTieBefore_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -242,8 +242,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
         // precede the focus in a single query (no walk, no cap).
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceBefore_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -291,8 +291,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceCursors_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var parent = CreateRun(jobName);
         await Store.CreateRunsAsync([parent], cancellationToken: ct);
@@ -307,8 +307,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceEmpty_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var lonely = CreateRun(jobName);
         await Store.CreateRunsAsync([lonely], cancellationToken: ct);
@@ -323,8 +323,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceChain_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         // Build a 4-level chain: root → a → b → c
         var root = CreateRun(jobName);
@@ -347,8 +347,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceRoot_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var root = CreateRun(jobName);
         await Store.CreateRunsAsync([root], cancellationToken: ct);

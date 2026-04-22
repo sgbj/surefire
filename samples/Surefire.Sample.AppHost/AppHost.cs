@@ -9,10 +9,10 @@ var surefire = builder.AddPostgres("postgres")
 //var surefire = builder.AddSqlServer("sqlserver")
 //    .AddDatabase("surefire")
 //    .WithCreationScript("""
-//        IF DB_ID('surefire') IS NULL
-//            CREATE DATABASE [surefire];
-//        ALTER DATABASE [surefire] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
-//        """);
+//                        IF DB_ID('surefire') IS NULL
+//                            CREATE DATABASE [surefire];
+//                        ALTER DATABASE [surefire] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
+//                        """);
 
 //var surefire = builder.AddRedis("surefire")
 //    .WithRedisInsight();

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Surefire;
 
 /// <summary>Immutable snapshot of a batch of job runs submitted together.</summary>
@@ -36,12 +38,14 @@ public sealed record JobBatch
     public DateTimeOffset? CompletedAt { get; init; }
 
     // ------------------------------------------------------------------
-    // Derived state
+    // Derived state — excluded from wire serialization; consumers compute from Status.
     // ------------------------------------------------------------------
 
     /// <summary>Gets whether the batch has reached a terminal status.</summary>
+    [JsonIgnore]
     public bool IsTerminal => Status.IsTerminal;
 
     /// <summary>Gets whether all runs in the batch completed successfully.</summary>
+    [JsonIgnore]
     public bool IsSuccess => Status == JobStatus.Succeeded;
 }

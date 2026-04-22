@@ -12,16 +12,18 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
 
         var job = CreateJob(jobName);
         job.RateLimitName = name;
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = name,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 1,
-            Window = TimeSpan.FromHours(1)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = name,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 1,
+                Window = TimeSpan.FromHours(1)
+            }
+        ], ct);
 
         var run1 = CreateRun(jobName);
         var run2 = CreateRun(jobName);
@@ -37,13 +39,15 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var claimed2 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.Null(claimed2);
 
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = name,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 10,
-            Window = TimeSpan.FromHours(1)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = name,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 10,
+                Window = TimeSpan.FromHours(1)
+            }
+        ], ct);
 
         var claimed3 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed3);
@@ -59,29 +63,33 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
 
         var job = CreateJob(jobName);
         job.RateLimitName = name;
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = name,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 1,
-            Window = TimeSpan.FromHours(1)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = name,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 1,
+                Window = TimeSpan.FromHours(1)
+            }
+        ], ct);
 
         var run1 = CreateRun(jobName);
         await Store.CreateRunsAsync([run1], cancellationToken: ct);
         var c1 = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(c1);
 
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = name,
-            Type = RateLimitType.FixedWindow,
-            MaxPermits = 1,
-            Window = TimeSpan.FromHours(1)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = name,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 1,
+                Window = TimeSpan.FromHours(1)
+            }
+        ], ct);
 
         var run2 = CreateRun(jobName);
         await Store.CreateRunsAsync([run2], cancellationToken: ct);
@@ -97,18 +105,20 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var jobName = $"SlidingJob_{Guid.CreateVersion7():N}";
         var queueName = "default";
 
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = name,
-            Type = RateLimitType.SlidingWindow,
-            MaxPermits = 2,
-            Window = TimeSpan.FromSeconds(10)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = name,
+                Type = RateLimitType.SlidingWindow,
+                MaxPermits = 2,
+                Window = TimeSpan.FromSeconds(10)
+            }
+        ], ct);
 
         var job = CreateJob(jobName);
         job.RateLimitName = name;
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var run1 = CreateRun(jobName);
         var run2 = CreateRun(jobName);
@@ -148,18 +158,20 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var jobName = $"RecoverJob_{suffix}";
         var queueName = "default";
 
-        await Store.UpsertRateLimitAsync(new()
-        {
-            Name = name,
-            Type = type,
-            MaxPermits = 1,
-            Window = TimeSpan.FromMilliseconds(180)
-        }, ct);
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = name,
+                Type = type,
+                MaxPermits = 1,
+                Window = TimeSpan.FromMilliseconds(180)
+            }
+        ], ct);
 
         var job = CreateJob(jobName);
         job.RateLimitName = name;
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var run1 = CreateRun(jobName);
         var run2 = CreateRun(jobName);

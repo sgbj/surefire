@@ -15,7 +15,8 @@ public sealed class RetentionServiceTests
         var store = new FakePurgeStore();
         var instrumentation = new SurefireInstrumentation(new DummyMeterFactory());
         var service = new SurefireRetentionService(
-            store, options, time, instrumentation, new(() => 0.5), NullLogger<SurefireRetentionService>.Instance);
+            store, options, time, instrumentation, new(time), new(() => 0.5),
+            NullLogger<SurefireRetentionService>.Instance);
         return (service, store, time);
     }
 

@@ -19,11 +19,14 @@ internal sealed partial class SurefireExecutorService(
     SurefireOptions options,
     TimeProvider timeProvider,
     SurefireInstrumentation instrumentation,
+    LoopHealthTracker loopHealth,
     BatchCompletionHandler batchCompletionHandler,
     BatchedEventWriter eventWriter,
     Backoff backoff,
     ILogger<SurefireExecutorService> logger) : BackgroundService
 {
+    internal const string LoopName = "executor";
+
     // Caps how many runs a single claim round trip will request. This bounds per-claim latency,
     // memory for the returned list, and lock duration on the claim path.
     private const int MaxBatchClaim = 32;
@@ -64,6 +67,7 @@ internal sealed partial class SurefireExecutorService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        loopHealth.Register(LoopName, options.PollingInterval);
         using var wakeup = new SemaphoreSlim(0, 1);
         await using var subscription = await notifications.SubscribeAsync(
             NotificationChannels.RunCreated,
@@ -128,6 +132,8 @@ internal sealed partial class SurefireExecutorService(
                             TaskContinuationOptions.None,
                             TaskScheduler.Default);
                     }
+
+                    loopHealth.RecordSuccess(LoopName);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -140,13 +146,12 @@ internal sealed partial class SurefireExecutorService(
                         break;
                     }
 
+                    // A job scheduler should never crash the host on a single bad tick. Log the
+                    // exception, record instrumentation, back off and continue so operators see
+                    // the failure via metrics/health-check while the host stays up.
                     Log.ExecutorLoopFailed(logger, ex);
-                    if (!store.IsTransientException(ex))
-                    {
-                        throw;
-                    }
-
-                    instrumentation.RecordStoreRetry("executor");
+                    instrumentation.RecordLoopError(LoopName);
+                    loopHealth.RecordFailure(LoopName);
                     await Task.Delay(backoff.NextDelay(backoffAttempt++, BackoffInitial, BackoffMax), timeProvider,
                         stoppingToken);
                     continue;
@@ -299,7 +304,8 @@ internal sealed partial class SurefireExecutorService(
                     null,
                     run,
                     noHandlerTransition,
-                    deadLetterToken);
+                    deadLetterToken,
+                    stoppingToken);
                 if (dlResult.Transitioned)
                 {
                     instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
@@ -358,10 +364,15 @@ internal sealed partial class SurefireExecutorService(
                 run.StartedAt,
                 completedAt);
 
-            using var completionCts = CreateBestEffortWorkCts(stoppingToken);
-            var completionToken = completionCts.Token;
+            // bestEffortCts bounds the flush + post-handler housekeeping to ShutdownTimeout;
+            // the terminal transition itself takes stoppingToken so a transient store outage
+            // longer than ShutdownTimeout doesn't abandon a successful handler to stale recovery.
+            using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
 
-            var transitionResult = await FlushAndTransitionTerminalAsync(context, run, completed, completionToken);
+            var transitionResult = await FlushAndTransitionTerminalAsync(
+                context, run, completed,
+                bestEffortCts.Token,
+                stoppingToken);
             if (transitionResult.Transitioned)
             {
                 instrumentation.RecordRunCompleted(run.JobName, run.StartedAt, completedAt);
@@ -371,7 +382,7 @@ internal sealed partial class SurefireExecutorService(
                     context,
                     transitionResult,
                     scope.ServiceProvider,
-                    completionToken);
+                    bestEffortCts.Token);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -641,7 +652,10 @@ internal sealed partial class SurefireExecutorService(
                 run.Attempt);
         }
 
-        var transitionResult = await FlushAndTransitionTerminalAsync(context, run, deadLetter, bestEffortToken);
+        var transitionResult = await FlushAndTransitionTerminalAsync(
+            context, run, deadLetter,
+            bestEffortToken,
+            stoppingToken);
         if (transitionResult.Transitioned)
         {
             instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
@@ -738,27 +752,31 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private async Task<RunTransitionResult> FlushAndTransitionTerminalAsync(JobContext? context, JobRun run,
-        RunStatusTransition transition, CancellationToken cancellationToken)
+        RunStatusTransition transition, CancellationToken flushToken, CancellationToken transitionToken)
     {
         // Flush in dependency order: pending trailing-edge progress → log pump → event writer → transition.
         // Each layer is an async-write path; draining them in order guarantees readers never see the
-        // terminal status while prior progress/log/output events are still in flight.
+        // terminal status while prior progress/log/output events are still in flight. The flush steps
+        // use a best-effort token (CancelAfter ShutdownTimeout) — if the pump or writer is wedged we
+        // drop late events rather than hold up the transition indefinitely.
         if (context is { })
         {
-            await context.FlushPendingProgressAsync(cancellationToken);
+            await context.FlushPendingProgressAsync(flushToken);
         }
 
-        await logEventPump.FlushRunAsync(run.Id, cancellationToken);
-        await eventWriter.FlushAsync(cancellationToken);
+        await logEventPump.FlushRunAsync(run.Id, flushToken);
+        await eventWriter.FlushAsync(flushToken);
 
-        // Retry transient errors (deadlock/serialization) around the terminal transition. Without
-        // this, a deadlock victim would propagate out as a failure and route the run through
-        // HandleRunFailureAsync — marking an already-succeeded run as failed. The event writer
-        // above has its own retry loop; this one is specific to the status-row write.
+        // Retry transient errors (deadlock/serialization) around the terminal transition bounded
+        // only by the host's stoppingToken. Abandoning a successful handler's transition to stale
+        // recovery re-executes non-idempotent jobs, so the retry must continue past the best-effort
+        // flush deadline. The implicit outer bound is InactiveThreshold: the same store outage
+        // that blocks the transition blocks heartbeats too, so stale recovery still sweeps the
+        // run if heartbeats stop landing — no risk of an unbounded slot leak.
         return await InvokeStoreWithTransientRetryAsync(
             ct => store.TryTransitionRunAsync(transition, ct),
             "transition",
-            cancellationToken);
+            transitionToken);
     }
 
     private async Task<T> InvokeStoreWithTransientRetryAsync<T>(
@@ -1216,7 +1234,6 @@ internal sealed partial class SurefireExecutorService(
             CreatedAt = now,
             NotBefore = now,
             Priority = job.Definition.Priority,
-            QueuePriority = 0,
             Progress = 0,
             DeduplicationId = BuildContinuousDeduplicationId(completedRun.Id),
             Attempt = 0

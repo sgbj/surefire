@@ -10,6 +10,27 @@ internal sealed class SqliteJobStore(
     TimeSpan? commandTimeout,
     TimeProvider timeProvider) : IJobStore
 {
+    // Connection-scoped pragmas, applied on every connection open. WAL mode itself is
+    // database-scoped and set once in MigrateAsync. Values here are tuned for a read/write
+    // balanced production workload; they're intentionally not user-configurable until a real
+    // deployment surfaces a case where the defaults don't fit.
+    //  - foreign_keys=ON: foreign-key enforcement defaults off per connection in SQLite.
+    //  - synchronous=NORMAL: right balance under WAL (fsync on checkpoint, not every commit).
+    //  - busy_timeout=24000: retry-on-busy at the SQLite layer; paired with IsTransientException.
+    //  - temp_store=MEMORY: large ORDER BY / stats / retention sorts stay resident.
+    //  - mmap_size=268435456 (256 MiB): hot pages served from mmap on read-heavy queries.
+    //  - journal_size_limit=67108864 (64 MiB): caps WAL file growth after a write burst.
+    //  - wal_autocheckpoint=1000: bounds WAL window size between automatic checkpoints.
+    private const string ConnectionPragmas = """
+                                             PRAGMA foreign_keys=ON;
+                                             PRAGMA synchronous=NORMAL;
+                                             PRAGMA busy_timeout=24000;
+                                             PRAGMA temp_store=MEMORY;
+                                             PRAGMA mmap_size=268435456;
+                                             PRAGMA journal_size_limit=67108864;
+                                             PRAGMA wal_autocheckpoint=1000;
+                                             """;
+
     private readonly string _connectionString = BuildConnectionString(connectionString, commandTimeout);
 
     internal int? CommandTimeoutSeconds { get; } =
@@ -93,8 +114,7 @@ internal sealed class SqliteJobStore(
                                                          priority INTEGER NOT NULL DEFAULT 0,
                                                          deduplication_id TEXT,
                                                          last_heartbeat_at TEXT,
-                                                         batch_id TEXT,
-                                                         queue_priority INTEGER NOT NULL DEFAULT 0
+                                                         batch_id TEXT
                                                      );
                                                      CREATE TABLE IF NOT EXISTS surefire_batches (
                                                          id TEXT PRIMARY KEY,
@@ -107,7 +127,7 @@ internal sealed class SqliteJobStore(
                                                          completed_at TEXT
                                                      );
                                                      CREATE INDEX IF NOT EXISTS ix_runs_claim
-                                                         ON surefire_runs (queue_priority DESC, priority DESC, not_before, id) WHERE status = 0;
+                                                         ON surefire_runs (priority DESC, not_before, id) WHERE status = 0;
                                                      CREATE INDEX IF NOT EXISTS ix_runs_job_name_status
                                                          ON surefire_runs (job_name, status);
                                                      CREATE INDEX IF NOT EXISTS ix_runs_created_at
@@ -160,10 +180,6 @@ internal sealed class SqliteJobStore(
                                                          last_heartbeat_at TEXT,
                                                          running_count INTEGER NOT NULL DEFAULT 0
                                                      );
-
-                                                     -- 'default' queue row is always present so per-queue running_count
-                                                     -- maintenance has a target row even when no explicit queue is registered.
-                                                     INSERT OR IGNORE INTO surefire_queues (name) VALUES ('default');
                                                      CREATE TABLE IF NOT EXISTS surefire_rate_limits (
                                                          name TEXT PRIMARY KEY,
                                                          type INTEGER NOT NULL DEFAULT 0,
@@ -179,8 +195,20 @@ internal sealed class SqliteJobStore(
         await ddlCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
+    public async Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs,
+        CancellationToken cancellationToken = default)
     {
+        if (jobs.Count == 0)
+        {
+            return;
+        }
+
+        // One JSON payload → one json_each → one INSERT...ON CONFLICT → one statement. JSON paths
+        // match the camelCase keys emitted by SurefireJsonContext; target columns stay snake_case.
+        // tags and retry_policy are stored as JSON text; json_extract of a JSON sub-object / array
+        // yields the sub-JSON verbatim. is_enabled / is_continuous are stored as 0/1 — json_extract
+        // on a JSON boolean returns 1/0. is_enabled is not in the DO UPDATE SET list so existing
+        // toggles stick.
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
                                                   INSERT INTO surefire_jobs (
@@ -188,12 +216,27 @@ internal sealed class SqliteJobStore(
                                                       timeout_ticks, max_concurrency, priority, retry_policy,
                                                       is_continuous, queue, rate_limit_name, is_enabled,
                                                       misfire_policy, fire_all_limit, arguments_schema, last_heartbeat_at
-                                                  ) VALUES (
-                                                      @name, @description, @tags, @cron_expression, @time_zone_id,
-                                                      @timeout_ticks, @max_concurrency, @priority, @retry_policy,
-                                                      @is_continuous, @queue, @rate_limit_name, @is_enabled,
-                                                      @misfire_policy, @fire_all_limit, @arguments_schema, @last_heartbeat_at
                                                   )
+                                                  SELECT
+                                                      json_extract(e.value, '$.name'),
+                                                      json_extract(e.value, '$.description'),
+                                                      json_extract(e.value, '$.tags'),
+                                                      json_extract(e.value, '$.cronExpression'),
+                                                      json_extract(e.value, '$.timeZoneId'),
+                                                      json_extract(e.value, '$.timeout'),
+                                                      json_extract(e.value, '$.maxConcurrency'),
+                                                      json_extract(e.value, '$.priority'),
+                                                      json_extract(e.value, '$.retryPolicy'),
+                                                      json_extract(e.value, '$.isContinuous'),
+                                                      json_extract(e.value, '$.queue'),
+                                                      json_extract(e.value, '$.rateLimitName'),
+                                                      json_extract(e.value, '$.isEnabled'),
+                                                      json_extract(e.value, '$.misfirePolicy'),
+                                                      json_extract(e.value, '$.fireAllLimit'),
+                                                      json_extract(e.value, '$.argumentsSchema'),
+                                                      @now
+                                                  FROM json_each(@payload) AS e
+                                                  WHERE json_type(e.value) = 'object'
                                                   ON CONFLICT (name) DO UPDATE SET
                                                       description = excluded.description,
                                                       tags = excluded.tags,
@@ -209,9 +252,10 @@ internal sealed class SqliteJobStore(
                                                       misfire_policy = excluded.misfire_policy,
                                                       fire_all_limit = excluded.fire_all_limit,
                                                       arguments_schema = excluded.arguments_schema,
-                                                      last_heartbeat_at = @last_heartbeat_at
+                                                      last_heartbeat_at = @now
                                                   """);
-        AddJobParameters(cmd, job);
+        cmd.Parameters.AddWithValue("@payload", UpsertPayloadFactory.SerializeJobs(jobs));
+        cmd.Parameters.AddWithValue("@now", FormatTimestamp(timeProvider.GetUtcNow()));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1412,8 +1456,10 @@ internal sealed class SqliteJobStore(
             nodeCmd.Parameters.AddWithValue("@n", nodeName);
             nodeCmd.Parameters.AddWithValue("@now", now);
             nodeCmd.Parameters.AddWithValue("@rc", activeRunIds.Count);
-            nodeCmd.Parameters.AddWithValue("@rjn", JsonSerializer.Serialize(jobNames));
-            nodeCmd.Parameters.AddWithValue("@rqn", JsonSerializer.Serialize(queueNames));
+            nodeCmd.Parameters.AddWithValue("@rjn",
+                JsonSerializer.Serialize(jobNames.ToArray(), SurefireJsonContext.Default.StringArray));
+            nodeCmd.Parameters.AddWithValue("@rqn",
+                JsonSerializer.Serialize(queueNames.ToArray(), SurefireJsonContext.Default.StringArray));
             await nodeCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -1556,51 +1602,39 @@ internal sealed class SqliteJobStore(
         return null;
     }
 
-    public async Task UpsertQueueAsync(
-        QueueDefinition queue, CancellationToken cancellationToken = default)
+    public async Task UpsertQueuesAsync(IReadOnlyList<QueueDefinition> queues,
+        CancellationToken cancellationToken = default)
     {
+        if (queues.Count == 0)
+        {
+            return;
+        }
+
+        // is_paused absent from the DO UPDATE SET list so dashboard pause survives re-upserts.
         await using var conn = await CreateConnectionAsync(cancellationToken);
-        await using var tx = conn.BeginTransaction(false);
-
-        await using (var cmd = CreateCommand(conn, """
-                                                   INSERT INTO surefire_queues (
-                                                       name, priority, max_concurrency, is_paused,
-                                                       rate_limit_name, last_heartbeat_at
-                                                   ) VALUES (@n, @pr, @mc, @ip, @rln, @lh)
-                                                   ON CONFLICT (name) DO UPDATE SET
-                                                       priority = excluded.priority,
-                                                       max_concurrency = excluded.max_concurrency,
-                                                       rate_limit_name = excluded.rate_limit_name,
-                                                       last_heartbeat_at = @lh
-                                                   """, tx))
-        {
-            cmd.Parameters.AddWithValue("@n", queue.Name);
-            cmd.Parameters.AddWithValue("@pr", queue.Priority);
-            cmd.Parameters.AddWithValue("@mc",
-                queue.MaxConcurrency.HasValue ? queue.MaxConcurrency.Value : DBNull.Value);
-            cmd.Parameters.AddWithValue("@ip", queue.IsPaused ? 1 : 0);
-            cmd.Parameters.AddWithValue("@rln", (object?)queue.RateLimitName ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@lh", FormatTimestamp(timeProvider.GetUtcNow()));
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await using (var updateCmd = CreateCommand(conn, """
-                                                         UPDATE surefire_runs
-                                                         SET queue_priority = @pr
-                                                         WHERE status = 0
-                                                             AND job_name IN (
-                                                                 SELECT name FROM surefire_jobs
-                                                                 WHERE COALESCE(queue, 'default') = @n
-                                                             )
-                                                             AND queue_priority != @pr
-                                                         """, tx))
-        {
-            updateCmd.Parameters.AddWithValue("@pr", queue.Priority);
-            updateCmd.Parameters.AddWithValue("@n", queue.Name);
-            await updateCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await tx.CommitAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn, """
+                                                  INSERT INTO surefire_queues (
+                                                      name, priority, max_concurrency, is_paused,
+                                                      rate_limit_name, last_heartbeat_at
+                                                  )
+                                                  SELECT
+                                                      json_extract(e.value, '$.name'),
+                                                      json_extract(e.value, '$.priority'),
+                                                      json_extract(e.value, '$.maxConcurrency'),
+                                                      json_extract(e.value, '$.isPaused'),
+                                                      json_extract(e.value, '$.rateLimitName'),
+                                                      @now
+                                                  FROM json_each(@payload) AS e
+                                                  WHERE json_type(e.value) = 'object'
+                                                  ON CONFLICT (name) DO UPDATE SET
+                                                      priority = excluded.priority,
+                                                      max_concurrency = excluded.max_concurrency,
+                                                      rate_limit_name = excluded.rate_limit_name,
+                                                      last_heartbeat_at = @now
+                                                  """);
+        cmd.Parameters.AddWithValue("@payload", UpsertPayloadFactory.SerializeQueues(queues));
+        cmd.Parameters.AddWithValue("@now", FormatTimestamp(timeProvider.GetUtcNow()));
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(
@@ -1620,40 +1654,48 @@ internal sealed class SqliteJobStore(
         return queues;
     }
 
-    public async Task SetQueuePausedAsync(
+    public async Task<bool> SetQueuePausedAsync(
         string name, bool isPaused, CancellationToken cancellationToken = default)
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
-        await using var cmd = CreateCommand(conn, """
-                                                  INSERT INTO surefire_queues (name, priority, max_concurrency, is_paused, rate_limit_name, last_heartbeat_at)
-                                                  VALUES (@n, 0, NULL, @ip, NULL, NULL)
-                                                  ON CONFLICT (name) DO UPDATE SET is_paused = @ip
-                                                  """);
+        await using var cmd = CreateCommand(conn,
+            "UPDATE surefire_queues SET is_paused = @ip WHERE name = @n");
         cmd.Parameters.AddWithValue("@n", name);
         cmd.Parameters.AddWithValue("@ip", isPaused ? 1 : 0);
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
-    public async Task UpsertRateLimitAsync(
-        RateLimitDefinition rateLimit, CancellationToken cancellationToken = default)
+    public async Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
+        CancellationToken cancellationToken = default)
     {
+        if (rateLimits.Count == 0)
+        {
+            return;
+        }
+
+        // Runtime counters (current_count, previous_count, window_start) are never touched by
+        // this statement, so existing values survive.
         await using var conn = await CreateConnectionAsync(cancellationToken);
-        var now = FormatTimestamp(timeProvider.GetUtcNow());
         await using var cmd = CreateCommand(conn, """
                                                   INSERT INTO surefire_rate_limits (
                                                       name, type, max_permits, "window", last_heartbeat_at
-                                                  ) VALUES (@n, @t, @mp, @w, @lh)
+                                                  )
+                                                  SELECT
+                                                      json_extract(e.value, '$.name'),
+                                                      json_extract(e.value, '$.type'),
+                                                      json_extract(e.value, '$.maxPermits'),
+                                                      json_extract(e.value, '$.window'),
+                                                      @now
+                                                  FROM json_each(@payload) AS e
+                                                  WHERE json_type(e.value) = 'object'
                                                   ON CONFLICT (name) DO UPDATE SET
                                                       type = excluded.type,
                                                       max_permits = excluded.max_permits,
                                                       "window" = excluded."window",
-                                                      last_heartbeat_at = @lh
+                                                      last_heartbeat_at = @now
                                                   """);
-        cmd.Parameters.AddWithValue("@n", rateLimit.Name);
-        cmd.Parameters.AddWithValue("@t", (int)rateLimit.Type);
-        cmd.Parameters.AddWithValue("@mp", rateLimit.MaxPermits);
-        cmd.Parameters.AddWithValue("@w", rateLimit.Window.Ticks);
-        cmd.Parameters.AddWithValue("@lh", now);
+        cmd.Parameters.AddWithValue("@payload", UpsertPayloadFactory.SerializeRateLimits(rateLimits));
+        cmd.Parameters.AddWithValue("@now", FormatTimestamp(timeProvider.GetUtcNow()));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -2098,6 +2140,14 @@ internal sealed class SqliteJobStore(
         return stats;
     }
 
+    /// <summary>
+    ///     SQLite transient errors. <c>SqliteErrorCode</c> is the primary result code
+    ///     (Microsoft.Data.Sqlite masks off extended codes via <c>&amp; 0xFF</c>), so matching
+    ///     <c>BUSY</c> (5) and <c>LOCKED</c> (6) also covers the extended variants
+    ///     <c>BUSY_RECOVERY</c>, <c>BUSY_SNAPSHOT</c>, <c>BUSY_TIMEOUT</c>,
+    ///     <c>LOCKED_SHAREDCACHE</c>, etc. Do not "fix" this by adding extended codes —
+    ///     they are already captured by the primary code match.
+    /// </summary>
     public bool IsTransientException(Exception ex) =>
         ex is SqliteException sqlite && sqlite.SqliteErrorCode is 5 or 6;
 
@@ -2154,19 +2204,19 @@ internal sealed class SqliteJobStore(
                             FROM rl_remaining
                         ),
                         ranked AS (
-                            SELECT r.id, r.queue_priority, r.priority, r.not_before,
+                            SELECT r.id, COALESCE(q.priority, 0) AS queue_priority, r.priority, r.not_before,
                                 r.job_name AS run_job_name, COALESCE(j.queue, 'default') AS run_queue_name,
                                 j.max_concurrency AS j_max, q.max_concurrency AS q_max,
                                 j.running_count AS j_running, COALESCE(q.running_count, 0) AS q_running,
                                 j.rate_limit_name AS j_rl, q.rate_limit_name AS q_rl,
                                 ROW_NUMBER() OVER (PARTITION BY r.job_name
-                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
+                                    ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
                                 ROW_NUMBER() OVER (PARTITION BY COALESCE(j.queue, 'default')
-                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
+                                    ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
                                 ROW_NUMBER() OVER (PARTITION BY j.rate_limit_name
-                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
+                                    ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
                                 ROW_NUMBER() OVER (PARTITION BY q.rate_limit_name
-                                    ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
+                                    ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
                             FROM surefire_runs r
                             JOIN surefire_jobs j ON j.name = r.job_name
                             LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
@@ -2491,7 +2541,7 @@ internal sealed class SqliteJobStore(
         var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var pragmaCmd = conn.CreateCommand();
-        pragmaCmd.CommandText = "PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=24000;";
+        pragmaCmd.CommandText = ConnectionPragmas;
         await pragmaCmd.ExecuteNonQueryAsync(cancellationToken);
         return conn;
     }
@@ -2544,30 +2594,6 @@ internal sealed class SqliteJobStore(
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private void AddJobParameters(SqliteCommand cmd, JobDefinition job)
-    {
-        cmd.Parameters.AddWithValue("@name", job.Name);
-        cmd.Parameters.AddWithValue("@description", (object?)job.Description ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@tags", JsonSerializer.Serialize(job.Tags));
-        cmd.Parameters.AddWithValue("@cron_expression", (object?)job.CronExpression ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@timeout_ticks",
-            job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value);
-        cmd.Parameters.AddWithValue("@max_concurrency",
-            job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@priority", job.Priority);
-        cmd.Parameters.AddWithValue("@retry_policy", JsonSerializer.Serialize(job.RetryPolicy));
-        cmd.Parameters.AddWithValue("@is_continuous", job.IsContinuous ? 1 : 0);
-        cmd.Parameters.AddWithValue("@queue", (object?)job.Queue ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@is_enabled", job.IsEnabled ? 1 : 0);
-        cmd.Parameters.AddWithValue("@misfire_policy", (int)job.MisfirePolicy);
-        cmd.Parameters.AddWithValue("@fire_all_limit",
-            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("@arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@last_heartbeat_at", FormatTimestamp(timeProvider.GetUtcNow()));
-    }
-
     private static async Task InsertRunAsync(
         SqliteConnection conn,
         JobRun run,
@@ -2580,15 +2606,13 @@ internal sealed class SqliteJobStore(
                                                       created_at, started_at, completed_at, cancelled_at, node_name,
                                                       attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                                       rerun_of_run_id, not_before, not_after, priority,
-                                                      deduplication_id, last_heartbeat_at, batch_id,
-                                                      queue_priority
+                                                      deduplication_id, last_heartbeat_at, batch_id
                                                   ) VALUES (
                                                       @id, @jn, @st, @ar, @re, @er, @pr,
                                                       @ca, @sa, @coa, @caa, @nn,
                                                       @at, @ti, @si, @pti, @psi, @pri, @rri,
                                                       @ror, @nb, @na, @py,
-                                                      @di, @lh, @bid,
-                                                      COALESCE((SELECT q.priority FROM surefire_queues q WHERE q.name = COALESCE((SELECT j.queue FROM surefire_jobs j WHERE j.name = @jn), 'default')), 0)
+                                                      @di, @lh, @bid
                                                   )
                                                   """, tx);
         cmd.Parameters.AddWithValue("@id", run.Id);
@@ -2641,8 +2665,9 @@ internal sealed class SqliteJobStore(
         {
             Name = reader.GetString(reader.GetOrdinal("name")),
             Description = GetNullableString(reader, "description"),
-            Tags = JsonSerializer.Deserialize<string[]>(
-                reader.GetString(reader.GetOrdinal("tags"))) ?? [],
+            Tags = JsonSerializer.Deserialize(
+                reader.GetString(reader.GetOrdinal("tags")),
+                SurefireJsonContext.Default.StringArray) ?? [],
             CronExpression = GetNullableString(reader, "cron_expression"),
             TimeZoneId = GetNullableString(reader, "time_zone_id"),
             Timeout = timeout,
@@ -2652,8 +2677,9 @@ internal sealed class SqliteJobStore(
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
             RetryPolicy = reader.IsDBNull(reader.GetOrdinal("retry_policy"))
                 ? new()
-                : JsonSerializer.Deserialize<RetryPolicy>(
-                    reader.GetString(reader.GetOrdinal("retry_policy"))) ?? new(),
+                : JsonSerializer.Deserialize(reader.GetString(reader.GetOrdinal("retry_policy")),
+                      SurefireJsonContext.Default.RetryPolicy)
+                  ?? throw new InvalidOperationException("Retry policy payload was null."),
             IsContinuous = reader.GetInt32(reader.GetOrdinal("is_continuous")) != 0,
             Queue = GetNullableString(reader, "queue"),
             RateLimitName = GetNullableString(reader, "rate_limit_name"),
@@ -2706,7 +2732,6 @@ internal sealed class SqliteJobStore(
             NotBefore = ParseTimestamp(reader.GetString(reader.GetOrdinal("not_before"))),
             NotAfter = GetNullableTimestamp(reader, "not_after"),
             Priority = reader.GetInt32(reader.GetOrdinal("priority")),
-            QueuePriority = reader.GetInt32(reader.GetOrdinal("queue_priority")),
             DeduplicationId = GetNullableString(reader, "deduplication_id"),
             LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at"),
             BatchId = GetNullableString(reader, "batch_id")
@@ -2718,10 +2743,12 @@ internal sealed class SqliteJobStore(
         StartedAt = ParseTimestamp(reader.GetString(reader.GetOrdinal("started_at"))),
         LastHeartbeatAt = ParseTimestamp(reader.GetString(reader.GetOrdinal("last_heartbeat_at"))),
         RunningCount = reader.GetInt32(reader.GetOrdinal("running_count")),
-        RegisteredJobNames = JsonSerializer.Deserialize<string[]>(
-            reader.GetString(reader.GetOrdinal("registered_job_names"))) ?? [],
-        RegisteredQueueNames = JsonSerializer.Deserialize<string[]>(
-            reader.GetString(reader.GetOrdinal("registered_queue_names"))) ?? []
+        RegisteredJobNames = JsonSerializer.Deserialize(
+            reader.GetString(reader.GetOrdinal("registered_job_names")),
+            SurefireJsonContext.Default.StringArray) ?? [],
+        RegisteredQueueNames = JsonSerializer.Deserialize(
+            reader.GetString(reader.GetOrdinal("registered_queue_names")),
+            SurefireJsonContext.Default.StringArray) ?? []
     };
 
     private async Task AcquireRateLimitAsync(
@@ -2794,7 +2821,8 @@ internal sealed class SqliteJobStore(
 
     // Decrement materialized running_count counters for a single Running → terminal transition.
     // Both updates happen inside the supplied transaction; the queue lookup uses COALESCE so
-    // jobs without an explicit queue still target the always-present 'default' queue row.
+    // jobs without an explicit queue target the `default` queue row when one exists (the UPDATE
+    // matches zero rows — and is a no-op — if no job on this node has referenced `default`).
     private async Task DecrementRunningCountAsync(SqliteConnection conn, SqliteTransaction tx,
         string jobName, CancellationToken cancellationToken)
     {

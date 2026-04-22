@@ -20,20 +20,32 @@ internal sealed class SurefireInitializationService(
 
         var registrations = registry.Snapshot();
 
-        foreach (var registered in registrations)
+        await store.UpsertJobsAsync(
+            registrations.Select(r => r.Definition).ToList(),
+            cancellationToken);
+
+        // Upsert every queue this node will use before executors start so claim's queue join
+        // sees a real row (with its pause / concurrency / rate-limit state). Two sources:
+        //   - options.Queues: explicitly configured via AddQueue(...). Settings persist as given.
+        //   - registry queues not in options: implicit fallbacks (e.g. the built-in "default"
+        //     queue when a job omits a queue name). These get a minimal definition; if the user
+        //     later configures the same name via AddQueue, that configuration wins on the next
+        //     maintenance tick.
+        var configuredQueueNames = new HashSet<string>(
+            options.Queues.Select(q => q.Name), StringComparer.Ordinal);
+        var queuesToUpsert = new List<QueueDefinition>(options.Queues);
+        foreach (var name in registry.GetQueueNames())
         {
-            await store.UpsertJobAsync(registered.Definition, cancellationToken);
+            if (configuredQueueNames.Contains(name))
+            {
+                continue;
+            }
+
+            queuesToUpsert.Add(new() { Name = name });
         }
 
-        foreach (var queue in options.Queues)
-        {
-            await store.UpsertQueueAsync(queue, cancellationToken);
-        }
-
-        foreach (var rateLimit in options.RateLimits)
-        {
-            await store.UpsertRateLimitAsync(rateLimit, cancellationToken);
-        }
+        await store.UpsertQueuesAsync(queuesToUpsert, cancellationToken);
+        await store.UpsertRateLimitsAsync(options.RateLimits.ToList(), cancellationToken);
 
         foreach (var registered in registrations)
         {

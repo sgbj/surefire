@@ -21,13 +21,15 @@ public interface IJobStore
     Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     /// <summary>
-    ///     Inserts or updates a job definition. If a job with the same name exists, all mutable
+    ///     Inserts or updates job definitions. If a job with the same name exists, all mutable
     ///     fields are overwritten except <c>IsEnabled</c> and <c>LastCronFireAt</c>, which are
-    ///     preserved across upserts.
+    ///     preserved per-job across upserts. Implementations execute the upserts in a single
+    ///     connection / transaction / script so the combined call has roughly the cost of one
+    ///     round-trip rather than N.
     /// </summary>
-    /// <param name="job">The job definition to upsert.</param>
+    /// <param name="jobs">The job definitions to upsert.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default);
+    Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns the job definition with the specified name, or null if not found.
@@ -367,7 +369,12 @@ public interface IJobStore
 
     /// <summary>
     ///     Upserts the node record and batch-updates heartbeat timestamps on the node's active runs.
-    ///     Called on every maintenance tick as the combined heartbeat operation.
+    ///     Called on every maintenance tick. Implementations must keep this lightweight: a single
+    ///     UPDATE per target table — no MERGE-with-side-effects, no scans of <c>surefire_runs</c>
+    ///     — so the tick can run at sub-second intervals without contending with claim / transition
+    ///     paths. Queue/rate-limit settings and their <c>last_heartbeat_at</c> are refreshed through
+    ///     <see cref="UpsertQueuesAsync" /> and <see cref="UpsertRateLimitsAsync" />, which
+    ///     <c>SurefireMaintenanceService</c> calls once per tick with the full set the node serves.
     /// </summary>
     /// <param name="nodeName">The node name.</param>
     /// <param name="jobNames">The job names registered on this node.</param>
@@ -421,12 +428,14 @@ public interface IJobStore
     Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Inserts or updates a queue definition. If a queue with the same name exists, all mutable
-    ///     fields are overwritten except <c>IsPaused</c>, which is preserved across upserts.
+    ///     Inserts or updates queue definitions. If a queue with the same name exists, all mutable
+    ///     fields are overwritten except <c>IsPaused</c>, which is preserved per-queue across
+    ///     upserts. Implementations execute the upserts in a single connection / transaction /
+    ///     script so the combined call has roughly the cost of one round-trip rather than N.
     /// </summary>
-    /// <param name="queue">The queue definition to upsert.</param>
+    /// <param name="queues">The queue definitions to upsert.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default);
+    Task UpsertQueuesAsync(IReadOnlyList<QueueDefinition> queues, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns all queue definitions.
@@ -437,21 +446,26 @@ public interface IJobStore
 
     /// <summary>
     ///     Pauses or unpauses a queue. When paused, no runs from the queue are claimed.
-    ///     A no-op if the queue does not exist.
+    ///     Returns <c>false</c> (no-op) if the queue does not exist so callers can surface
+    ///     a 404 rather than silently creating a phantom queue.
     /// </summary>
     /// <param name="name">The queue name.</param>
     /// <param name="isPaused">True to pause, false to unpause.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default);
+    /// <returns><c>true</c> if the queue existed and was updated; <c>false</c> if it did not exist.</returns>
+    Task<bool> SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Inserts or updates a rate limit definition. Does not reset runtime counters on update.
-    ///     Rate limit acquisition is embedded inside <see cref="ClaimRunsAsync" /> -- there is no
-    ///     standalone acquire method.
+    ///     Inserts or updates rate limit definitions. Runtime counters are preserved per rate
+    ///     limit across updates. Rate limit acquisition is embedded inside
+    ///     <see cref="ClaimRunsAsync" /> -- there is no standalone acquire method. Implementations
+    ///     execute the upserts in a single connection / transaction / script so the combined call
+    ///     has roughly the cost of one round-trip rather than N.
     /// </summary>
-    /// <param name="rateLimit">The rate limit definition to upsert.</param>
+    /// <param name="rateLimits">The rate limit definitions to upsert.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default);
+    Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Cancels all pending runs whose <c>NotAfter</c> deadline has passed and

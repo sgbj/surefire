@@ -63,7 +63,6 @@ public sealed class RunResponse
     public DateTimeOffset NotBefore { get; init; }
     public DateTimeOffset? NotAfter { get; init; }
     public int Priority { get; init; }
-    public int QueuePriority { get; init; }
     public string? DeduplicationId { get; init; }
     public DateTimeOffset? LastHeartbeatAt { get; init; }
     public string? BatchId { get; init; }
@@ -93,7 +92,6 @@ public sealed class RunResponse
         NotBefore = run.NotBefore,
         NotAfter = run.NotAfter,
         Priority = run.Priority,
-        QueuePriority = run.QueuePriority,
         DeduplicationId = run.DeduplicationId,
         LastHeartbeatAt = run.LastHeartbeatAt,
         BatchId = run.BatchId,

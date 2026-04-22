@@ -325,6 +325,30 @@ public sealed class SurefireOptions
         {
             ValidateRateLimitArguments(rateLimit.Name, rateLimit.MaxPermits, rateLimit.Window);
         }
+
+        ValidateNoDuplicateNames(Queues.Select(q => q.Name), "queue");
+        ValidateNoDuplicateNames(RateLimits.Select(r => r.Name), "rate limit");
+    }
+
+    internal static void ValidateNoDuplicateNames(IEnumerable<string> names, string kind)
+    {
+        var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in names)
+        {
+            if (seen.TryGetValue(name, out var prior))
+            {
+                if (string.Equals(prior, name, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"Duplicate {kind} name '{name}'.");
+                }
+
+                throw new InvalidOperationException(
+                    $"{kind} names '{prior}' and '{name}' differ only in case; Surefire treats them as " +
+                    "distinct, which is almost always a configuration mistake.");
+            }
+
+            seen[name] = name;
+        }
     }
 
     internal SurefireOptions Freeze()

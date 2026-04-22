@@ -25,7 +25,8 @@ public sealed class SurefireHealthCheckTests
             store,
             new HealthyNotificationProvider(),
             options,
-            timeProvider);
+            timeProvider,
+            new(timeProvider));
 
         var result = await check.CheckHealthAsync(new(), CancellationToken.None);
 
@@ -52,7 +53,8 @@ public sealed class SurefireHealthCheckTests
             store,
             new FailingNotificationProvider(),
             options,
-            timeProvider);
+            timeProvider,
+            new(timeProvider));
 
         var result = await check.CheckHealthAsync(new(), CancellationToken.None);
 

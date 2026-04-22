@@ -1,5 +1,14 @@
 namespace Surefire;
 
+/// <summary>
+///     Single-process in-memory <see cref="IJobStore" /> used by tests and dev fixtures.
+///     <para>
+///         Intended for dev/test, not production: claim iterates every pending run and sorts them
+///         under <c>_gate</c>, which is O(n log n) per claim. The SQL / Redis stores index
+///         pending runs server-side and have O(log n) per-claim cost. Avoid this store for
+///         benchmarks or deployments with large pending backlogs.
+///     </para>
+/// </summary>
 internal sealed class InMemoryJobStore : IJobStore
 {
     private readonly Dictionary<string, JobBatch> _batches = new();
@@ -13,10 +22,12 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, JobDefinition> _jobs = new();
     private readonly Dictionary<string, NodeInfo> _nodes = new();
     private readonly Dictionary<string, int> _nonTerminalCountByJob = new();
-    private readonly Dictionary<string, int> _pendingCountByQueue = new();
 
-    private readonly SortedSet<PendingRunKey> _pendingIndex = new();
-    private readonly Dictionary<string, PendingRunKey> _pendingKeyByRunId = new();
+    // Per-run pending entries keyed by runId. Sorted globally at claim time using
+    // the live queue priority from _queues — no denormalized snapshot means queue
+    // priority changes take effect on the very next claim without any index rebuild.
+    private readonly Dictionary<string, PendingRunEntry> _pending = new();
+    private readonly Dictionary<string, int> _pendingCountByQueue = new();
     private readonly Dictionary<string, QueueDefinition> _queues = new();
     private readonly Dictionary<string, RateLimitDefinition> _rateLimitDefinitions = new();
 
@@ -33,26 +44,34 @@ internal sealed class InMemoryJobStore : IJobStore
 
     public Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-    public Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
+    public Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken cancellationToken = default)
     {
+        if (jobs.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
         var now = _timeProvider.GetUtcNow();
 
         lock (_gate)
         {
-            if (_jobs.TryGetValue(job.Name, out var existing))
+            foreach (var job in jobs)
             {
-                var updated = CopyJob(job);
-                updated.IsEnabled = existing.IsEnabled;
-                updated.LastHeartbeatAt = now;
-                updated.LastCronFireAt = existing.LastCronFireAt;
-                _jobs[job.Name] = updated;
-            }
-            else
-            {
-                var updated = CopyJob(job);
-                updated.LastHeartbeatAt = now;
-                updated.LastCronFireAt = null;
-                _jobs[job.Name] = updated;
+                if (_jobs.TryGetValue(job.Name, out var existing))
+                {
+                    var updated = CopyJob(job);
+                    updated.IsEnabled = existing.IsEnabled;
+                    updated.LastHeartbeatAt = now;
+                    updated.LastCronFireAt = existing.LastCronFireAt;
+                    _jobs[job.Name] = updated;
+                }
+                else
+                {
+                    var updated = CopyJob(job);
+                    updated.LastHeartbeatAt = now;
+                    updated.LastCronFireAt = null;
+                    _jobs[job.Name] = updated;
+                }
             }
         }
 
@@ -482,21 +501,34 @@ internal sealed class InMemoryJobStore : IJobStore
             var jobNameSet = jobNames as ISet<string> ?? new HashSet<string>(jobNames);
             var queueNameSet = queueNames as ISet<string> ?? new HashSet<string>(queueNames);
 
-            // Snapshot the pending index keys; the loop mutates _pendingIndex via RemoveFromPendingIndex.
-            // Running/pending counters and rate-limit state are updated in place so subsequent iterations
-            // see the effect of earlier claims in this same call — this preserves per-job/queue concurrency
-            // and rate-limit guarantees when batch-claiming.
-            var keys = _pendingIndex.ToArray();
-            var claimed = new List<JobRun>(Math.Min(maxCount, keys.Length));
+            // Materialize a sorted snapshot of candidate runs using live queue priority.
+            // Queue priority is looked up from _queues (falling back to 0 for queues with
+            // no definition) so runtime priority changes take effect immediately without
+            // any denormalized field on runs. Sort order matches the SQL/Redis stores:
+            // queue priority DESC, run priority DESC, not_before ASC, id ASC.
+            var candidates = new PendingCandidate[_pending.Count];
+            var idx = 0;
+            foreach (var (runId, entry) in _pending)
+            {
+                var queuePriority = _queues.TryGetValue(entry.QueueName, out var q) ? q.Priority : 0;
+                candidates[idx++] = new(runId, entry.RunPriority, entry.NotBefore, queuePriority);
+            }
 
-            foreach (var key in keys)
+            Array.Sort(candidates, PendingCandidate.ClaimOrder);
+
+            // Running/pending counters and rate-limit state are updated in place so subsequent
+            // iterations see the effect of earlier claims in this same call — this preserves
+            // per-job/queue concurrency and rate-limit guarantees when batch-claiming.
+            var claimed = new List<JobRun>(Math.Min(maxCount, candidates.Length));
+
+            foreach (var c in candidates)
             {
                 if (claimed.Count >= maxCount)
                 {
                     break;
                 }
 
-                if (!_runs.TryGetValue(key.Id, out var run))
+                if (!_runs.TryGetValue(c.RunId, out var run))
                 {
                     continue;
                 }
@@ -571,7 +603,7 @@ internal sealed class InMemoryJobStore : IJobStore
                     AcquireRateLimit(queueRateLimit, now);
                 }
 
-                RemoveFromPendingIndex(run.Id);
+                _pending.Remove(run.Id);
                 DecrementCount(_pendingCountByQueue, queueName);
                 var claimedRun = run with
                 {
@@ -614,23 +646,22 @@ internal sealed class InMemoryJobStore : IJobStore
 
             foreach (var run in copies)
             {
-                var stored = run with { QueuePriority = GetQueuePriority(run.JobName) };
-                _runs[stored.Id] = stored;
+                _runs[run.Id] = run;
 
-                if (stored.Status == JobStatus.Pending)
+                if (run.Status == JobStatus.Pending)
                 {
-                    AddToPendingIndex(stored);
-                    IncrementCount(_pendingCountByQueue, GetQueueName(stored.JobName));
+                    AddToPendingIndex(run);
+                    IncrementCount(_pendingCountByQueue, GetQueueName(run.JobName));
                 }
 
-                if (!stored.Status.IsTerminal)
+                if (!run.Status.IsTerminal)
                 {
-                    IncrementCount(_nonTerminalCountByJob, stored.JobName);
+                    IncrementCount(_nonTerminalCountByJob, run.JobName);
                 }
 
-                if (stored.DeduplicationId is { })
+                if (run.DeduplicationId is { })
                 {
-                    _dedupIndex.Add((stored.JobName, stored.DeduplicationId));
+                    _dedupIndex.Add((run.JobName, run.DeduplicationId));
                 }
             }
 
@@ -899,29 +930,27 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
+    public Task UpsertQueuesAsync(IReadOnlyList<QueueDefinition> queues,
+        CancellationToken cancellationToken = default)
     {
+        if (queues.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
         var now = _timeProvider.GetUtcNow();
 
         lock (_gate)
         {
-            if (_queues.TryGetValue(queue.Name, out var existing))
+            foreach (var queue in queues)
             {
-                var oldPriority = existing.Priority;
                 var updated = CopyQueue(queue);
-                updated.IsPaused = existing.IsPaused;
                 updated.LastHeartbeatAt = now;
-                _queues[queue.Name] = updated;
-
-                if (oldPriority != updated.Priority)
+                if (_queues.TryGetValue(queue.Name, out var existing))
                 {
-                    RebuildPendingIndexForQueue(queue.Name, updated.Priority);
+                    updated.IsPaused = existing.IsPaused;
                 }
-            }
-            else
-            {
-                var updated = CopyQueue(queue);
-                updated.LastHeartbeatAt = now;
+
                 _queues[queue.Name] = updated;
             }
         }
@@ -938,32 +967,39 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default)
+    public Task<bool> SetQueuePausedAsync(string name, bool isPaused,
+        CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            if (_queues.TryGetValue(name, out var queue))
+            if (!_queues.TryGetValue(name, out var queue))
             {
-                queue.IsPaused = isPaused;
+                return Task.FromResult(false);
             }
-            else
-            {
-                _queues[name] = new() { Name = name, IsPaused = isPaused };
-            }
-        }
 
-        return Task.CompletedTask;
+            queue.IsPaused = isPaused;
+            return Task.FromResult(true);
+        }
     }
 
-    public Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default)
+    public Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
+        CancellationToken cancellationToken = default)
     {
+        if (rateLimits.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
         var now = _timeProvider.GetUtcNow();
 
         lock (_gate)
         {
-            var copy = CopyRateLimit(rateLimit);
-            copy.LastHeartbeatAt = now;
-            _rateLimitDefinitions[rateLimit.Name] = copy;
+            foreach (var rl in rateLimits)
+            {
+                var copy = CopyRateLimit(rl);
+                copy.LastHeartbeatAt = now;
+                _rateLimitDefinitions[rl.Name] = copy;
+            }
         }
 
         return Task.CompletedTask;
@@ -1028,7 +1064,7 @@ internal sealed class InMemoryJobStore : IJobStore
             {
                 if (_runs.Remove(id, out var removed))
                 {
-                    RemoveFromPendingIndex(id);
+                    _pending.Remove(id);
                     if (_eventsByRunId.Remove(id, out var removedEvents))
                     {
                         RemoveBatchEventIndexes(removed, removedEvents);
@@ -1478,28 +1514,27 @@ internal sealed class InMemoryJobStore : IJobStore
 
             foreach (var run in copies)
             {
-                var stored = run with { QueuePriority = GetQueuePriority(run.JobName) };
-                _runs[stored.Id] = stored;
+                _runs[run.Id] = run;
 
-                if (stored.Status == JobStatus.Pending)
+                if (run.Status == JobStatus.Pending)
                 {
-                    AddToPendingIndex(stored);
-                    IncrementCount(_pendingCountByQueue, GetQueueName(stored.JobName));
+                    AddToPendingIndex(run);
+                    IncrementCount(_pendingCountByQueue, GetQueueName(run.JobName));
                 }
-                else if (ConsumesWorkerCapacity(stored.Status))
+                else if (ConsumesWorkerCapacity(run.Status))
                 {
-                    IncrementCount(_runningCountByJob, stored.JobName);
-                    IncrementCount(_runningCountByQueue, GetQueueName(stored.JobName));
-                }
-
-                if (stored.DeduplicationId is { })
-                {
-                    _dedupIndex.Add((stored.JobName, stored.DeduplicationId));
+                    IncrementCount(_runningCountByJob, run.JobName);
+                    IncrementCount(_runningCountByQueue, GetQueueName(run.JobName));
                 }
 
-                if (!stored.Status.IsTerminal)
+                if (run.DeduplicationId is { })
                 {
-                    IncrementCount(_nonTerminalCountByJob, stored.JobName);
+                    _dedupIndex.Add((run.JobName, run.DeduplicationId));
+                }
+
+                if (!run.Status.IsTerminal)
+                {
+                    IncrementCount(_nonTerminalCountByJob, run.JobName);
                 }
             }
 
@@ -1538,33 +1573,32 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
             }
 
-            var stored = run with { QueuePriority = GetQueuePriority(run.JobName) };
-            if (_runs.ContainsKey(stored.Id))
+            if (_runs.ContainsKey(run.Id))
             {
                 return Task.FromResult(false);
             }
 
-            _runs[stored.Id] = stored;
+            _runs[run.Id] = run;
 
-            if (stored.Status == JobStatus.Pending)
+            if (run.Status == JobStatus.Pending)
             {
-                AddToPendingIndex(stored);
-                IncrementCount(_pendingCountByQueue, GetQueueName(stored.JobName));
+                AddToPendingIndex(run);
+                IncrementCount(_pendingCountByQueue, GetQueueName(run.JobName));
             }
-            else if (ConsumesWorkerCapacity(stored.Status))
+            else if (ConsumesWorkerCapacity(run.Status))
             {
-                IncrementCount(_runningCountByJob, stored.JobName);
-                IncrementCount(_runningCountByQueue, GetQueueName(stored.JobName));
-            }
-
-            if (stored.DeduplicationId is { })
-            {
-                _dedupIndex.Add((stored.JobName, stored.DeduplicationId));
+                IncrementCount(_runningCountByJob, run.JobName);
+                IncrementCount(_runningCountByQueue, GetQueueName(run.JobName));
             }
 
-            if (!stored.Status.IsTerminal)
+            if (run.DeduplicationId is { })
             {
-                IncrementCount(_nonTerminalCountByJob, stored.JobName);
+                _dedupIndex.Add((run.JobName, run.DeduplicationId));
+            }
+
+            if (!run.Status.IsTerminal)
+            {
+                IncrementCount(_nonTerminalCountByJob, run.JobName);
             }
 
             if (lastCronFireAt is { } fireAt && _jobs.TryGetValue(run.JobName, out var jobDef))
@@ -1633,40 +1667,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
     private void AddToPendingIndex(JobRun run)
     {
-        var key = new PendingRunKey(run.QueuePriority, run.Priority, run.NotBefore, run.Id);
-        _pendingIndex.Add(key);
-        _pendingKeyByRunId[run.Id] = key;
-    }
-
-    private void RemoveFromPendingIndex(string runId)
-    {
-        if (_pendingKeyByRunId.Remove(runId, out var key))
-        {
-            _pendingIndex.Remove(key);
-        }
-    }
-
-    private void RebuildPendingIndexForQueue(string queueName, int newPriority)
-    {
-        var toUpdate = new List<(string RunId, PendingRunKey OldKey)>();
-        foreach (var (runId, oldKey) in _pendingKeyByRunId)
-        {
-            if (_runs.TryGetValue(runId, out var run) && GetQueueName(run.JobName) == queueName)
-            {
-                toUpdate.Add((runId, oldKey));
-            }
-        }
-
-        foreach (var (runId, oldKey) in toUpdate)
-        {
-            _pendingIndex.Remove(oldKey);
-            var run = _runs[runId];
-            var updated = run with { QueuePriority = newPriority };
-            _runs[runId] = updated;
-            var newKey = new PendingRunKey(newPriority, run.Priority, run.NotBefore, run.Id);
-            _pendingIndex.Add(newKey);
-            _pendingKeyByRunId[runId] = newKey;
-        }
+        _pending[run.Id] = new(GetQueueName(run.JobName), run.Priority, run.NotBefore);
     }
 
     private void UpdateIndexes(JobRun run, JobStatus oldStatus, JobStatus newStatus)
@@ -1680,7 +1681,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         if (oldStatus == JobStatus.Pending)
         {
-            RemoveFromPendingIndex(run.Id);
+            _pending.Remove(run.Id);
             DecrementCount(_pendingCountByQueue, queueName);
         }
 
@@ -1716,20 +1717,6 @@ internal sealed class InMemoryJobStore : IJobStore
 
     private void AppendStatusEventCore(string runId, int attempt, JobStatus status) =>
         AppendEventsCore([RunStatusEvents.Create(runId, attempt, status, _timeProvider.GetUtcNow())]);
-
-    private int GetQueuePriority(string jobName)
-    {
-        if (_jobs.TryGetValue(jobName, out var job))
-        {
-            var queueName = job.Queue ?? "default";
-            if (_queues.TryGetValue(queueName, out var queue))
-            {
-                return queue.Priority;
-            }
-        }
-
-        return 0;
-    }
 
     private static void IncrementCount(Dictionary<string, int> dict, string key)
     {
@@ -1979,34 +1966,42 @@ internal sealed class InMemoryJobStore : IJobStore
         public DateTimeOffset WindowStart;
     }
 
-    // Sort order: queue priority DESC, run priority DESC, NotBefore ASC, Id ASC
-    private readonly record struct PendingRunKey(
-        int QueuePriority,
+    private readonly record struct PendingRunEntry(string QueueName, int RunPriority, DateTimeOffset NotBefore);
+
+    // Transient claim-time snapshot. Queue priority is looked up once per claim from _queues
+    // rather than stored on the entry so runtime priority changes apply on the very next claim.
+    private readonly record struct PendingCandidate(
+        string RunId,
         int RunPriority,
         DateTimeOffset NotBefore,
-        string Id) : IComparable<PendingRunKey>
+        int QueuePriority)
     {
-        public int CompareTo(PendingRunKey other)
+        public static readonly IComparer<PendingCandidate> ClaimOrder = new Comparer();
+
+        private sealed class Comparer : IComparer<PendingCandidate>
         {
-            var cmp = other.QueuePriority.CompareTo(QueuePriority);
-            if (cmp != 0)
+            public int Compare(PendingCandidate x, PendingCandidate y)
             {
-                return cmp;
-            }
+                var cmp = y.QueuePriority.CompareTo(x.QueuePriority);
+                if (cmp != 0)
+                {
+                    return cmp;
+                }
 
-            cmp = other.RunPriority.CompareTo(RunPriority);
-            if (cmp != 0)
-            {
-                return cmp;
-            }
+                cmp = y.RunPriority.CompareTo(x.RunPriority);
+                if (cmp != 0)
+                {
+                    return cmp;
+                }
 
-            cmp = NotBefore.CompareTo(other.NotBefore);
-            if (cmp != 0)
-            {
-                return cmp;
-            }
+                cmp = x.NotBefore.CompareTo(y.NotBefore);
+                if (cmp != 0)
+                {
+                    return cmp;
+                }
 
-            return string.Compare(Id, other.Id, StringComparison.Ordinal);
+                return string.CompareOrdinal(x.RunId, y.RunId);
+            }
         }
     }
 }

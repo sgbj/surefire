@@ -7,7 +7,7 @@ public abstract class SchemaConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"MigrateJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 

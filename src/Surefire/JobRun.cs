@@ -1,4 +1,4 @@
-using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Surefire;
 
@@ -30,9 +30,6 @@ public sealed record JobRun
 
     /// <summary>Gets the priority of the run. Higher values are claimed first.</summary>
     public int Priority { get; init; }
-
-    /// <summary>Gets the effective queue priority (from queue configuration).</summary>
-    public int QueuePriority { get; init; }
 
     /// <summary>Gets the deduplication ID used to prevent duplicate runs.</summary>
     public string? DeduplicationId { get; init; }
@@ -118,21 +115,23 @@ public sealed record JobRun
     /// <summary>Gets the name of the node that claimed this run.</summary>
     public string? NodeName { get; init; }
 
-    internal JsonSerializerOptions? SerializerOptions { get; init; }
-
     // ------------------------------------------------------------------
-    // Derived state
+    // Derived state — excluded from wire serialization; consumers compute from Status.
     // ------------------------------------------------------------------
 
     /// <summary>Gets whether the run has reached a terminal status.</summary>
+    [JsonIgnore]
     public bool IsTerminal => Status.IsTerminal;
 
     /// <summary>Gets whether the run completed successfully.</summary>
+    [JsonIgnore]
     public bool IsSuccess => Status == JobStatus.Succeeded;
 
     /// <summary>Gets whether the run failed permanently.</summary>
+    [JsonIgnore]
     public bool IsFailure => Status == JobStatus.Failed;
 
     /// <summary>Gets whether the run was cancelled.</summary>
+    [JsonIgnore]
     public bool IsCancelled => Status == JobStatus.Cancelled;
 }

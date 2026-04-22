@@ -57,7 +57,7 @@ internal sealed partial class JobClient(
             StartInputPump(run.Id, prepared.Streams);
         }
 
-        return AttachSerializerOptions(run);
+        return run;
     }
 
     public Task<JobBatch> TriggerBatchAsync(IEnumerable<BatchItem> runs, CancellationToken cancellationToken = default)
@@ -74,11 +74,8 @@ internal sealed partial class JobClient(
     // Query
     // =========================================================================
 
-    public async Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default)
-    {
-        var record = await store.GetRunAsync(runId, cancellationToken);
-        return record is null ? null : AttachSerializerOptions(record);
-    }
+    public Task<JobRun?> GetRunAsync(string runId, CancellationToken cancellationToken = default)
+        => store.GetRunAsync(runId, cancellationToken);
 
     public async IAsyncEnumerable<JobRun> GetRunsAsync(RunFilter filter,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -102,7 +99,7 @@ internal sealed partial class JobClient(
 
             foreach (var run in page.Items)
             {
-                yield return AttachSerializerOptions(run);
+                yield return run;
             }
 
             skip += page.Items.Count;
@@ -193,7 +190,7 @@ internal sealed partial class JobClient(
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCreated, rerun.Id, cancellationToken);
-        return AttachSerializerOptions(rerun);
+        return rerun;
     }
 
     // =========================================================================
@@ -309,7 +306,7 @@ internal sealed partial class JobClient(
             throw new RunNotFoundException(runId);
         }
 
-        return AttachSerializerOptions(run);
+        return run;
     }
 
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
@@ -450,14 +447,14 @@ internal sealed partial class JobClient(
             {
                 foreach (var run in await FlushAsync())
                 {
-                    yield return AttachSerializerOptions(run);
+                    yield return run;
                 }
             }
         }
 
         foreach (var run in await FlushAsync())
         {
-            yield return AttachSerializerOptions(run);
+            yield return run;
         }
     }
 
@@ -1498,29 +1495,28 @@ internal sealed partial class JobClient(
             return null;
         }
 
+        RunFailureEnvelope? envelope;
         try
         {
-            using var doc = JsonDocument.Parse(payload);
-            var root = doc.RootElement;
-            var type = root.TryGetProperty("exceptionType", out var t) && t.ValueKind == JsonValueKind.String
-                ? t.GetString()
-                : null;
-            var message = root.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String
-                ? m.GetString()
-                : null;
-
-            return (type, message) switch
-            {
-                ({ Length: > 0 }, { Length: > 0 }) => $"{type}: {message}",
-                (_, { Length: > 0 }) => message,
-                ({ Length: > 0 }, _) => type,
-                _ => null
-            };
+            envelope = JsonSerializer.Deserialize(payload, SurefireJsonContext.Default.RunFailureEnvelope);
         }
         catch (JsonException)
         {
             return null;
         }
+
+        if (envelope is null)
+        {
+            return null;
+        }
+
+        return (envelope.ExceptionType, envelope.Message) switch
+        {
+            ({ Length: > 0 } type, { Length: > 0 } message) => $"{type}: {message}",
+            (_, { Length: > 0 } message) => message,
+            ({ Length: > 0 } type, _) => type,
+            _ => null
+        };
     }
 
     private JobRun CreateRun(string jobName, string? serializedArguments, RunOptions runOptions,
@@ -1536,7 +1532,6 @@ internal sealed partial class JobClient(
             NotBefore = runOptions.NotBefore ?? now,
             NotAfter = runOptions.NotAfter,
             Priority = priority,
-            QueuePriority = 0,
             DeduplicationId = runOptions.DeduplicationId,
             RerunOfRunId = rerunOfRunId,
             Progress = 0,
@@ -1564,8 +1559,6 @@ internal sealed partial class JobClient(
     }
 
     private static string CreateRunId() => Guid.CreateVersion7().ToString("N");
-
-    private JobRun AttachSerializerOptions(JobRun run) => run with { SerializerOptions = _serializerOptions };
 
     private async Task<int?> ResolveRequestedPriorityAsync(string jobName, int? explicitPriority,
         CancellationToken cancellationToken)

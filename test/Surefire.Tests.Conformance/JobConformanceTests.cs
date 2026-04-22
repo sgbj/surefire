@@ -13,7 +13,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
         job.MaxConcurrency = 5;
         job.Priority = 10;
 
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var loaded = await Store.GetJobAsync(job.Name, ct);
         Assert.NotNull(loaded);
@@ -48,7 +48,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
             FireAllLimit = 7,
             ArgumentsSchema = """{"type":"object"}"""
         };
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var stored = await Store.GetJobAsync(job.Name, ct);
         Assert.NotNull(stored);
@@ -78,7 +78,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
         var job = CreateJob($"TimeoutTicks_{Guid.CreateVersion7():N}");
         job.Timeout = TimeSpan.FromTicks(12_345_679);
 
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var stored = await Store.GetJobAsync(job.Name, ct);
         Assert.NotNull(stored);
@@ -94,12 +94,12 @@ public abstract class JobConformanceTests : StoreConformanceBase
         var initial = CreateJob(name);
         initial.MisfirePolicy = MisfirePolicy.FireAll;
         initial.FireAllLimit = 3;
-        await Store.UpsertJobAsync(initial, ct);
+        await Store.UpsertJobsAsync([initial], ct);
 
         var updated = CreateJob(name);
         updated.MisfirePolicy = MisfirePolicy.FireAll;
         updated.FireAllLimit = null;
-        await Store.UpsertJobAsync(updated, ct);
+        await Store.UpsertJobsAsync([updated], ct);
 
         var loaded = await Store.GetJobAsync(name, ct);
         Assert.NotNull(loaded);
@@ -112,13 +112,13 @@ public abstract class JobConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob("PreserveEnabled");
         job.Description = "Original";
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         await Store.SetJobEnabledAsync("PreserveEnabled", false, ct);
 
         var updated = CreateJob("PreserveEnabled");
         updated.Description = "Updated";
-        await Store.UpsertJobAsync(updated, ct);
+        await Store.UpsertJobsAsync([updated], ct);
 
         var loaded = await Store.GetJobAsync("PreserveEnabled", ct);
         Assert.NotNull(loaded);
@@ -131,14 +131,14 @@ public abstract class JobConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob("PreserveCron");
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var fireAt = new DateTimeOffset(2025, 6, 15, 12, 0, 0, TimeSpan.Zero);
         await Store.UpdateLastCronFireAtAsync("PreserveCron", fireAt, ct);
 
         var updated = CreateJob("PreserveCron");
         updated.Description = "Re-registered";
-        await Store.UpsertJobAsync(updated, ct);
+        await Store.UpsertJobsAsync([updated], ct);
 
         var loaded = await Store.GetJobAsync("PreserveCron", ct);
         Assert.NotNull(loaded);
@@ -152,7 +152,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob($"NoCron_{Guid.CreateVersion7():N}");
         job.LastCronFireAt = new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var loaded = await Store.GetJobAsync(job.Name, ct);
         Assert.NotNull(loaded);
@@ -165,7 +165,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob($"Isolation_{Guid.CreateVersion7():N}");
         job.RetryPolicy = new() { MaxRetries = 3, BackoffType = BackoffType.Exponential };
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var copy1 = await Store.GetJobAsync(job.Name, ct);
         Assert.NotNull(copy1);
@@ -191,9 +191,9 @@ public abstract class JobConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var suffix = Guid.CreateVersion7().ToString("N");
-        await Store.UpsertJobAsync(CreateJob($"OrderProcessor_{suffix}"), ct);
-        await Store.UpsertJobAsync(CreateJob($"OrderNotifier_{suffix}"), ct);
-        await Store.UpsertJobAsync(CreateJob($"InvoiceGenerator_{suffix}"), ct);
+        await Store.UpsertJobsAsync([CreateJob($"OrderProcessor_{suffix}")], ct);
+        await Store.UpsertJobsAsync([CreateJob($"OrderNotifier_{suffix}")], ct);
+        await Store.UpsertJobsAsync([CreateJob($"InvoiceGenerator_{suffix}")], ct);
 
         var results = await Store.GetJobsAsync(new() { Name = "Order" }, ct);
 
@@ -210,15 +210,15 @@ public abstract class JobConformanceTests : StoreConformanceBase
 
         var job1 = CreateJob($"TaggedA_{suffix}");
         job1.Tags = ["billing", "critical"];
-        await Store.UpsertJobAsync(job1, ct);
+        await Store.UpsertJobsAsync([job1], ct);
 
         var job2 = CreateJob($"TaggedB_{suffix}");
         job2.Tags = ["shipping"];
-        await Store.UpsertJobAsync(job2, ct);
+        await Store.UpsertJobsAsync([job2], ct);
 
         var job3 = CreateJob($"TaggedC_{suffix}");
         job3.Tags = ["billing"];
-        await Store.UpsertJobAsync(job3, ct);
+        await Store.UpsertJobsAsync([job3], ct);
 
         var results = await Store.GetJobsAsync(new() { Tag = "billing" }, ct);
 
@@ -232,8 +232,8 @@ public abstract class JobConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var suffix = Guid.CreateVersion7().ToString("N");
-        await Store.UpsertJobAsync(CreateJob($"Enabled_{suffix}"), ct);
-        await Store.UpsertJobAsync(CreateJob($"Disabled_{suffix}"), ct);
+        await Store.UpsertJobsAsync([CreateJob($"Enabled_{suffix}")], ct);
+        await Store.UpsertJobsAsync([CreateJob($"Disabled_{suffix}")], ct);
         await Store.SetJobEnabledAsync($"Disabled_{suffix}", false, ct);
 
         var enabled = await Store.GetJobsAsync(new() { IsEnabled = true }, ct);
@@ -250,7 +250,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var name = $"Toggle_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(name), ct);
+        await Store.UpsertJobsAsync([CreateJob(name)], ct);
 
         var before = await Store.GetJobAsync(name, ct);
         Assert.NotNull(before);
@@ -280,7 +280,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var name = $"CronFire_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(name), ct);
+        await Store.UpsertJobsAsync([CreateJob(name)], ct);
 
         var fireAt = new DateTimeOffset(2025, 3, 1, 8, 0, 0, TimeSpan.Zero);
         await Store.UpdateLastCronFireAtAsync(name, fireAt, ct);
@@ -296,7 +296,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"HBFilter_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var stored = await Store.GetJobAsync(jobName, ct);
         Assert.NotNull(stored);
@@ -322,7 +322,7 @@ public abstract class JobConformanceTests : StoreConformanceBase
 
         var job = CreateJob($"CaseTag_{suffix}");
         job.Tags = ["Billing"];
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var results = await Store.GetJobsAsync(new() { Tag = "billing" }, ct);
 

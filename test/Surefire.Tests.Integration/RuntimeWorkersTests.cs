@@ -30,10 +30,7 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("Echo", new { value = "ok" }, cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(10));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.Equal("ok", run.GetResult<string>());
+        Assert.Equal("ok", await harness.Client.WaitAsync<string>(run.Id, cts.Token));
     }
 
     [Fact]
@@ -57,10 +54,7 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("EnumEcho", cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.Equal(DayOfWeek.Wednesday, run.GetResult<DayOfWeek>());
+        Assert.Equal(DayOfWeek.Wednesday, await harness.Client.WaitAsync<DayOfWeek>(run.Id, cts.Token));
     }
 
     [Fact]
@@ -96,10 +90,7 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("Flaky", cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.Equal(42, run.GetResult<int>());
+        Assert.Equal(42, await harness.Client.WaitAsync<int>(run.Id, cts.Token));
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
         Assert.NotNull(runRecord);
@@ -123,13 +114,11 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("NoResultTask", cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.False(run.TryGetResult<object?>(out _));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Client.WaitAsync<object?>(run.Id, cts.Token));
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
         Assert.NotNull(runRecord);
+        Assert.Equal(JobStatus.Succeeded, runRecord.Status);
         Assert.Null(runRecord.Result);
     }
 
@@ -150,11 +139,7 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("ExplicitNull", cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.True(run.TryGetResult<object?>(out var typed));
-        Assert.Null(typed);
+        Assert.Null(await harness.Client.WaitAsync<object?>(run.Id, cts.Token));
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
         Assert.NotNull(runRecord);
@@ -178,10 +163,7 @@ public sealed class RuntimeWorkersTests
         var run = await harness.Client.TriggerAsync("EmptyObject", cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.True(run.TryGetResult<JsonElement>(out var typed));
+        var typed = await harness.Client.WaitAsync<JsonElement>(run.Id, cts.Token);
         Assert.Equal(JsonValueKind.Object, typed.ValueKind);
 
         var runRecord = await harness.Store.GetRunAsync(run.Id, cts.Token);
@@ -437,10 +419,7 @@ public sealed class RuntimeWorkersTests
 
         using var completionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         completionCts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, completionCts.Token);
-
-        Assert.True(run.IsSuccess);
-        Assert.Equal(123, run.GetResult<int>());
+        Assert.Equal(123, await harness.Client.WaitAsync<int>(run.Id, completionCts.Token));
     }
 
     [Fact]
@@ -714,9 +693,7 @@ public sealed class RuntimeWorkersTests
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        run = await harness.Client.WaitAsync(run.Id, cts.Token);
-        Assert.True(run.IsSuccess);
-        Assert.Equal([1, 2, 3], run.GetResult<List<int>>());
+        Assert.Equal([1, 2, 3], await harness.Client.WaitAsync<List<int>>(run.Id, cts.Token));
 
         var allOutputEvents =
             await harness.Store.GetEventsAsync(runId, types: [RunEventType.Output], cancellationToken: ct);
@@ -1635,8 +1612,7 @@ public sealed class RuntimeWorkersTests
         var parentRunId = parentRun.Id;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        parentRun = await harness.Client.WaitAsync(parentRunId, cts.Token);
-        var childRunId = parentRun.GetResult<string>();
+        var childRunId = await harness.Client.WaitAsync<string>(parentRunId, cts.Token);
 
         var childRun = await harness.Store.GetRunAsync(childRunId, cts.Token);
         Assert.NotNull(childRun);
@@ -1665,8 +1641,7 @@ public sealed class RuntimeWorkersTests
         var parentRunId = parentRun.Id;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        parentRun = await harness.Client.WaitAsync(parentRunId, cts.Token);
-        var batchId = parentRun.GetResult<string>();
+        var batchId = await harness.Client.WaitAsync<string>(parentRunId, cts.Token);
 
         var batch = await harness.Store.GetBatchAsync(batchId, cts.Token);
         Assert.NotNull(batch);
@@ -1968,14 +1943,10 @@ public sealed class RuntimeWorkersTests
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
-        original = await harness.Client.WaitAsync(original.Id, cts.Token);
-        Assert.True(original.IsSuccess);
-        Assert.Equal(6, original.GetResult<int>());
+        Assert.Equal(6, await harness.Client.WaitAsync<int>(original.Id, cts.Token));
 
         var rerun = await harness.Client.RerunAsync(original.Id, cts.Token);
-        rerun = await harness.Client.WaitAsync(rerun.Id, cts.Token);
-        Assert.True(rerun.IsSuccess);
-        Assert.Equal(6, rerun.GetResult<int>());
+        Assert.Equal(6, await harness.Client.WaitAsync<int>(rerun.Id, cts.Token));
 
         var rerunRun = await harness.Store.GetRunAsync(rerun.Id, cts.Token);
         Assert.NotNull(rerunRun);
@@ -2013,15 +1984,13 @@ public sealed class RuntimeWorkersTests
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(8));
-        var firstPass = new List<JobRun>();
-        await foreach (var result in ((JobClient)harness.Client).WaitEachAsync(originalBatchId, cts.Token))
+        var firstPass = new List<int>();
+        await foreach (var result in harness.Client.WaitEachAsync<int>(originalBatchId, cts.Token))
         {
             firstPass.Add(result);
         }
 
-        Assert.Equal(2, firstPass.Count);
-        Assert.All(firstPass, result => Assert.True(result.IsSuccess));
-        Assert.Equal([3, 165], firstPass.Select(result => result.GetResult<int>()).OrderBy(v => v).ToArray());
+        Assert.Equal([3, 165], firstPass.OrderBy(v => v).ToArray());
 
         var originalChildrenPage = await harness.Store.GetRunsAsync(
             new() { BatchId = originalBatchId },
@@ -2041,12 +2010,9 @@ public sealed class RuntimeWorkersTests
         var rerunResults = new List<int>();
         foreach (var rerun in rerunRuns)
         {
-            var waitedRerun = await harness.Client.WaitAsync(rerun.Id, cts.Token);
-            var v = waitedRerun.GetResult<int>();
-            rerunResults.Add(v);
+            rerunResults.Add(await harness.Client.WaitAsync<int>(rerun.Id, cts.Token));
         }
 
-        Assert.Equal(2, rerunResults.Count);
         Assert.Equal([3, 165], rerunResults.OrderBy(v => v).ToArray());
 
         // Each rerun references the original child it was derived from

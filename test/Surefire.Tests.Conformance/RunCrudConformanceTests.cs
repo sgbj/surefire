@@ -108,7 +108,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"Rerun_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var originalRun = CreateRun(jobName);
         var rerun = CreateRun(jobName) with { RerunOfRunId = originalRun.Id };
@@ -225,7 +225,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DedupTerminal_{Guid.CreateVersion7():N}";
         var dedupId = Guid.CreateVersion7().ToString("N");
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         var result1 = await Store.TryCreateRunAsync(run1, cancellationToken: ct);
@@ -248,7 +248,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DisabledJob_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         await Store.SetJobEnabledAsync(jobName, false, ct);
 
         var run = CreateRun(jobName);
@@ -262,7 +262,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"EnabledJob_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(jobName);
         var result = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
@@ -275,7 +275,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"MaxActive_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run1 = CreateRun(jobName);
         var result1 = await Store.TryCreateRunAsync(run1, 1, cancellationToken: ct);
@@ -292,7 +292,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ManualTrigger_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         await Store.SetJobEnabledAsync(jobName, false, ct);
 
         var run = CreateRun(jobName);
@@ -743,7 +743,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"OrderStarted_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run1 = CreateRun(jobName, JobStatus.Running) with { StartedAt = baseTime.AddMinutes(-3) };
@@ -770,7 +770,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"OrderCompleted_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run1 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-3) };
@@ -797,7 +797,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"FilteredResortLarge_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-1));
         var completedRuns = new List<JobRun>(300);
@@ -849,7 +849,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"WrongNode_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -869,7 +869,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NodeFilter_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName, JobStatus.Running) with { NodeName = "node-a" };
         var run2 = CreateRun(jobName, JobStatus.Running) with { NodeName = "node-b" };
@@ -887,7 +887,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"CompletedAfter_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var baseTime = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var run1 = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = baseTime.AddMinutes(-10) };
@@ -914,7 +914,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var jobName = $"DedupMaxActive_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.MaxConcurrency = 5;
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run1 = CreateRun(jobName) with { DeduplicationId = "unique-1" };
         var created1 = await Store.TryCreateRunAsync(run1, 5, cancellationToken: ct);
@@ -929,7 +929,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     public async Task TryCreateRun_Dedup_Concurrent_ExactlyOneWins()
     {
         var ct = TestContext.Current.CancellationToken;
-        await Store.UpsertJobAsync(CreateJob("TestJob"), ct);
+        await Store.UpsertJobsAsync([CreateJob("TestJob")], ct);
 
         for (var trial = 0; trial < 20; trial++)
         {
@@ -952,7 +952,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob("TestJob");
         job.MaxConcurrency = 1;
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         for (var trial = 0; trial < 20; trial++)
         {
@@ -989,7 +989,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"AtomicJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName);
         await Store.CreateRunsAsync([run1], cancellationToken: ct);
@@ -1008,7 +1008,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TryCreateDup_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName);
         Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
@@ -1025,7 +1025,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DedupPurge_{Guid.CreateVersion7():N}";
         var dedupId = Guid.CreateVersion7().ToString("N");
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var createdAt1 = DateTimeOffset.UtcNow.AddDays(-30);
         var run1 = CreateRun(jobName) with
@@ -1052,7 +1052,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"MultiFilter_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
 
@@ -1130,7 +1130,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NullNode_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -1151,7 +1151,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DedupCancel_{Guid.CreateVersion7():N}";
         var dedupId = Guid.CreateVersion7().ToString("N");
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
@@ -1168,7 +1168,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DedupActive_{Guid.CreateVersion7():N}";
         var dedupId = Guid.CreateVersion7().ToString("N");
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
         Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
@@ -1182,7 +1182,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"CronAtomic_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var fireAt = DateTimeOffset.UtcNow;
         var run = CreateRun(jobName);
@@ -1202,7 +1202,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"CronReject_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run1 = CreateRun(jobName) with { DeduplicationId = "same" };
         Assert.True(await Store.TryCreateRunAsync(run1, lastCronFireAt: DateTimeOffset.UtcNow.AddMinutes(-5),

@@ -7,8 +7,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StatsJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var runs = new[]
@@ -59,8 +59,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"JobStatsJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var r1 = CreateRun(jobName);
         await Store.CreateRunsAsync([r1], cancellationToken: ct);
@@ -91,7 +91,7 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"EmptyStatsJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var stats = await Store.GetJobStatsAsync(jobName, ct);
 
@@ -119,12 +119,12 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var queueName = $"stats-queue-{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var jobName = $"QStatsJob_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.Queue = queueName;
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var p1 = CreateRun(jobName);
         var p2 = CreateRun(jobName);
@@ -160,8 +160,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"StatsTimeline_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
 
@@ -222,8 +222,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BucketJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         // Create a completed run and a failed run via proper claim + CAS flow
         var r1 = CreateRun(jobName);

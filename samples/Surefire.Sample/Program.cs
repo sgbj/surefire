@@ -9,8 +9,7 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracing => tracing.AddSource(SurefireDiagnostics.ActivitySourceName))
     .WithMetrics(metrics => metrics.AddMeter(SurefireDiagnostics.MeterName));
 
-builder.AddNpgsqlDataSource("surefire",
-    configureDataSourceBuilder: dsBuilder => { dsBuilder.ConnectionStringBuilder.IncludeErrorDetail = true; });
+builder.AddNpgsqlDataSource("surefire");
 //builder.AddSqlServerClient("surefire");
 //builder.AddRedisClient("surefire");
 

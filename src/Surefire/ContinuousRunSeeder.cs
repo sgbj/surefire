@@ -22,7 +22,6 @@ internal static class ContinuousRunSeeder
                 CreatedAt = now,
                 NotBefore = now,
                 Priority = definition.Priority,
-                QueuePriority = 0,
                 Progress = 0,
                 Attempt = 0
             };

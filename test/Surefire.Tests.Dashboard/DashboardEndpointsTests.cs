@@ -89,13 +89,15 @@ public sealed class DashboardEndpointsTests
         await using var app = await CreateAppAsync(ct: ct);
 
         var store = app.Services.GetRequiredService<IJobStore>();
-        await store.UpsertJobAsync(new()
-        {
-            Name = "tests-invalid-timezone",
-            Queue = "default",
-            CronExpression = "0 9 * * *",
-            TimeZoneId = "Invalid/Zone"
-        }, ct);
+        await store.UpsertJobsAsync([
+            new()
+            {
+                Name = "tests-invalid-timezone",
+                Queue = "default",
+                CronExpression = "0 9 * * *",
+                TimeZoneId = "Invalid/Zone"
+            }
+        ], ct);
 
         using var client = app.GetTestClient();
         var job = await client.GetFromJsonAsync<JobResponse>("/surefire/api/jobs/tests-invalid-timezone", ct);
@@ -130,7 +132,7 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
-    public async Task PatchQueueEndpoint_ImplicitQueue_CreatesAndPauses()
+    public async Task PatchQueueEndpoint_MissingQueue_ReturnsNotFound()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var app = await CreateAppAsync(ct: ct);
@@ -139,7 +141,78 @@ public sealed class DashboardEndpointsTests
         var response = await SendPatchAsync(client, "/surefire/api/queues/tests-missing-queue", new { isPaused = true },
             ct);
 
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PatchQueueEndpoint_DefaultQueue_Pauses_WhenAJobUsesIt()
+    {
+        // The default queue is upserted by initialization based on registered jobs, not by
+        // migration. An app that registers a job with no explicit queue gets a "default" row
+        // it can pause from the dashboard.
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(a => a.AddJob("tests-default-queue", () => "ok"), ct);
+        using var client = app.GetTestClient();
+
+        var response = await SendPatchAsync(client, "/surefire/api/queues/default", new { isPaused = true }, ct);
+
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PatchQueueEndpoint_DefaultQueue_ReturnsNotFound_WhenNoJobUsesIt()
+    {
+        // Symmetry: when no job uses the default queue, no row exists, so pausing it is a 404.
+        // This is the behavior that lets retention sweep an unused default and keeps it off
+        // the dashboard for apps that define their own queues.
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(ct: ct);
+        using var client = app.GetTestClient();
+
+        var response = await SendPatchAsync(client, "/surefire/api/queues/default", new { isPaused = true }, ct);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RunLogsEndpoint_WithOnlyMalformedEntriesInWindow_StillAdvancesCursor()
+    {
+        // Regression for C3: cursor must advance across rows that can't be parsed. Otherwise the
+        // client sees hasMore=true with a null cursor and polls the same window forever.
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(ct: ct);
+        var store = app.Services.GetRequiredService<IJobStore>();
+
+        var run = await SeedRunAsync(store, ct);
+        await store.AppendEventsAsync(
+        [
+            MakeLogEvent(run.Id, "not-json"),
+            MakeLogEvent(run.Id, "also-not-json")
+        ], ct);
+
+        using var client = app.GetTestClient();
+        var page = await client.GetFromJsonAsync<JsonElement>(
+            $"/surefire/api/runs/{run.Id}/logs?take=1", ct);
+
+        Assert.True(page.GetProperty("nextCursor").GetInt64() > 0);
+    }
+
+    [Fact]
+    public async Task ChildrenEndpoint_WithMalformedCursor_ReturnsBadRequest()
+    {
+        // Regression for M2: opaque cursors that arrive from a user-editable URL must not throw
+        // a 500. A malformed cursor is a client-provided value; translate it to 400 with a clear
+        // diagnostic.
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(ct: ct);
+        var store = app.Services.GetRequiredService<IJobStore>();
+        var run = await SeedRunAsync(store, ct);
+
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync(
+            $"/surefire/api/runs/{run.Id}/children?afterCursor=not-a-valid-cursor", ct);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
@@ -166,13 +239,15 @@ public sealed class DashboardEndpointsTests
         await using var app = await CreateAppAsync(ct: ct);
 
         var store = app.Services.GetRequiredService<IJobStore>();
-        await store.UpsertJobAsync(new()
-        {
-            Name = "tests-trigger-schema",
-            Queue = "default",
-            ArgumentsSchema =
-                "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}},\"required\":[\"count\"]}"
-        }, ct);
+        await store.UpsertJobsAsync([
+            new()
+            {
+                Name = "tests-trigger-schema",
+                Queue = "default",
+                ArgumentsSchema =
+                    "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}},\"required\":[\"count\"]}"
+            }
+        ], ct);
 
         using var client = app.GetTestClient();
         var job = await client.GetFromJsonAsync<JobResponse>("/surefire/api/jobs/tests-trigger-schema", ct);
@@ -192,11 +267,13 @@ public sealed class DashboardEndpointsTests
         var store = app.Services.GetRequiredService<IJobStore>();
         var now = DateTimeOffset.UtcNow;
 
-        await store.UpsertJobAsync(new()
-        {
-            Name = "tests-job-stats-percent",
-            Queue = "default"
-        }, ct);
+        await store.UpsertJobsAsync([
+            new()
+            {
+                Name = "tests-job-stats-percent",
+                Queue = "default"
+            }
+        ], ct);
 
         await store.CreateRunsAsync([
             new()
@@ -230,11 +307,13 @@ public sealed class DashboardEndpointsTests
         var store = app.Services.GetRequiredService<IJobStore>();
         var now = DateTimeOffset.UtcNow;
 
-        await store.UpsertJobAsync(new()
-        {
-            Name = "tests-stats-success-rate-ratio",
-            Queue = "default"
-        }, ct);
+        await store.UpsertJobsAsync([
+            new()
+            {
+                Name = "tests-stats-success-rate-ratio",
+                Queue = "default"
+            }
+        ], ct);
 
         await store.CreateRunsAsync([
             new()
@@ -501,7 +580,7 @@ public sealed class DashboardEndpointsTests
 
         var store = app.Services.GetRequiredService<IJobStore>();
         var jobName = "tests-stream-resume";
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var run = new JobRun
@@ -583,7 +662,7 @@ public sealed class DashboardEndpointsTests
 
         var store = app.Services.GetRequiredService<IJobStore>();
         var jobName = "tests-stream-event-types";
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var run = new JobRun
@@ -667,7 +746,7 @@ public sealed class DashboardEndpointsTests
 
         var store = app.Services.GetRequiredService<IJobStore>();
         var jobName = "tests-stream-terminal";
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var run = new JobRun
@@ -704,7 +783,7 @@ public sealed class DashboardEndpointsTests
 
         var store = app.Services.GetRequiredService<IJobStore>();
         var jobName = "tests-logs-malformed";
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var run = new JobRun
@@ -760,7 +839,7 @@ public sealed class DashboardEndpointsTests
         var notifications = app.Services.GetRequiredService<INotificationProvider>();
 
         var jobName = "tests-stream-late-events";
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var run = new JobRun
@@ -837,7 +916,7 @@ public sealed class DashboardEndpointsTests
         var store = app.Services.GetRequiredService<IJobStore>();
 
         var jobName = "tests-stream-terminal-without-completed-notification";
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = DateTimeOffset.UtcNow;
         var run = new JobRun
@@ -912,6 +991,30 @@ public sealed class DashboardEndpointsTests
 
         return client.SendAsync(request, ct);
     }
+
+    private static async Task<JobRun> SeedRunAsync(IJobStore store, CancellationToken ct)
+    {
+        var run = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = "tests-seed",
+            Status = JobStatus.Succeeded,
+            CreatedAt = DateTimeOffset.UtcNow,
+            NotBefore = DateTimeOffset.UtcNow,
+            Attempt = 1
+        };
+        await store.CreateRunsAsync([run], null, ct);
+        return run;
+    }
+
+    private static RunEvent MakeLogEvent(string runId, string payload) => new()
+    {
+        RunId = runId,
+        EventType = RunEventType.Log,
+        Payload = payload,
+        CreatedAt = DateTimeOffset.UtcNow,
+        Attempt = 1
+    };
 
     private static RunEvent CreateTerminalStatusEvent(JobRun run, DateTimeOffset createdAt) => new()
     {

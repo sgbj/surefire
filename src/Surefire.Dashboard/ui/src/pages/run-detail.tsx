@@ -71,8 +71,8 @@ const CHILD_RUN_PAGE_SIZE = 500;
 // Trace: tree-aware — ancestors + siblings window + direct children of focus.
 // Siblings-before uses a bounded window (typical workflows have few siblings);
 // children paginate on demand through /runs/{id}/children.
-const TRACE_SIBLING_WINDOW = 50;
-const TRACE_CHILDREN_TAKE = 100;
+const TRACE_SIBLING_WINDOW = 200;
+const TRACE_CHILDREN_TAKE = 200;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -256,14 +256,19 @@ export function RunDetailPage() {
   const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
 
   // Extended sibling windows when the user paginates past the initial bounds.
+  // Cursor tri-state: `undefined` = user hasn't paginated in this direction yet
+  // (fall back to traceData's initial cursor); `string` = next page available;
+  // `null` = paginated to exhaustion, no more rows. Collapsing the last two into
+  // a single nullable would hide the exhaustion signal behind the initial cursor
+  // and keep the load-more button showing forever.
   const [extraSiblingsBefore, setExtraSiblingsBefore] = useState<JobRun[]>([]);
   const [extraSiblingsBeforeCursor, setExtraSiblingsBeforeCursor] = useState<
-    string | null
-  >(null);
+    string | null | undefined
+  >(undefined);
   const [extraSiblingsAfter, setExtraSiblingsAfter] = useState<JobRun[]>([]);
   const [extraSiblingsAfterCursor, setExtraSiblingsAfterCursor] = useState<
-    string | null
-  >(null);
+    string | null | undefined
+  >(undefined);
   const [isLoadingMoreSiblingsAfter, setIsLoadingMoreSiblingsAfter] =
     useState(false);
   const [isLoadingMoreSiblingsBefore, setIsLoadingMoreSiblingsBefore] =
@@ -276,9 +281,9 @@ export function RunDetailPage() {
     setChildrenCursorByNode({});
     setLoadingNodes(new Set());
     setExtraSiblingsBefore([]);
-    setExtraSiblingsBeforeCursor(null);
+    setExtraSiblingsBeforeCursor(undefined);
     setExtraSiblingsAfter([]);
-    setExtraSiblingsAfterCursor(null);
+    setExtraSiblingsAfterCursor(undefined);
   }, [id]);
   const [logsByRun, setLogsByRun] = useState<Record<string, RunLogEntry[]>>({});
   const [logFilterByRun, setLogFilterByRun] = useState<
@@ -409,10 +414,18 @@ export function RunDetailPage() {
     return ids;
   }, [traceData]);
 
+  // `undefined` means the user hasn't paginated in this direction yet — fall
+  // back to the initial cursor from the trace endpoint. Any explicit value
+  // (string OR null) is the authoritative state from the latest paginate call,
+  // including the "exhausted" null that must suppress the load-more button.
   const siblingsAfterCursor =
-    extraSiblingsAfterCursor ?? traceData?.siblingsCursor?.after ?? null;
+    extraSiblingsAfterCursor !== undefined
+      ? extraSiblingsAfterCursor
+      : traceData?.siblingsCursor?.after ?? null;
   const siblingsBeforeCursor =
-    extraSiblingsBeforeCursor ?? traceData?.siblingsCursor?.before ?? null;
+    extraSiblingsBeforeCursor !== undefined
+      ? extraSiblingsBeforeCursor
+      : traceData?.siblingsCursor?.before ?? null;
 
   const allowedRunIds = useMemo(() => {
     const ids = new Set<string>();
@@ -961,7 +974,7 @@ export function RunDetailPage() {
     // subsequent cursor pages append cleanly. childrenOf() merges traceData's
     // fresh statuses over this on every render, so polling updates still flow.
     setChildrenByNode((prev) =>
-      prev[focusId] !== undefined ? prev : { ...prev, [focusId]: [] },
+      prev[focusId] !== undefined ? prev : { ...prev, [focusId]: traceData.children },
     );
     setChildrenCursorByNode((prev) => ({ ...prev, [focusId]: initialCursor }));
     void paginateAllChildren(focusId, initialCursor);
@@ -1261,7 +1274,7 @@ export function RunDetailPage() {
                       <TableRow className="hover:bg-transparent cursor-default">
                         <TableCell colSpan={4} className="max-w-0 w-full">
                           {failure.stackTrace ? (
-                            <pre className="text-[13px] whitespace-pre overflow-x-auto font-mono">
+                            <pre className="text-[13px] whitespace-pre-wrap break-words font-mono">
                               {failure.stackTrace}
                             </pre>
                           ) : (

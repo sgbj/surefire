@@ -20,7 +20,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "PriorityDefault_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Priority = 17 }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Priority = 17 }], ct);
 
         var triggered = await client.TriggerAsync(jobName, null, new(), ct);
         var runId = triggered.Id;
@@ -43,7 +43,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "PriorityOverride_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Priority = 3 }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Priority = 3 }], ct);
 
         var triggered = await client.TriggerAsync(jobName, null, new() { Priority = 99 }, ct);
 
@@ -70,7 +70,7 @@ public sealed class JobClientContractTests
             new CollectingLogger<JobClient>());
 
         var jobName = "BatchPerItemOptions_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         var batch = await client.TriggerBatchAsync(
             new[]
@@ -126,7 +126,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "BatchDedup_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             client.TriggerAllAsync(jobName, [1, 2], new() { DeduplicationId = "dup" }, ct));
@@ -144,7 +144,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "ConflictType_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         // Create first run with dedup id
         await client.TriggerAsync(jobName, null, new() { DeduplicationId = "unique-1" }, ct);
@@ -172,7 +172,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "CancelOwned_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var runTask = client.RunAsync(jobName, cancellationToken: cts.Token);
@@ -226,7 +226,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "WaitOnly_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
 
@@ -258,7 +258,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "WaitBatchCancel_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batch = await client.TriggerBatchAsync(jobName, [1], cancellationToken: ct);
         var child = (await store.GetRunsAsync(new() { BatchId = batch.Id }, 0, 10, ct)).Items.Single();
@@ -291,7 +291,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "ObserveRun_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -361,7 +361,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "ObserveLate_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -430,7 +430,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "ObserveCancelled_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -507,7 +507,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "CancelNoOp_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -550,7 +550,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "WaitStream_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -633,7 +633,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "WaitStreamTerminal_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -709,7 +709,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "ObserveCursor_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -794,7 +794,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "WaitStreamMalformed_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;
@@ -874,8 +874,8 @@ public sealed class JobClientContractTests
 
         var now = time.GetUtcNow();
         var jobName = "WaitEachOrdering_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
-        await store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
+        await store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName,
             [new { v = 1 }, new { v = 2 }, new { v = 3 }], ct);
@@ -932,7 +932,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "BatchCursor_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var batchId = await client.TriggerAllAsync(jobName, [new { value = 1 }, new { value = 2 }], ct);
         var childA = await WaitForClaimAsync(store, jobName, ct);
@@ -1036,7 +1036,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "BatchLateOutput_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = time.GetUtcNow();
         var batchId = Guid.CreateVersion7().ToString("N");
@@ -1129,7 +1129,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "BatchLateOutputAfterEarlier_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var now = time.GetUtcNow();
         var batchId = Guid.CreateVersion7().ToString("N");
@@ -1244,7 +1244,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "StableGetRuns_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var baseline = time.GetUtcNow().AddSeconds(-2);
         var initialRuns = Enumerable.Range(0, 3)
@@ -1336,7 +1336,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "StreamAcceptsThenCallerCancels_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var triggered = await client.TriggerAsync(jobName, new
@@ -1393,7 +1393,7 @@ public sealed class JobClientContractTests
             logger);
 
         var jobName = "StreamOnlyArgs_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         var triggered = await client.TriggerAsync(jobName, new
         {
@@ -1425,7 +1425,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "RunIdsBatch_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         var batch = await client.TriggerBatchAsync(jobName, [new { x = 1 }, new { x = 2 }, new { x = 3 }],
             cancellationToken: ct);
@@ -1448,7 +1448,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "RunIdsBatchGet_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
         var triggered = await client.TriggerBatchAsync(jobName, [new { x = 1 }, new { x = 2 }], cancellationToken: ct);
         var fetched = await client.GetBatchAsync(triggered.Id, ct);
@@ -1471,7 +1471,7 @@ public sealed class JobClientContractTests
         var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "ArrayResult_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
         var runId = triggered.Id;

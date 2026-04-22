@@ -110,6 +110,91 @@ public sealed class ConfigurationValidationTests
         Assert.False(runtimeOptions.SerializerOptions.PropertyNameCaseInsensitive);
     }
 
+    [Fact]
+    public void AddSurefire_DuplicateQueueNames_Throws()
+    {
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddSurefire(options =>
+            {
+                options.AddQueue("work");
+                options.AddQueue("work");
+            }));
+
+        Assert.Contains("Duplicate queue", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void AddSurefire_CaseDivergentQueueNames_Throws()
+    {
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddSurefire(options =>
+            {
+                options.AddQueue("Work");
+                options.AddQueue("work");
+            }));
+
+        Assert.Contains("differ only in case", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void AddSurefire_DuplicateRateLimitNames_Throws()
+    {
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddSurefire(options =>
+            {
+                options.AddFixedWindowLimiter("api", 5, TimeSpan.FromSeconds(1));
+                options.AddFixedWindowLimiter("api", 10, TimeSpan.FromSeconds(2));
+            }));
+
+        Assert.Contains("Duplicate rate limit", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void AddSurefire_CaseDivergentRateLimitNames_Throws()
+    {
+        var services = new ServiceCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            services.AddSurefire(options =>
+            {
+                options.AddFixedWindowLimiter("Api", 5, TimeSpan.FromSeconds(1));
+                options.AddSlidingWindowLimiter("api", 10, TimeSpan.FromSeconds(2));
+            }));
+
+        Assert.Contains("differ only in case", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void JobRegistry_CaseDivergentJobNames_Throws()
+    {
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var registry = new JobRegistry();
+        registry.AddOrUpdate("MyJob", () => 1, provider);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            registry.AddOrUpdate("myjob", () => 2, provider));
+
+        Assert.Contains("differ only in case", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void JobRegistry_ExactDuplicateJobName_UpdatesHandler()
+    {
+        // Re-registering the exact same name is a designed override path (handler hot-swap).
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var registry = new JobRegistry();
+        registry.AddOrUpdate("MyJob", () => 1, provider);
+        registry.AddOrUpdate("MyJob", () => 2, provider);
+
+        Assert.True(registry.TryGet("MyJob", out _));
+    }
+
     private static JobBuilder CreateJobBuilder() =>
         new(new() { Name = "validation-job" }, () => { });
 }

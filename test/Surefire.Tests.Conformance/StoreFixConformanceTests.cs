@@ -14,7 +14,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NoExist_{Guid.CreateVersion7():N}";
         var run = CreateRun(jobName);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
 
@@ -26,7 +26,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PriorityDefault_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(new() { Name = jobName, Priority = 42 }, ct);
+        await Store.UpsertJobsAsync([new() { Name = jobName, Priority = 42 }], ct);
 
         var run = CreateRun(jobName) with { Priority = 9 };
 
@@ -58,7 +58,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchPriorityDefault_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(new() { Name = jobName, Priority = 13 }, ct);
+        await Store.UpsertJobsAsync([new() { Name = jobName, Priority = 13 }], ct);
 
         var runA = CreateRun(jobName) with { Priority = 3 };
         var runB = CreateRun(jobName) with { Priority = 11 };
@@ -78,7 +78,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"LateReg_{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var run = CreateRun(jobName);
         var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
@@ -87,7 +87,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var beforeRegistration = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.Null(beforeRegistration);
 
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var afterRegistration = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(afterRegistration);
@@ -99,9 +99,9 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"Disabled_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
         await Store.SetJobEnabledAsync(jobName, false, ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var run = CreateRun(jobName);
         var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
@@ -117,8 +117,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var job1Name = $"upload_photos_{suffix}";
         var job2Name = $"upload%special_{suffix}";
 
-        await Store.UpsertJobAsync(CreateJob(job1Name), ct);
-        await Store.UpsertJobAsync(CreateJob(job2Name), ct);
+        await Store.UpsertJobsAsync([CreateJob(job1Name)], ct);
+        await Store.UpsertJobsAsync([CreateJob(job2Name)], ct);
 
         var results = await Store.GetJobsAsync(new() { Name = $"%special_{suffix}" }, ct);
 
@@ -134,8 +134,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var job1Name = $"job_a_{suffix}";
         var job2Name = $"jobXa_{suffix}";
 
-        await Store.UpsertJobAsync(CreateJob(job1Name), ct);
-        await Store.UpsertJobAsync(CreateJob(job2Name), ct);
+        await Store.UpsertJobsAsync([CreateJob(job1Name)], ct);
+        await Store.UpsertJobsAsync([CreateJob(job2Name)], ct);
 
         // Search for literal "_a_" â€” should not treat _ as single-char wildcard
         var results = await Store.GetJobsAsync(new() { Name = $"_a_{suffix}" }, ct);
@@ -150,8 +150,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchStats_{Guid.CreateVersion7():N}";
         var queueName = "default";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var batchId = Guid.CreateVersion7().ToString("N");
         var child1 = CreateRun(jobName) with { BatchId = batchId };
@@ -175,16 +175,16 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var jobName = $"QueueMove_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.Queue = "low";
-        await Store.UpsertJobAsync(job, ct);
-        await Store.UpsertQueueAsync(new() { Name = "low", Priority = 1 }, ct);
-        await Store.UpsertQueueAsync(new() { Name = "high", Priority = 10 }, ct);
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "low", Priority = 1 }], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "high", Priority = 10 }], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
         // Move the job to the "high" queue
         job.Queue = "high";
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         // The pending run should still be claimable when the node registers for both queues
         var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["low", "high"], 1, ct)).FirstOrDefault();
@@ -196,7 +196,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var queueName = $"conc-q-{Guid.CreateVersion7():N}";
-        await Store.UpsertQueueAsync(new() { Name = queueName, MaxConcurrency = 2 }, ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName, MaxConcurrency = 2 }], ct);
 
         // Create 10 different jobs all in the same concurrency-limited queue
         var jobNames = new List<string>();
@@ -205,7 +205,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
             var jobName = $"QConc_{i}_{Guid.CreateVersion7():N}";
             var job = CreateJob(jobName);
             job.Queue = queueName;
-            await Store.UpsertJobAsync(job, ct);
+            await Store.UpsertJobsAsync([job], ct);
             jobNames.Add(jobName);
 
             var run = CreateRun(jobName);
@@ -231,8 +231,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchPending_{Guid.CreateVersion7():N}";
         var queueName = "default";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = queueName }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
 
         var batchId = Guid.CreateVersion7().ToString("N");
         var child1 = CreateRun(jobName) with { BatchId = batchId };
@@ -267,7 +267,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ManyEvents_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -303,8 +303,8 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"MixedExpire_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var past = now.AddMinutes(-10);

@@ -19,7 +19,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     private async Task<(JobBatch Batch, JobRun[] Runs)> CreateBatchWithRunsAsync(int childCount, CancellationToken ct)
     {
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batch = CreateBatch(childCount);
         var runs = Enumerable.Range(0, childCount)
@@ -65,7 +65,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batch = CreateBatch(1);
         var run = CreateRun(jobName) with { BatchId = batch.Id };
@@ -191,7 +191,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batch = CreateBatch(2);
         var pendingRun = CreateRun(jobName) with { BatchId = batch.Id };
@@ -235,7 +235,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchStats_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batch = CreateBatch(2);
         var runA = CreateRun(jobName) with { BatchId = batch.Id };
@@ -279,7 +279,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var batch = CreateBatch(2);
@@ -338,8 +338,8 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         // Every store must satisfy the ordered-by-input-ids, missing-ids-omitted contract.
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"GetByIds_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
-        await Store.UpsertQueueAsync(new() { Name = "default" }, ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
         var runs = new List<JobRun>();
         for (var i = 0; i < 5; i++)
@@ -475,7 +475,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NonBatch_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
         var run = CreateRun(jobName);
         await Store.TryCreateRunAsync(run, cancellationToken: ct);
 

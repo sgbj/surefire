@@ -607,7 +607,9 @@ public sealed class HydrationContractTests
     {
         public Task MigrateAsync(CancellationToken ct = default) => inner.MigrateAsync(ct);
         public Task PingAsync(CancellationToken ct = default) => inner.PingAsync(ct);
-        public Task UpsertJobAsync(JobDefinition job, CancellationToken ct = default) => inner.UpsertJobAsync(job, ct);
+
+        public Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken ct = default) =>
+            inner.UpsertJobsAsync(jobs, ct);
 
         public Task<JobDefinition?> GetJobAsync(string name, CancellationToken ct = default) =>
             inner.GetJobAsync(name, ct);
@@ -705,17 +707,17 @@ public sealed class HydrationContractTests
         public Task<NodeInfo?> GetNodeAsync(string name, CancellationToken ct = default) =>
             inner.GetNodeAsync(name, ct);
 
-        public Task UpsertQueueAsync(QueueDefinition queue, CancellationToken ct = default) =>
-            inner.UpsertQueueAsync(queue, ct);
+        public Task UpsertQueuesAsync(IReadOnlyList<QueueDefinition> queues, CancellationToken ct = default) =>
+            inner.UpsertQueuesAsync(queues, ct);
 
         public Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken ct = default) =>
             inner.GetQueuesAsync(ct);
 
-        public Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken ct = default) =>
+        public Task<bool> SetQueuePausedAsync(string name, bool isPaused, CancellationToken ct = default) =>
             inner.SetQueuePausedAsync(name, isPaused, ct);
 
-        public Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken ct = default) =>
-            inner.UpsertRateLimitAsync(rateLimit, ct);
+        public Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
+            CancellationToken ct = default) => inner.UpsertRateLimitsAsync(rateLimits, ct);
 
         public Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken ct = default) =>
             inner.CancelExpiredRunsWithIdsAsync(ct);

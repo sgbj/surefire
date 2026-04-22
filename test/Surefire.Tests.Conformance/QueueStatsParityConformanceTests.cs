@@ -7,7 +7,7 @@ public abstract class QueueStatsParityConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ImplicitDefault_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var pending = CreateRun(jobName);
         var running = CreateRun(jobName);
@@ -31,7 +31,7 @@ public abstract class QueueStatsParityConformanceTests : StoreConformanceBase
         var jobName = $"ImplicitNamed_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
         job.Queue = queueName;
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);

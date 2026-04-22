@@ -73,6 +73,18 @@ public sealed class RetryPolicyTests
     }
 
     [Fact]
+    public void NextDelay_JitterAtMinimum_HalvesDelay()
+    {
+        var backoff = new Backoff(() => 0.0);
+        var initial = TimeSpan.FromMilliseconds(200);
+        var max = TimeSpan.FromSeconds(5);
+
+        var delay = backoff.NextDelay(0, initial, max);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(100), delay);
+    }
+
+    [Fact]
     public void NextDelay_JitterDisabled_ReturnsExactDelay()
     {
         var backoff = new Backoff(() => 0.0);

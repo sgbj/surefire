@@ -5,7 +5,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     private async Task<string> CreateRunForEventsAsync(CancellationToken ct)
     {
         var jobName = $"EventJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -15,7 +15,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     private async Task<(string BatchId, JobRun ChildA, JobRun ChildB)> CreateBatchForEventsAsync(CancellationToken ct)
     {
         var jobName = $"BatchEventJob_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobAsync(CreateJob(jobName), ct);
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var batchId = Guid.CreateVersion7().ToString("N");
         var createdAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
@@ -297,7 +297,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
@@ -324,7 +324,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
@@ -353,7 +353,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
@@ -398,7 +398,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
@@ -422,7 +422,7 @@ public abstract class EventConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 

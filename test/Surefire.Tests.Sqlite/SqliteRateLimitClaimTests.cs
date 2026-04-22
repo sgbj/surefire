@@ -19,20 +19,24 @@ public sealed class SqliteRateLimitClaimTests
             await storeA.MigrateAsync(ct);
 
             var jobName = $"job-{Guid.CreateVersion7():N}";
-            await storeA.UpsertRateLimitAsync(new()
-            {
-                Name = "claims",
-                Type = RateLimitType.FixedWindow,
-                MaxPermits = 2,
-                Window = TimeSpan.FromMinutes(1)
-            }, ct);
-            await storeA.UpsertJobAsync(new()
-            {
-                Name = jobName,
-                Queue = "default",
-                RateLimitName = "claims"
-            }, ct);
-            await storeA.UpsertQueueAsync(new() { Name = "default" }, ct);
+            await storeA.UpsertRateLimitsAsync([
+                new()
+                {
+                    Name = "claims",
+                    Type = RateLimitType.FixedWindow,
+                    MaxPermits = 2,
+                    Window = TimeSpan.FromMinutes(1)
+                }
+            ], ct);
+            await storeA.UpsertJobsAsync([
+                new()
+                {
+                    Name = jobName,
+                    Queue = "default",
+                    RateLimitName = "claims"
+                }
+            ], ct);
+            await storeA.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
             var now = DateTimeOffset.UtcNow;
             await storeA.CreateRunsAsync([
@@ -100,7 +104,7 @@ public sealed class SqliteRateLimitClaimTests
             await storeA.MigrateAsync(ct);
 
             var jobName = $"job-{Guid.CreateVersion7():N}";
-            await storeA.UpsertJobAsync(new() { Name = jobName, Queue = "default" }, ct);
+            await storeA.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
             var startGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var now = DateTimeOffset.UtcNow;

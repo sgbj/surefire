@@ -295,11 +295,28 @@ public static class DashboardEndpoints
                 }
 
                 var resolvedTake = Math.Clamp(take ?? DefaultChildrenPageSize, 1, MaxChildrenPageSize);
-                var page = await store.GetDirectChildrenAsync(id,
-                    afterCursor,
-                    beforeCursor,
-                    resolvedTake,
-                    ct);
+
+                DirectChildrenPage page;
+                try
+                {
+                    page = await store.GetDirectChildrenAsync(id,
+                        afterCursor,
+                        beforeCursor,
+                        resolvedTake,
+                        ct);
+                }
+                catch (FormatException ex)
+                {
+                    // Cursors are opaque by contract; internal callers round-trip them verbatim.
+                    // User-facing URLs can expose them to clients that mutate or truncate the value,
+                    // so surface a 400 with a clear diagnostic rather than a 500. Do not silently
+                    // treat a malformed cursor as "start of page" — that hides paging bugs and can
+                    // cause infinite client polling loops.
+                    return TypedResults.Problem(
+                        statusCode: StatusCodes.Status400BadRequest,
+                        title: "Invalid pagination cursor",
+                        detail: ex.Message);
+                }
 
                 return TypedResults.Ok(new RunChildrenResponse
                 {
@@ -361,18 +378,24 @@ public static class DashboardEndpoints
                     [RunEventType.Log], take: resolvedTake + 1, cancellationToken: ct);
 
                 var logs = new List<JsonElement>(Math.Min(events.Count, resolvedTake));
-                long? nextCursor = null;
+                long? lastScannedId = null;
+                var scanned = 0;
                 foreach (var @event in events)
                 {
-                    if (logs.Count >= resolvedTake)
+                    if (scanned >= resolvedTake)
                     {
                         break;
                     }
 
+                    scanned++;
+                    // Advance the cursor unconditionally — skipped malformed payloads still
+                    // count against the window so pagination can't livelock on a run whose
+                    // take+1 window contains only unparseable events.
+                    lastScannedId = @event.Id;
+
                     try
                     {
                         logs.Add(JsonSerializer.Deserialize<JsonElement>(@event.Payload));
-                        nextCursor = @event.Id;
                     }
                     catch (JsonException ex)
                     {
@@ -387,7 +410,7 @@ public static class DashboardEndpoints
                 return TypedResults.Ok(new LogPageResponse
                 {
                     Items = logs,
-                    NextCursor = hasMore ? nextCursor : null
+                    NextCursor = hasMore ? lastScannedId : null
                 });
             });
 
@@ -526,12 +549,16 @@ public static class DashboardEndpoints
             });
 
         api.MapPatch("/queues/{name}",
-            async Task<NoContent> (string name, UpdateQueueRequest request,
+            async Task<Results<NoContent, ProblemHttpResult>> (string name, UpdateQueueRequest request,
                 IJobStore store, CancellationToken ct) =>
             {
-                if (request.IsPaused is { })
+                if (request.IsPaused is { } paused)
                 {
-                    await store.SetQueuePausedAsync(name, request.IsPaused.Value, ct);
+                    var updated = await store.SetQueuePausedAsync(name, paused, ct);
+                    if (!updated)
+                    {
+                        return NotFoundProblem($"Queue '{name}' was not found.");
+                    }
                 }
 
                 return TypedResults.NoContent();

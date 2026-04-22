@@ -100,12 +100,11 @@ internal sealed class PostgreSqlJobStore(
                                   priority INT NOT NULL DEFAULT 0,
                                   deduplication_id TEXT,
                                   last_heartbeat_at TIMESTAMPTZ,
-                                  queue_priority INT NOT NULL DEFAULT 0,
                                   batch_id TEXT
                               );
 
                               CREATE INDEX IF NOT EXISTS ix_surefire_runs_claim
-                                  ON surefire_runs (queue_priority DESC, priority DESC, not_before, id)
+                                  ON surefire_runs (priority DESC, not_before, id)
                                   WHERE status = 0;
 
                               CREATE INDEX IF NOT EXISTS ix_surefire_runs_batch_id
@@ -194,10 +193,6 @@ internal sealed class PostgreSqlJobStore(
                                   running_count INT NOT NULL DEFAULT 0
                               );
 
-                              -- 'default' queue row is always present so per-queue running_count
-                              -- maintenance has a target row even when no explicit queue is registered.
-                              INSERT INTO surefire_queues (name) VALUES ('default') ON CONFLICT DO NOTHING;
-
                               CREATE TABLE IF NOT EXISTS surefire_rate_limits (
                                   name TEXT PRIMARY KEY,
                                   type INT NOT NULL DEFAULT 0,
@@ -238,8 +233,20 @@ internal sealed class PostgreSqlJobStore(
         _ = await cmd.ExecuteScalarAsync(cancellationToken);
     }
 
-    public async Task UpsertJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
+    public async Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs,
+        CancellationToken cancellationToken = default)
     {
+        if (jobs.Count == 0)
+        {
+            return;
+        }
+
+        // One JSON payload → jsonb_array_elements → one INSERT...ON CONFLICT → one round trip,
+        // regardless of jobs.Count. Per-field extraction via `->` / `->>` keeps the camelCase JSON
+        // keys (matching SurefireJsonContext's naming policy) visible at the mapping point and
+        // frees the SQL from declaring a jsonb_to_recordset schema. is_enabled and
+        // last_cron_fire_at are deliberately absent from the DO UPDATE SET list so they are
+        // preserved on existing rows and only take their input values (or NULL) on first insert.
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
@@ -248,12 +255,27 @@ internal sealed class PostgreSqlJobStore(
                               max_concurrency, priority, retry_policy, is_continuous, queue,
                               rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
                               last_heartbeat_at
-                          ) VALUES (
-                              @name, @description, @tags, @cron_expression, @time_zone_id, @timeout,
-                              @max_concurrency, @priority, @retry_policy::jsonb, @is_continuous, @queue,
-                              @rate_limit_name, @is_enabled, @misfire_policy, @fire_all_limit, @arguments_schema,
-                              NOW()
                           )
+                          SELECT
+                              e->>'name',
+                              e->>'description',
+                              ARRAY(SELECT jsonb_array_elements_text(e->'tags')),
+                              e->>'cronExpression',
+                              e->>'timeZoneId',
+                              (e->>'timeout')::bigint,
+                              (e->>'maxConcurrency')::int,
+                              (e->>'priority')::int,
+                              e->'retryPolicy',
+                              (e->>'isContinuous')::boolean,
+                              e->>'queue',
+                              e->>'rateLimitName',
+                              (e->>'isEnabled')::boolean,
+                              (e->>'misfirePolicy')::int,
+                              (e->>'fireAllLimit')::int,
+                              e->>'argumentsSchema',
+                              NOW()
+                          FROM jsonb_array_elements(@payload::jsonb) AS e
+                          ORDER BY e->>'name'
                           ON CONFLICT (name) DO UPDATE SET
                               description = EXCLUDED.description,
                               tags = EXCLUDED.tags,
@@ -271,26 +293,7 @@ internal sealed class PostgreSqlJobStore(
                               arguments_schema = EXCLUDED.arguments_schema,
                               last_heartbeat_at = NOW()
                           """;
-
-        cmd.Parameters.AddWithValue("name", job.Name);
-        cmd.Parameters.AddWithValue("description", (object?)job.Description ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("tags", job.Tags);
-        cmd.Parameters.AddWithValue("cron_expression", (object?)job.CronExpression ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("time_zone_id", (object?)job.TimeZoneId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("timeout", job.Timeout.HasValue ? job.Timeout.Value.Ticks : DBNull.Value);
-        cmd.Parameters.AddWithValue("max_concurrency",
-            job.MaxConcurrency.HasValue ? job.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("priority", job.Priority);
-        cmd.Parameters.AddWithValue("retry_policy", SerializeRetryPolicy(job.RetryPolicy));
-        cmd.Parameters.AddWithValue("is_continuous", job.IsContinuous);
-        cmd.Parameters.AddWithValue("queue", (object?)job.Queue ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("rate_limit_name", (object?)job.RateLimitName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("is_enabled", job.IsEnabled);
-        cmd.Parameters.AddWithValue("misfire_policy", (int)job.MisfirePolicy);
-        cmd.Parameters.AddWithValue("fire_all_limit",
-            job.FireAllLimit.HasValue ? job.FireAllLimit.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("arguments_schema", (object?)job.ArgumentsSchema ?? DBNull.Value);
-
+        cmd.Parameters.AddWithValue("payload", UpsertPayloadFactory.SerializeJobs(jobs));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1627,31 +1630,37 @@ internal sealed class PostgreSqlJobStore(
         return null;
     }
 
-    public async Task UpsertQueueAsync(QueueDefinition queue, CancellationToken cancellationToken = default)
+    public async Task UpsertQueuesAsync(IReadOnlyList<QueueDefinition> queues,
+        CancellationToken cancellationToken = default)
     {
+        if (queues.Count == 0)
+        {
+            return;
+        }
+
+        // is_paused stays out of the DO UPDATE SET list so dashboard pause state survives
+        // the maintenance tick's periodic re-upsert. On first insert is_paused comes from
+        // the input payload.
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
-                          INSERT INTO surefire_queues (name, priority, max_concurrency, rate_limit_name, last_heartbeat_at)
-                          VALUES (@name, @priority, @max_concurrency, @rate_limit_name, NOW())
+                          INSERT INTO surefire_queues (name, priority, max_concurrency, is_paused, rate_limit_name, last_heartbeat_at)
+                          SELECT
+                              e->>'name',
+                              (e->>'priority')::int,
+                              (e->>'maxConcurrency')::int,
+                              (e->>'isPaused')::boolean,
+                              e->>'rateLimitName',
+                              NOW()
+                          FROM jsonb_array_elements(@payload::jsonb) AS e
+                          ORDER BY e->>'name'
                           ON CONFLICT (name) DO UPDATE SET
                               priority = EXCLUDED.priority,
                               max_concurrency = EXCLUDED.max_concurrency,
                               rate_limit_name = EXCLUDED.rate_limit_name,
                               last_heartbeat_at = NOW();
-
-                          UPDATE surefire_runs SET queue_priority = @priority
-                          WHERE status = 0
-                              AND job_name IN (SELECT name FROM surefire_jobs WHERE COALESCE(queue, 'default') = @name)
-                              AND queue_priority != @priority;
                           """;
-
-        cmd.Parameters.AddWithValue("name", queue.Name);
-        cmd.Parameters.AddWithValue("priority", queue.Priority);
-        cmd.Parameters.AddWithValue("max_concurrency",
-            queue.MaxConcurrency.HasValue ? queue.MaxConcurrency.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("rate_limit_name", (object?)queue.RateLimitName ?? DBNull.Value);
-
+        cmd.Parameters.AddWithValue("payload", UpsertPayloadFactory.SerializeQueues(queues));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1671,39 +1680,46 @@ internal sealed class PostgreSqlJobStore(
         return results;
     }
 
-    public async Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken cancellationToken = default)
+    public async Task<bool> SetQueuePausedAsync(string name, bool isPaused,
+        CancellationToken cancellationToken = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        cmd.CommandText = """
-                          INSERT INTO surefire_queues (name, priority, max_concurrency, is_paused, rate_limit_name, last_heartbeat_at)
-                          VALUES (@name, 0, NULL, @is_paused, NULL, NULL)
-                          ON CONFLICT (name) DO UPDATE SET is_paused = EXCLUDED.is_paused
-                          """;
+        cmd.CommandText = "UPDATE surefire_queues SET is_paused = @is_paused WHERE name = @name";
         cmd.Parameters.AddWithValue("name", name);
         cmd.Parameters.AddWithValue("is_paused", isPaused);
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
-    public async Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken cancellationToken = default)
+    public async Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
+        CancellationToken cancellationToken = default)
     {
+        if (rateLimits.Count == 0)
+        {
+            return;
+        }
+
+        // Runtime counter columns (current_count, window_start) are not present on this statement
+        // at all, so they are preserved verbatim on update.
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
                           INSERT INTO surefire_rate_limits (name, type, max_permits, "window", last_heartbeat_at)
-                          VALUES (@name, @type, @max_permits, @window, NOW())
+                          SELECT
+                              e->>'name',
+                              (e->>'type')::int,
+                              (e->>'maxPermits')::int,
+                              (e->>'window')::bigint,
+                              NOW()
+                          FROM jsonb_array_elements(@payload::jsonb) AS e
+                          ORDER BY e->>'name'
                           ON CONFLICT (name) DO UPDATE SET
                               type = EXCLUDED.type,
                               max_permits = EXCLUDED.max_permits,
                               "window" = EXCLUDED."window",
                               last_heartbeat_at = NOW()
                           """;
-
-        cmd.Parameters.AddWithValue("name", rateLimit.Name);
-        cmd.Parameters.AddWithValue("type", (int)rateLimit.Type);
-        cmd.Parameters.AddWithValue("max_permits", rateLimit.MaxPermits);
-        cmd.Parameters.AddWithValue("window", rateLimit.Window.Ticks);
-
+        cmd.Parameters.AddWithValue("payload", UpsertPayloadFactory.SerializeRateLimits(rateLimits));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -2192,8 +2208,12 @@ internal sealed class PostgreSqlJobStore(
                 await Task.Delay(MigrationLockRetryDelay, timeProvider, timeoutCts.Token);
             }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
+            when (timeoutCts.Token.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
+            // Only translate to TimeoutException when the LOCAL timer fired and the caller didn't
+            // cancel. If both fire concurrently (host shutdown + lock-wait expiry) we propagate the
+            // original OCE — the caller asked to stop, that's the truthful diagnostic.
             throw new TimeoutException(
                 $"Timed out waiting {MigrationLockWaitTimeout.TotalSeconds:0}s to acquire the Surefire PostgreSQL migration lock.");
         }
@@ -2294,19 +2314,19 @@ internal sealed class PostgreSqlJobStore(
                               FROM surefire_rate_limits rl
                           ),
                           ranked AS (
-                              SELECT r.id, r.queue_priority, r.priority, r.not_before,
+                              SELECT r.id, COALESCE(q.priority, 0) AS queue_priority, r.priority, r.not_before,
                                   r.job_name AS run_job_name, COALESCE(j.queue, 'default') AS run_queue_name,
                                   j.max_concurrency AS j_max, q.max_concurrency AS q_max,
                                   j.running_count AS j_running, COALESCE(q.running_count, 0) AS q_running,
                                   j.rate_limit_name AS j_rl, q.rate_limit_name AS q_rl,
                                   ROW_NUMBER() OVER (PARTITION BY r.job_name
-                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
+                                      ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rn,
                                   ROW_NUMBER() OVER (PARTITION BY COALESCE(j.queue, 'default')
-                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
+                                      ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rn,
                                   ROW_NUMBER() OVER (PARTITION BY j.rate_limit_name
-                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
+                                      ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
                                   ROW_NUMBER() OVER (PARTITION BY q.rate_limit_name
-                                      ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
+                                      ORDER BY COALESCE(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
                               FROM surefire_runs r
                               JOIN surefire_jobs j ON j.name = r.job_name
                               LEFT JOIN surefire_queues q ON q.name = COALESCE(j.queue, 'default')
@@ -2411,7 +2431,7 @@ internal sealed class PostgreSqlJobStore(
                               created_at, started_at, completed_at, cancelled_at, node_name, attempt,
                               trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id,
                               root_run_id, rerun_of_run_id, not_before, not_after, priority,
-                              deduplication_id, last_heartbeat_at, queue_priority, batch_id
+                              deduplication_id, last_heartbeat_at, batch_id
                           FROM claimed
                           """;
 
@@ -2469,6 +2489,26 @@ internal sealed class PostgreSqlJobStore(
         if (runs.Count == 0)
         {
             return;
+        }
+
+        // Pre-lock the jobs rows whose counters this statement will mutate, in name order,
+        // before the INSERT. Same canonical jobs → runs order every other mutating path obeys;
+        // ORDER BY makes concurrent batch creators acquire the set in a deterministic sequence
+        // so they serialize instead of deadlocking against claim/transition paths that already
+        // lock these rows FOR UPDATE.
+        var lockNames = runs
+            .Where(r => !r.Status.IsTerminal)
+            .Select(r => r.JobName)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (lockNames.Length > 0)
+        {
+            await using var lockCmd = CreateCommand(conn);
+            lockCmd.Transaction = tx;
+            lockCmd.CommandText =
+                "SELECT 1 FROM surefire_jobs WHERE name = ANY(@names) ORDER BY name FOR UPDATE";
+            lockCmd.Parameters.AddWithValue("names", lockNames);
+            await lockCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         var n = runs.Count;
@@ -2531,8 +2571,7 @@ internal sealed class PostgreSqlJobStore(
         }
 
         // UNNEST keeps the SQL text stable across input sizes so PG's plan cache hits
-        // regardless of batch size. queue_priority is derived per row from the job's
-        // configured queue.
+        // regardless of batch size.
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -2541,7 +2580,7 @@ internal sealed class PostgreSqlJobStore(
                               created_at, started_at, completed_at, cancelled_at, node_name,
                               attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                               rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                              last_heartbeat_at, queue_priority, batch_id
+                              last_heartbeat_at, batch_id
                           )
                           SELECT
                               input.id, input.job_name, input.status, input.arguments, input.result, input.reason, input.progress,
@@ -2549,8 +2588,6 @@ internal sealed class PostgreSqlJobStore(
                               input.attempt, input.trace_id, input.span_id, input.parent_trace_id, input.parent_span_id,
                               input.parent_run_id, input.root_run_id, input.rerun_of_run_id, input.not_before, input.not_after,
                               input.priority, input.deduplication_id, input.last_heartbeat_at,
-                              COALESCE((SELECT q.priority FROM surefire_queues q
-                                        WHERE q.name = COALESCE((SELECT j.queue FROM surefire_jobs j WHERE j.name = input.job_name), 'default')), 0),
                               input.batch_id
                           FROM UNNEST(
                               @ids, @job_names, @statuses, @arguments, @results, @reasons, @progresses,
@@ -2635,9 +2672,14 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
-        if (maxActiveForJob is { })
+        // Canonical config-first lock order (jobs → queues → rate_limits → runs, per the
+        // invariant at ClaimRunsCoreAsync). Acquired unconditionally so the subsequent
+        // non_terminal_count UPDATE never upgrades a lock against a concurrent claim or
+        // transition that already holds the jobs row. If the row doesn't yet exist
+        // (late registration) this locks nothing and the downstream INSERT/UPDATEs are
+        // no-ops on surefire_jobs, matching the TryCreateRunAsync contract.
+        await using (var lockCmd = CreateCommand(conn))
         {
-            await using var lockCmd = CreateCommand(conn);
             lockCmd.Transaction = tx;
             lockCmd.CommandText = "SELECT 1 FROM surefire_jobs WHERE name = @name FOR UPDATE";
             lockCmd.Parameters.AddWithValue("name", run.JobName);
@@ -2678,15 +2720,13 @@ internal sealed class PostgreSqlJobStore(
                                   created_at, started_at, completed_at, cancelled_at, node_name,
                                   attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                   rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                                  last_heartbeat_at, queue_priority, batch_id
+                                  last_heartbeat_at, batch_id
                               ) VALUES (
                                   @id, @job_name, @status, @arguments, @result, @reason, @progress,
                                   @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
                                   @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                   @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                                  @last_heartbeat_at,
-                                  COALESCE((SELECT q.priority FROM surefire_queues q WHERE q.name = COALESCE((SELECT j.queue FROM surefire_jobs j WHERE j.name = @job_name), 'default')), 0),
-                                  @batch_id
+                                  @last_heartbeat_at, @batch_id
                               )
                               ON CONFLICT DO NOTHING
                               """;
@@ -2700,16 +2740,14 @@ internal sealed class PostgreSqlJobStore(
                                    created_at, started_at, completed_at, cancelled_at, node_name,
                                    attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                    rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                                   last_heartbeat_at, queue_priority, batch_id
+                                   last_heartbeat_at, batch_id
                                )
                                SELECT
                                    @id, @job_name, @status, @arguments, @result, @reason, @progress,
                                    @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
                                    @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                    @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                                   @last_heartbeat_at,
-                                   COALESCE((SELECT q.priority FROM surefire_queues q WHERE q.name = COALESCE((SELECT j.queue FROM surefire_jobs j WHERE j.name = @job_name), 'default')), 0),
-                                   @batch_id
+                                   @last_heartbeat_at, @batch_id
                                WHERE {whereClause}
                                ON CONFLICT DO NOTHING
                                """;
@@ -2914,7 +2952,6 @@ internal sealed class PostgreSqlJobStore(
             Attempt = reader.GetInt32(ord.Attempt),
             NotBefore = reader.GetFieldValue<DateTimeOffset>(ord.NotBefore),
             Priority = reader.GetInt32(ord.Priority),
-            QueuePriority = reader.GetInt32(ord.QueuePriority),
             Arguments = reader.IsDBNull(ord.Arguments) ? null : reader.GetString(ord.Arguments),
             Result = reader.IsDBNull(ord.Result) ? null : reader.GetString(ord.Result),
             Reason = reader.IsDBNull(ord.Reason) ? null : reader.GetString(ord.Reason),
@@ -2991,7 +3028,9 @@ internal sealed class PostgreSqlJobStore(
             MaxConcurrency = reader.IsDBNull(maxConcurrencyCol) ? null : reader.GetInt32(maxConcurrencyCol),
             RetryPolicy = reader.IsDBNull(retryPolicyCol)
                 ? new()
-                : DeserializeRetryPolicy(reader.GetString(retryPolicyCol)),
+                : JsonSerializer.Deserialize(reader.GetString(retryPolicyCol),
+                      SurefireJsonContext.Default.RetryPolicy)
+                  ?? throw new InvalidOperationException("Retry policy payload was null."),
             Queue = reader.IsDBNull(queueCol) ? null : reader.GetString(queueCol),
             RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
             ArgumentsSchema = reader.IsDBNull(schemaCol) ? null : reader.GetString(schemaCol),
@@ -3045,30 +3084,6 @@ internal sealed class PostgreSqlJobStore(
         };
     }
 
-    private static string SerializeRetryPolicy(RetryPolicy policy) =>
-        JsonSerializer.Serialize(new
-        {
-            maxRetries = policy.MaxRetries,
-            backoffType = (int)policy.BackoffType,
-            initialDelay = policy.InitialDelay.Ticks,
-            maxDelay = policy.MaxDelay.Ticks,
-            jitter = policy.Jitter
-        });
-
-    private static RetryPolicy DeserializeRetryPolicy(string json)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        return new()
-        {
-            MaxRetries = root.GetProperty("maxRetries").GetInt32(),
-            BackoffType = (BackoffType)root.GetProperty("backoffType").GetInt32(),
-            InitialDelay = TimeSpan.FromTicks(root.GetProperty("initialDelay").GetInt64()),
-            MaxDelay = TimeSpan.FromTicks(root.GetProperty("maxDelay").GetInt64()),
-            Jitter = root.GetProperty("jitter").GetBoolean()
-        };
-    }
-
     private static string EscapeLike(string input) =>
         input.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
 
@@ -3086,7 +3101,6 @@ internal sealed class PostgreSqlJobStore(
         int Attempt,
         int NotBefore,
         int Priority,
-        int QueuePriority,
         int Arguments,
         int Result,
         int Reason,
@@ -3109,7 +3123,7 @@ internal sealed class PostgreSqlJobStore(
         public static RunOrdinals From(NpgsqlDataReader r) => new(
             r.GetOrdinal("id"), r.GetOrdinal("job_name"), r.GetOrdinal("status"),
             r.GetOrdinal("progress"), r.GetOrdinal("created_at"), r.GetOrdinal("attempt"),
-            r.GetOrdinal("not_before"), r.GetOrdinal("priority"), r.GetOrdinal("queue_priority"),
+            r.GetOrdinal("not_before"), r.GetOrdinal("priority"),
             r.GetOrdinal("arguments"), r.GetOrdinal("result"), r.GetOrdinal("reason"),
             r.GetOrdinal("started_at"), r.GetOrdinal("completed_at"), r.GetOrdinal("cancelled_at"),
             r.GetOrdinal("node_name"), r.GetOrdinal("trace_id"), r.GetOrdinal("span_id"),

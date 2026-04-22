@@ -10,7 +10,7 @@ internal abstract class ThrowingJobStore : IJobStore
     public virtual Task MigrateAsync(CancellationToken ct = default) => throw new NotImplementedException();
     public virtual Task PingAsync(CancellationToken ct = default) => throw new NotImplementedException();
 
-    public virtual Task UpsertJobAsync(JobDefinition job, CancellationToken ct = default) =>
+    public virtual Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken ct = default) =>
         throw new NotImplementedException();
 
     public virtual Task<JobDefinition?> GetJobAsync(string name, CancellationToken ct = default) =>
@@ -101,17 +101,17 @@ internal abstract class ThrowingJobStore : IJobStore
     public virtual Task<NodeInfo?> GetNodeAsync(string name, CancellationToken cancellationToken = default) =>
         throw new NotImplementedException();
 
-    public virtual Task UpsertQueueAsync(QueueDefinition queue, CancellationToken ct = default) =>
+    public virtual Task UpsertQueuesAsync(IReadOnlyList<QueueDefinition> queues, CancellationToken ct = default) =>
         throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken ct = default) =>
         throw new NotImplementedException();
 
-    public virtual Task SetQueuePausedAsync(string name, bool isPaused, CancellationToken ct = default) =>
+    public virtual Task<bool> SetQueuePausedAsync(string name, bool isPaused, CancellationToken ct = default) =>
         throw new NotImplementedException();
 
-    public virtual Task UpsertRateLimitAsync(RateLimitDefinition rateLimit, CancellationToken ct = default) =>
-        throw new NotImplementedException();
+    public virtual Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
+        CancellationToken ct = default) => throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
         CancellationToken cancellationToken = default) => throw new NotImplementedException();

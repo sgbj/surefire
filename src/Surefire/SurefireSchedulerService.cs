@@ -10,14 +10,17 @@ internal sealed partial class SurefireSchedulerService(
     SurefireOptions options,
     TimeProvider timeProvider,
     SurefireInstrumentation instrumentation,
+    LoopHealthTracker loopHealth,
     Backoff backoff,
     ILogger<SurefireSchedulerService> logger) : BackgroundService
 {
+    internal const string LoopName = "scheduler";
     private static readonly TimeSpan BackoffInitial = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        loopHealth.Register(LoopName, options.PollingInterval);
         using var timer = new PeriodicTimer(options.PollingInterval, timeProvider);
 
         try
@@ -28,6 +31,7 @@ internal sealed partial class SurefireSchedulerService(
                 try
                 {
                     await ScheduleDueJobsAsync(stoppingToken);
+                    loopHealth.RecordSuccess(LoopName);
                     backoffAttempt = 0;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -41,13 +45,12 @@ internal sealed partial class SurefireSchedulerService(
                         break;
                     }
 
+                    // A job scheduler should never crash the host on a single bad tick. Log the
+                    // exception, record instrumentation, back off and continue so operators see
+                    // the failure via metrics/health-check while the host stays up.
                     Log.SchedulerTickFailed(logger, ex);
-                    if (!store.IsTransientException(ex))
-                    {
-                        throw;
-                    }
-
-                    instrumentation.RecordStoreRetry("scheduler");
+                    instrumentation.RecordLoopError(LoopName);
+                    loopHealth.RecordFailure(LoopName);
                     await Task.Delay(backoff.NextDelay(backoffAttempt++, BackoffInitial, BackoffMax), timeProvider,
                         stoppingToken);
                 }
@@ -153,7 +156,6 @@ internal sealed partial class SurefireSchedulerService(
             NotBefore = notBefore,
             NotAfter = null,
             Priority = job.Priority,
-            QueuePriority = 0,
             DeduplicationId = BuildCronDeduplicationId(job.Name, cronFireAt),
             Progress = 0,
             Attempt = 0

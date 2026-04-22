@@ -9,7 +9,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -33,7 +33,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -52,7 +52,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -75,7 +75,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -98,7 +98,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -121,7 +121,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -152,7 +152,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -192,7 +192,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -214,7 +214,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -238,7 +238,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -266,7 +266,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         {
             var jobName = "ConcurrentCas_" + Guid.CreateVersion7().ToString("N");
             var job = CreateJob(jobName);
-            await Store.UpsertJobAsync(job, ct);
+            await Store.UpsertJobsAsync([job], ct);
 
             var run = CreateRun(jobName);
             await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -307,7 +307,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -333,7 +333,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
@@ -356,7 +356,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
-        await Store.UpsertJobAsync(job, ct);
+        await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);

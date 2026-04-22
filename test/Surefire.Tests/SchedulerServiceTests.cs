@@ -20,6 +20,7 @@ public sealed class SchedulerServiceTests
         var service = new SurefireSchedulerService(
             store, notifications, opts, time,
             new(new DummyMeterFactory()),
+            new(time),
             new(() => 0),
             NullLogger<SurefireSchedulerService>.Instance);
         return (service, store, time);
@@ -264,6 +265,46 @@ public sealed class SchedulerServiceTests
         Assert.Empty(store.CreatedRuns);
     }
 
+    // ── Loop resilience (C4) ──────────────────────────────────────────────────
+
+    [Fact]
+    public async Task SchedulerLoop_NonTransientStoreError_LoopContinuesAndRecordsFailure()
+    {
+        // C4 regression: the loop must never rethrow out of ExecuteAsync and kill the host. A
+        // non-transient error (InvalidOperationException) must be logged and counted, and the
+        // next tick must keep firing.
+        var time = new FakeTimeProvider();
+        time.SetUtcNow(new(2025, 1, 1, 12, 0, 0, TimeSpan.Zero));
+        var store = new ExplodingSchedulerStore();
+        var notifications = new FakeNotificationProvider();
+        var loopHealth = new LoopHealthTracker(time);
+        var service = new SurefireSchedulerService(
+            store, notifications, new(), time,
+            new(new DummyMeterFactory()),
+            loopHealth,
+            new(() => 0),
+            NullLogger<SurefireSchedulerService>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        var execute = service.StartAsync(cts.Token);
+
+        // Let the scheduler poll ~4 times (default PollingInterval is 5s).
+        for (var i = 0; i < 4; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(5));
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+
+        await cts.CancelAsync();
+        await service.StopAsync(CancellationToken.None);
+        await execute;
+
+        var state = loopHealth.Snapshot()[SurefireSchedulerService.LoopName];
+        Assert.True(state.ConsecutiveFailures > 0,
+            $"Expected at least one recorded failure, got {state.ConsecutiveFailures}");
+        Assert.True(store.Calls >= 2, $"Loop should survive to retry; Calls={store.Calls}");
+    }
+
     // ── Fake infrastructure ───────────────────────────────────────────────────
 
     private sealed class FakeNotificationProvider : INotificationProvider
@@ -283,6 +324,21 @@ public sealed class SchedulerServiceTests
             public static readonly NoopDisposable Instance = new();
             public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class ExplodingSchedulerStore : ThrowingJobStore
+    {
+        private int _calls;
+        public int Calls => Volatile.Read(ref _calls);
+
+        public override Task<IReadOnlyList<JobDefinition>> GetJobsAsync(JobListFilter? filter = null,
+            CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _calls);
+            throw new InvalidOperationException("non-transient failure");
+        }
+
+        public override bool IsTransientException(Exception ex) => false;
     }
 
     internal sealed class FakeSchedulerStore : ThrowingJobStore
