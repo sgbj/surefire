@@ -20,7 +20,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Table,
   TableBody,
   TableCell,
   TableHead,
@@ -1213,7 +1212,7 @@ export function RunDetailPage() {
       {run.reason && (
         <div className="rounded-lg border border-destructive/15 overflow-hidden">
           <div className="max-h-[26rem] overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/5 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/10 backdrop-blur-sm">
               <span className="text-sm text-destructive/80">Reason</span>
             </div>
             <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
@@ -1225,15 +1224,15 @@ export function RunDetailPage() {
 
       {failureRows.length > 0 && (
         <div className="rounded-lg border border-destructive/15 overflow-hidden">
-          <div className="max-h-[26rem] overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/5 backdrop-blur-sm">
-              <span className="text-sm text-destructive/80">
-                Errors ({failureRows.length})
-              </span>
-            </div>
-          <Table>
-            <TableHeader>
-              <TableRow>
+          <div className="max-h-[26rem] overflow-auto">
+          <table className="w-full caption-bottom text-sm min-w-[768px]">
+            <TableHeader className="sticky top-0 z-10 bg-destructive/10 backdrop-blur-sm">
+              <TableRow className="hover:bg-transparent border-destructive/10">
+                <TableCell colSpan={4} className="text-destructive/80">
+                  Errors ({failureRows.length})
+                </TableCell>
+              </TableRow>
+              <TableRow className="hover:bg-transparent border-destructive/10">
                 <TableHead>Attempt</TableHead>
                 <TableHead>Occurred</TableHead>
                 <TableHead>Exception</TableHead>
@@ -1289,7 +1288,7 @@ export function RunDetailPage() {
                 );
               })}
             </TableBody>
-          </Table>
+          </table>
           </div>
         </div>
       )}
