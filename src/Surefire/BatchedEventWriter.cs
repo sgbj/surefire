@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -10,10 +11,18 @@ namespace Surefire;
 ///     transactions (status transitions, run creation, cancellation) remain transactional and
 ///     bypass this path; only standalone appends (progress reports, stream output, log events,
 ///     batch completion side-events) flow through here.
+///     <para>
+///         Flush durability is tracked per-run, not globally. A permanent failure on one run's
+///         events poisons only that run's <see cref="FlushRunAsync" /> — sibling runs sharing the
+///         same writer keep flushing normally. The sticky-within-run semantics stay intact: once a
+///         run's events have permanently failed, every subsequent <see cref="FlushRunAsync" /> for
+///         that run throws until <see cref="DropRunState" /> is called on terminal.
+///     </para>
 /// </summary>
 internal sealed partial class BatchedEventWriter(
     IJobStore store,
     INotificationProvider notifications,
+    SurefireOptions options,
     TimeProvider timeProvider,
     Backoff backoff,
     ILogger<BatchedEventWriter> logger)
@@ -42,20 +51,14 @@ internal sealed partial class BatchedEventWriter(
             FullMode = BoundedChannelFullMode.Wait
         });
 
-    // FlushAsync ordering: each Enqueue stamps a monotonic sequence. After a batch flushes
-    // successfully the worker advances _flushedSeq to the batch's max sequence and signals any
-    // waiters. On a permanent failure the exception is captured along with the failing batch's
-    // MIN sequence so FlushAsync callers whose target has reached or passed that earliest known
-    // failure observe the captured exception. Tracking the min (not the max) keeps the guard
-    // correct even after later batches succeed: the min bounds `[1, min]` as "some earlier event
-    // permanently failed," which is the condition a FlushAsync caller must see. Transient errors
-    // never reach this field; the worker retries indefinitely with backoff until the store recovers.
-    private readonly Lock _flushGate = new();
-    private TaskCompletionSource _batchFlushedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // Per-run flush state. Each entry is created lazily on first enqueue and dropped on terminal
+    // via DropRunState. Keyed by RunEvent.RunId so that a permanent failure on one run's events
+    // can't block sibling runs — every state has its own Lock, Tcs, FlushedSeq, and sticky Error.
+    private readonly ConcurrentDictionary<string, PerRunFlushState> _runStates = new(StringComparer.Ordinal);
+
+    // Global monotonic sequence — assigned to each enqueued event so batches stay in enqueue
+    // order and so per-run watermarks can be expressed in a single shared number space.
     private long _enqueueSeq;
-    private ExceptionDispatchInfo? _error;
-    private long _errorMinSeq;
-    private long _flushedSeq;
 
     private CancellationTokenSource? _runCts;
     private Task? _runLoop;
@@ -72,11 +75,11 @@ internal sealed partial class BatchedEventWriter(
 
     /// <summary>
     ///     Completes the write channel and drains any remaining events before returning. Callers
-    ///     that have enqueued events can await <see cref="FlushAsync" /> before stop to observe
+    ///     that have enqueued events can await <see cref="FlushRunAsync" /> before stop to observe
     ///     per-batch outcomes. The host's <paramref name="cancellationToken" /> is forwarded to the
     ///     worker so a host shutdown deadline breaks any indefinite transient-retry loop and lets
     ///     the host actually stop. Events still pending at that point surface their cancellation
-    ///     to <see cref="FlushAsync" /> waiters via the per-sequence error capture.
+    ///     to <see cref="FlushRunAsync" /> waiters via the per-run error capture.
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
@@ -115,52 +118,79 @@ internal sealed partial class BatchedEventWriter(
     ///     the bounded channel; the background worker coalesces it with sibling events into a
     ///     batched <see cref="IJobStore.AppendEventsAsync" /> call and deduplicates notifications.
     ///     Callers that need the event persisted before proceeding must await
-    ///     <see cref="FlushAsync" /> afterward. Applies backpressure if the channel is full.
+    ///     <see cref="FlushRunAsync" /> afterward. Applies backpressure if the channel is full.
     /// </summary>
     public ValueTask EnqueueAsync(RunEvent evt, IReadOnlyList<NotificationPublish> channels,
         CancellationToken cancellationToken = default)
     {
         var sequence = Interlocked.Increment(ref _enqueueSeq);
+        var state = _runStates.GetOrAdd(evt.RunId, static _ => new());
+        lock (state.Lock)
+        {
+            if (sequence > state.EnqueuedSeq)
+            {
+                state.EnqueuedSeq = sequence;
+            }
+        }
+
         return _channel.Writer.WriteAsync(new(evt, channels, sequence), cancellationToken);
     }
 
     /// <summary>
-    ///     Waits until every event enqueued before this call has been persisted. Callers that need
-    ///     ordering guarantees — e.g. before transitioning a run to a terminal status — should
-    ///     await this so readers never observe the terminal state missing prior events. Throws the
-    ///     original exception if the store write permanently failed for any event at or before the
-    ///     caller's enqueue point.
+    ///     Waits until every event enqueued for <paramref name="runId" /> before this call has been
+    ///     persisted. Callers that need ordering guarantees — e.g. before transitioning the run to
+    ///     a terminal status — should await this so readers never observe the terminal state
+    ///     missing prior events. Throws the original exception if any of the run's own events
+    ///     permanently failed. Sibling runs' failures do not propagate here.
     /// </summary>
-    public async Task FlushAsync(CancellationToken cancellationToken = default)
+    public async Task FlushRunAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var target = Interlocked.Read(ref _enqueueSeq);
+        if (!_runStates.TryGetValue(runId, out var state))
+        {
+            // Nothing was ever enqueued for this run (or its state was already dropped). Either
+            // way, there is nothing to wait on and nothing the caller can fail to observe.
+            return;
+        }
+
+        long target;
+        lock (state.Lock)
+        {
+            target = state.EnqueuedSeq;
+        }
 
         while (true)
         {
             TaskCompletionSource tcs;
-            lock (_flushGate)
+            lock (state.Lock)
             {
-                // Throw when the caller's target has reached or passed the first permanently-
-                // failed batch's MIN sequence. That condition means the caller's range `[1, target]`
-                // overlaps — at minimum — the earliest known failure, so claiming durability
-                // would be a lie. Tracking min (not max) stays correct after later batches succeed
-                // and advance _flushedSeq past the failure.
-                if (_error is { } err && target >= _errorMinSeq)
+                // Sticky-within-run: once a permanent failure has been stamped for this run, every
+                // subsequent flush observes it until the state is dropped on terminal. The error
+                // binds the whole run because a failure in the middle of a run's event stream
+                // means downstream readers can never see a consistent prefix — claiming durability
+                // would be a lie regardless of whether later batches for the same run succeed.
+                if (state.Error is { } err)
                 {
                     err.Throw();
                 }
 
-                if (_flushedSeq >= target)
+                if (state.FlushedSeq >= target)
                 {
                     return;
                 }
 
-                tcs = _batchFlushedTcs;
+                tcs = state.Tcs;
             }
 
             await tcs.Task.WaitAsync(cancellationToken);
         }
     }
+
+    /// <summary>
+    ///     Drops the per-run flush bookkeeping. Must be called after a terminal transition, once
+    ///     no further events can be enqueued for the run. Symmetric to
+    ///     <see cref="SurefireLogEventPump.DropRunState" />.
+    /// </summary>
+    public void DropRunState(string runId) => _runStates.TryRemove(runId, out _);
 
     private async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -230,24 +260,28 @@ internal sealed partial class BatchedEventWriter(
         finally
         {
             // Complete the writer so producers waiting on capacity unblock, then drain everything
-            // already queued. The drain uses stoppingToken so that — if the host's shutdown
-            // deadline cancelled it — FlushBatchAsync's transient-retry loop sees the cancellation
-            // and surfaces it via _error rather than retrying forever. On a graceful stop where
-            // stoppingToken stays uncancelled, the drain proceeds normally to completion.
+            // already queued. The drain uses a fresh CTS bounded by ShutdownTimeout — independent
+            // of stoppingToken — so events that were accepted with backpressure aren't dropped just
+            // because the host's shutdown deadline cancelled stoppingToken first. A healthy store
+            // finishes the drain in one or two round trips well under the budget. A wedged store
+            // burns through the budget and FlushBatchAsync surfaces the timeout per-run via the
+            // sticky error capture, matching the per-run-error semantics of the running case.
+            // Same pattern as SurefireLogEventPump.ExecuteAsync's drain at L98-109.
             _channel.Writer.TryComplete();
+            using var drainCts = new CancellationTokenSource(options.ShutdownTimeout);
             while (reader.TryRead(out var item))
             {
                 batch.Add(item);
                 if (batch.Count >= MaxBatchSize)
                 {
-                    await FlushBatchAsync(batch, stoppingToken);
+                    await FlushBatchAsync(batch, drainCts.Token);
                     batch.Clear();
                 }
             }
 
             if (batch.Count > 0)
             {
-                await FlushBatchAsync(batch, stoppingToken);
+                await FlushBatchAsync(batch, drainCts.Token);
             }
         }
     }
@@ -255,26 +289,10 @@ internal sealed partial class BatchedEventWriter(
     private async Task FlushBatchAsync(List<EventRequest> batch, CancellationToken cancellationToken)
     {
         // All call sites guard with `batch.Count > 0`; the check here makes the invariant
-        // explicit and lets SignalBatchCompleted drop its own maxSeq == 0 short-circuit.
+        // explicit.
         if (batch.Count == 0)
         {
             return;
-        }
-
-        var minSeq = batch[0].Sequence;
-        var maxSeq = batch[0].Sequence;
-        for (var i = 1; i < batch.Count; i++)
-        {
-            var seq = batch[i].Sequence;
-            if (seq < minSeq)
-            {
-                minSeq = seq;
-            }
-
-            if (seq > maxSeq)
-            {
-                maxSeq = seq;
-            }
         }
 
         var events = new RunEvent[batch.Count];
@@ -285,7 +303,7 @@ internal sealed partial class BatchedEventWriter(
 
         // Retry transient errors indefinitely — stores define IsTransientException to cover only
         // deadlock, connection reset, and similar conditions that clear on a retry. Permanent
-        // errors (schema, auth, constraint) propagate to FlushAsync callers so terminal
+        // errors (schema, auth, constraint) propagate to FlushRunAsync callers so terminal
         // transitions never proceed with events unpersisted.
         var attempt = 0;
         while (true)
@@ -297,7 +315,7 @@ internal sealed partial class BatchedEventWriter(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                SignalBatchCompleted(minSeq, maxSeq,
+                SignalBatchCompleted(batch,
                     ExceptionDispatchInfo.Capture(new OperationCanceledException(cancellationToken)));
                 return;
             }
@@ -311,7 +329,7 @@ internal sealed partial class BatchedEventWriter(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    SignalBatchCompleted(minSeq, maxSeq,
+                    SignalBatchCompleted(batch,
                         ExceptionDispatchInfo.Capture(new OperationCanceledException(cancellationToken)));
                     return;
                 }
@@ -319,7 +337,7 @@ internal sealed partial class BatchedEventWriter(
             catch (Exception ex)
             {
                 Log.EventFlushFailed(logger, ex, events.Length);
-                SignalBatchCompleted(minSeq, maxSeq, ExceptionDispatchInfo.Capture(ex));
+                SignalBatchCompleted(batch, ExceptionDispatchInfo.Capture(ex));
                 return;
             }
         }
@@ -327,7 +345,7 @@ internal sealed partial class BatchedEventWriter(
         // Deduplicate notifications by channel across the whole flushed batch. A 500-event burst
         // on the same run produces one RunEvent(run.Id) publish instead of 500. Notifications are
         // idempotent wake-up signals, so individual failures are logged but never fail the batch:
-        // the store write already succeeded and FlushAsync's durability guarantee is satisfied.
+        // the store write already succeeded and FlushRunAsync's durability guarantee is satisfied.
         HashSet<string>? published = null;
         foreach (var request in batch)
         {
@@ -345,7 +363,7 @@ internal sealed partial class BatchedEventWriter(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    SignalBatchCompleted(minSeq, maxSeq, null);
+                    SignalBatchCompleted(batch, null);
                     return;
                 }
                 catch (Exception ex)
@@ -355,37 +373,74 @@ internal sealed partial class BatchedEventWriter(
             }
         }
 
-        SignalBatchCompleted(minSeq, maxSeq, null);
+        SignalBatchCompleted(batch, null);
     }
 
-    private void SignalBatchCompleted(long minSeq, long maxSeq, ExceptionDispatchInfo? error)
+    private void SignalBatchCompleted(List<EventRequest> batch, ExceptionDispatchInfo? error)
     {
-        TaskCompletionSource completed;
-        lock (_flushGate)
+        // Group the batch by runId so we advance/stamp each run's state exactly once per call.
+        // Tiny allocations here are amortized against a full store round trip; the batch has at
+        // most MaxBatchSize entries and typically a handful of distinct runs.
+        var perRun = new Dictionary<string, (long MinSeq, long MaxSeq)>(StringComparer.Ordinal);
+        foreach (var request in batch)
         {
-            if (error is null)
+            var runId = request.Event.RunId;
+            if (perRun.TryGetValue(runId, out var range))
             {
-                if (maxSeq > _flushedSeq)
+                if (request.Sequence < range.MinSeq)
                 {
-                    _flushedSeq = maxSeq;
+                    range.MinSeq = request.Sequence;
                 }
-            }
-            else if (_error is null)
-            {
-                // Sticky first-failure capture. Record the failing batch's MIN sequence so the
-                // FlushAsync guard can correctly observe: any caller whose target has reached or
-                // passed this min has a `[1, target]` range that overlaps the permanently-failed
-                // range. Later permanent failures never replace the first one — the earliest
-                // known failure is what bounds durability.
-                _error = error;
-                _errorMinSeq = minSeq;
-            }
 
-            completed = _batchFlushedTcs;
-            _batchFlushedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (request.Sequence > range.MaxSeq)
+                {
+                    range.MaxSeq = request.Sequence;
+                }
+
+                perRun[runId] = range;
+            }
+            else
+            {
+                perRun[runId] = (request.Sequence, request.Sequence);
+            }
         }
 
-        completed.TrySetResult();
+        foreach (var (runId, range) in perRun)
+        {
+            // Success path uses TryGetValue (not GetOrAdd): if the state was dropped while this
+            // batch was in flight, the run has already terminated and no waiter needs signalling.
+            // Failure path uses TryGetValue too — a dropped run cannot observe an error either,
+            // so re-materializing the state would just leak.
+            if (!_runStates.TryGetValue(runId, out var state))
+            {
+                continue;
+            }
+
+            TaskCompletionSource completed;
+            lock (state.Lock)
+            {
+                if (error is null)
+                {
+                    if (range.MaxSeq > state.FlushedSeq)
+                    {
+                        state.FlushedSeq = range.MaxSeq;
+                    }
+                }
+                else if (state.Error is null)
+                {
+                    // Sticky first-failure capture, per run. Record the failing batch's MIN
+                    // sequence for this run so debugging/metrics can identify the earliest lost
+                    // event; FlushRunAsync only reads the Error field (presence), not the min.
+                    state.Error = error;
+                    state.ErrorMinSeq = range.MinSeq;
+                }
+
+                completed = state.Tcs;
+                state.Tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            completed.TrySetResult();
+        }
     }
 
     internal readonly record struct NotificationPublish(string Channel, string? Message);
@@ -394,6 +449,16 @@ internal sealed partial class BatchedEventWriter(
         RunEvent Event,
         IReadOnlyList<NotificationPublish> Notifications,
         long Sequence);
+
+    private sealed class PerRunFlushState
+    {
+        public readonly Lock Lock = new();
+        public long EnqueuedSeq;
+        public ExceptionDispatchInfo? Error;
+        public long ErrorMinSeq;
+        public long FlushedSeq;
+        public TaskCompletionSource Tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     private static partial class Log
     {

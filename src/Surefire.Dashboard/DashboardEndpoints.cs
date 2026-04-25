@@ -13,6 +13,10 @@ using Surefire.Dashboard;
 
 namespace Microsoft.AspNetCore.Builder;
 
+/// <summary>
+///     Endpoint-routing extensions that mount the Surefire dashboard — both the JSON API used by
+///     external tools and the embedded UI — under a configurable URL prefix.
+/// </summary>
 public static class DashboardEndpoints
 {
     private const int DefaultRunsPageSize = 50;
@@ -22,6 +26,32 @@ public static class DashboardEndpoints
     private const int DefaultSiblingWindow = 50;
     private const int MaxSiblingWindow = 200;
 
+    /// <summary>
+    ///     Maps the Surefire dashboard endpoints under <paramref name="prefix" />. Mounts:
+    ///     <list type="bullet">
+    ///         <item>
+    ///             <description>
+    ///                 <c>{prefix}/api/...</c> — JSON endpoints for jobs, runs, queues, nodes, stats, SSE log
+    ///                 streaming, and tree-aware run traces.
+    ///             </description>
+    ///         </item>
+    ///         <item>
+    ///             <description><c>{prefix}/...</c> — the embedded single-page UI served from the assembly's resources.</description>
+    ///         </item>
+    ///     </list>
+    ///     The returned <see cref="IEndpointConventionBuilder" /> covers the full group, so callers
+    ///     can apply auth, CORS, or rate-limit conventions across every route in one chain — for
+    ///     example <c>app.MapSurefireDashboard().RequireAuthorization("Surefire")</c>.
+    /// </summary>
+    /// <param name="endpoints">The route builder to mount onto.</param>
+    /// <param name="prefix">URL prefix the dashboard is served under. Must begin with <c>/</c>. Defaults to <c>/surefire</c>.</param>
+    /// <returns>A convention builder over the entire dashboard route group.</returns>
+    /// <remarks>
+    ///     Resolves <see cref="Surefire.IJobStore" />, <see cref="Surefire.IJobClient" />,
+    ///     <see cref="Surefire.SurefireOptions" />, and <see cref="TimeProvider" /> from DI.
+    ///     The dashboard is unauthenticated by default; production deployments should chain
+    ///     <c>.RequireAuthorization(...)</c> on the returned builder.
+    /// </remarks>
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
         string prefix = "/surefire")
     {
@@ -143,14 +173,14 @@ public static class DashboardEndpoints
                 }
             });
 
-        api.MapGet("/runs", async (string? jobName, bool? exactJobName, JobStatus? status, string? nodeName,
+        api.MapGet("/runs", async (string? jobName, string? jobNameContains, JobStatus? status, string? nodeName,
             string? parentRunId, int? skip, int? take, DateTimeOffset? createdAfter, DateTimeOffset? createdBefore,
             IJobStore store, CancellationToken ct) =>
         {
             var filter = new RunFilter
             {
                 JobName = jobName,
-                ExactJobName = exactJobName ?? false,
+                JobNameContains = jobNameContains,
                 Status = status,
                 NodeName = nodeName,
                 ParentRunId = parentRunId,

@@ -35,7 +35,7 @@ internal static class ContinuousRunSeeder
                 break;
             }
 
-            await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
         }
     }
 }

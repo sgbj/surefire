@@ -56,7 +56,6 @@ export function JobDetailPage() {
   const runsQueryParams = useMemo(
     () => ({
       jobName: name!,
-      exactJobName: true,
       status: statusFilter !== "all" ? Number(statusFilter) : undefined,
       datePreset,
       skip: pagination.pageIndex * pagination.pageSize,

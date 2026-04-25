@@ -215,16 +215,14 @@ internal sealed class InMemoryJobStore : IJobStore
                 query = query.Where(r => r.Status == filter.Status.Value);
             }
 
-            if (filter.JobName is { })
+            if (filter.JobName is { } exactJobName)
             {
-                if (filter.ExactJobName)
-                {
-                    query = query.Where(r => r.JobName == filter.JobName);
-                }
-                else
-                {
-                    query = query.Where(r => r.JobName.Contains(filter.JobName, StringComparison.OrdinalIgnoreCase));
-                }
+                query = query.Where(r => r.JobName == exactJobName);
+            }
+
+            if (filter.JobNameContains is { } jobNameContains)
+            {
+                query = query.Where(r => r.JobName.Contains(jobNameContains, StringComparison.OrdinalIgnoreCase));
             }
 
             if (filter.ParentRunId is { })

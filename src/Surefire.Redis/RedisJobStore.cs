@@ -776,7 +776,8 @@ internal sealed partial class RedisJobStore(
         else if (filter.IsTerminal == true)
         {
             var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
-            var noPostFilters = filter.JobName is null && filter.NodeName is null
+            var noPostFilters = filter.JobName is null && filter.JobNameContains is null
+                                                       && filter.NodeName is null
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
@@ -813,7 +814,8 @@ internal sealed partial class RedisJobStore(
         else if (filter.IsTerminal == false)
         {
             var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
-            var noPostFilters = filter.JobName is null && filter.NodeName is null
+            var noPostFilters = filter.JobName is null && filter.JobNameContains is null
+                                                       && filter.NodeName is null
                                                        && filter.ParentRunId is null && filter.RootRunId is null
                                                        && filter.CompletedAfter is null &&
                                                        filter.LastHeartbeatBefore is null
@@ -847,10 +849,10 @@ internal sealed partial class RedisJobStore(
                     cancellationToken);
             }
         }
-        else if (filter.JobName is { } jobName && filter.ExactJobName)
+        else if (filter.JobName is { } jobName)
         {
             var (minScore, maxScore, exclude) = GetCreatedScoreWindow(filter);
-            if (NoAdditionalFiltersExceptExactJobName(filter))
+            if (NoAdditionalFiltersExceptJobName(filter))
             {
                 totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}job_runs:{jobName}", minScore, maxScore,
                     exclude);
@@ -3879,22 +3881,15 @@ internal sealed partial class RedisJobStore(
             return false;
         }
 
-        if (filter.JobName is { })
+        if (filter.JobName is { } exactJobName && run.JobName != exactJobName)
         {
-            if (filter.ExactJobName)
-            {
-                if (run.JobName != filter.JobName)
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                if (!run.JobName.Contains(filter.JobName, StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-            }
+            return false;
+        }
+
+        if (filter.JobNameContains is { } jobNameContains
+            && !run.JobName.Contains(jobNameContains, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
         }
 
         if (filter.ParentRunId is { } && run.ParentRunId != filter.ParentRunId)
@@ -3964,6 +3959,7 @@ internal sealed partial class RedisJobStore(
     private static bool NoAdditionalFilters(RunFilter filter) =>
         filter.Status is null
         && filter.JobName is null
+        && filter.JobNameContains is null
         && filter.ParentRunId is null
         && filter.RootRunId is null
         && filter.NodeName is null
@@ -3975,6 +3971,7 @@ internal sealed partial class RedisJobStore(
     private static bool NoAdditionalFiltersExceptStatus(RunFilter filter) =>
         filter.Status is { }
         && filter.JobName is null
+        && filter.JobNameContains is null
         && filter.ParentRunId is null
         && filter.RootRunId is null
         && filter.NodeName is null
@@ -3983,9 +3980,9 @@ internal sealed partial class RedisJobStore(
         && filter.IsTerminal is null
         && filter.OrderBy == RunOrderBy.CreatedAt;
 
-    private static bool NoAdditionalFiltersExceptExactJobName(RunFilter filter) =>
+    private static bool NoAdditionalFiltersExceptJobName(RunFilter filter) =>
         filter.JobName is { }
-        && filter.ExactJobName
+        && filter.JobNameContains is null
         && filter.Status is null
         && filter.ParentRunId is null
         && filter.RootRunId is null
@@ -3999,6 +3996,7 @@ internal sealed partial class RedisJobStore(
         filter.ParentRunId is { }
         && filter.Status is null
         && filter.JobName is null
+        && filter.JobNameContains is null
         && filter.RootRunId is null
         && filter.NodeName is null
         && filter.CompletedAfter is null
@@ -4040,6 +4038,7 @@ internal sealed partial class RedisJobStore(
         filter.RootRunId is { }
         && filter.Status is null
         && filter.JobName is null
+        && filter.JobNameContains is null
         && filter.ParentRunId is null
         && filter.NodeName is null
         && filter.CompletedAfter is null
@@ -4051,6 +4050,7 @@ internal sealed partial class RedisJobStore(
         filter.BatchId is { }
         && filter.Status is null
         && filter.JobName is null
+        && filter.JobNameContains is null
         && filter.ParentRunId is null
         && filter.RootRunId is null
         && filter.NodeName is null

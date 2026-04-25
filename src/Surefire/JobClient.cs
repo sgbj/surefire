@@ -51,7 +51,7 @@ internal sealed partial class JobClient(
             throw new RunConflictException(run.Id, $"Run creation for job '{job}' was rejected.");
         }
 
-        await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
+        await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
         if (prepared.Streams.Count > 0)
         {
             StartInputPump(run.Id, prepared.Streams);
@@ -189,7 +189,7 @@ internal sealed partial class JobClient(
             throw new RunConflictException(runId, $"Run creation for rerun of '{runId}' was rejected.");
         }
 
-        await notifications.PublishAsync(NotificationChannels.RunCreated, rerun.Id, cancellationToken);
+        await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
         return rerun;
     }
 
@@ -715,6 +715,11 @@ internal sealed partial class JobClient(
         }
         else
         {
+            // Wake the executor exactly once per batch — RunCreated is an edge-trigger wakeup,
+            // not a per-run event, so coalescing N child runs into a single publish is the
+            // correct shape (and avoids broker fanout proportional to batch size).
+            await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
+
             foreach (var (runId, streams, _) in streamPumps)
             {
                 StartInputPump(runId, streams);

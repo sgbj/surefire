@@ -118,7 +118,8 @@ GET   /api/runs?jobName=X&take=20                   # list runs with filters
 GET   /api/runs/{id}                                # get a single run
 GET   /api/runs/{id}/logs                           # get parsed log events
 GET   /api/runs/{id}/stream                         # live logs & progress (SSE)
-GET   /api/runs/{id}/trace?skip=0&take=500          # paged trace (root + descendants)
+GET   /api/runs/{id}/trace?siblingWindow=50&childrenTake=100   # tree-aware focused trace (ancestors + focus + siblings + first-page children)
+GET   /api/runs/{id}/children?afterCursor=…&take=100           # paginate direct children (forward or reverse via beforeCursor)
 POST  /api/runs/{id}/cancel                         # cancel a running job
 POST  /api/runs/{id}/rerun                          # re-run a completed run
 GET   /api/queues                                   # list all queues

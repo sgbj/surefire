@@ -305,7 +305,7 @@ export const LogLevelLabels: Record<number, string> = {
 
 export interface RunsQueryParams {
   jobName?: string;
-  exactJobName?: boolean;
+  jobNameContains?: string;
   status?: number;
   nodeName?: string;
   parentRunId?: string;
@@ -361,7 +361,8 @@ export const api = {
   getRuns: (params?: RunsQueryParams) => {
     const search = new URLSearchParams();
     if (params?.jobName) search.set("jobName", params.jobName);
-    if (params?.exactJobName) search.set("exactJobName", "true");
+    if (params?.jobNameContains)
+      search.set("jobNameContains", params.jobNameContains);
     if (params?.status !== undefined)
       search.set("status", params.status.toString());
     if (params?.nodeName) search.set("nodeName", params.nodeName);

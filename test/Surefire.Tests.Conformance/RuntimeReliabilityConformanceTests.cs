@@ -37,7 +37,6 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
-                ExactJobName = true,
                 IsTerminal = false
             }, 0, 20),
             p => p.Items.Count == 3,
@@ -171,7 +170,6 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
-                ExactJobName = true,
                 Status = JobStatus.Running
             }, 0, 10),
             p => p.Items.Count == 1,
@@ -187,7 +185,6 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
-                ExactJobName = true,
                 IsTerminal = false
             }, 0, 20),
             p => p.Items.Count == 3,
@@ -202,7 +199,6 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = jobName,
-                ExactJobName = true,
                 IsTerminal = false
             }, 0, 20),
             p => p.Items.Count == 2 && p.Items.Count(r => r.Status == JobStatus.Running) == 1,

@@ -193,8 +193,7 @@ public sealed class RuntimeWorkersTests
         await TestWait.PollUntilAsync(
             async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
-                JobName = "CronFireAll",
-                ExactJobName = true
+                JobName = "CronFireAll"
             }, cancellationToken: ct),
             runsPage => runsPage.TotalCount >= 2,
             TimeSpan.FromSeconds(5),
@@ -225,8 +224,7 @@ public sealed class RuntimeWorkersTests
         var firstPage = await TestWait.PollUntilAsync(
             async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
-                JobName = "CronFireAllBounded",
-                ExactJobName = true
+                JobName = "CronFireAllBounded"
             }, cancellationToken: ct),
             runsPage => runsPage.TotalCount >= 1,
             TimeSpan.FromSeconds(4),
@@ -239,8 +237,7 @@ public sealed class RuntimeWorkersTests
         await TestWait.PollUntilAsync(
             async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
-                JobName = "CronFireAllBounded",
-                ExactJobName = true
+                JobName = "CronFireAllBounded"
             }, cancellationToken: ct),
             runsPage => runsPage.TotalCount >= 3,
             TimeSpan.FromSeconds(8),
@@ -269,8 +266,7 @@ public sealed class RuntimeWorkersTests
         await TestWait.PollUntilAsync(
             async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
             {
-                JobName = "CronInitialSeed",
-                ExactJobName = true
+                JobName = "CronInitialSeed"
             }, 0, 10, ct),
             runsPage => runsPage.TotalCount > 0,
             TimeSpan.FromSeconds(4),
@@ -380,8 +376,7 @@ public sealed class RuntimeWorkersTests
             {
                 var page = await harness.Store.GetRunsAsync(new()
                 {
-                    JobName = "CancelableRun",
-                    ExactJobName = true
+                    JobName = "CancelableRun"
                 }, 0, 1, ct);
 
                 return page.Items.SingleOrDefault();
@@ -799,7 +794,6 @@ public sealed class RuntimeWorkersTests
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = "ContinuousSeedStartup",
-                ExactJobName = true,
                 IsTerminal = false
             }, 0, 20, ct),
             p => p.Items.Count == 3 && p.Items.Count(r => r.Status == JobStatus.Running) is >= 1 and <= 3,
@@ -839,7 +833,6 @@ public sealed class RuntimeWorkersTests
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = "ContinuousBacklog",
-                ExactJobName = true,
                 Status = JobStatus.Running
             }, 0, 10, ct),
             p => p.Items.Count == 1,
@@ -855,7 +848,6 @@ public sealed class RuntimeWorkersTests
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = "ContinuousBacklog",
-                ExactJobName = true,
                 IsTerminal = false
             }, 0, 20, ct),
             p => p.Items.Count == 3,
@@ -870,7 +862,6 @@ public sealed class RuntimeWorkersTests
             async () => await harness.Store.GetRunsAsync(new()
             {
                 JobName = "ContinuousBacklog",
-                ExactJobName = true,
                 IsTerminal = false
             }, 0, 20, ct),
             p => p.Items.Count == 2 && p.Items.Count(r => r.Status == JobStatus.Running) == 1,
@@ -1045,8 +1036,8 @@ public sealed class RuntimeWorkersTests
 
         var envelope = JsonDocument.Parse(failureEvents[^1].Payload).RootElement;
         Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
-        Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
-        Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+        Assert.Equal("maintenance", ReadString(envelope, "FailureSource", "failureSource"));
+        Assert.Equal("stale_recovery", ReadString(envelope, "FailureCode", "failureCode"));
         Assert.Null(ReadOptionalString(envelope, "StackTrace", "stackTrace"));
 
         static int ReadInt(JsonElement element, string first, string second)
@@ -1141,8 +1132,8 @@ public sealed class RuntimeWorkersTests
 
         var envelope = JsonDocument.Parse(failureEvents[^1].Payload).RootElement;
         Assert.Equal(1, ReadInt(envelope, "Attempt", "attempt"));
-        Assert.Equal("Maintenance", ReadString(envelope, "FailureSource", "failureSource"));
-        Assert.Equal("StaleRecovery", ReadString(envelope, "FailureCode", "failureCode"));
+        Assert.Equal("maintenance", ReadString(envelope, "FailureSource", "failureSource"));
+        Assert.Equal("stale_recovery", ReadString(envelope, "FailureCode", "failureCode"));
         Assert.Null(ReadOptionalString(envelope, "StackTrace", "stackTrace"));
 
         static int ReadInt(JsonElement element, string first, string second)
@@ -1533,8 +1524,8 @@ public sealed class RuntimeWorkersTests
         Assert.All(envelopes, envelope =>
         {
             Assert.Equal("System.InvalidOperationException", ReadString(envelope, "ExceptionType", "exceptionType"));
-            Assert.Equal("Executor", ReadString(envelope, "FailureSource", "failureSource"));
-            Assert.Equal("Exception", ReadString(envelope, "FailureCode", "failureCode"));
+            Assert.Equal("executor", ReadString(envelope, "FailureSource", "failureSource"));
+            Assert.Equal("exception", ReadString(envelope, "FailureCode", "failureCode"));
             Assert.Contains("retry-failure-events", ReadString(envelope, "Message", "message"),
                 StringComparison.Ordinal);
             Assert.Contains("System.InvalidOperationException", ReadString(envelope, "StackTrace", "stackTrace"),
@@ -2077,7 +2068,7 @@ public sealed class RuntimeWorkersTests
             return await TestWait.PollUntilAsync(
                 async () =>
                 {
-                    var page = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true }, 0,
+                    var page = await store.GetRunsAsync(new() { JobName = jobName }, 0,
                         20, cancellationToken);
                     return page.Items.FirstOrDefault(r =>
                         !string.Equals(r.Id, excludeRunId, StringComparison.Ordinal));

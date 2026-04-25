@@ -115,9 +115,10 @@ internal sealed partial class SurefireExecutorService(
                         continue;
                     }
 
+                    var claimedAt = timeProvider.GetUtcNow();
                     foreach (var run in claimed)
                     {
-                        instrumentation.RecordRunClaimed(run.JobName);
+                        instrumentation.RecordRunClaimed(run.JobName, run.NotBefore, claimedAt);
 
                         var executionTask = ExecuteClaimedRunAsync(run, stoppingToken);
                         _activeTasks[run.Id] = executionTask;
@@ -127,6 +128,7 @@ internal sealed partial class SurefireExecutorService(
                                 _runCancellation.TryRemove(run.Id, out var _);
                                 activeRunTracker.Remove(run.Id);
                                 logEventPump.DropRunState(run.Id);
+                                eventWriter.DropRunState(run.Id);
                             },
                             CancellationToken.None,
                             TaskContinuationOptions.None,
@@ -267,8 +269,8 @@ internal sealed partial class SurefireExecutorService(
                     RunFailureEnvelope.FromMessage(
                         run.Attempt,
                         timeProvider.GetUtcNow(),
-                        "Executor",
-                        "NoHandlerRegistered",
+                        "executor",
+                        "no_handler_registered",
                         "No handler registered for this job.",
                         typeof(InvalidOperationException).FullName));
 
@@ -305,10 +307,11 @@ internal sealed partial class SurefireExecutorService(
                     run,
                     noHandlerTransition,
                     deadLetterToken,
-                    stoppingToken);
+                    CancellationToken.None);
                 if (dlResult.Transitioned)
                 {
-                    instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
+                    instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow(),
+                        DeadLetterReason.NoHandlerRegistered);
                     await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                         deadLetterToken);
                     await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, deadLetterToken);
@@ -364,15 +367,14 @@ internal sealed partial class SurefireExecutorService(
                 run.StartedAt,
                 completedAt);
 
-            // bestEffortCts bounds the flush + post-handler housekeeping to ShutdownTimeout;
-            // the terminal transition itself takes stoppingToken so a transient store outage
-            // longer than ShutdownTimeout doesn't abandon a successful handler to stale recovery.
+            // Flush is best-effort (bounded by ShutdownTimeout); the transition runs under
+            // CancellationToken.None as an atomic commit. See FlushAndTransitionTerminalAsync.
             using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
 
             var transitionResult = await FlushAndTransitionTerminalAsync(
                 context, run, completed,
                 bestEffortCts.Token,
-                stoppingToken);
+                CancellationToken.None);
             if (transitionResult.Transitioned)
             {
                 instrumentation.RecordRunCompleted(run.JobName, run.StartedAt, completedAt);
@@ -406,6 +408,7 @@ internal sealed partial class SurefireExecutorService(
             // an error message, and emits an AttemptFailure event visible on the dashboard.
             if (timeoutCts is { IsCancellationRequested: true })
             {
+                activity?.SetTag("surefire.job.timeout", true);
                 await HandleRunFailureAsync(
                     context,
                     run,
@@ -430,8 +433,8 @@ internal sealed partial class SurefireExecutorService(
                             run.Attempt,
                             timeProvider.GetUtcNow(),
                             ex,
-                            "Executor",
-                            "BookkeepingFailure"),
+                            "executor",
+                            "bookkeeping_failure"),
                         stoppingToken);
                 }
                 catch (Exception appendEx)
@@ -441,6 +444,8 @@ internal sealed partial class SurefireExecutorService(
 
                 return;
             }
+
+            activity?.SetStatus(ActivityStatusCode.Error, "Cancelled");
 
             using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
             var bestEffortToken = bestEffortCts.Token;
@@ -453,8 +458,8 @@ internal sealed partial class SurefireExecutorService(
                 RunFailureEnvelope.FromMessage(
                     run.Attempt,
                     cancelledAt,
-                    "Executor",
-                    "RunCancelled",
+                    "executor",
+                    "run_cancelled",
                     cancelReason));
 
             if (context is { })
@@ -463,7 +468,7 @@ internal sealed partial class SurefireExecutorService(
             }
 
             await logEventPump.FlushRunAsync(run.Id, bestEffortToken);
-            await eventWriter.FlushAsync(bestEffortToken);
+            await eventWriter.FlushRunAsync(run.Id, bestEffortToken);
             var cancelResult = await InvokeStoreWithTransientRetryAsync(
                 ct => store.TryCancelRunAsync(
                     run.Id,
@@ -514,6 +519,37 @@ internal sealed partial class SurefireExecutorService(
     private async Task HandleRunFailureAsync(JobContext? context, JobRun run, Exception ex,
         CancellationToken stoppingToken)
     {
+        // Top-level catch so failure-handling failures (store outage during the dead-letter
+        // transition, user-supplied OnRetry/OnDeadLetter callback throwing, sticky permanent
+        // event-flush failure, etc.) don't escape this method as unobserved task exceptions on
+        // the fire-and-forget executionTask continuation. We deliberately do NOT retry the
+        // store transition here — the store we'd need to write to is by hypothesis misbehaving,
+        // and a second CAS attempt would just add noise. Surface it with a clear log entry and
+        // let stale recovery (heartbeat lapse → InactiveThreshold) pick the run up the same way
+        // it handles real node crashes — from this run's perspective we're effectively a
+        // localized node-crash equivalent. Catches OCE too: an OCE here typically comes from
+        // bestEffortToken expiring, not stoppingToken, so it doesn't represent a shutdown
+        // signal we need to propagate.
+        try
+        {
+            await HandleRunFailureAsyncCore(context, run, ex, stoppingToken);
+        }
+        catch (Exception handlingEx)
+        {
+            Log.FailureHandlingFailed(logger, handlingEx, run.Id, run.JobName);
+        }
+    }
+
+    private async Task HandleRunFailureAsyncCore(JobContext? context, JobRun run, Exception ex,
+        CancellationToken stoppingToken)
+    {
+        // The active span is the one StartActivity'd in ExecuteClaimedRunAsync; the using-var
+        // there sets Activity.Current for the duration of this awaited call. Mark it Error so
+        // backends like Jaeger/Tempo don't show every failed run as Unset.
+        var activity = Activity.Current;
+        activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity?.AddException(ex);
+
         using var bestEffortCts = CreateBestEffortWorkCts(stoppingToken);
         var bestEffortToken = bestEffortCts.Token;
         var isShutdownInterruption = ex is ShutdownInterruptedException;
@@ -562,7 +598,7 @@ internal sealed partial class SurefireExecutorService(
                         run.Attempt,
                         timeProvider.GetUtcNow(),
                         ex,
-                        "Executor",
+                        "executor",
                         GetFailureCode(ex)));
 
                 // Retry path: do not set Reason — per-attempt failure detail lives on the
@@ -585,7 +621,7 @@ internal sealed partial class SurefireExecutorService(
                 }
 
                 await logEventPump.FlushRunAsync(run.Id, bestEffortToken);
-                await eventWriter.FlushAsync(bestEffortToken);
+                await eventWriter.FlushRunAsync(run.Id, bestEffortToken);
 
                 var pendingResult = await InvokeStoreWithTransientRetryAsync(
                     ct => store.TryTransitionRunAsync(pending, ct),
@@ -593,7 +629,19 @@ internal sealed partial class SurefireExecutorService(
                     bestEffortToken);
                 if (pendingResult.Transitioned)
                 {
-                    await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id,
+                    // Per-attempt failure event so retried-then-succeeded runs still show their
+                    // failed attempts on the trace. SetStatus above marks the span Error; this
+                    // event is what makes attempt-level failure detail visible without it.
+                    // Only carries event-specific attributes — surefire.run.attempt is already
+                    // on the parent span (one attempt per span), so duplicating it here would
+                    // add cardinality without information per OTel event-attribute conventions.
+                    activity?.AddEvent(new("surefire.attempt.failed",
+                        tags: new()
+                        {
+                            ["surefire.failure.reason"] = GetFailureCode(ex)
+                        }));
+
+                    await notifications.PublishAsync(NotificationChannels.RunCreated, null,
                         bestEffortToken);
                     await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id,
                         bestEffortToken);
@@ -620,7 +668,7 @@ internal sealed partial class SurefireExecutorService(
                 run.Attempt,
                 timeProvider.GetUtcNow(),
                 ex,
-                "Executor",
+                "executor",
                 GetFailureCode(ex)));
 
         // Dead-letter path: Reason is only set when the run is being discarded for a
@@ -655,10 +703,11 @@ internal sealed partial class SurefireExecutorService(
         var transitionResult = await FlushAndTransitionTerminalAsync(
             context, run, deadLetter,
             bestEffortToken,
-            stoppingToken);
+            CancellationToken.None);
         if (transitionResult.Transitioned)
         {
-            instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow());
+            instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow(),
+                isShutdownInterruption ? DeadLetterReason.ShutdownInterrupted : DeadLetterReason.RetriesExhausted);
             await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id, bestEffortToken);
             await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, bestEffortToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, bestEffortToken);
@@ -757,22 +806,24 @@ internal sealed partial class SurefireExecutorService(
         // Flush in dependency order: pending trailing-edge progress → log pump → event writer → transition.
         // Each layer is an async-write path; draining them in order guarantees readers never see the
         // terminal status while prior progress/log/output events are still in flight. The flush steps
-        // use a best-effort token (CancelAfter ShutdownTimeout) — if the pump or writer is wedged we
-        // drop late events rather than hold up the transition indefinitely.
+        // use a best-effort `flushToken` (typically linked to stoppingToken with a ShutdownTimeout cap) —
+        // if the pump or writer is wedged we drop late events rather than hold up the transition.
+        //
+        // The terminal transition itself is treated as an atomic commit and intentionally runs under a
+        // long-lived `transitionToken` (callers pass CancellationToken.None). Cancelling mid-retry would
+        // leave the run stuck in Running until stale recovery reclaims it, at which point a non-idempotent
+        // handler would re-execute on a fresh attempt — strictly worse than blocking. Two out-of-band
+        // bounds keep this safe: during shutdown, WaitForActiveRunsAsync caps the entire active task at
+        // ShutdownTimeout regardless of which token we hold; during a permanent store outage, the same
+        // outage blocks heartbeats so stale recovery (InactiveThreshold) reclaims the slot.
         if (context is { })
         {
             await context.FlushPendingProgressAsync(flushToken);
         }
 
         await logEventPump.FlushRunAsync(run.Id, flushToken);
-        await eventWriter.FlushAsync(flushToken);
+        await eventWriter.FlushRunAsync(run.Id, flushToken);
 
-        // Retry transient errors (deadlock/serialization) around the terminal transition bounded
-        // only by the host's stoppingToken. Abandoning a successful handler's transition to stale
-        // recovery re-executes non-idempotent jobs, so the retry must continue past the best-effort
-        // flush deadline. The implicit outer bound is InactiveThreshold: the same store outage
-        // that blocks the transition blocks heartbeats too, so stale recovery still sweeps the
-        // run if heartbeats stop landing — no risk of an unbounded slot leak.
         return await InvokeStoreWithTransientRetryAsync(
             ct => store.TryTransitionRunAsync(transition, ct),
             "transition",
@@ -1248,7 +1299,7 @@ internal sealed partial class SurefireExecutorService(
             return;
         }
 
-        await notifications.PublishAsync(NotificationChannels.RunCreated, nextRun.Id, cancellationToken);
+        await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
     }
 
     private async Task RunPostCompletionHousekeepingAsync(RegisteredJob job, JobRun run, JobContext context,
@@ -1316,11 +1367,14 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
+    // Snake_case to align with OpenTelemetry tag-value conventions; this string is emitted on
+    // both the <c>surefire.failure.reason</c> activity-event tag and (via the AttemptFailure
+    // payload) the dashboard's per-attempt failure rendering.
     private static string GetFailureCode(Exception exception) => exception switch
     {
-        ShutdownInterruptedException => "ShutdownInterrupted",
-        OperationCanceledException => "OperationCanceled",
-        _ => "Exception"
+        ShutdownInterruptedException => "shutdown_interrupted",
+        OperationCanceledException => "operation_canceled",
+        _ => "exception"
     };
 
     private static Task ReleaseWakeupAsync(SemaphoreSlim wakeup) => WakeupSignal.ReleaseAsync(wakeup);
@@ -1416,6 +1470,13 @@ internal sealed partial class SurefireExecutorService(
             Message = "Store call '{Operation}' hit transient error; retrying (attempt {Attempt}).")]
         public static partial void StoreCallTransientRetrying(ILogger logger, Exception exception, string operation,
             int attempt);
+
+        [LoggerMessage(EventId = 1111, Level = LogLevel.Error,
+            Message =
+                "Failed to drive run '{RunId}' (job '{JobName}') to a terminal state from the failure handler. " +
+                "Run will appear orphaned in Running until stale recovery picks it up after InactiveThreshold.")]
+        public static partial void FailureHandlingFailed(ILogger logger, Exception exception, string runId,
+            string jobName);
     }
 
     private sealed record InvocationResult(

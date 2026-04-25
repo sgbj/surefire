@@ -753,6 +753,98 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task Claim_DeepQueue_ConcurrentClaimAndTransition_NoDeadlocks()
+    {
+        // Reproduces the production shape that surfaced SQL Server 1205s under .WithReplicas(2):
+        // a deep pending queue (1000 sample-app batch runs) with multiple claimers running in
+        // parallel AND each claimed run racing to its terminal transition. The combination —
+        // claim-vs-claim and claim-vs-transition over an overlapping run set — is what the old
+        // wide-UPDLOCK rank used to deadlock on. The fix keeps ranking under RCSI snapshot and
+        // only U-locks the LIMIT-N candidates on the UPDATE, so the lock surface scales with
+        // batch size, not pending depth. Any 1205 that escapes ClaimRunsAsync or
+        // TryTransitionRunAsync would surface here as an unhandled exception and fail the test.
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"DeepQueueClaim_{Guid.CreateVersion7():N}";
+        var job = CreateJob(jobName);
+        await Store.UpsertJobsAsync([job], ct);
+
+        const int totalRuns = 600;
+        const int workerCount = 8;
+        const int batchSize = 16;
+
+        var runIds = new HashSet<string>(StringComparer.Ordinal);
+        var pendingRuns = new List<JobRun>(totalRuns);
+        for (var i = 0; i < totalRuns; i++)
+        {
+            var run = CreateRun(jobName);
+            runIds.Add(run.Id);
+            pendingRuns.Add(run);
+        }
+
+        await Store.CreateRunsAsync(pendingRuns, cancellationToken: ct);
+
+        var processedIds = new ConcurrentBag<string>();
+        var failures = new ConcurrentBag<Exception>();
+
+        var workers = Enumerable.Range(0, workerCount).Select(w => Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    var claimed = await Store.ClaimRunsAsync(
+                        $"node-{w}", [jobName], ["default"], batchSize, ct);
+                    if (claimed.Count == 0)
+                    {
+                        // Another worker may still be holding the queue tail; spin briefly and
+                        // re-poll. The loop exits once every run is in @processedIds.
+                        if (processedIds.Count >= totalRuns)
+                        {
+                            return;
+                        }
+
+                        await Task.Delay(5, ct);
+                        continue;
+                    }
+
+                    var completedAt = DateTimeOffset.UtcNow;
+                    var transitions = claimed.Select(r =>
+                    {
+                        var done = r with { Status = JobStatus.Succeeded, CompletedAt = completedAt };
+                        return Store.TryTransitionRunAsync(Transition(done, JobStatus.Running), ct);
+                    });
+
+                    var results = await Task.WhenAll(transitions);
+                    for (var i = 0; i < claimed.Count; i++)
+                    {
+                        if (results[i].Transitioned)
+                        {
+                            processedIds.Add(claimed[i].Id);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // expected on test cancellation
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }, ct)).ToArray();
+
+        await Task.WhenAll(workers);
+
+        Assert.Empty(failures);
+        Assert.Equal(totalRuns, processedIds.Count);
+        Assert.Equal(totalRuns, processedIds.Distinct().Count());
+        Assert.True(runIds.SetEquals(processedIds));
+    }
+
+    [Fact]
     public async Task Capacity_RestoredAfterCancelRunningRun()
     {
         // TryCancelRunAsync must decrement the running counter when the prior status was Running

@@ -56,7 +56,7 @@ export function NodeDetailPage() {
   const runsQueryKey = useMemo(
     () => ({
       nodeName: name!,
-      jobName: debouncedJobName || undefined,
+      jobNameContains: debouncedJobName || undefined,
       status: statusFilter !== "all" ? Number(statusFilter) : undefined,
       datePreset,
       skip: pagination.pageIndex * pagination.pageSize,
@@ -71,7 +71,7 @@ export function NodeDetailPage() {
       const preset = RUN_DATE_PRESETS.find((p) => p.value === datePreset);
       return api.getRuns({
         nodeName: runsQueryKey.nodeName,
-        jobName: runsQueryKey.jobName,
+        jobNameContains: runsQueryKey.jobNameContains,
         status: runsQueryKey.status,
         createdAfter: preset?.getAfter(),
         skip: runsQueryKey.skip,

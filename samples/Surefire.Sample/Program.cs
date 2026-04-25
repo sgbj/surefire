@@ -166,11 +166,13 @@ app.AddJob("StreamBatch", async (IJobClient client, ILogger<Program> logger, Can
     {
         var results = client.StreamBatchAsync<AddRandomResult>("AddRandom", new object?[1_000], cancellationToken: ct);
         var sum = 0L;
+        var i = 0;
 
         await foreach (var result in results)
         {
             sum += result.Sum;
-            logger.LogInformation("Result: {Result}", result);
+            i++;
+            logger.LogInformation("Result {Index}: {Result}", i, result);
         }
 
         return sum;

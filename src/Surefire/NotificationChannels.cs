@@ -10,7 +10,15 @@ public static class NotificationChannels
     private const int MaxChannelLength = 63;
     private const string RunPrefix = "surefire:run:";
 
-    /// <summary>Broadcast channel for new run creation.</summary>
+    /// <summary>
+    ///     Wakeup signal published whenever new claimable work has been persisted (single-run
+    ///     creation, rerun, scheduled trigger, batch creation, maintenance requeue, etc.). The
+    ///     payload is unused — publishers pass <c>null</c>. Subscribers (currently only
+    ///     <c>SurefireExecutorService</c>) treat receipt as an edge trigger to break out of
+    ///     their poll wait and re-attempt <c>ClaimRunsAsync</c>. Coalescing many creations into
+    ///     a single publish per producer call is intentional: the consumer claims in batches
+    ///     keyed on (job, queue), not on individual run ids.
+    /// </summary>
     public const string RunCreated = "surefire:run:created";
 
     /// <summary>Broadcast channel for run completion (concurrency freed).</summary>

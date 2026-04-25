@@ -29,7 +29,7 @@ public sealed class DashboardEndpointsTests
 
         using var client = app.GetTestClient();
         var page = await client.GetFromJsonAsync<PagedResponse<RunResponse>>(
-            $"/surefire/api/runs?jobName=tests-runs-unbounded&exactJobName=true&skip=0&take={requestedTake}", ct);
+            $"/surefire/api/runs?jobName=tests-runs-unbounded&skip=0&take={requestedTake}", ct);
 
         Assert.NotNull(page);
         Assert.Equal(500, page.Items.Count);

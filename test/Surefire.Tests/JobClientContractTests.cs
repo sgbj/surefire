@@ -180,7 +180,7 @@ public sealed class JobClientContractTests
         _ = await TestWait.PollUntilAsync(
             async pollCt =>
             {
-                var runs = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true }, 0, 5, pollCt);
+                var runs = await store.GetRunsAsync(new() { JobName = jobName }, 0, 5, pollCt);
                 return runs.Items.SingleOrDefault();
             },
             run => run is { },
@@ -195,7 +195,7 @@ public sealed class JobClientContractTests
         var cancelledRun = await TestWait.PollUntilAsync(
             async pollCt =>
             {
-                var runs = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true }, 0, 5, pollCt);
+                var runs = await store.GetRunsAsync(new() { JobName = jobName }, 0, 5, pollCt);
                 return runs.Items.SingleOrDefault();
             },
             run => run.Status == JobStatus.Cancelled,
@@ -1266,8 +1266,7 @@ public sealed class JobClientContractTests
 
         await foreach (var run in client.GetRunsAsync(new()
                        {
-                           JobName = jobName,
-                           ExactJobName = true
+                           JobName = jobName
                        }, ct))
         {
             observed.Add(run.Id);
