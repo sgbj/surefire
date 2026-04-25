@@ -134,8 +134,8 @@ internal sealed partial class SurefireMaintenanceService(
                     RunFailureEnvelope.FromMessage(
                         run.Attempt,
                         timeProvider.GetUtcNow(),
-                        "Maintenance",
-                        "ExpiredCancellation",
+                        "maintenance",
+                        "expired_cancellation",
                         "Cancelled: run expired past its NotAfter deadline."),
                     cancellationToken);
             }
@@ -217,13 +217,20 @@ internal sealed partial class SurefireMaintenanceService(
                         continue;
                     }
 
+                    // Stale-recovery dead-letters previously weren't counted at all, so
+                    // surefire.runs.failed undercounted reality whenever orphan recovery
+                    // dead-lettered a run. Tag with StaleRecovery so operators can split
+                    // "node died and we cleaned up its work" from "handler kept failing".
+                    instrumentation.RecordRunFailed(run.JobName, run.StartedAt, now,
+                        DeadLetterReason.StaleRecovery);
+
                     await batchCompletionHandler.AppendFailureEventAsync(
                         run,
                         RunFailureEnvelope.FromMessage(
                             run.Attempt,
                             now,
-                            "Maintenance",
-                            "StaleRecovery",
+                            "maintenance",
+                            "stale_recovery",
                             "Run became stale and exhausted retry policy."),
                         cancellationToken);
 
@@ -254,8 +261,8 @@ internal sealed partial class SurefireMaintenanceService(
                     RunFailureEnvelope.FromMessage(
                         run.Attempt,
                         timeProvider.GetUtcNow(),
-                        "Maintenance",
-                        "StaleRecovery",
+                        "maintenance",
+                        "stale_recovery",
                         "Run became stale and was recovered for retry."));
 
                 var pending = RunStatusTransition.RunningToPending(
@@ -273,7 +280,7 @@ internal sealed partial class SurefireMaintenanceService(
                 }
 
                 await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
-                await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
+                await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
             }
         }
     }

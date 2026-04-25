@@ -168,11 +168,25 @@ internal sealed class PostgreSqlJobStore(
                                   payload TEXT NOT NULL,
                                   created_at TIMESTAMPTZ NOT NULL,
                                   attempt INT NOT NULL DEFAULT 1,
+                                  -- Stamped with the inserting transaction's xid8 so event-tail readers
+                                  -- can clamp paging to a commit-stable horizon. Postgres allocates `id`
+                                  -- (BIGSERIAL) at INSERT time but the row only becomes visible at COMMIT,
+                                  -- so concurrent writers commit out of id order. A naive `id > @since`
+                                  -- cursor advances past in-flight low ids and silently skips them when
+                                  -- they finally commit. By recording xact_id and excluding any read at or
+                                  -- past the lowest in-flight transaction's first row id, we guarantee the
+                                  -- cursor only crosses rows whose entire commit prefix is visible.
+                                  xact_id XID8 NOT NULL DEFAULT pg_current_xact_id(),
                                   FOREIGN KEY (run_id) REFERENCES surefire_runs(id) ON DELETE CASCADE
                               );
 
                               CREATE INDEX IF NOT EXISTS ix_surefire_events_run
                                   ON surefire_events (run_id, id);
+
+                              -- Supports the in-flight horizon probe used by event-tail readers:
+                              -- SELECT MIN(id) FROM surefire_events WHERE xact_id >= pg_snapshot_xmin(...).
+                              CREATE INDEX IF NOT EXISTS ix_surefire_events_xact_id
+                                  ON surefire_events (xact_id, id);
 
                               CREATE TABLE IF NOT EXISTS surefire_nodes (
                                   name TEXT PRIMARY KEY,
@@ -1394,7 +1408,19 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
 
-        var sb = new StringBuilder("SELECT * FROM surefire_events WHERE run_id = @run_id AND id > @since_id");
+        var sb = new StringBuilder("""
+                                   SELECT * FROM surefire_events
+                                   WHERE run_id = @run_id
+                                     AND id > @since_id
+                                     -- Commit-stable horizon clamp. See surefire_events.xact_id comment in the schema
+                                     -- DDL. We must never return a row whose id sits at or above the lowest currently
+                                     -- in-flight transaction's first inserted id; otherwise the caller's `id > @since`
+                                     -- cursor will skip that in-flight row when it eventually commits below the cursor.
+                                     AND id < COALESCE(
+                                         (SELECT MIN(id) FROM surefire_events
+                                          WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
+                                         9223372036854775807)
+                                   """);
         cmd.Parameters.AddWithValue("run_id", runId);
         cmd.Parameters.AddWithValue("since_id", sinceId);
 
@@ -1447,6 +1473,11 @@ internal sealed class PostgreSqlJobStore(
                           WHERE r.batch_id = @batch_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
+                              -- Commit-stable horizon clamp. See surefire_events.xact_id schema comment.
+                              AND e.id < COALESCE(
+                                  (SELECT MIN(id) FROM surefire_events
+                                   WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
+                                  9223372036854775807)
                           ORDER BY e.id
                           LIMIT @take
                           """;
@@ -1481,6 +1512,11 @@ internal sealed class PostgreSqlJobStore(
                           JOIN surefire_runs r ON r.id = e.run_id
                           WHERE r.batch_id = @batch_id
                               AND e.id > @since_event_id
+                              -- Commit-stable horizon clamp. See surefire_events.xact_id schema comment.
+                              AND e.id < COALESCE(
+                                  (SELECT MIN(id) FROM surefire_events
+                                   WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
+                                  9223372036854775807)
                           ORDER BY e.id
                           LIMIT @take
                           """;
@@ -2838,16 +2874,14 @@ internal sealed class PostgreSqlJobStore(
 
         if (filter.JobName is { })
         {
-            if (filter.ExactJobName)
-            {
-                parts.Add("job_name = @filter_job_name");
-                cmd.Parameters.AddWithValue("filter_job_name", filter.JobName);
-            }
-            else
-            {
-                parts.Add("job_name ILIKE '%' || @filter_job_name || '%' ESCAPE '\\'");
-                cmd.Parameters.AddWithValue("filter_job_name", EscapeLike(filter.JobName));
-            }
+            parts.Add("job_name = @filter_job_name");
+            cmd.Parameters.AddWithValue("filter_job_name", filter.JobName);
+        }
+
+        if (filter.JobNameContains is { })
+        {
+            parts.Add("job_name ILIKE '%' || @filter_job_name_contains || '%' ESCAPE '\\'");
+            cmd.Parameters.AddWithValue("filter_job_name_contains", EscapeLike(filter.JobNameContains));
         }
 
         if (filter.ParentRunId is { })

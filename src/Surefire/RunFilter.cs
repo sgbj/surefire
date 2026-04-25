@@ -8,11 +8,14 @@ public sealed record RunFilter
     /// <summary>Filters runs by status.</summary>
     public JobStatus? Status { get; init; }
 
-    /// <summary>Filters runs by job name. Uses substring matching unless <see cref="ExactJobName" /> is true.</summary>
+    /// <summary>Filters runs whose job name matches exactly (case-sensitive).</summary>
     public string? JobName { get; init; }
 
-    /// <summary>When true, <see cref="JobName" /> must match exactly instead of as a substring.</summary>
-    public bool ExactJobName { get; init; }
+    /// <summary>
+    ///     Filters runs whose job name contains the given substring (case-insensitive).
+    ///     Independent of <see cref="JobName" />: when both are set, both must match.
+    /// </summary>
+    public string? JobNameContains { get; init; }
 
     /// <summary>Filters runs that are direct children of the specified parent run.</summary>
     public string? ParentRunId { get; init; }

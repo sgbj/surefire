@@ -116,9 +116,14 @@ internal sealed class SqlServerJobStore(
                                       batch_id NVARCHAR(450)
                                   );
 
+                                  -- Backs the snapshot-rank phase of ClaimRunsCoreAsync. Key columns
+                                  -- match the priority/not_before/id ordering the claim sorts by; INCLUDE
+                                  -- carries job_name, not_after, and queue so the seek satisfies the rank
+                                  -- predicate without RID-looking-up the base table for every status=0 row.
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_claim')
                                   CREATE INDEX ix_surefire_runs_claim
                                       ON dbo.surefire_runs (priority DESC, not_before, id)
+                                      INCLUDE (job_name, not_after)
                                       WHERE status = 0;
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_root')
@@ -194,12 +199,26 @@ internal sealed class SqlServerJobStore(
                                       payload NVARCHAR(MAX) NOT NULL,
                                       created_at DATETIMEOFFSET NOT NULL,
                                       attempt INT NOT NULL DEFAULT 1,
+                                      -- Auto-stamped per-database monotonic version. Event-tail readers
+                                      -- clamp `id` paging to a commit-stable horizon by excluding rows at
+                                      -- or above the lowest in-flight tx's first id (probed via
+                                      -- MIN_ACTIVE_ROWVERSION). IDENTITY allocates `id` at INSERT time but
+                                      -- the row is only visible at COMMIT, so concurrent writers commit
+                                      -- out of id order; a naive `id > @since` cursor would skip in-flight
+                                      -- low ids when they finally commit below the cursor.
+                                      commit_seq ROWVERSION NOT NULL,
                                       CONSTRAINT fk_events_run_id FOREIGN KEY (run_id) REFERENCES dbo.surefire_runs(id) ON DELETE CASCADE
                                   );
 
                                   IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_events_run')
                                   CREATE INDEX ix_surefire_events_run
                                       ON dbo.surefire_events (run_id, id);
+
+                                  -- Supports the in-flight horizon probe used by event-tail readers:
+                                  -- SELECT MIN(id) FROM dbo.surefire_events WHERE commit_seq >= MIN_ACTIVE_ROWVERSION().
+                                  IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_events_commit_seq')
+                                  CREATE INDEX ix_surefire_events_commit_seq
+                                      ON dbo.surefire_events (commit_seq, id);
 
                                   IF OBJECT_ID('dbo.surefire_nodes', 'U') IS NULL
                                   CREATE TABLE dbo.surefire_nodes (
@@ -268,35 +287,70 @@ internal sealed class SqlServerJobStore(
         // One JSON payload → one OPENJSON → one MERGE → one round trip. JSON paths match the
         // camelCase keys emitted by SurefireJsonContext; column aliases stay snake_case to mirror
         // the target columns directly. tags and retry_policy use `AS JSON` so OPENJSON hands them
-        // back as the original sub-JSON text. is_enabled is set from the payload on INSERT and
-        // is absent from the UPDATE SET list so dashboard toggles survive re-upserts.
+        // back as the original sub-JSON text. is_enabled is set from the payload on INSERT and is
+        // absent from the UPDATE SET list so dashboard toggles survive re-upserts.
+        //
+        // Transaction + 'surefire_writes' applock serialize this against every other mutating
+        // path (claim, transition, cancel, create, purge, heartbeat). MERGE WITH (HOLDLOCK)
+        // takes key-range serializable locks across the upserted rows; without the applock,
+        // overlapping ranges between two replicas' simultaneous heartbeat upserts can deadlock.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
+        await using var tx =
+            (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
         cmd.CommandText = """
+                          DECLARE @input TABLE (
+                              name NVARCHAR(450) NOT NULL PRIMARY KEY,
+                              description NVARCHAR(MAX),
+                              tags NVARCHAR(MAX),
+                              cron_expression NVARCHAR(MAX),
+                              time_zone_id NVARCHAR(450),
+                              timeout BIGINT,
+                              max_concurrency INT,
+                              priority INT,
+                              retry_policy NVARCHAR(MAX),
+                              is_continuous BIT,
+                              queue NVARCHAR(450),
+                              rate_limit_name NVARCHAR(450),
+                              is_enabled BIT,
+                              misfire_policy INT,
+                              fire_all_limit INT,
+                              arguments_schema NVARCHAR(MAX)
+                          );
+
+                          INSERT INTO @input (
+                              name, description, tags, cron_expression, time_zone_id, timeout,
+                              max_concurrency, priority, retry_policy, is_continuous, queue,
+                              rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema
+                          )
+                          SELECT name, description, tags, cron_expression, time_zone_id, timeout,
+                              max_concurrency, priority, retry_policy, is_continuous, queue,
+                              rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema
+                          FROM OPENJSON(@payload)
+                          WITH (
+                              name NVARCHAR(450) '$.name',
+                              description NVARCHAR(MAX) '$.description',
+                              tags NVARCHAR(MAX) '$.tags' AS JSON,
+                              cron_expression NVARCHAR(MAX) '$.cronExpression',
+                              time_zone_id NVARCHAR(450) '$.timeZoneId',
+                              timeout BIGINT '$.timeout',
+                              max_concurrency INT '$.maxConcurrency',
+                              priority INT '$.priority',
+                              retry_policy NVARCHAR(MAX) '$.retryPolicy' AS JSON,
+                              is_continuous BIT '$.isContinuous',
+                              queue NVARCHAR(450) '$.queue',
+                              rate_limit_name NVARCHAR(450) '$.rateLimitName',
+                              is_enabled BIT '$.isEnabled',
+                              misfire_policy INT '$.misfirePolicy',
+                              fire_all_limit INT '$.fireAllLimit',
+                              arguments_schema NVARCHAR(MAX) '$.argumentsSchema'
+                          );
+
                           MERGE dbo.surefire_jobs WITH (HOLDLOCK) AS target
-                          USING (
-                              SELECT *
-                              FROM OPENJSON(@payload)
-                              WITH (
-                                  name NVARCHAR(450) '$.name',
-                                  description NVARCHAR(MAX) '$.description',
-                                  tags NVARCHAR(MAX) '$.tags' AS JSON,
-                                  cron_expression NVARCHAR(MAX) '$.cronExpression',
-                                  time_zone_id NVARCHAR(450) '$.timeZoneId',
-                                  timeout BIGINT '$.timeout',
-                                  max_concurrency INT '$.maxConcurrency',
-                                  priority INT '$.priority',
-                                  retry_policy NVARCHAR(MAX) '$.retryPolicy' AS JSON,
-                                  is_continuous BIT '$.isContinuous',
-                                  queue NVARCHAR(450) '$.queue',
-                                  rate_limit_name NVARCHAR(450) '$.rateLimitName',
-                                  is_enabled BIT '$.isEnabled',
-                                  misfire_policy INT '$.misfirePolicy',
-                                  fire_all_limit INT '$.fireAllLimit',
-                                  arguments_schema NVARCHAR(MAX) '$.argumentsSchema'
-                              )
-                          ) AS source
+                          USING @input AS source
                           ON target.name = source.name
                           WHEN MATCHED THEN UPDATE SET
                               description = source.description,
@@ -325,10 +379,12 @@ internal sealed class SqlServerJobStore(
                               source.retry_policy, source.is_continuous, source.queue, source.rate_limit_name,
                               source.is_enabled, source.misfire_policy, source.fire_all_limit,
                               source.arguments_schema, SYSUTCDATETIME()
-                          );
+                          )
+                          OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
                           """;
         cmd.Parameters.Add(CreateParameter("@payload", UpsertPayloadFactory.SerializeJobs(jobs)));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
     }
 
     public async Task<JobDefinition?> GetJobAsync(string name, CancellationToken cancellationToken = default)
@@ -453,27 +509,58 @@ internal sealed class SqlServerJobStore(
             return [];
         }
 
+        // SQL Server's hard cap is 2,100 parameters per RPC. Each id binds one parameter, so
+        // anything over ~2,099 throws SqlException 8003. Chunk well under the cap to leave
+        // headroom and to bound per-statement parsing cost on pathological IN-lists. All
+        // current callers stay under 500, but a defensive ceiling here means future callers
+        // don't silently regress at the ~2k boundary.
+        const int chunkSize = 1000;
+
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = CreateCommand(conn);
-        var placeholders = new string[ids.Count];
-        for (var i = 0; i < ids.Count; i++)
-        {
-            var p = "@id" + i;
-            placeholders[i] = p;
-            cmd.Parameters.Add(CreateParameter(p, ids[i]));
-        }
-
-        cmd.CommandText = $"SELECT * FROM dbo.surefire_runs WHERE id IN ({string.Join(",", placeholders)})";
 
         var byId = new Dictionary<string, JobRun>(ids.Count, StringComparer.Ordinal);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var sb = new StringBuilder();
+
+        for (var offset = 0; offset < ids.Count; offset += chunkSize)
         {
-            var run = ReadRun(reader);
-            byId[run.Id] = run;
+            var end = Math.Min(offset + chunkSize, ids.Count);
+
+            sb.Clear();
+            sb.Append("SELECT * FROM dbo.surefire_runs WHERE id IN (");
+
+            await using var cmd = CreateCommand(conn);
+            for (var i = offset; i < end; i++)
+            {
+                // Reset parameter index per chunk so the SQL text shape (and therefore the
+                // SQL Server plan cache key) is identical across chunks — same chunk-size
+                // queries reuse one cached plan instead of producing a new entry for every
+                // unique index range.
+                var paramIndex = i - offset;
+                if (paramIndex > 0)
+                {
+                    sb.Append(',');
+                }
+
+                var p = "@id" + paramIndex;
+                sb.Append(p);
+                cmd.Parameters.Add(CreateParameter(p, ids[i]));
+            }
+
+            sb.Append(')');
+            cmd.CommandText = sb.ToString();
+
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var run = ReadRun(reader);
+                byId[run.Id] = run;
+            }
         }
 
+        // Project in caller-supplied order so the input/output index relationship the
+        // hot callers (JobClient hydration, stale recovery) rely on is preserved across
+        // chunk boundaries.
         var result = new List<JobRun>(byId.Count);
         foreach (var id in ids)
         {
@@ -698,13 +785,13 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
+
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
         // Capture the affected job_name into @upd. running_count decrements when transitioning
         // OUT of Running; non_terminal_count decrements when transitioning INTO a terminal status.
-        // Both decrements target the same surefire_jobs row, so they're merged into one UPDATE to
-        // minimize lock acquisitions — two separate UPDATEs double the deadlock surface.
         cmd.CommandText = """
                           DECLARE @upd TABLE (job_name NVARCHAR(450) NOT NULL);
 
@@ -856,6 +943,8 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
+
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Capture prior status in OUTPUT (via DELETED) so the follow-up counter UPDATEs only
@@ -1006,6 +1095,7 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
         await using var batchCmd = CreateCommand(conn);
         batchCmd.Transaction = tx;
@@ -1023,12 +1113,6 @@ internal sealed class SqlServerJobStore(
         batchCmd.Parameters.Add(CreateParameter("@completed_at",
             batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value));
         await batchCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        // Pre-lock every distinct jobs row this call will mutate, in name order, before any
-        // INSERT into surefire_runs. Canonical jobs → runs order every mutating path obeys;
-        // ORDER BY makes concurrent callers acquire the set in a deterministic sequence so
-        // they serialize instead of deadlocking against claim/transition paths.
-        await LockJobRowsAsync(conn, tx, runs, cancellationToken);
 
         const int paramsPerRun = 26;
         const int maxParams = 2100;
@@ -1157,6 +1241,7 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Capture prior status (DELETED.status) so per-job/per-queue counters only decrement for
@@ -1289,6 +1374,7 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Capture prior status (DELETED.status) so per-job/per-queue counters only decrement for
@@ -1449,6 +1535,7 @@ internal sealed class SqlServerJobStore(
             return;
         }
 
+        // No applock: single-table INSERT, no cycle surface; on the hot path.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx =
@@ -1467,7 +1554,16 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
 
-        var sb = new StringBuilder("SELECT * FROM dbo.surefire_events WHERE run_id = @run_id AND id > @since_id");
+        var sb = new StringBuilder("""
+                                   SELECT * FROM dbo.surefire_events
+                                   WHERE run_id = @run_id
+                                     AND id > @since_id
+                                     -- Commit-stable horizon clamp. See dbo.surefire_events.commit_seq schema comment.
+                                     AND id < ISNULL(
+                                         (SELECT MIN(id) FROM dbo.surefire_events
+                                          WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
+                                         9223372036854775807)
+                                   """);
         cmd.Parameters.Add(CreateParameter("@run_id", runId));
         cmd.Parameters.Add(CreateParameter("@since_id", sinceId));
 
@@ -1526,6 +1622,11 @@ internal sealed class SqlServerJobStore(
                           WHERE r.batch_id = @batch_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
+                              -- Commit-stable horizon clamp. See dbo.surefire_events.commit_seq schema comment.
+                              AND e.id < ISNULL(
+                                  (SELECT MIN(id) FROM dbo.surefire_events
+                                   WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
+                                  9223372036854775807)
                           ORDER BY e.id ASC
                           """;
         cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
@@ -1560,6 +1661,11 @@ internal sealed class SqlServerJobStore(
                           INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
                           WHERE r.batch_id = @batch_id
                               AND e.id > @since_event_id
+                              -- Commit-stable horizon clamp. See dbo.surefire_events.commit_seq schema comment.
+                              AND e.id < ISNULL(
+                                  (SELECT MIN(id) FROM dbo.surefire_events
+                                   WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
+                                  9223372036854775807)
                           ORDER BY e.id ASC
                           """;
         cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
@@ -1584,6 +1690,7 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
         await using var nodeCmd = CreateCommand(conn);
         nodeCmd.Transaction = tx;
@@ -1747,23 +1854,37 @@ internal sealed class SqlServerJobStore(
         }
 
         // is_paused stays out of the WHEN MATCHED SET list so the dashboard pause flag survives
-        // the maintenance tick's periodic re-upsert.
+        // the maintenance tick's periodic re-upsert. Transaction + 'surefire_writes' applock
+        // serializes against every other mutating path; see AcquireWriteLockAsync for rationale.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
+        await using var tx =
+            (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
         cmd.CommandText = """
+                          DECLARE @input TABLE (
+                              name NVARCHAR(450) NOT NULL PRIMARY KEY,
+                              priority INT,
+                              max_concurrency INT,
+                              is_paused BIT,
+                              rate_limit_name NVARCHAR(450)
+                          );
+
+                          INSERT INTO @input (name, priority, max_concurrency, is_paused, rate_limit_name)
+                          SELECT name, priority, max_concurrency, is_paused, rate_limit_name
+                          FROM OPENJSON(@payload)
+                          WITH (
+                              name NVARCHAR(450) '$.name',
+                              priority INT '$.priority',
+                              max_concurrency INT '$.maxConcurrency',
+                              is_paused BIT '$.isPaused',
+                              rate_limit_name NVARCHAR(450) '$.rateLimitName'
+                          );
+
                           MERGE dbo.surefire_queues WITH (HOLDLOCK) AS target
-                          USING (
-                              SELECT *
-                              FROM OPENJSON(@payload)
-                              WITH (
-                                  name NVARCHAR(450) '$.name',
-                                  priority INT '$.priority',
-                                  max_concurrency INT '$.maxConcurrency',
-                                  is_paused BIT '$.isPaused',
-                                  rate_limit_name NVARCHAR(450) '$.rateLimitName'
-                              )
-                          ) AS source
+                          USING @input AS source
                           ON target.name = source.name
                           WHEN MATCHED THEN UPDATE SET
                               priority = source.priority,
@@ -1771,10 +1892,12 @@ internal sealed class SqlServerJobStore(
                               rate_limit_name = source.rate_limit_name,
                               last_heartbeat_at = SYSUTCDATETIME()
                           WHEN NOT MATCHED THEN INSERT (name, priority, max_concurrency, is_paused, rate_limit_name, last_heartbeat_at)
-                              VALUES (source.name, source.priority, source.max_concurrency, source.is_paused, source.rate_limit_name, SYSUTCDATETIME());
+                              VALUES (source.name, source.priority, source.max_concurrency, source.is_paused, source.rate_limit_name, SYSUTCDATETIME())
+                          OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
                           """;
         cmd.Parameters.Add(CreateParameter("@payload", UpsertPayloadFactory.SerializeQueues(queues)));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<QueueDefinition>> GetQueuesAsync(CancellationToken cancellationToken = default)
@@ -1815,22 +1938,36 @@ internal sealed class SqlServerJobStore(
         }
 
         // Runtime counters (current_count, previous_count, window_start) are never touched by
-        // this statement, so they are preserved verbatim.
+        // this statement, so they are preserved verbatim. Transaction + 'surefire_writes'
+        // applock serializes against every other mutating path; see AcquireWriteLockAsync for
+        // rationale.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
+        await using var tx =
+            (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
         cmd.CommandText = """
+                          DECLARE @input TABLE (
+                              name NVARCHAR(450) NOT NULL PRIMARY KEY,
+                              type INT,
+                              max_permits INT,
+                              [window] BIGINT
+                          );
+
+                          INSERT INTO @input (name, type, max_permits, [window])
+                          SELECT name, type, max_permits, [window]
+                          FROM OPENJSON(@payload)
+                          WITH (
+                              name NVARCHAR(450) '$.name',
+                              type INT '$.type',
+                              max_permits INT '$.maxPermits',
+                              [window] BIGINT '$.window'
+                          );
+
                           MERGE dbo.surefire_rate_limits WITH (HOLDLOCK) AS target
-                          USING (
-                              SELECT *
-                              FROM OPENJSON(@payload)
-                              WITH (
-                                  name NVARCHAR(450) '$.name',
-                                  type INT '$.type',
-                                  max_permits INT '$.maxPermits',
-                                  [window] BIGINT '$.window'
-                              )
-                          ) AS source
+                          USING @input AS source
                           ON target.name = source.name
                           WHEN MATCHED THEN UPDATE SET
                               type = source.type,
@@ -1838,10 +1975,12 @@ internal sealed class SqlServerJobStore(
                               [window] = source.[window],
                               last_heartbeat_at = SYSUTCDATETIME()
                           WHEN NOT MATCHED THEN INSERT (name, type, max_permits, [window], last_heartbeat_at)
-                              VALUES (source.name, source.type, source.max_permits, source.[window], SYSUTCDATETIME());
+                              VALUES (source.name, source.type, source.max_permits, source.[window], SYSUTCDATETIME())
+                          OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
                           """;
         cmd.Parameters.Add(CreateParameter("@payload", UpsertPayloadFactory.SerializeRateLimits(rateLimits)));
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
@@ -1851,6 +1990,7 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -1962,46 +2102,191 @@ internal sealed class SqlServerJobStore(
 
         while (true)
         {
-            // DELETE + counter UPDATE in a single transaction so non_terminal_count stays
-            // consistent with the rows remaining in surefire_runs. Only non-terminal deletions
-            // (status = 0 pending-abandon branch) decrement the counter; terminal deletions
-            // don't contribute to non_terminal_count in the first place.
+            // Two-phase deletion to keep canonical jobs → runs lock order. The previous shape
+            // (DELETE TOP(1000) runs … then UPDATE jobs) acquired runs X-locks before the jobs
+            // X-conversion — runs → jobs ordering, opposite of every other path — so a claim
+            // holding jobs(JobX) UPDLOCK and a purge holding run(R) X-lock for that same job
+            // could deadlock when the claim tried to UPDATE run(R) and the purge tried to
+            // UPDATE jobs(JobX). Now: snapshot-read the candidate IDs under RCSI, derive the
+            // distinct job_names, UPDLOCK those jobs in alpha order, then DELETE the runs by ID
+            // and apply the counter delta. Same canonical order as claim, transition, cancel,
+            // and create paths.
             await using var tx =
                 (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-            await using var runCmd = CreateCommand(conn);
-            runCmd.Transaction = tx;
-            runCmd.CommandText = """
-                                 DECLARE @deleted TABLE (job_name NVARCHAR(450) NOT NULL, status INT NOT NULL);
+            await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
-                                 DELETE TOP (1000) FROM dbo.surefire_runs
-                                 OUTPUT DELETED.job_name, DELETED.status INTO @deleted (job_name, status)
-                                 WHERE (status IN (2, 4, 5)
-                                     AND completed_at < @threshold
-                                     AND (batch_id IS NULL OR EXISTS (
-                                         SELECT 1 FROM dbo.surefire_batches b
-                                         WHERE b.id = dbo.surefire_runs.batch_id
-                                             AND b.status IN (2, 4, 5)
-                                             AND b.completed_at IS NOT NULL
-                                             AND b.completed_at < @threshold
-                                     )))
-                                     OR (status = 0 AND not_before < @threshold);
+            // Phase 1 (snapshot read): pick up to 1000 candidate run IDs and capture their
+            // job_name + status under RCSI — no row locks. The IDs go into a sorted-by-PK temp
+            // table so the DELETE in phase 3 hits them in id order without a sort step.
+            await using var pickCmd = CreateCommand(conn);
+            pickCmd.Transaction = tx;
+            pickCmd.CommandText = """
+                                  SELECT TOP (1000) r.id, r.job_name, r.status
+                                  FROM dbo.surefire_runs r
+                                  WHERE (r.status IN (2, 4, 5)
+                                      AND r.completed_at < @threshold
+                                      AND (r.batch_id IS NULL OR EXISTS (
+                                          SELECT 1 FROM dbo.surefire_batches b
+                                          WHERE b.id = r.batch_id
+                                              AND b.status IN (2, 4, 5)
+                                              AND b.completed_at IS NOT NULL
+                                              AND b.completed_at < @threshold
+                                      )))
+                                      OR (r.status = 0 AND r.not_before < @threshold)
+                                  ORDER BY r.id;
+                                  """;
+            pickCmd.Parameters.Add(CreateParameter("@threshold", threshold));
 
-                                 UPDATE dbo.surefire_jobs SET non_terminal_count =
-                                     CASE WHEN dbo.surefire_jobs.non_terminal_count > nj.cnt
-                                          THEN dbo.surefire_jobs.non_terminal_count - nj.cnt
+            var pickedIds = new List<string>();
+            var pickedJobNames = new HashSet<string>(StringComparer.Ordinal);
+            var nonTerminalDecrementsByJob = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            await using (var reader = await pickCmd.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var id = reader.GetString(0);
+                    var jobName = reader.GetString(1);
+                    var status = reader.GetInt32(2);
+                    pickedIds.Add(id);
+                    pickedJobNames.Add(jobName);
+                    if (status != 2 && status != 4 && status != 5)
+                    {
+                        nonTerminalDecrementsByJob[jobName] =
+                            nonTerminalDecrementsByJob.GetValueOrDefault(jobName) + 1;
+                    }
+                }
+            }
+
+            if (pickedIds.Count == 0)
+            {
+                await tx.CommitAsync(cancellationToken);
+                break;
+            }
+
+            // Phase 2 (canonical jobs UPDLOCK): pre-lock the surefire_jobs rows whose
+            // non_terminal_count we'll decrement, in alphabetical order via VALUES seek with
+            // FORCE ORDER LOOP JOIN MAXDOP 1. Only jobs that had non-terminal candidates are
+            // locked (terminal deletions don't touch the counter). If everything we picked is
+            // terminal, the lock set is empty and we skip straight to phase 3.
+            if (nonTerminalDecrementsByJob.Count > 0)
+            {
+                var lockJobNames = nonTerminalDecrementsByJob.Keys
+                    .OrderBy(n => n, StringComparer.Ordinal)
+                    .ToList();
+
+                await using var lockCmd = CreateCommand(conn);
+                lockCmd.Transaction = tx;
+                var lockSb = new StringBuilder();
+                lockSb.Append("""
+                              SELECT j.name FROM (VALUES
+                              """);
+                for (var i = 0; i < lockJobNames.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        lockSb.Append(',');
+                    }
+
+                    var p = $"@lj{i}";
+                    lockSb.Append('(').Append(p).Append(')');
+                    lockCmd.Parameters.Add(CreateParameter(p, lockJobNames[i]));
+                }
+
+                lockSb.Append("""
+                              ) AS v(name)
+                              INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = v.name
+                              OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                              """);
+                lockCmd.CommandText = lockSb.ToString();
+                await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Phase 3 (DELETE by ID): runs are deleted by exact PK list, so X-locks land on
+            // exactly the rows we picked. The jobs counter UPDATE is a U→X conversion on rows
+            // we already hold UPDLOCK on — no fresh lock acquisition surface against concurrent
+            // claims. Race tolerance: a row whose state changed since the snapshot read (e.g.
+            // a transition that took status=0 → status=1 between phase 1 and now) won't match
+            // the WHERE re-check and is silently skipped.
+            await using var deleteCmd = CreateCommand(conn);
+            deleteCmd.Transaction = tx;
+            var deleteSb = new StringBuilder();
+            deleteSb.Append("""
+                            DELETE r FROM dbo.surefire_runs r
+                            INNER JOIN (VALUES
+                            """);
+            for (var i = 0; i < pickedIds.Count; i++)
+            {
+                if (i > 0)
+                {
+                    deleteSb.Append(',');
+                }
+
+                var p = $"@di{i}";
+                deleteSb.Append('(').Append(p).Append(')');
+                deleteCmd.Parameters.Add(CreateParameter(p, pickedIds[i]));
+            }
+
+            deleteSb.Append("""
+                            ) AS v(id) ON r.id = v.id
+                            WHERE (r.status IN (2, 4, 5)
+                                AND r.completed_at < @threshold
+                                AND (r.batch_id IS NULL OR EXISTS (
+                                    SELECT 1 FROM dbo.surefire_batches b
+                                    WHERE b.id = r.batch_id
+                                        AND b.status IN (2, 4, 5)
+                                        AND b.completed_at IS NOT NULL
+                                        AND b.completed_at < @threshold
+                                )))
+                                OR (r.status = 0 AND r.not_before < @threshold);
+                            """);
+            deleteCmd.CommandText = deleteSb.ToString();
+            deleteCmd.Parameters.Add(CreateParameter("@threshold", threshold));
+            var deletedCount = await deleteCmd.ExecuteNonQueryAsync(cancellationToken);
+
+            // Phase 4 (counter UPDATEs): apply non_terminal_count decrements against the
+            // already-UPDLOCK'd jobs rows from phase 2. Iterate in the same alphabetical order
+            // as the lock acquisition for consistency with the canonical pattern.
+            if (nonTerminalDecrementsByJob.Count > 0)
+            {
+                var sortedDecrements = nonTerminalDecrementsByJob
+                    .OrderBy(kvp => kvp.Key, StringComparer.Ordinal)
+                    .ToList();
+
+                await using var counterCmd = CreateCommand(conn);
+                counterCmd.Transaction = tx;
+                var counterSb = new StringBuilder();
+                counterSb.Append("""
+                                 UPDATE j SET non_terminal_count =
+                                     CASE WHEN j.non_terminal_count > v.cnt
+                                          THEN j.non_terminal_count - v.cnt
                                           ELSE 0
                                      END
-                                 FROM dbo.surefire_jobs
-                                 INNER JOIN (
-                                     SELECT job_name, COUNT(*) AS cnt FROM @deleted
-                                     WHERE status NOT IN (2, 4, 5)
-                                     GROUP BY job_name
-                                 ) nj ON nj.job_name = dbo.surefire_jobs.name;
+                                 FROM dbo.surefire_jobs j
+                                 INNER JOIN (VALUES
+                                 """);
+                for (var i = 0; i < sortedDecrements.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        counterSb.Append(',');
+                    }
 
-                                 SELECT COUNT(*) FROM @deleted;
-                                 """;
-            runCmd.Parameters.Add(CreateParameter("@threshold", threshold));
-            var deletedCount = Convert.ToInt32(await runCmd.ExecuteScalarAsync(cancellationToken));
+                    var pn = $"@cn{i}";
+                    var pc = $"@cc{i}";
+                    counterSb.Append('(').Append(pn).Append(',').Append(pc).Append(')');
+                    counterCmd.Parameters.Add(CreateParameter(pn, sortedDecrements[i].Key));
+                    counterCmd.Parameters.Add(CreateParameter(pc, sortedDecrements[i].Value));
+                }
+
+                counterSb.Append("""
+                                 ) AS v(name, cnt) ON v.name = j.name
+                                 OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                                 """);
+                counterCmd.CommandText = counterSb.ToString();
+                await counterCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await tx.CommitAsync(cancellationToken);
             if (deletedCount == 0)
             {
@@ -2315,47 +2600,20 @@ internal sealed class SqlServerJobStore(
         var jobParams = new List<string>();
         var queueParams = new List<string>();
 
-        // Serialize claims across nodes on the constrained config rows. We lock every
-        // job/queue/rate-limit even when unconstrained because running_count is now maintained on
-        // every job/queue and we need the row lock to safely INCREMENT it inside this same
-        // transaction against concurrent transition decrements.
-        await using var lockRlCmd = CreateCommand(conn);
-        lockRlCmd.Transaction = tx;
-        for (var i = 0; i < jobNamesArr.Count; i++)
-        {
-            jobParams.Add($"@jn_{i}");
-            lockRlCmd.Parameters.Add(CreateParameter($"@jn_{i}", jobNamesArr[i]));
-        }
-
-        var jobNamesIn = string.Join(", ", jobParams);
-        lockRlCmd.CommandText = $"""
-                                 SELECT name FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK)
-                                 WHERE name IN ({jobNamesIn});
-
-                                 SELECT name FROM dbo.surefire_queues WITH (UPDLOCK, ROWLOCK)
-                                 WHERE name IN (
-                                     SELECT ISNULL(j.queue, 'default') FROM dbo.surefire_jobs j WHERE j.name IN ({jobNamesIn})
-                                 );
-
-                                 SELECT name FROM dbo.surefire_rate_limits WITH (UPDLOCK)
-                                 WHERE name IN (
-                                     SELECT j.rate_limit_name FROM dbo.surefire_jobs j
-                                     WHERE j.name IN ({jobNamesIn}) AND j.rate_limit_name IS NOT NULL
-                                     UNION
-                                     SELECT q.rate_limit_name FROM dbo.surefire_jobs j
-                                     JOIN dbo.surefire_queues q ON q.name = ISNULL(j.queue, 'default')
-                                     WHERE j.name IN ({jobNamesIn}) AND q.rate_limit_name IS NOT NULL
-                                 )
-                                 """;
-        await lockRlCmd.ExecuteNonQueryAsync(cancellationToken);
+        // Serialize against every other mutating transaction in this store via the shared
+        // 'surefire_writes' applock. See AcquireWriteLockAsync for rationale.
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
         for (var i = 0; i < jobNamesArr.Count; i++)
         {
+            jobParams.Add($"@jn_{i}");
             cmd.Parameters.Add(CreateParameter($"@jn_{i}", jobNamesArr[i]));
         }
+
+        var jobNamesIn = string.Join(", ", jobParams);
 
         for (var i = 0; i < queueNamesArr.Count; i++)
         {
@@ -2365,15 +2623,40 @@ internal sealed class SqlServerJobStore(
 
         var queueNamesIn = string.Join(", ", queueParams);
 
-        // Multi-statement claim batch under one transaction. Capacity reads come from the
-        // materialized j.running_count and q.running_count columns instead of scanning
-        // surefire_runs, which avoids U-lock-vs-write contention on the hot path.
-        // After the UPDATE captures claimed rows in @claimed, follow-up statements aggregate the
-        // counter increments and apply them against the locked job/queue/rate-limit config rows.
-        // ROW_NUMBER PARTITION BY enforces per-bucket capacity strictly. q_rl_rn check is skipped
-        // when the queue shares the job's rate limiter (same bucket → already capped by j_rl_rn).
+        // Multi-statement claim batch under the applock. Capacity reads come from the
+        // materialized j.running_count / q.running_count columns instead of scanning
+        // surefire_runs, which keeps the snapshot rank cheap.
+        //
+        // Lock-scope shape on surefire_runs mirrors PostgreSqlJobStore's
+        // `ranked → eligible → locked → claimed` CTE chain (see
+        // Surefire.PostgreSql/PostgreSqlJobStore.cs#L2389-2400). Two phases:
+        //
+        //   Phase 1 (snapshot rank): the `ranked` CTE reads surefire_runs without a lock hint.
+        //   READ_COMMITTED_SNAPSHOT (enabled by AppHost on database creation) makes this a
+        //   non-locking row-version read. Window functions evaluate over the full status=0
+        //   candidate set under that snapshot; `eligible` filters by capacity and applies
+        //   TOP (@max_count). Reads are O(pending), zero row locks.
+        //
+        //   Phase 2 (targeted lock + UPDATE): the eligible IDs land in @candidate so the
+        //   optimizer can't fold the rank's snapshot read with the lock acquisition. The
+        //   UPDATE references surefire_runs WITH (UPDLOCK, ROWLOCK, READPAST) joined against
+        //   @candidate — only the ≤@max_count rows we're claiming take U-locks. The WHERE
+        //   re-checks status / not_before / not_after (the SQL Server analogue of Postgres
+        //   EvalPlanQual at PostgreSqlJobStore.cs#L2390-2400) so a row whose state moved
+        //   between snapshot and UPDATE (e.g. a transition) is a silent no-op.
+        //
+        // ROW_NUMBER PARTITION BY enforces per-bucket capacity strictly. q_rl_rn check is
+        // skipped when the queue shares the job's rate limiter (same bucket → already capped
+        // by j_rl_rn).
         cmd.CommandText = $"""
                            DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
+
+                           DECLARE @candidate TABLE (
+                               id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                               run_queue_name NVARCHAR(450) NOT NULL,
+                               j_rl NVARCHAR(450) NULL,
+                               q_rl NVARCHAR(450) NULL
+                           );
 
                            DECLARE @claimed TABLE (
                                id NVARCHAR(450) NOT NULL PRIMARY KEY,
@@ -2434,6 +2717,8 @@ internal sealed class SqlServerJobStore(
                                FROM dbo.surefire_rate_limits rl
                            ),
                            ranked AS (
+                               -- No lock hint: RCSI makes this a non-locking row-version read.
+                               -- UPDLOCK is taken in phase 2 only on the LIMIT-N candidates.
                                SELECT r.id, ISNULL(q.priority, 0) AS queue_priority, r.priority, r.not_before,
                                    r.job_name AS run_job_name, ISNULL(j.queue, 'default') AS run_queue_name,
                                    j.max_concurrency AS j_max, q.max_concurrency AS q_max,
@@ -2447,7 +2732,7 @@ internal sealed class SqlServerJobStore(
                                        ORDER BY ISNULL(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS j_rl_rn,
                                    ROW_NUMBER() OVER (PARTITION BY q.rate_limit_name
                                        ORDER BY ISNULL(q.priority, 0) DESC, r.priority DESC, r.not_before ASC, r.id ASC) AS q_rl_rn
-                               FROM dbo.surefire_runs r WITH (UPDLOCK, READPAST)
+                               FROM dbo.surefire_runs r
                                JOIN dbo.surefire_jobs j ON j.name = r.job_name
                                LEFT JOIN dbo.surefire_queues q ON q.name = ISNULL(j.queue, 'default')
                                WHERE r.status = 0
@@ -2457,8 +2742,8 @@ internal sealed class SqlServerJobStore(
                                    AND ISNULL(j.queue, 'default') IN ({queueNamesIn})
                                    AND ISNULL(q.is_paused, 0) = 0
                            ),
-                           candidate AS (
-                               SELECT TOP (@max_count) r.id, r.run_job_name, r.run_queue_name, r.j_rl, r.q_rl
+                           eligible AS (
+                               SELECT TOP (@max_count) r.id, r.run_queue_name, r.j_rl, r.q_rl
                                FROM ranked r
                                LEFT JOIN rl_state jrl ON jrl.name = r.j_rl
                                LEFT JOIN rl_state qrl ON qrl.name = r.q_rl
@@ -2468,15 +2753,30 @@ internal sealed class SqlServerJobStore(
                                    AND (r.q_rl IS NULL OR r.q_rl = r.j_rl OR qrl.available IS NULL OR r.q_rl_rn <= qrl.available)
                                ORDER BY r.queue_priority DESC, r.priority DESC, r.not_before ASC, r.id ASC
                            )
-                           UPDATE dbo.surefire_runs SET
+                           INSERT INTO @candidate (id, run_queue_name, j_rl, q_rl)
+                           SELECT id, run_queue_name, j_rl, q_rl FROM eligible
+                           OPTION (MAXDOP 1);
+
+                           -- Phase 2: lock and update only the candidate IDs. UPDLOCK,ROWLOCK on
+                           -- the inner side of the join applies to ≤@max_count rows; READPAST
+                           -- skips a row another claimer is mid-converting (U→X) so concurrent
+                           -- claims that picked an overlapping eligible set silently miss instead
+                           -- of deadlocking. The WHERE predicates are re-checked under the lock —
+                           -- a row whose status / not_before / not_after changed between the
+                           -- snapshot rank and this UPDATE is a no-op, not a correctness bug.
+                           UPDATE r SET
                                status = 1,
                                node_name = @node_name,
                                started_at = @now,
                                last_heartbeat_at = @now,
-                               attempt = dbo.surefire_runs.attempt + 1
-                           OUTPUT INSERTED.id, INSERTED.job_name, candidate.run_queue_name, candidate.j_rl, candidate.q_rl, INSERTED.status, INSERTED.attempt
+                               attempt = r.attempt + 1
+                           OUTPUT INSERTED.id, INSERTED.job_name, c.run_queue_name, c.j_rl, c.q_rl, INSERTED.status, INSERTED.attempt
                                INTO @claimed (id, job_name, queue_name, j_rl, q_rl, status, attempt)
-                           FROM dbo.surefire_runs INNER JOIN candidate ON dbo.surefire_runs.id = candidate.id;
+                           FROM dbo.surefire_runs r WITH (UPDLOCK, ROWLOCK, READPAST)
+                           INNER JOIN @candidate c ON c.id = r.id
+                           WHERE r.status = 0
+                               AND r.not_before <= @now
+                               AND (r.not_after IS NULL OR r.not_after > @now);
 
                            -- Aggregate counter increments derived from the claimed batch and apply
                            -- them against the locked config rows in three statements, all inside the
@@ -2574,12 +2874,7 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-
-        // Pre-lock every distinct jobs row this call will mutate, in name order, before any
-        // INSERT into surefire_runs. Canonical jobs → runs order every mutating path obeys;
-        // ORDER BY makes concurrent callers acquire the set in a deterministic sequence so
-        // they serialize instead of deadlocking against claim/transition paths.
-        await LockJobRowsAsync(conn, tx, runs, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
         const int paramsPerRun = 26;
         const int maxParams = 2100;
@@ -2675,21 +2970,9 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var tx =
             (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        await AcquireWriteLockAsync(conn, tx, cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-
-        // Canonical config-first lock order (jobs → queues → rate_limits → runs). Acquired
-        // unconditionally so the subsequent non_terminal_count UPDATE never upgrades a lock
-        // against a concurrent claim or transition that already holds the jobs row. If the row
-        // doesn't yet exist (late registration) this locks nothing and the downstream INSERT/
-        // UPDATEs are no-ops on surefire_jobs, matching the TryCreateRunAsync contract.
-        await using (var lockCmd = CreateCommand(conn))
-        {
-            lockCmd.Transaction = tx;
-            lockCmd.CommandText = "SELECT 1 FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK) WHERE name = @name";
-            lockCmd.Parameters.Add(CreateParameter("@name", run.JobName));
-            await lockCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
 
         var conditions = new List<string>();
 
@@ -2800,40 +3083,6 @@ internal sealed class SqlServerJobStore(
         }
     }
 
-    private async Task LockJobRowsAsync(SqlConnection conn, SqlTransaction tx,
-        IReadOnlyList<JobRun> runs, CancellationToken cancellationToken)
-    {
-        var names = runs
-            .Where(r => !r.Status.IsTerminal)
-            .Select(r => r.JobName)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToList();
-        if (names.Count == 0)
-        {
-            return;
-        }
-
-        var sb = new StringBuilder();
-        sb.Append("SELECT name FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK) WHERE name IN (");
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        for (var i = 0; i < names.Count; i++)
-        {
-            if (i > 0)
-            {
-                sb.Append(',');
-            }
-
-            sb.Append($"@lk{i}");
-            cmd.Parameters.Add(CreateParameter($"@lk{i}", names[i]));
-        }
-
-        sb.Append(") ORDER BY name");
-        cmd.CommandText = sb.ToString();
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
-    }
-
     private async Task InsertEventsAsync(SqlConnection conn, SqlTransaction tx,
         IReadOnlyList<RunEvent>? events, CancellationToken cancellationToken)
     {
@@ -2883,16 +3132,14 @@ internal sealed class SqlServerJobStore(
 
         if (filter.JobName is { })
         {
-            if (filter.ExactJobName)
-            {
-                parts.Add("job_name = @filter_job_name");
-                cmd.Parameters.Add(CreateParameter("@filter_job_name", filter.JobName));
-            }
-            else
-            {
-                parts.Add("job_name LIKE '%' + @filter_job_name + '%'");
-                cmd.Parameters.Add(CreateParameter("@filter_job_name", EscapeLike(filter.JobName)));
-            }
+            parts.Add("job_name = @filter_job_name");
+            cmd.Parameters.Add(CreateParameter("@filter_job_name", filter.JobName));
+        }
+
+        if (filter.JobNameContains is { })
+        {
+            parts.Add("job_name LIKE '%' + @filter_job_name_contains + '%'");
+            cmd.Parameters.Add(CreateParameter("@filter_job_name_contains", EscapeLike(filter.JobNameContains)));
         }
 
         if (filter.ParentRunId is { })
@@ -3160,6 +3407,38 @@ internal sealed class SqlServerJobStore(
         }
 
         return command;
+    }
+
+    /// <summary>
+    ///     Takes a transaction-scoped exclusive application lock on a single, well-known resource
+    ///     ('surefire_writes') so every mutating transaction in this store serializes at the
+    ///     database level. Reads (under RCSI) bypass this lock entirely. Auto-released on commit
+    ///     or rollback.
+    ///     Why a single global lock instead of fine-grained row locks: SQL Server's row-level
+    ///     pessimistic locking has irreducible deadlock-cycle surface across multi-table
+    ///     mutations (jobs / queues / rate_limits / runs) when many writers race for the same
+    ///     hot row — Postgres avoids this via MVCC, SQL Server can't. Every production-grade
+    ///     SQL-Server-backed scheduler (Hangfire, NServiceBus's SQL transport, MassTransit) uses
+    ///     the same pattern for the same reason. Throughput is bounded by serial transaction
+    ///     duration (~5ms typical → ~200 writes/sec sustained), which is fine for a job
+    ///     scheduler — the bottleneck before this was deadlocks, not throughput.
+    /// </summary>
+    private async Task AcquireWriteLockAsync(SqlConnection conn, SqlTransaction tx,
+        CancellationToken cancellationToken)
+    {
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          DECLARE @result INT;
+                          EXEC @result = sp_getapplock
+                              @Resource = 'surefire_writes',
+                              @LockMode = 'Exclusive',
+                              @LockOwner = 'Transaction',
+                              @LockTimeout = -1;
+                          IF @result < 0
+                              THROW 50002, 'Failed to acquire write lock', 1;
+                          """;
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static SqlParameter CreateParameter(string name, object? value)

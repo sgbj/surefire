@@ -343,8 +343,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var pendingResults = await Store.GetRunsAsync(new()
         {
             Status = JobStatus.Pending,
-            JobName = jobName,
-            ExactJobName = true
+            JobName = jobName
         }, cancellationToken: ct);
 
         Assert.Single(pendingResults.Items);
@@ -362,7 +361,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         await Store.CreateRunsAsync([run1, run2, run3], cancellationToken: ct);
 
-        var results = await Store.GetRunsAsync(new() { JobName = "Email" }, cancellationToken: ct);
+        var results = await Store.GetRunsAsync(new() { JobNameContains = "Email" }, cancellationToken: ct);
 
         Assert.Contains(results.Items, r => r.Id == run1.Id);
         Assert.Contains(results.Items, r => r.Id == run2.Id);
@@ -446,14 +445,12 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var terminal = await Store.GetRunsAsync(new()
         {
             IsTerminal = true,
-            JobName = jobName,
-            ExactJobName = true
+            JobName = jobName
         }, cancellationToken: ct);
         var nonTerminal = await Store.GetRunsAsync(new()
         {
             IsTerminal = false,
-            JobName = jobName,
-            ExactJobName = true
+            JobName = jobName
         }, cancellationToken: ct);
 
         Assert.Equal(2, terminal.TotalCount);
@@ -477,10 +474,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync(runs, cancellationToken: ct);
 
         var page1 = await Store.GetRunsAsync(
-            new() { JobName = jobName, ExactJobName = true },
+            new() { JobName = jobName },
             0, 3, ct);
         var page2 = await Store.GetRunsAsync(
-            new() { JobName = jobName, ExactJobName = true },
+            new() { JobName = jobName },
             3, 3, ct);
 
         Assert.Equal(10, page1.TotalCount);
@@ -516,7 +513,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var filter = new RunFilter
         {
             JobName = jobName,
-            ExactJobName = true,
             Status = JobStatus.Pending
         };
 
@@ -546,7 +542,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         // Skip past the end of the result set. The PG/SQL Server original used
         // COUNT(*) OVER() and silently returned TotalCount=0 here, breaking dashboard pagination.
         var pastEnd = await Store.GetRunsAsync(
-            new() { JobName = jobName, ExactJobName = true },
+            new() { JobName = jobName },
             100, 10, ct);
 
         Assert.Equal(10, pastEnd.TotalCount);
@@ -584,7 +580,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var results = await Store.GetRunsAsync(new()
         {
             JobName = jobName,
-            ExactJobName = true,
             OrderBy = RunOrderBy.CreatedAt
         }, cancellationToken: ct);
 
@@ -610,8 +605,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var results = await Store.GetRunsAsync(new()
         {
             LastHeartbeatBefore = cutoff,
-            JobName = jobName,
-            ExactJobName = true
+            JobName = jobName
         }, cancellationToken: ct);
 
         Assert.Single(results.Items);
@@ -692,7 +686,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var results = await Store.GetRunsAsync(new()
         {
             JobName = jobName,
-            ExactJobName = true,
             CreatedAfter = DateTimeOffset.UtcNow.AddMinutes(-20),
             CreatedBefore = DateTimeOffset.UtcNow.AddMinutes(-10)
         }, cancellationToken: ct);
@@ -755,7 +748,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var results = await Store.GetRunsAsync(new()
         {
             JobName = jobName,
-            ExactJobName = true,
             OrderBy = RunOrderBy.StartedAt
         }, cancellationToken: ct);
 
@@ -782,7 +774,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var results = await Store.GetRunsAsync(new()
         {
             JobName = jobName,
-            ExactJobName = true,
             OrderBy = RunOrderBy.CompletedAt
         }, cancellationToken: ct);
 
@@ -826,7 +817,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var page = await Store.GetRunsAsync(new()
         {
             JobName = jobName,
-            ExactJobName = true,
             Status = JobStatus.Succeeded,
             OrderBy = RunOrderBy.CompletedAt
         }, skip, take, ct);
@@ -899,7 +889,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var results = await Store.GetRunsAsync(new()
         {
             JobName = jobName,
-            ExactJobName = true,
             CompletedAfter = baseTime.AddMinutes(-5)
         }, cancellationToken: ct);
 
@@ -966,7 +955,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
             Assert.Equal(1, results.Count(r => r));
 
             // Cleanup: complete the created run so next trial starts fresh
-            var runs = await Store.GetRunsAsync(new() { JobName = "TestJob", ExactJobName = true, IsTerminal = false },
+            var runs = await Store.GetRunsAsync(new() { JobName = "TestJob", IsTerminal = false },
                 take: 10, cancellationToken: ct);
             foreach (var run in runs.Items)
             {
@@ -1076,7 +1065,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         {
             Status = JobStatus.Pending,
             JobName = jobName,
-            ExactJobName = true,
             CreatedAfter = now.AddHours(-1)
         }, take: 10, cancellationToken: ct);
 
@@ -1116,8 +1104,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         var page = await Store.GetRunsAsync(new()
         {
             IsTerminal = true,
-            JobName = jobName,
-            ExactJobName = true
+            JobName = jobName
         }, 0, 3, ct);
 
         Assert.Equal(5, page.TotalCount);

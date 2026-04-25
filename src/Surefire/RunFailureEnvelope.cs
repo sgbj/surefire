@@ -11,7 +11,7 @@ internal sealed class RunFailureEnvelope
     public string? StackTrace { get; init; }
 
     public static RunFailureEnvelope FromException(int attempt, DateTimeOffset occurredAt, Exception exception,
-        string failureSource, string failureCode = "Exception") => new()
+        string failureSource, string failureCode = "exception") => new()
     {
         Attempt = attempt,
         OccurredAt = occurredAt,

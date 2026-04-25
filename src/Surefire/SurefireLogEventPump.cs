@@ -20,7 +20,6 @@ internal sealed partial class SurefireLogEventPump(
 
     private readonly Channel<LogEntry> _channel = Channel.CreateBounded<LogEntry>(new BoundedChannelOptions(8192)
     {
-        FullMode = BoundedChannelFullMode.DropWrite,
         SingleReader = true,
         SingleWriter = false
     });

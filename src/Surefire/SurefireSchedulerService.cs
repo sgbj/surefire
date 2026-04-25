@@ -171,7 +171,7 @@ internal sealed partial class SurefireSchedulerService(
             return;
         }
 
-        await notifications.PublishAsync(NotificationChannels.RunCreated, run.Id, cancellationToken);
+        await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
     }
 
     private static string BuildCronDeduplicationId(string jobName, DateTimeOffset fireTime) =>

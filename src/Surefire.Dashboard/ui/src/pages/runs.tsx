@@ -34,7 +34,7 @@ export function RunsPage() {
   // Compute the actual createdAfter date inside queryFn so each refetch uses a fresh timestamp.
   const queryKey = useMemo(
     () => ({
-      jobName: debouncedJobName || undefined,
+      jobNameContains: debouncedJobName || undefined,
       status: statusFilter !== "all" ? Number(statusFilter) : undefined,
       datePreset,
       skip: pagination.pageIndex * pagination.pageSize,
@@ -48,7 +48,7 @@ export function RunsPage() {
     queryFn: () => {
       const preset = RUN_DATE_PRESETS.find((p) => p.value === datePreset);
       return api.getRuns({
-        jobName: queryKey.jobName,
+        jobNameContains: queryKey.jobNameContains,
         status: queryKey.status,
         createdAfter: preset?.getAfter(),
         skip: queryKey.skip,

@@ -138,6 +138,61 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task Claim_ConcurrentRace_DoesNotConsumeExtraRateLimitPermit()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.CreateVersion7().ToString("N");
+        var rateLimitName = $"claims-{suffix}";
+        var jobName = $"ClaimRace_{suffix}";
+        var queueName = "default";
+
+        await Store.UpsertRateLimitsAsync([
+            new()
+            {
+                Name = rateLimitName,
+                Type = RateLimitType.FixedWindow,
+                MaxPermits = 2,
+                Window = TimeSpan.FromMinutes(1)
+            }
+        ], ct);
+
+        var job = CreateJob(jobName);
+        job.Queue = queueName;
+        job.RateLimitName = rateLimitName;
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = queueName }], ct);
+
+        await Store.CreateRunsAsync([CreateRun(jobName)], cancellationToken: ct);
+
+        var startGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var claimTasks = new[]
+        {
+            Task.Run(async () =>
+            {
+                await startGate.Task;
+                return (await Store.ClaimRunsAsync("node-a", [jobName], [queueName], 1, ct)).FirstOrDefault();
+            }, ct),
+            Task.Run(async () =>
+            {
+                await startGate.Task;
+                return (await Store.ClaimRunsAsync("node-b", [jobName], [queueName], 1, ct)).FirstOrDefault();
+            }, ct)
+        };
+
+        startGate.TrySetResult();
+
+        var claims = await Task.WhenAll(claimTasks);
+        Assert.Equal(1, claims.Count(c => c is { }));
+
+        var secondRun = CreateRun(jobName);
+        await Store.CreateRunsAsync([secondRun], cancellationToken: ct);
+
+        var secondClaim = (await Store.ClaimRunsAsync("node-c", [jobName], [queueName], 1, ct)).FirstOrDefault();
+        Assert.NotNull(secondClaim);
+        Assert.Equal(secondRun.Id, secondClaim!.Id);
+    }
+
+    [Fact]
     public async Task RateLimit_FixedWindow_PermitsRecoverAfterWindowExpires()
     {
         var ct = TestContext.Current.CancellationToken;

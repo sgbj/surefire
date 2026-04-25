@@ -49,9 +49,13 @@ internal sealed class SurefireHealthCheck(
             var now = timeProvider.GetUtcNow();
             foreach (var (loop, state) in loopHealth.Snapshot())
             {
+                // Five straight failures is a wedged loop, not a soft signal — Kubernetes
+                // liveness probes treat Degraded as alive, so reporting Degraded here would
+                // leave a stuck pod running forever. Report Unhealthy so the orchestrator
+                // can restart us.
                 if (state.ConsecutiveFailures >= ConsecutiveFailureThreshold)
                 {
-                    return HealthCheckResult.Degraded(
+                    return HealthCheckResult.Unhealthy(
                         $"Surefire '{loop}' loop has failed {state.ConsecutiveFailures} consecutive ticks.");
                 }
 
@@ -77,17 +81,21 @@ internal sealed class SurefireHealthCheck(
             var nodes = await store.GetNodesAsync(cancellationToken);
             var localNode =
                 nodes.FirstOrDefault(n => string.Equals(n.Name, options.NodeName, StringComparison.Ordinal));
+            // Local heartbeat absent or stale = this node has stopped participating in the
+            // cluster. Other nodes will already be reclaiming our runs via stale recovery, so
+            // surfacing Degraded here would be actively misleading — report Unhealthy so the
+            // orchestrator restarts us.
             if (localNode is null)
             {
-                return HealthCheckResult.Degraded($"Node '{options.NodeName}' heartbeat not found.");
+                return HealthCheckResult.Unhealthy($"Node '{options.NodeName}' heartbeat not found.");
             }
 
-            // Allow one heartbeat interval plus inactive-threshold tolerance before degrading.
+            // Allow one heartbeat interval plus inactive-threshold tolerance before flagging.
             var maxAge = options.HeartbeatInterval + options.InactiveThreshold;
             var age = now - localNode.LastHeartbeatAt;
             if (age > maxAge)
             {
-                return HealthCheckResult.Degraded(
+                return HealthCheckResult.Unhealthy(
                     $"Node '{options.NodeName}' heartbeat is stale by {age}. Threshold is {maxAge}.");
             }
 

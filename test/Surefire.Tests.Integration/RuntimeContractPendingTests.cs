@@ -38,7 +38,7 @@ public sealed class RuntimeContractPendingTests
         Assert.NotEqual(runId2, runId3);
         Assert.NotEqual(runId1, runId3);
 
-        var page = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true }, 0, 10, ct);
+        var page = await store.GetRunsAsync(new() { JobName = jobName }, 0, 10, ct);
         Assert.Equal(3, page.TotalCount);
         Assert.All(page.Items, r => Assert.Equal(JobStatus.Pending, r.Status));
     }
@@ -940,7 +940,7 @@ public sealed class RuntimeContractPendingTests
         return await TestWait.PollUntilAsync(
             async _ =>
             {
-                var page = await store.GetRunsAsync(new() { JobName = jobName, ExactJobName = true },
+                var page = await store.GetRunsAsync(new() { JobName = jobName },
                     cancellationToken: ct);
                 return page.Items.FirstOrDefault(r =>
                     r.Arguments is { } args && args.Contains(marker, StringComparison.Ordinal));

@@ -41,7 +41,7 @@ public sealed class InMemoryJobStoreLockTests
 
         // Page size 2 — TotalCount must still reflect the full 5, not 2.
         var result = await store.GetRunsAsync(
-            new() { JobName = jobName, ExactJobName = true },
+            new() { JobName = jobName },
             0, 2, ct);
 
         Assert.Equal(5, result.TotalCount);
@@ -61,10 +61,10 @@ public sealed class InMemoryJobStoreLockTests
         }
 
         var page1 = await store.GetRunsAsync(
-            new() { JobName = jobName, ExactJobName = true },
+            new() { JobName = jobName },
             0, 3, ct);
         var page2 = await store.GetRunsAsync(
-            new() { JobName = jobName, ExactJobName = true },
+            new() { JobName = jobName },
             3, 3, ct);
 
         Assert.Equal(3, page1.Items.Count);
@@ -134,7 +134,7 @@ public sealed class InMemoryJobStoreLockTests
             for (var i = 0; i < 20; i++)
             {
                 await store.GetRunsAsync(
-                    new() { JobName = jobName, ExactJobName = true },
+                    new() { JobName = jobName },
                     0, 10, cts.Token);
             }
         }, cts.Token));

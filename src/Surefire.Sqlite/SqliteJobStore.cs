@@ -10,26 +10,30 @@ internal sealed class SqliteJobStore(
     TimeSpan? commandTimeout,
     TimeProvider timeProvider) : IJobStore
 {
-    // Connection-scoped pragmas, applied on every connection open. WAL mode itself is
-    // database-scoped and set once in MigrateAsync. Values here are tuned for a read/write
-    // balanced production workload; they're intentionally not user-configurable until a real
-    // deployment surfaces a case where the defaults don't fit.
+    // Connection-scoped pragmas, applied on every connection open. Values here are tuned for
+    // a read/write balanced production workload; they're intentionally not user-configurable
+    // until a real deployment surfaces a case where the defaults don't fit.
     //  - foreign_keys=ON: foreign-key enforcement defaults off per connection in SQLite.
-    //  - synchronous=NORMAL: right balance under WAL (fsync on checkpoint, not every commit).
     //  - busy_timeout=24000: retry-on-busy at the SQLite layer; paired with IsTransientException.
     //  - temp_store=MEMORY: large ORDER BY / stats / retention sorts stay resident.
     //  - mmap_size=268435456 (256 MiB): hot pages served from mmap on read-heavy queries.
-    //  - journal_size_limit=67108864 (64 MiB): caps WAL file growth after a write burst.
     //  - wal_autocheckpoint=1000: bounds WAL window size between automatic checkpoints.
     private const string ConnectionPragmas = """
                                              PRAGMA foreign_keys=ON;
-                                             PRAGMA synchronous=NORMAL;
                                              PRAGMA busy_timeout=24000;
                                              PRAGMA temp_store=MEMORY;
                                              PRAGMA mmap_size=268435456;
-                                             PRAGMA journal_size_limit=67108864;
                                              PRAGMA wal_autocheckpoint=1000;
                                              """;
+
+    // Database-scoped pragmas, applied during migration. These are intentionally not set on
+    // each open to avoid toggling safety settings while another operation may hold a transaction.
+    //  - synchronous=NORMAL: right balance under WAL (fsync on checkpoint, not every commit).
+    //  - journal_size_limit=67108864 (64 MiB): caps WAL file growth after a write burst.
+    private const string DatabasePragmas = """
+                                           PRAGMA synchronous=NORMAL;
+                                           PRAGMA journal_size_limit=67108864;
+                                           """;
 
     private readonly string _connectionString = BuildConnectionString(connectionString, commandTimeout);
 
@@ -47,21 +51,49 @@ internal sealed class SqliteJobStore(
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
 
+        // WAL is a per-file persistent setting and cannot be set inside a transaction. The
+        // other database-scoped pragmas are likewise idempotent and safe to apply before
+        // taking the migration lock.
         await using (var walCmd = CreateCommand(conn, "PRAGMA journal_mode=WAL;"))
         {
             await walCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        await using (var dbPragmaCmd = CreateCommand(conn, DatabasePragmas))
+        {
+            await dbPragmaCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Bootstrap the migrations table outside the lock so the optimistic check below is
+        // safe on a fresh database. CREATE TABLE IF NOT EXISTS is idempotent and serializes
+        // through SQLite's writer lock anyway.
         await using (var schemaCmd = CreateCommand(conn,
                          "CREATE TABLE IF NOT EXISTS surefire_schema_migrations (version INTEGER NOT NULL PRIMARY KEY);"))
         {
             await schemaCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var hasV1 = await HasMigrationVersionAsync(conn, 1, cancellationToken);
-
-        if (hasV1)
+        // Optimistic fast path: typical boots find v1 already present and return without
+        // acquiring the writer lock. The slow path below re-checks under BEGIN IMMEDIATE.
+        if (await HasMigrationVersionAsync(conn, 1, cancellationToken))
         {
+            return;
+        }
+
+        // BEGIN IMMEDIATE (deferred: false) acquires SQLite's writer lock at transaction
+        // start so two nodes serialize before either touches schema. v1's DDL is entirely
+        // IF NOT EXISTS so it would survive racing nodes without a lock — but later
+        // migrations (e.g. ALTER TABLE ADD COLUMN, for which SQLite has no IF NOT EXISTS
+        // variant) will not. Doing this once here means future migrations slot in without
+        // re-architecting. The connection's busy_timeout (24s, see ConnectionPragmas)
+        // makes BEGIN IMMEDIATE wait for a peer's writer lock rather than throw SQLITE_BUSY.
+        await using var tx = conn.BeginTransaction(false);
+
+        // Re-check under the lock — another node may have completed v1 between our
+        // optimistic read and the BEGIN IMMEDIATE acquiring the writer lock.
+        if (await HasMigrationVersionAsync(conn, 1, cancellationToken, tx))
+        {
+            await tx.CommitAsync(cancellationToken);
             return;
         }
 
@@ -191,8 +223,10 @@ internal sealed class SqliteJobStore(
                                                          last_heartbeat_at TEXT
                                                      );
                                                      INSERT OR IGNORE INTO surefire_schema_migrations (version) VALUES (1);
-                                                     """);
+                                                     """, tx);
         await ddlCmd.ExecuteNonQueryAsync(cancellationToken);
+
+        await tx.CommitAsync(cancellationToken);
     }
 
     public async Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs,
@@ -540,16 +574,14 @@ internal sealed class SqliteJobStore(
 
         if (filter.JobName is { })
         {
-            if (filter.ExactJobName)
-            {
-                where += " AND job_name = @jn";
-                cmd.Parameters.AddWithValue("@jn", filter.JobName);
-            }
-            else
-            {
-                where += " AND job_name LIKE @jn ESCAPE '\\'";
-                cmd.Parameters.AddWithValue("@jn", $"%{EscapeLike(filter.JobName)}%");
-            }
+            where += " AND job_name = @jn";
+            cmd.Parameters.AddWithValue("@jn", filter.JobName);
+        }
+
+        if (filter.JobNameContains is { })
+        {
+            where += " AND job_name LIKE @jnc ESCAPE '\\'";
+            cmd.Parameters.AddWithValue("@jnc", $"%{EscapeLike(filter.JobNameContains)}%");
         }
 
         if (filter.ParentRunId is { })
@@ -2561,10 +2593,10 @@ internal sealed class SqliteJobStore(
     }
 
     private static async Task<bool> HasMigrationVersionAsync(SqliteConnection conn, int version,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, SqliteTransaction? tx = null)
     {
         await using var cmd = CreateCommand(conn,
-            "SELECT COUNT(*) FROM surefire_schema_migrations WHERE version = @version");
+            "SELECT COUNT(*) FROM surefire_schema_migrations WHERE version = @version", tx);
         cmd.Parameters.AddWithValue("@version", version);
         return (long)(await cmd.ExecuteScalarAsync(cancellationToken))! > 0;
     }

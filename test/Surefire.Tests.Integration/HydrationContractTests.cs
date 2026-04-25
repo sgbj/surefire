@@ -485,7 +485,7 @@ public sealed class HydrationContractTests
         // Cancellation of the owning token must cancel the run it triggered.
         var runsInStore = new List<JobRun>();
         await foreach (var r in harness.Client.GetRunsAsync(
-                           new() { JobName = "Hang", ExactJobName = true }, ct))
+                           new() { JobName = "Hang" }, ct))
         {
             runsInStore.Add(r);
         }

@@ -30,8 +30,8 @@ internal sealed class TestEventWriter : IAsyncDisposable
 
     public static async Task<TestEventWriter> StartAsync(IJobStore store, INotificationProvider notifications)
     {
-        var writer = new BatchedEventWriter(store, notifications, TimeProvider.System, new(),
-            NullLogger<BatchedEventWriter>.Instance);
+        var writer = new BatchedEventWriter(store, notifications, new(),
+            TimeProvider.System, new(), NullLogger<BatchedEventWriter>.Instance);
         var handle = new TestEventWriter(writer);
         await writer.StartAsync(handle._cts.Token);
         return handle;
