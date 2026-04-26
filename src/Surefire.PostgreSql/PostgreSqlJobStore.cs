@@ -1408,35 +1408,42 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
 
+        // Horizon clamp is conditional on run status. The clamp protects the tail cursor from
+        // skipping in-flight low-id rows that haven't yet committed; once the run is terminal
+        // (statuses 2/4/5), no writer can append to it, so every event for this run is committed
+        // and visible. Applying the clamp anyway would spuriously hide already-committed rows
+        // when an unrelated long-running transaction holds `xmin` back — the reader observes the
+        // run as terminal, drains zero events, and exits with a hole. Same shape of bug as the
+        // batch-events clamp; same fix.
         var sb = new StringBuilder("""
-                                   SELECT * FROM surefire_events
-                                   WHERE run_id = @run_id
-                                     AND id > @since_id
-                                     -- Commit-stable horizon clamp. See surefire_events.xact_id comment in the schema
-                                     -- DDL. We must never return a row whose id sits at or above the lowest currently
-                                     -- in-flight transaction's first inserted id; otherwise the caller's `id > @since`
-                                     -- cursor will skip that in-flight row when it eventually commits below the cursor.
-                                     AND id < COALESCE(
-                                         (SELECT MIN(id) FROM surefire_events
-                                          WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
-                                         9223372036854775807)
+                                   SELECT e.* FROM surefire_events e
+                                   JOIN surefire_runs r ON r.id = e.run_id
+                                   WHERE e.run_id = @run_id
+                                     AND e.id > @since_id
+                                     AND (
+                                         r.status IN (2, 4, 5)
+                                         OR e.id < COALESCE(
+                                             (SELECT MIN(id) FROM surefire_events
+                                              WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
+                                             9223372036854775807)
+                                     )
                                    """);
         cmd.Parameters.AddWithValue("run_id", runId);
         cmd.Parameters.AddWithValue("since_id", sinceId);
 
         if (types is { Length: > 0 })
         {
-            sb.Append(" AND event_type = ANY(@types)");
+            sb.Append(" AND e.event_type = ANY(@types)");
             cmd.Parameters.AddWithValue("types", types.Select(t => (short)t).ToArray());
         }
 
         if (attempt is { })
         {
-            sb.Append(" AND (attempt = @attempt OR attempt = 0)");
+            sb.Append(" AND (e.attempt = @attempt OR e.attempt = 0)");
             cmd.Parameters.AddWithValue("attempt", attempt.Value);
         }
 
-        sb.Append(" ORDER BY id");
+        sb.Append(" ORDER BY e.id");
 
         if (take is { })
         {
@@ -1466,18 +1473,24 @@ internal sealed class PostgreSqlJobStore(
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
+        // See GetBatchEventsAsync below for the conditional-clamp rationale: once the batch
+        // is terminal, no further writers exist and the clamp would spuriously hide already-
+        // committed rows when an unrelated long-running TX holds `xmin` back.
         cmd.CommandText = """
                           SELECT e.*
                           FROM surefire_events e
                           JOIN surefire_runs r ON r.id = e.run_id
+                          JOIN surefire_batches b ON b.id = r.batch_id
                           WHERE r.batch_id = @batch_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
-                              -- Commit-stable horizon clamp. See surefire_events.xact_id schema comment.
-                              AND e.id < COALESCE(
-                                  (SELECT MIN(id) FROM surefire_events
-                                   WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
-                                  9223372036854775807)
+                              AND (
+                                  b.status IN (2, 4, 5)
+                                  OR e.id < COALESCE(
+                                      (SELECT MIN(id) FROM surefire_events
+                                       WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
+                                      9223372036854775807)
+                              )
                           ORDER BY e.id
                           LIMIT @take
                           """;
@@ -1506,17 +1519,26 @@ internal sealed class PostgreSqlJobStore(
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
+        // Horizon clamp is conditional on batch status. The clamp protects the tail cursor
+        // from skipping in-flight low-id rows that haven't yet committed; once the batch is
+        // terminal (statuses 2/4/5), no writer can append to it, so every event for this batch
+        // is committed and visible. Applying the clamp anyway would spuriously hide rows when
+        // an unrelated long-running transaction holds `xmin` back — the reader observes the
+        // batch as terminal, drains zero events, and exits with a hole.
         cmd.CommandText = """
                           SELECT e.*
                           FROM surefire_events e
                           JOIN surefire_runs r ON r.id = e.run_id
+                          JOIN surefire_batches b ON b.id = r.batch_id
                           WHERE r.batch_id = @batch_id
                               AND e.id > @since_event_id
-                              -- Commit-stable horizon clamp. See surefire_events.xact_id schema comment.
-                              AND e.id < COALESCE(
-                                  (SELECT MIN(id) FROM surefire_events
-                                   WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
-                                  9223372036854775807)
+                              AND (
+                                  b.status IN (2, 4, 5)
+                                  OR e.id < COALESCE(
+                                      (SELECT MIN(id) FROM surefire_events
+                                       WHERE xact_id >= pg_snapshot_xmin(pg_current_snapshot())),
+                                      9223372036854775807)
+                              )
                           ORDER BY e.id
                           LIMIT @take
                           """;

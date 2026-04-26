@@ -3,6 +3,7 @@ using Projects;
 var builder = DistributedApplication.CreateBuilder(args);
 
 var surefire = builder.AddPostgres("postgres")
+//    .WithArgs("-c", "max_connections=200")
     .WithPgAdmin()
     .AddDatabase("surefire");
 

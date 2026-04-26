@@ -1554,15 +1554,25 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
 
+        // Horizon clamp is conditional on run status. The clamp protects the tail cursor from
+        // skipping in-flight low-id rows that haven't yet committed; once the run is terminal
+        // (statuses 2/4/5), no writer can append to it, so every event for this run is committed
+        // and visible. Applying the clamp anyway would spuriously hide already-committed rows
+        // when an unrelated long-running transaction holds MIN_ACTIVE_ROWVERSION back — the
+        // reader observes the run as terminal, drains zero events, and exits with a hole. Same
+        // shape of bug as the batch-events clamp; same fix.
         var sb = new StringBuilder("""
-                                   SELECT * FROM dbo.surefire_events
-                                   WHERE run_id = @run_id
-                                     AND id > @since_id
-                                     -- Commit-stable horizon clamp. See dbo.surefire_events.commit_seq schema comment.
-                                     AND id < ISNULL(
-                                         (SELECT MIN(id) FROM dbo.surefire_events
-                                          WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
-                                         9223372036854775807)
+                                   SELECT e.* FROM dbo.surefire_events e
+                                   INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
+                                   WHERE e.run_id = @run_id
+                                     AND e.id > @since_id
+                                     AND (
+                                         r.status IN (2, 4, 5)
+                                         OR e.id < ISNULL(
+                                             (SELECT MIN(id) FROM dbo.surefire_events
+                                              WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
+                                             9223372036854775807)
+                                     )
                                    """);
         cmd.Parameters.Add(CreateParameter("@run_id", runId));
         cmd.Parameters.Add(CreateParameter("@since_id", sinceId));
@@ -1575,16 +1585,16 @@ internal sealed class SqlServerJobStore(
                 cmd.Parameters.Add(CreateParameter(name, (short)t));
                 return name;
             }).ToList();
-            sb.Append($" AND event_type IN ({string.Join(",", typeParams)})");
+            sb.Append($" AND e.event_type IN ({string.Join(",", typeParams)})");
         }
 
         if (attempt is { })
         {
-            sb.Append(" AND (attempt = @attempt OR attempt = 0)");
+            sb.Append(" AND (e.attempt = @attempt OR e.attempt = 0)");
             cmd.Parameters.Add(CreateParameter("@attempt", attempt.Value));
         }
 
-        sb.Append(" ORDER BY id");
+        sb.Append(" ORDER BY e.id");
 
         if (take is { })
         {
@@ -1615,18 +1625,24 @@ internal sealed class SqlServerJobStore(
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
+        // See GetBatchEventsAsync below for the conditional-clamp rationale: once the batch
+        // is terminal, no further writers exist and the clamp would spuriously hide already-
+        // committed rows when an unrelated long-running TX holds MIN_ACTIVE_ROWVERSION back.
         cmd.CommandText = """
                           SELECT TOP (@take) e.*
                           FROM dbo.surefire_events e
                           INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
+                          INNER JOIN dbo.surefire_batches b ON b.id = r.batch_id
                           WHERE r.batch_id = @batch_id
                               AND e.event_type = @event_type
                               AND e.id > @since_event_id
-                              -- Commit-stable horizon clamp. See dbo.surefire_events.commit_seq schema comment.
-                              AND e.id < ISNULL(
-                                  (SELECT MIN(id) FROM dbo.surefire_events
-                                   WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
-                                  9223372036854775807)
+                              AND (
+                                  b.status IN (2, 4, 5)
+                                  OR e.id < ISNULL(
+                                      (SELECT MIN(id) FROM dbo.surefire_events
+                                       WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
+                                      9223372036854775807)
+                              )
                           ORDER BY e.id ASC
                           """;
         cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
@@ -1655,17 +1671,26 @@ internal sealed class SqlServerJobStore(
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
+        // Horizon clamp is conditional on batch status. The clamp protects the tail cursor
+        // from skipping in-flight low-id rows that haven't yet committed; once the batch is
+        // terminal (statuses 2/4/5), no writer can append to it, so every event for this
+        // batch is committed and visible. Applying the clamp anyway would spuriously hide
+        // rows when an unrelated long-running transaction holds MIN_ACTIVE_ROWVERSION back —
+        // the reader observes the batch as terminal, drains zero events, and exits with a hole.
         cmd.CommandText = """
                           SELECT TOP (@take) e.*
                           FROM dbo.surefire_events e
                           INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
+                          INNER JOIN dbo.surefire_batches b ON b.id = r.batch_id
                           WHERE r.batch_id = @batch_id
                               AND e.id > @since_event_id
-                              -- Commit-stable horizon clamp. See dbo.surefire_events.commit_seq schema comment.
-                              AND e.id < ISNULL(
-                                  (SELECT MIN(id) FROM dbo.surefire_events
-                                   WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
-                                  9223372036854775807)
+                              AND (
+                                  b.status IN (2, 4, 5)
+                                  OR e.id < ISNULL(
+                                      (SELECT MIN(id) FROM dbo.surefire_events
+                                       WHERE commit_seq >= MIN_ACTIVE_ROWVERSION()),
+                                      9223372036854775807)
+                              )
                           ORDER BY e.id ASC
                           """;
         cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
