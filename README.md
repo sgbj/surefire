@@ -20,57 +20,42 @@ app.Run();
 
 ## Features
 
-- **Distributed** — run across multiple nodes with coordinated claiming and retry handling.
-- **Dashboard** — built-in real-time UI with live logs, progress tracking, and job management.
-- **Batches** — trigger many runs at once and consume completion as a stream or aggregate.
-- **Cron scheduling** — schedule jobs with cron expressions.
-- **Retries** — configurable retry policies with fixed or exponential backoff.
-- **Queues** — named queues with priority, concurrency limits, rate limiting, and pause/resume.
-- **Timeouts & concurrency** — per-job timeout and max concurrency limits.
-- **Streaming input & output** — stream values into and out of jobs with `IAsyncEnumerable<T>`.
-- **Lifecycle callbacks** — hook into success, retry, and dead letter events.
-- **OpenTelemetry** — traces and metrics out of the box.
-- **Health checks** — integrates with ASP.NET Core health checks for store, notifications, and node liveness.
+- Runs across multiple nodes with coordinated claiming and retry handling.
+- Built-in dashboard with live logs, progress, run history, and node monitoring.
+- Per-job cron, retries, queues, timeouts, and rate limits.
+- Stream values into and out of jobs with `IAsyncEnumerable<T>`. Run batches and consume their results as a list or a stream.
+- Call jobs from other jobs using `IJobClient`.
+- OpenTelemetry traces and metrics. ASP.NET Core health checks.
 
-## Getting started
+## Install
 
 ```bash
-# Core packages
 dotnet add package Surefire
 dotnet add package Surefire.Dashboard
-
-# Optional provider packages (the core package defaults to an in-memory store + in-memory notifications)
-dotnet add package Surefire.PostgreSql
-dotnet add package Surefire.SqlServer
-dotnet add package Surefire.Redis
-dotnet add package Surefire.Sqlite
 ```
 
-### Provider capabilities
+Comes with an in-memory store and notifications. Provider packages are available for PostgreSQL, SQL Server, SQLite, and Redis.
 
-| Package               | Store     | Notifications | Notes                                                   |
-|-----------------------|-----------|---------------|---------------------------------------------------------|
-| `Surefire`            | In-memory | In-memory     | Single-process, state lost on restart                   |
-| `Surefire.PostgreSql` | Yes       | Yes           | Best all-around production backend                      |
-| `Surefire.SqlServer`  | Yes       | No            | Use when SQL Server is your system of record            |
-| `Surefire.Sqlite`     | Yes       | No            | Good for single-node apps, local tools, and development |
-| `Surefire.Redis`      | Yes       | Yes           | Best when Redis is already a core dependency            |
-
-PostgreSQL and Redis provide cross-node notifications. SQL Server and SQLite currently provide durable storage only, so
-wakeups fall back to polling behavior. If a notification transport is unavailable, Surefire still recovers from the
-durable store, but pickup latency falls back to `PollingInterval`.
+```bash
+dotnet add package Surefire.PostgreSql
+dotnet add package Surefire.SqlServer
+dotnet add package Surefire.Sqlite
+dotnet add package Surefire.Redis
+```
 
 ```csharp
-var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddNpgsqlDataSource(builder.Configuration.GetConnectionString("Surefire")!);
 
-builder.Services.AddSurefire();
+builder.Services.AddSurefire(options => options.UsePostgreSql());
+```
 
-var app = builder.Build();
+## Defining jobs
 
-// Simple job
+Register jobs as delegates with `AddJob`. Parameters resolve from DI and from arguments passed when triggering a run. `AddJob` returns a builder that can be used to configure cron, retries, timeouts, rate limits, callbacks, etc.
+
+```csharp
 app.AddJob("Add", (int a, int b) => a + b);
 
-// Async job with DI, logging, and progress
 app.AddJob("ImportData", async (JobContext ctx, ILogger<Program> logger, CancellationToken ct) =>
 {
     for (var i = 1; i <= 10; i++)
@@ -79,75 +64,52 @@ app.AddJob("ImportData", async (JobContext ctx, ILogger<Program> logger, Cancell
         await ctx.ReportProgressAsync(i / 10.0);
         await Task.Delay(1000, ct);
     }
-}).WithDescription("Imports data and reports progress");
+})
+.WithDescription("Imports data and reports progress")
+.WithRetry(3);
 
-// Scheduled job
-app.AddJob("GenerateReport", async (IReportService reportService, CancellationToken ct) =>
+app.AddJob("GenerateReport", async (IReportService reports, CancellationToken ct) =>
 {
-    await reportService.GenerateReportAsync(ct);
-}).WithCron("0 * * * *");
-
-app.MapSurefireDashboard();
-
-app.Run();
-```
-
-Provider packages resolve their underlying client (`NpgsqlDataSource`, `IConnectionMultiplexer`) from DI. Register it
-however you like — `builder.AddNpgsqlDataSource("surefire")` from Aspire, `AddNpgsqlDataSource(connectionString)`
-directly — then enable the provider:
-
-```csharp
-builder.AddNpgsqlDataSource("surefire");
-
-builder.Services.AddSurefire(options =>
-{
-    options.UsePostgreSql(commandTimeout: TimeSpan.FromSeconds(30));
-});
-```
-
-## Observability and health
-
-Surefire emits OpenTelemetry traces and metrics during runtime execution, and registers a built-in health check named
-`surefire` via `AddSurefire()`.
-
-```csharp
-builder.Services.AddHealthChecks();
-
-app.MapHealthChecks("/health");
-```
-
-For production deployments, secure the dashboard:
-
-```csharp
-app.MapSurefireDashboard()
-    .RequireAuthorization("AdminPolicy");
+    await reports.GenerateReportAsync(ct);
+})
+.WithCron("0 * * * *");
 ```
 
 ## Triggering jobs
 
-Use `IJobClient` to trigger jobs from anywhere:
+Use `IJobClient` to trigger jobs from anywhere in your app, including inside other jobs.
 
 ```csharp
 // Fire and forget
 await client.TriggerAsync("ImportData");
 
-// With arguments
-await client.TriggerAsync("Add", new { a = 1, b = 2 });
-
-// Run and wait for the result
+// Run a job and wait for the result
 var sum = await client.RunAsync<int>("Add", new { a = 1, b = 2 });
+
+// Or stream values as they're produced
+await foreach (var value in client.StreamAsync<int>("GenerateNumbers"))
+{
+    // ...
+}
+
+// Run a batch and get all results at once
+var results = await client.RunBatchAsync<Result>("Process", inputs);
+
+// Or stream batch results as they finish
+await foreach (var result in client.StreamBatchAsync<Result>("Process", inputs))
+{
+    // ...
+}
 ```
 
-## Job composition
-
-Compose jobs by calling other jobs with `IJobClient`:
+Inject `IJobClient` into a job to call other jobs from inside it:
 
 ```csharp
 app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
 {
     var a = Random.Shared.Next(1, 101);
     var b = Random.Shared.Next(1, 101);
-    var sum = await client.RunAsync<int>("Add", new { a, b }, ct);
+    var sum = await client.RunAsync<int>("Add", new { a, b }, cancellationToken: ct);
     return new { a, b, sum };
 });
 ```
@@ -157,6 +119,10 @@ app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
 ```csharp
 app.AddJob("ProcessOrder", async (int orderId) => { /* ... */ })
     .WithRetry(3)
+    .OnSuccess((JobContext ctx) =>
+    {
+        // Run succeeded
+    })
     .OnRetry((JobContext ctx, ILogger<Program> logger) =>
     {
         logger.LogWarning("Attempt {Attempt} failed", ctx.Attempt);
@@ -167,8 +133,7 @@ app.AddJob("ProcessOrder", async (int orderId) => { /* ... */ })
     });
 ```
 
-`OnSuccess` fires when a run completes. `OnRetry` fires when Surefire schedules another attempt after a failure.
-`OnDeadLetter` fires when no retries remain.
+`OnSuccess` fires when a run succeeds. `OnRetry` fires when Surefire schedules another attempt after a failure. `OnDeadLetter` fires when no retries remain.
 
 ## Dashboard
 
@@ -177,13 +142,12 @@ app.MapSurefireDashboard();    // at /surefire
 app.MapSurefireDashboard("/"); // at the root
 ```
 
-The dashboard is embedded in the package and includes:
+Includes an embedded dashboard that lets you:
 
-- Live log streaming and progress bars
-- Job management (trigger, enable/disable)
-- Run history with filtering
-- Node monitoring
-- A REST API at `{prefix}/api/`
+- Trigger jobs, enable or disable them, and pause queues
+- Cancel runs or rerun completed ones
+- View traces, child runs, errors, arguments, and results
+- Use a REST API at `{prefix}/api/` for the same actions
 
 ## Documentation
 
