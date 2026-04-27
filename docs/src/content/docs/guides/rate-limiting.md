@@ -5,7 +5,7 @@ description: Control how fast jobs execute with fixed and sliding window rate li
 
 ## Defining rate limits
 
-Register named rate limits in the Surefire configuration. Each rate limit has a name, a window type, and a maximum number of permits per window.
+Register rate limits with `AddSlidingWindowLimiter` or `AddFixedWindowLimiter`. Each takes a name, a maximum number of permits, and a window:
 
 ```csharp
 builder.Services.AddSurefire(options =>
@@ -24,8 +24,6 @@ builder.Services.AddSurefire(options =>
 
 ## Applying rate limits
 
-Rate limits can be applied at the job level or the queue level.
-
 ### Per job
 
 ```csharp
@@ -42,7 +40,6 @@ options.AddQueue("emails", queue =>
 });
 ```
 
-When a job has a rate limit and its queue also has a rate limit, both limits apply.
+When a job has a rate limit and its queue has one too, both apply.
 
-Rate-limited runs stay in `Pending` status until a permit is available, so runs are delayed rather than failed or cancelled.
-
+Rate-limited runs stay in `Pending` until a permit is available, so they're delayed rather than failed.

@@ -8,15 +8,16 @@ description: Stream results between jobs using IAsyncEnumerable.
 A job can return `IAsyncEnumerable<T>` to stream results incrementally instead of returning everything at once. Each yielded item is persisted as it's produced, so consumers can start processing before the producer finishes.
 
 ```csharp
-app.AddJob("FetchProducts", async (CancellationToken ct) =>
+app.AddJob("GenerateNumbers", (CancellationToken ct, int count = 60) =>
 {
-    return Fetch();
+    return Generate();
 
-    async IAsyncEnumerable<string> Fetch()
+    async IAsyncEnumerable<int> Generate()
     {
-        await foreach (var line in ReadCsvLinesAsync(ct))
+        for (var i = 1; i <= count; i++)
         {
-            yield return line;
+            yield return i;
+            await Task.Delay(1000, ct);
         }
     }
 });
@@ -27,44 +28,21 @@ app.AddJob("FetchProducts", async (CancellationToken ct) =>
 A job can accept an `IAsyncEnumerable<T>` parameter. When it runs as part of a pipeline, items arrive in real time as the upstream job produces them.
 
 ```csharp
-app.AddJob("ConvertProducts", async (IAsyncEnumerable<string> lines, ILogger<Program> logger, CancellationToken ct) =>
-{
-    return Convert();
-
-    async IAsyncEnumerable<Product> Convert()
-    {
-        await foreach (var line in lines)
-        {
-            var parts = line.Split(',');
-            var product = new Product(parts[0], parts[1], decimal.Parse(parts[2]));
-            logger.LogInformation("Converted: {Product}", product);
-            yield return product;
-        }
-    }
-});
+app.AddJob("DoubleNumbers", (IAsyncEnumerable<int> values) =>
+    values.Select(value => value * 2));
 ```
 
 ## Building a pipeline
 
-Use `StreamAsync<T>` on `IJobClient` to chain streaming jobs together. Each stage runs as its own job with independent logging, retries, and progress tracking. Data flows between them without waiting for the upstream job to finish.
+Use `StreamAsync<T>` on `IJobClient` to chain streaming jobs together. Each stage runs as its own job with independent logging, retries, and progress tracking. Data flows between stages without waiting for the upstream job to finish.
 
 ```csharp
-app.AddJob("ProcessProducts", async (IJobClient client, CancellationToken ct) =>
+app.AddJob("SumNumbers", async (IJobClient client, CancellationToken ct) =>
 {
-    var lines = client.StreamAsync<string>("FetchProducts", ct);
-    var products = client.StreamAsync<Product>("ConvertProducts", new { lines }, ct);
-
-    var count = 0;
-    await foreach (var product in products)
-    {
-        count++;
-    }
-
-    return $"Processed {count} products";
+    var values = client.StreamAsync<int>("GenerateNumbers", cancellationToken: ct);
+    var doubled = client.StreamAsync<int>("DoubleNumbers", new { values }, cancellationToken: ct);
+    return await doubled.SumAsync(ct);
 });
 ```
 
-When a stream consumer is cancelled, the cancellation propagates to the producing job so it can stop work.
-
-This propagation applies to owner-style calls (`StreamAsync*`).
-Observer-style calls (`WaitStreamAsync*`) only stop local consumption and do not cancel the run.
+`StreamAsync` is an owner-style call: cancelling its `CancellationToken` cancels the run it triggered, so cancellation flows back through the pipeline to the producer. The observer-style equivalent, `WaitStreamAsync`, only stops your local consumption; it never cancels the run.

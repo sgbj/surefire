@@ -10,35 +10,26 @@ app.MapSurefireDashboard();           // at /surefire
 app.MapSurefireDashboard("/admin");   // custom prefix
 ```
 
-The dashboard is embedded in the `Surefire.Dashboard` package — no extra files or build steps.
+The dashboard is embedded in the `Surefire.Dashboard` package, with no extra files or build steps.
 
 ## Authorization
 
-The dashboard endpoints have no authorization by default. Treat the dashboard like any other privileged operational surface. In production, you should require authorization and avoid exposing it on a public route:
+The dashboard endpoints are unauthenticated by default. In production, require authorization on the returned endpoint group. Anyone who reaches the dashboard can view job arguments, trigger jobs, cancel runs, and pause queues.
 
 ```csharp
 app.MapSurefireDashboard()
     .RequireAuthorization("AdminPolicy");
 ```
 
-`MapSurefireDashboard` returns an `IEndpointConventionBuilder`, so you can chain any ASP.NET Core endpoint convention including `RequireAuthorization`, `RequireCors`, or custom metadata.
-
-Without authorization, anyone who can reach the dashboard can view job arguments, trigger jobs, cancel runs, and manage queues.
-
-For production deployments, a common pattern is to mount the dashboard under an admin path and apply the same auth policy you use for the rest of your operational endpoints:
-
-```csharp
-app.MapSurefireDashboard("/admin/surefire")
-    .RequireAuthorization("AdminPolicy");
-```
+`MapSurefireDashboard` returns an `IEndpointConventionBuilder`, so you can chain any endpoint convention: `RequireAuthorization`, `RequireCors`, or custom metadata.
 
 ## Home
 
 The home page gives you a quick overview:
 
-- **Stat cards** — total jobs, total runs, active runs, and success rate.
-- **Runs over time** — a stacked area chart showing runs by status. Toggle between 1h, 24h, 7d, and 30d.
-- **Recent runs** — the latest runs with status badges.
+- **Stat cards**: total jobs, total runs, active runs, and success rate.
+- **Runs over time**: a stacked area chart showing runs by status. Toggle between 1h, 24h, 7d, and 30d.
+- **Recent runs**: the latest runs with status badges.
 
 ![Dashboard home](../../../assets/dashboard.png)
 
@@ -70,14 +61,21 @@ Click into a run to see:
 - **Streaming logs** that update in real-time as the job runs.
 - **Arguments and result** as formatted JSON.
 - **Error details** for failed runs.
-- **Trace view** — a timeline showing parent/child run relationships.
-- **Rerun chain** — links between manually rerun attempts.
-- **Triggered runs** — any child runs this job created.
-- **Cancel** a running job or **re-run** a completed one.
+- **Trace view**: a timeline of parent/child run relationships.
+- **Rerun chain**: navigation between a run and any reruns of it.
+- **Triggered runs**: any child runs this job created.
+
+From the run page, you can also cancel a running job or rerun a completed one.
 
 ![Run detail](../../../assets/run-detail.png)
 
 ![Run detail with error](../../../assets/run-detail-error.png)
+
+## Queues
+
+Lists all queues with their pending run count, concurrency limits, and paused status. You can pause and resume queues from this page. See the [queues concept page](/surefire/concepts/queues/) for more on how queues work.
+
+![Queues list](../../../assets/queues.png)
 
 ## Nodes
 
@@ -89,23 +87,15 @@ Click into a node to see what jobs it handles and its recent run history.
 
 ![Node detail](../../../assets/node-detail.png)
 
-## Queues
-
-Lists all queues with their pending run count, concurrency limits, and paused status. You can pause and resume queues from this page. See the [queues concept page](/surefire/concepts/queues/) for more on how queues work.
-
-![Queues list](../../../assets/queues.png)
-
 ## Command palette
 
-Press <kbd>/</kbd> or <kbd>Ctrl+K</kbd> (<kbd>⌘K</kbd> on Mac) to open the command palette. Search for jobs, runs, or nodes and jump straight to them.
+Press <kbd>/</kbd> or <kbd>Ctrl+K</kbd> (<kbd>⌘K</kbd> on Mac) to open the command palette. Jump to any of the main pages, or search for a specific job or node by name.
 
 ![Command palette](../../../assets/command-palette.png)
 
-## API
+## REST API
 
-The dashboard also exposes a REST API at `{prefix}/api/`:
-
-- Use it to query jobs and runs, stream run updates, and manage runs/queues.
+The dashboard is built on a REST API at `{prefix}/api/`. Use it to query jobs and runs, stream run updates, and manage runs and queues from your own tools.
 
 ```
 GET   /api/stats                                    # dashboard statistics
@@ -119,7 +109,7 @@ GET   /api/runs/{id}                                # get a single run
 GET   /api/runs/{id}/logs                           # get parsed log events
 GET   /api/runs/{id}/stream                         # live logs & progress (SSE)
 GET   /api/runs/{id}/trace?siblingWindow=50&childrenTake=100   # tree-aware focused trace (ancestors + focus + siblings + first-page children)
-GET   /api/runs/{id}/children?afterCursor=…&take=100           # paginate direct children (forward or reverse via beforeCursor)
+GET   /api/runs/{id}/children?afterCursor=...&take=100         # paginate direct children (forward or reverse via beforeCursor)
 POST  /api/runs/{id}/cancel                         # cancel a running job
 POST  /api/runs/{id}/rerun                          # re-run a completed run
 GET   /api/queues                                   # list all queues

@@ -3,25 +3,23 @@ title: Filters
 description: Add cross-cutting behavior to jobs with the filter pipeline.
 ---
 
-## Overview
-
-Filters are middleware for job execution. They wrap the job handler and run before and after each execution, letting you add cross-cutting behavior like logging, metrics, authorization, or error handling.
+Filters are middleware for job execution. They wrap each handler invocation, so they're a good place for cross-cutting behavior: logging, metrics, authorization, error reporting.
 
 ## Writing a filter
 
-Implement `IJobFilter`. Call `next(context)` to continue the pipeline, or skip it to short-circuit execution.
+Implement `IJobFilter`. Call `next(context)` to continue down the pipeline, or skip it to short-circuit.
 
 ```csharp
-public class LoggingFilter : IJobFilter
+public class TimingFilter(ILogger<TimingFilter> logger) : IJobFilter
 {
     public async Task InvokeAsync(JobContext context, JobFilterDelegate next)
     {
-        var sw = Stopwatch.StartNew();
-        Console.WriteLine($"Starting {context.JobName}");
+        var startedAt = Stopwatch.GetTimestamp();
 
         await next(context);
 
-        Console.WriteLine($"Finished {context.JobName} in {sw.ElapsedMilliseconds}ms");
+        logger.LogInformation("Job {Name} took {Elapsed}",
+            context.JobName, Stopwatch.GetElapsedTime(startedAt));
     }
 }
 ```
@@ -35,8 +33,7 @@ Global filters run on every job. Register them with `UseFilter<T>` in the Surefi
 ```csharp
 builder.Services.AddSurefire(options =>
 {
-    options.UseFilter<LoggingFilter>();
-    options.UseFilter<TenantFilter>();
+    options.UseFilter<TimingFilter>();
 });
 ```
 
@@ -47,19 +44,13 @@ Filters run in the order they're registered. The first filter registered is the 
 Per-job filters run only on a specific job. Add them with `UseFilter<T>` on the job builder:
 
 ```csharp
-app.AddJob("Import", async () => { /* ... */ })
-    .UseFilter<AuditFilter>();
+app.AddJob("CriticalImport", async () => { /* ... */ })
+    .UseFilter<SlackNotificationFilter>();
 ```
 
-Per-job filters are resolved from DI if registered, or created via `ActivatorUtilities` if not. Their constructor parameters are injected automatically.
+Per-job filters are resolved from DI if registered, or created via `ActivatorUtilities` if not. Their constructor parameters are injected automatically. Global filters always wrap per-job filters, so a per-job filter runs inside any globals.
 
-## Pipeline order
-
-Global filters wrap all jobs. Per-job filters wrap only their specific job. Filters execute in registration order.
-
-## Examples
-
-### Error notification filter
+A common pattern is forwarding job failures somewhere observable. Here's a filter that posts a Slack message on failure and rethrows so the run still records the failure normally:
 
 ```csharp
 public class SlackNotificationFilter(SlackClient slack) : IJobFilter
@@ -79,20 +70,4 @@ public class SlackNotificationFilter(SlackClient slack) : IJobFilter
 }
 ```
 
-### Timing filter
-
-```csharp
-public class TimingFilter(ILogger<TimingFilter> logger) : IJobFilter
-{
-    public async Task InvokeAsync(JobContext context, JobFilterDelegate next)
-    {
-        var sw = Stopwatch.StartNew();
-
-        await next(context);
-
-        logger.LogInformation("Job {Name} took {Ms}ms",
-            context.JobName, sw.ElapsedMilliseconds);
-    }
-}
-```
-
+See [Lifecycle callbacks](/surefire/guides/jobs/#lifecycle-callbacks) for simpler hooks at specific events.

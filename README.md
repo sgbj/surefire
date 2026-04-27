@@ -20,7 +20,7 @@ app.Run();
 
 ## Features
 
-- Runs across multiple nodes with coordinated claiming and retry handling.
+- Runs across multiple nodes with coordinated claiming and retry handling. Nodes can register the same or different jobs.
 - Built-in dashboard with live logs, progress, run history, and node monitoring.
 - Per-job cron, retries, queues, timeouts, and rate limits.
 - Stream values into and out of jobs with `IAsyncEnumerable<T>`. Run batches and consume their results as a list or a stream.

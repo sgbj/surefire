@@ -11,20 +11,15 @@ dotnet add package Surefire.Redis
 
 ## Setup
 
-Register an `IConnectionMultiplexer` in DI (for example with `builder.AddRedisClient("surefire")` from Aspire, or `builder.Services.AddSingleton<IConnectionMultiplexer>(...)`), then:
+The Redis provider resolves an `IConnectionMultiplexer` from DI. Register one with `StackExchange.Redis` or the Aspire client extension, then call `UseRedis`:
 
 ```csharp
-builder.Services.AddSurefire(options =>
-{
-    options.UseRedis();
-});
+builder.Services.AddSurefire(options => options.UseRedis());
 ```
 
-This registers both the job store and the notification provider. Notifications use Redis Pub/Sub for real-time event delivery.
+That call wires up both the store and notifications. Notifications use Redis Pub/Sub, so workers across the cluster wake up immediately when new runs are enqueued.
 
-## Using a specific connection
-
-Pass a factory to resolve a keyed or named multiplexer:
+To resolve a keyed or named multiplexer, pass a factory:
 
 ```csharp
 options.UseRedis(sp => sp.GetRequiredKeyedService<IConnectionMultiplexer>("surefire"));
@@ -32,22 +27,16 @@ options.UseRedis(sp => sp.GetRequiredKeyedService<IConnectionMultiplexer>("suref
 
 ## When to use Redis
 
-Redis is a good fit for:
+Redis fits well for:
 
-- High-throughput workloads where claim latency matters
-- High-throughput workloads where low scheduling latency matters
-- Multi-node deployments that need real-time notifications without database-specific features (like PostgreSQL's LISTEN/NOTIFY)
-- Teams already running Redis infrastructure
-
-The Redis provider supports all Surefire features.
+- High-throughput workloads where claim and scheduling latency matter.
+- Multi-node deployments that want real-time notifications without depending on database-specific features.
+- Teams already running Redis infrastructure.
 
 ## Notification behavior
 
-Redis Pub/Sub is the low-latency wakeup path, not the source of truth. The durable source of truth is still the Redis job store.
+Redis Pub/Sub is the low-latency wakeup path. The Redis store itself is always the source of truth.
 
-- **Normal case** — workers pick up new work quickly through Pub/Sub notifications.
-- **Redis notification outage or disconnect** — wakeups can be delayed until the next polling interval, but workers still recover from the durable store.
-- **Health checks** — Surefire degrades health when the notification transport is unhealthy, even if the store is still reachable.
-
-If low wakeup latency matters during transient Redis outages, tune `PollingInterval` accordingly.
-
+- **Healthy**: workers pick up new runs immediately via Pub/Sub.
+- **Pub/Sub disconnected**: wakeups fall back to `PollingInterval`. Workers still recover from the durable store.
+- **Health checks**: Surefire reports degraded health when Pub/Sub is unhealthy, even if the store is reachable.

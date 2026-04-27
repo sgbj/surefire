@@ -20,7 +20,7 @@ builder.Services.AddSurefire(options =>
 | Option | Default | Description |
 |---|---|---|
 | `NodeName` | `{MachineName}:{ProcessId}:{random}` | Name reported in node views and logs. Must be unique per process |
-| `PollingInterval` | 5s | Fallback polling interval when notifications are not available |
+| `PollingInterval` | 5s | Fallback polling interval when notifications are not available, and the primary wakeup signal for SQL Server and SQLite |
 | `HeartbeatInterval` | 30s | Node heartbeat interval |
 | `InactiveThreshold` | 2min | Inactivity window used for node/run recovery decisions |
 | `RetentionPeriod` | 7 days | How long completed runs are kept. Set to `null` to disable purge |
@@ -32,25 +32,13 @@ builder.Services.AddSurefire(options =>
 
 ## Health checks
 
-`AddSurefire` already registers a health check named `surefire`. To expose it:
+`AddSurefire` registers a health check named `surefire`. To expose it:
 
 ```csharp
 app.MapHealthChecks("/health");
 ```
 
-## Dashboard mapping
+## Dashboard
 
-```csharp
-app.MapSurefireDashboard();          // /surefire
-app.MapSurefireDashboard("/admin"); // /admin
-```
-
-The dashboard is embedded in the `Surefire.Dashboard` package. No separate frontend build step is required.
-
-In production, secure the dashboard endpoints:
-
-```csharp
-app.MapSurefireDashboard()
-    .RequireAuthorization("AdminPolicy");
-```
+Map the dashboard with `app.MapSurefireDashboard()`. See [Dashboard](/surefire/guides/dashboard/) for setup, authorization, and the REST API.
 

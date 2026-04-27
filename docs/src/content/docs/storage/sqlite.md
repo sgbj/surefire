@@ -20,23 +20,16 @@ builder.Services.AddSurefire(options =>
 
 ## When to use SQLite
 
-SQLite is a good fit for:
+SQLite is a good fit for development, testing, embedded apps, and single-node deployments where you want persistence without running a database server.
 
-- Development and testing
-- Single-node deployments where you want persistence without running a database server
-- Embedded applications
+## Schema
 
-SQLite is not suitable for multi-node deployments since the database file is local to one machine.
+With `AutoMigrate` enabled (the default), Surefire creates and migrates the required `surefire_*` tables on startup.
 
 ## Notifications
 
-The SQLite provider does not include a real-time notification provider. Workers rely on polling. Since SQLite is typically used in single-node setups, the default 5-second polling interval is usually fine. You can lower it if needed:
+The SQLite provider has no built-in notification transport. Workers wake up on `PollingInterval` (default 5 seconds). Lower it for faster pickup of new runs:
 
 ```csharp
-builder.Services.AddSurefire(options =>
-{
-    options.UseSqlite("Data Source=surefire.db");
-    options.PollingInterval = TimeSpan.FromSeconds(1);
-});
+options.PollingInterval = TimeSpan.FromSeconds(2);
 ```
-
