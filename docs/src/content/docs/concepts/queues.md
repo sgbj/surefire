@@ -33,8 +33,6 @@ app.AddJob("MonthlyReport", async () => { /* ... */ })
     .WithQueue("reports");
 ```
 
-Jobs without an explicit queue go to `default`.
-
 ## Priority
 
 Queues have a priority (default 0, higher is more important). When multiple queues have pending runs, higher-priority queues are processed first.
@@ -71,5 +69,4 @@ See the [rate limiting guide](/surefire/guides/rate-limiting/) for details.
 
 ## Pausing
 
-Queues can be paused and resumed from the dashboard or the API. When a queue is paused, no new runs from that queue start until it's resumed. Runs already in progress are not affected.
-
+Queues can be paused and resumed from the dashboard or the REST API. While a queue is paused, no new runs from it start. Runs already in progress are not affected.

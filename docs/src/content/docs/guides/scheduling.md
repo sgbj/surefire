@@ -5,18 +5,16 @@ description: Cron schedules, continuous jobs, and misfire handling.
 
 ## Cron jobs
 
-Use `WithCron` to run a job on a schedule. Surefire accepts 5-field or 6-field cron expressions:
+Use `WithCron` to run a job on a schedule:
 
 ```csharp
 app.AddJob("DailyReport", async () => { /* ... */ })
     .WithCron("0 9 * * *", "America/Chicago"); // 9am Central every day
 ```
 
-The second argument is an optional timezone ID. Without it, the schedule runs in UTC.
+The second argument is an optional timezone ID. Without it, the schedule runs in UTC. Schedules respect the zone's daylight saving transitions, so `0 9 * * *` with `America/Chicago` always fires at 9:00 AM Central even when the equivalent UTC time shifts.
 
-Use IANA zone IDs such as `America/Chicago` or `Europe/London`. Surefire resolves them through `TimeZoneInfo`, so the same IDs work on modern .NET across Windows and Linux.
-
-Cron schedules follow the selected local time zone, including daylight saving transitions. For example, `0 9 * * *` with `America/Chicago` stays at **9:00 AM Central**, even though the UTC fire time changes when DST starts or ends.
+Each scheduled fire time produces at most one run, even with multiple nodes scheduling in parallel.
 
 Some common expressions:
 
@@ -28,11 +26,9 @@ Some common expressions:
 | `0 9 * * 1-5` | Weekdays at 9am |
 | `0 0 1 * *` | First of every month at midnight |
 
-Each cron occurrence is deduplicated so overlapping scheduler activity does not create duplicate runs for the same fire time.
-
 ## Misfire policy
 
-If a node is down when a cron job is supposed to fire, the missed occurrences are called misfires. The misfire policy controls what happens when the node comes back up:
+If no node is available when a cron job is supposed to fire, the missed occurrences are called misfires. The misfire policy controls what happens when scheduling resumes:
 
 ```csharp
 app.AddJob("Cleanup", async () => { /* ... */ })
@@ -40,27 +36,13 @@ app.AddJob("Cleanup", async () => { /* ... */ })
     .WithMisfirePolicy(MisfirePolicy.FireOnce);
 ```
 
-| Policy | Behavior |
-|---|---|
-| `Skip` | Ignore all missed fires and resume from the next future occurrence. This is the default. |
-| `FireOnce` | Fire once to catch up, then resume the normal schedule. |
-| `FireAll` | Fire missed occurrences, optionally bounded per scheduler tick with `fireAllLimit`. |
+| Policy | Behavior | When to use |
+|---|---|---|
+| `Skip` (default) | Ignore missed fires and resume from the next future occurrence. | Most jobs, where catch-up runs would pile up after an outage. |
+| `FireOnce` | Fire once to catch up, then resume the normal schedule. | Cumulative work that should run at least once after a gap. |
+| `FireAll` | Fire every missed occurrence, optionally capped with `fireAllLimit`. | Workloads where every scheduled execution matters and skipping any would cause data loss. |
 
-`Skip` is the right choice for most jobs. If your server was down for 3 hours and you have a minutely job, you probably don't want 180 catch-up runs.
-
-`FireOnce` is useful when the job does cumulative work (like processing everything since the last run) and you need it to run at least once after a gap.
-
-`FireAll` is for cases where every single scheduled execution matters and skipping any would cause data loss.
-
-By default, `FireAll` is unbounded for the current scheduler tick:
-
-```csharp
-app.AddJob("Cleanup", async () => { /* ... */ })
-    .WithCron("0 * * * *")
-    .WithMisfirePolicy(MisfirePolicy.FireAll);
-```
-
-If you want to pace backlog replay after outages, set `fireAllLimit` to cap how many missed fires are enqueued per tick. Remaining missed fires are replayed on subsequent ticks:
+To bound the catch-up after long outages, pass `fireAllLimit`. Surefire keeps the most recent N misses and skips the rest, so a 24-hour outage on an hourly job with `fireAllLimit: 10` fires the last 10 hours and resumes from now:
 
 ```csharp
 app.AddJob("Cleanup", async () => { /* ... */ })
@@ -70,7 +52,7 @@ app.AddJob("Cleanup", async () => { /* ... */ })
 
 ## Continuous jobs
 
-A continuous job auto-restarts whenever it completes, fails, or is cancelled. This is useful for queue consumers, stream processors, and background pollers.
+A continuous job restarts after each run, regardless of whether it succeeded, failed, or was cancelled. Useful for queue consumers, stream processors, and background pollers that should always be running.
 
 ```csharp
 app.AddJob("QueueConsumer", async (CancellationToken ct) =>
@@ -84,30 +66,21 @@ app.AddJob("QueueConsumer", async (CancellationToken ct) =>
 .Continuous();
 ```
 
-Continuous successor creation is idempotent, so duplicate completion processing does not create duplicate successors.
-
-On startup, Surefire seeds enabled continuous jobs up to their configured `MaxConcurrency` (default 1).
-
-By default, continuous jobs have `MaxConcurrency` of 1, meaning only one instance runs across the cluster. Override this to run parallel workers:
+Continuous jobs default to `MaxConcurrency` of 1, meaning only one instance runs across the cluster. Override it to run parallel workers:
 
 ```csharp
-app.AddJob("QueueConsumer", async (CancellationToken ct) =>
-{
-    while (!ct.IsCancellationRequested)
-    {
-        var msg = await queue.DequeueAsync(ct);
-        await ProcessAsync(msg, ct);
-    }
-})
-.Continuous()
-.WithMaxConcurrency(3);
+app.AddJob("QueueConsumer", async (CancellationToken ct) => { /* ... */ })
+    .Continuous()
+    .WithMaxConcurrency(3);
 ```
+
+Surefire seeds enabled continuous jobs up to their configured `MaxConcurrency` on startup.
 
 | Scenario | Behavior |
 |---|---|
-| Job completes | Restarts immediately |
+| Job completes | Restarts |
 | Job fails, retries remaining | Normal retry behavior |
 | Job fails, retries exhausted | Restarts after a cooldown delay |
-| Job cancelled by user | Restarts (unless job is disabled) |
+| Job cancelled | Restarts (unless job is disabled) |
 | Job disabled via dashboard | No restart |
-| Job re-enabled via dashboard | New run created on next heartbeat |
+| Job re-enabled via dashboard | Restarts |

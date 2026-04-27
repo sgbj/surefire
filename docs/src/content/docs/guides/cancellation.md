@@ -13,7 +13,7 @@ await client.CancelAsync(runId);
 
 You can also cancel runs from the dashboard by clicking the cancel button on a running or pending job.
 
-Pending runs are cancelled immediately. Running runs first move into `Cancelling`, receive a cancellation signal via `CancellationToken`, and become `Cancelled` once the attempt has finished flushing its final observable events. If a running job doesn't check its token, it will continue until it finishes or the process shuts down.
+Cancellation transitions the run directly to `Cancelled`. The running attempt receives a signal through its `CancellationToken` and stops at the next opportunity. If a running job never checks its token, it keeps executing until it finishes on its own or the process shuts down, even though the run is already marked `Cancelled`.
 
 ## Cascade cancellation
 
@@ -22,8 +22,8 @@ When you cancel a run, all of its child runs (triggered via `IJobClient` from wi
 ```csharp
 app.AddJob("Parent", async (IJobClient client, CancellationToken ct) =>
 {
-    // If Parent is cancelled, this child is also cancelled
-    await client.RunAsync("Child", ct);
+    // If Parent is cancelled, this child is also cancelled.
+    await client.RunAsync("Child", cancellationToken: ct);
 });
 ```
 
@@ -39,11 +39,11 @@ app.AddJob("Import", async (CancellationToken ct) =>
 .WithTimeout(TimeSpan.FromMinutes(5));
 ```
 
-Timeout is implemented via cancellation of the running attempt. In run history this appears as cancellation for that attempt.
+A timeout cancels the running attempt's `CancellationToken` and records the attempt as failed (with a `TimeoutException`), not as cancelled. Normal retry policy applies, so a timeout that has retries remaining produces a fresh attempt.
 
 ## Shutdown
 
-When the application shuts down, Surefire interrupts in-flight running attempts and waits up to `ShutdownTimeout` (default 15 seconds) for shutdown work.
+When the host shuts down, in-flight runs are cancelled and have up to `ShutdownTimeout` (default 15 seconds) to finish. Anything still running past the timeout is recorded as a failure and follows normal retry policy.
 
 ```csharp
 builder.Services.AddSurefire(options =>
@@ -51,8 +51,6 @@ builder.Services.AddSurefire(options =>
     options.ShutdownTimeout = TimeSpan.FromSeconds(30);
 });
 ```
-
-Shutdown interruptions are recorded as run failures with an explicit shutdown error and then follow normal retry policy. If retries remain, the run is scheduled again; otherwise it moves to dead-letter.
 
 ## Handling cancellation in jobs
 

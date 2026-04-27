@@ -194,8 +194,9 @@ public sealed class JobBuilder
     /// </summary>
     /// <param name="policy">The misfire policy.</param>
     /// <param name="fireAllLimit">
-    ///     Optional per-tick limit for missed fires when <paramref name="policy" /> is
-    ///     <see cref="Surefire.MisfirePolicy.FireAll" />. Null means unlimited.
+    ///     Optional cap on missed fires to catch up when <paramref name="policy" /> is
+    ///     <see cref="Surefire.MisfirePolicy.FireAll" />. Once the cap is reached, older missed
+    ///     fires are skipped and scheduling resumes from the present. Null means unlimited.
     /// </param>
     /// <returns>This builder for chaining.</returns>
     public JobBuilder WithMisfirePolicy(MisfirePolicy policy, int? fireAllLimit = null)

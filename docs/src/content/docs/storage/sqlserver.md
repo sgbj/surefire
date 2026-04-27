@@ -14,19 +14,15 @@ dotnet add package Surefire.SqlServer
 ```csharp
 builder.Services.AddSurefire(options =>
 {
-    options.UseSqlServer(builder.Configuration.GetConnectionString("surefire")!);
+    options.UseSqlServer(builder.Configuration.GetConnectionString("Surefire")!);
 });
 ```
 
-Or pass the connection string directly:
+## Database
 
-```csharp
-options.UseSqlServer("Server=localhost;Database=myapp;Trusted_Connection=true");
-```
+With `AutoMigrate` enabled (the default), Surefire creates and migrates the required `dbo.surefire_*` tables on startup. The principal you use for migration needs permission to create tables. At runtime, `db_datareader` and `db_datawriter` are enough.
 
-Point Surefire at a dedicated user database — not `master`, `tempdb`, `model`, or `msdb`. The principal used for migration needs permission to create tables; at runtime `db_datareader`/`db_datawriter` is enough.
-
-For best performance, enable `READ_COMMITTED_SNAPSHOT` on the database. This prevents dashboard reads from blocking writers and reduces lock contention between claims, inserts, and maintenance under load:
+Enable `READ_COMMITTED_SNAPSHOT` on the database to keep dashboard reads from blocking writers and reduce lock contention between claims, inserts, and maintenance under load:
 
 ```sql
 ALTER DATABASE [YourDb] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
@@ -34,26 +30,20 @@ ALTER DATABASE [YourDb] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
 
 This requires `ALTER` on the database and exclusive access (hence `ROLLBACK IMMEDIATE`), so run it once during provisioning.
 
-## Schema
-
-With `AutoMigrate` enabled (the default), Surefire creates the required SQL Server tables automatically.
-The current provider uses the built-in `dbo.surefire_*` table names.
-
 ## Notifications
 
-The SQL Server provider does not include a real-time notification provider. Workers rely on polling to pick up new jobs. Set the `PollingInterval` to control how frequently the scheduler checks for pending runs:
+The SQL Server provider has no built-in notification transport. Workers wake up on `PollingInterval` (default 5 seconds). Lower it for faster pickup of new runs:
 
 ```csharp
-options.PollingInterval = TimeSpan.FromSeconds(1);
+options.PollingInterval = TimeSpan.FromSeconds(2);
 ```
 
-For lower latency, you can combine the SQL Server store with Redis as the notification provider. Register an `IConnectionMultiplexer` in DI (e.g. `builder.AddRedisClient("notifications")`) then:
+For real-time wakeups, pair the SQL Server store with the Redis notification provider. Register an `IConnectionMultiplexer` in DI, then:
 
 ```csharp
 builder.Services.AddSurefire(options =>
 {
-    options.UseSqlServer("Server=localhost;Database=myapp;Trusted_Connection=true");
+    options.UseSqlServer(builder.Configuration.GetConnectionString("Surefire")!);
     options.UseRedisNotifications();
 });
 ```
-

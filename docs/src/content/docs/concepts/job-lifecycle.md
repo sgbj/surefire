@@ -1,31 +1,27 @@
 ---
 title: Job lifecycle
-description: Statuses, retries, dead lettering, reruns, and deduplication.
+description: Run statuses, retries, and reruns.
 ---
 
 ## Statuses
 
-Every run goes through a series of statuses:
+A run has one of five statuses:
 
 | Status | Meaning |
 |---|---|
-| Pending | Waiting to be picked up by a node |
+| Pending | Waiting to be claimed by a node |
 | Running | Currently executing |
-| Cancelling | Cancellation was requested for a running attempt and finalization is still in progress |
 | Succeeded | Finished successfully |
-| Retrying | The latest attempt failed and another attempt is scheduled |
 | Cancelled | Cancelled by a user, during shutdown, or because it expired |
 | Failed | Failed after all retry attempts were exhausted |
 
+Succeeded, Cancelled, and Failed are terminal. The `Attempt` field on the run records which attempt produced the terminal status.
+
 ## Retries
 
-When a job fails and retries are configured:
+When an attempt fails and retries remain, the run transitions back to `Pending` with `NotBefore` set to the next backoff time and `Attempt` incremented. The next claim picks it up after the delay. When retries are exhausted, the run transitions from `Running` directly to `Failed`.
 
-1. The run transitions to `Retrying`.
-2. After the backoff delay, the run transitions back to `Pending`.
-3. If retries are exhausted, the run is marked `Failed`.
-
-Configure retries on a per-job basis:
+Configure retries per job:
 
 ```csharp
 app.AddJob("Flaky", async () => { /* ... */ })
@@ -43,39 +39,4 @@ The default backoff is fixed at 5 seconds with jitter enabled.
 
 ## Reruns
 
-Reruns are different from retries. A retry is automatic and part of the same logical execution chain. A rerun is a manual action, typically triggered from the dashboard, that creates a completely independent run with the same job name and arguments.
-
-Reruns don't inherit the parent's trace tree. They're linked via `RerunOfRunId` for reference, but they're otherwise standalone.
-
-## Deduplication
-
-You can prevent duplicate runs by setting a deduplication ID:
-
-```csharp
-await client.TriggerAsync("Import", args, new RunOptions
-{
-    DeduplicationId = $"import-{date:yyyy-MM-dd}"
-});
-```
-
-If a non-terminal run with the same deduplication ID already exists, the trigger is rejected. Deduplication IDs are released when the existing run reaches a terminal status (`Succeeded`, `Cancelled`, or `Failed`).
-
-Cron jobs use automatic deduplication based on the job name and scheduled time, so you don't need to worry about double-firing after a node restart.
-
-## Run expiration
-
-Set `NotAfter` on a run to give it a deadline. If the run has not started by that time, it will eventually be cancelled automatically.
-
-```csharp
-await client.TriggerAsync("TimelyReport", args, new RunOptions
-{
-    NotBefore = DateTimeOffset.UtcNow,
-    NotAfter = DateTimeOffset.UtcNow.AddMinutes(30)
-});
-```
-
-This is useful for time-sensitive work where a late execution is worse than no execution. Expiration cancels runs that have not started yet; in-flight runs are handled through normal cancellation/finalization.
-
-## Node health
-
-Nodes send heartbeats every 30 seconds (configurable). If a node goes silent for longer than `InactiveThreshold` (default 2 minutes), another node recovers its runs by transitioning them through retry flow. Inactive nodes are pruned from the store.
+Retries are automatic and continue the same run. Reruns are manual (from the dashboard or `IJobClient.RerunAsync`) and create a new run with the same job name, arguments, and input events. The new run's `RerunOfRunId` points back to the original so the dashboard can show the connection.

@@ -35,16 +35,16 @@ import ScreenshotCarousel from '../../components/ScreenshotCarousel.astro';
 
 <CardGrid>
   <Card title="Minimal API style" icon="rocket">
-    Register jobs with delegates using the same fluent style as endpoint mapping, with arguments resolved from DI and run payloads.
+    Register jobs with delegates using the same fluent style as endpoint mapping. Parameters resolve from DI and from arguments passed when triggering a run.
   </Card>
   <Card title="Distributed" icon="random">
-    Run multiple nodes with coordinated scheduling and recovery.
+    Runs across multiple nodes with coordinated scheduling and recovery. Nodes can register the same or different jobs.
   </Card>
-  <Card title="Real-time dashboard" icon="laptop">
-    Built-in UI with live log streaming, progress tracking, job management, and node monitoring.
+  <Card title="Built-in dashboard" icon="laptop">
+    Live logs, progress, run history, node monitoring, and a REST API.
   </Card>
-  <Card title="Feature rich" icon="puzzle">
-    Retries, cron scheduling, queues, rate limiting, concurrency limits, lifecycle hooks, streaming with `IAsyncEnumerable<T>`, and OpenTelemetry.
+  <Card title="Scheduling, reliability, observability" icon="puzzle">
+    Cron, retries, queues, rate limits, timeouts, lifecycle callbacks, filters, streaming with `IAsyncEnumerable<T>`, and OpenTelemetry.
   </Card>
 </CardGrid>
 
@@ -65,7 +65,7 @@ app.AddJob("DataImport", async (ILogger<Program> logger, CancellationToken ct) =
         logger.LogInformation("Step {Step}/10", i);
         await Task.Delay(1000, ct);
     }
-}).WithDescription("Imports data and reports progress")
+}).WithDescription("Imports data")
   .WithCron("* * * * *");
 
 app.MapSurefireDashboard();

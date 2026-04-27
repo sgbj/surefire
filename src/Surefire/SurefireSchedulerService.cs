@@ -197,26 +197,24 @@ internal sealed partial class SurefireSchedulerService(
         DateTimeOffset now,
         int? maxOccurrences)
     {
-        var fireTimes = new List<DateTimeOffset>();
+        // When capped, keep the most recent N occurrences (sliding window). The newest misses
+        // are usually what operators care about catching up; older ones are skipped.
+        var queue = new Queue<DateTimeOffset>(maxOccurrences ?? 16);
         var cursor = lastCronFireAt;
-        while (true)
+        var truncated = false;
+        while (cron.GetNextOccurrence(cursor, timeZone) is { } next && next <= now)
         {
-            var next = cron.GetNextOccurrence(cursor, timeZone);
-            if (next is null || next > now)
+            if (maxOccurrences is { } max && queue.Count == max)
             {
-                break;
+                queue.Dequeue();
+                truncated = true;
             }
 
-            if (maxOccurrences is { } max && fireTimes.Count >= max)
-            {
-                return new(fireTimes, true);
-            }
-
-            fireTimes.Add(next.Value);
-            cursor = next.Value;
+            queue.Enqueue(next);
+            cursor = next;
         }
 
-        return new(fireTimes, false);
+        return new(queue.ToArray(), truncated);
     }
 
     private readonly record struct MissedFireTimesResult(IReadOnlyList<DateTimeOffset> FireTimes, bool IsTruncated);
@@ -237,7 +235,7 @@ internal sealed partial class SurefireSchedulerService(
 
         [LoggerMessage(EventId = 1204, Level = LogLevel.Warning,
             Message =
-                "Job '{JobName}' reached FireAllLimit={FireAllLimit}. Remaining missed fires will be scheduled on subsequent ticks.")]
+                "Job '{JobName}' reached FireAllLimit={FireAllLimit}. Older missed fires were skipped.")]
         public static partial void FireAllLimited(ILogger logger, string jobName, int fireAllLimit);
     }
 }

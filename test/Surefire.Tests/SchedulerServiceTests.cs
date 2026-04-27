@@ -124,16 +124,27 @@ public sealed class SchedulerServiceTests
     }
 
     [Fact]
-    public async Task FireAll_ExceedsLimit_TruncatesAtLimit()
+    public async Task FireAll_ExceedsLimit_FiresNewestNAndCursorLandsOnLatestMiss()
     {
         var (service, store, time) = CreateService();
-        var lastFire = time.GetUtcNow().AddMinutes(-10).AddSeconds(-30);
+        var now = time.GetUtcNow();
+        var lastFire = now.AddMinutes(-10).AddSeconds(-30);
         store.Jobs.Add(MakeJob(cron: "* * * * *", policy: MisfirePolicy.FireAll,
             fireAllLimit: 3, lastCronFireAt: lastFire));
 
         await service.ScheduleDueJobsAsync(CancellationToken.None);
 
-        Assert.Equal(3, store.CreatedRuns.Count);
+        // 10 misses available (one per minute over 10:30), limit 3 keeps the newest 3.
+        Assert.Equal(
+            [
+                now.AddMinutes(-2).AddSeconds(-30),
+                now.AddMinutes(-1).AddSeconds(-30),
+                now.AddSeconds(-30)
+            ],
+            store.CreatedRuns.Select(x => x.CronFireAt).ToArray());
+
+        // Cursor lands on the latest miss so subsequent ticks don't replay the older skipped fires.
+        Assert.Equal(now.AddSeconds(-30), store.CreatedRuns[^1].CronFireAt);
     }
 
     [Fact]

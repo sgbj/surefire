@@ -8,15 +8,18 @@ description: Get up and running with Surefire in minutes.
 ```bash
 dotnet add package Surefire
 dotnet add package Surefire.Dashboard
-
-# Choose an optional storage provider:
-dotnet add package Surefire.PostgreSql
-dotnet add package Surefire.SqlServer
-dotnet add package Surefire.Redis
-dotnet add package Surefire.Sqlite
 ```
 
-The core package includes an in-memory store that works out of the box. It runs in a single process and loses its state when the process stops.
+The core package ships with an in-memory store and notifications, which work out of the box but only within a single process. State is lost when the process stops.
+
+For production, add a storage provider:
+
+```bash
+dotnet add package Surefire.PostgreSql
+dotnet add package Surefire.SqlServer
+dotnet add package Surefire.Sqlite
+dotnet add package Surefire.Redis
+```
 
 ## Quick start
 
