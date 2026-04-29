@@ -260,6 +260,7 @@ internal sealed partial class SurefireExecutorService(
         IDisposable? jobContextScope = null;
         TimeSpan? configuredTimeout = null;
         JobContext? context = null;
+        var handlerCompleted = false;
 
         try
         {
@@ -353,6 +354,7 @@ internal sealed partial class SurefireExecutorService(
             await using var scope = scopeFactory.CreateAsyncScope();
 
             var invocation = await ExecuteThroughFiltersAsync(job, run, context, scope.ServiceProvider, executionToken);
+            handlerCompleted = true;
             context.Result = invocation.ResultObject;
 
             var completedAt = timeProvider.GetUtcNow();
@@ -417,10 +419,10 @@ internal sealed partial class SurefireExecutorService(
                 return;
             }
 
-            // OCE without runCts cancellation came from post-handler bookkeeping (e.g. the
+            // OCE after the handler completed came from post-handler bookkeeping (e.g. the
             // best-effort completion token), not a genuine cancel. Leave the run in Running so
             // stale recovery picks it up.
-            if (!runCts.IsCancellationRequested)
+            if (!runCts.IsCancellationRequested && handlerCompleted)
             {
                 Log.PostHandlerBookkeepingFailed(logger, ex, run.Id, run.JobName);
                 try
@@ -449,16 +451,18 @@ internal sealed partial class SurefireExecutorService(
             var bestEffortToken = bestEffortCts.Token;
 
             var cancelledAt = timeProvider.GetUtcNow();
-            var cancelReason = "Cancelled by external request.";
+            var cancelReason = runCts.IsCancellationRequested
+                ? "Cancelled by external request."
+                : "Operation was canceled.";
 
             var cancelEvent = batchCompletionHandler.CreateFailureEvent(
                 run,
-                RunFailureEnvelope.FromMessage(
+                RunFailureEnvelope.FromException(
                     run.Attempt,
                     cancelledAt,
+                    ex,
                     "executor",
-                    "run_cancelled",
-                    cancelReason));
+                    "run_cancelled"));
 
             if (context is { })
             {
@@ -496,6 +500,12 @@ internal sealed partial class SurefireExecutorService(
                         bestEffortToken);
                 }
             }
+
+            await CancelDescendantRunsAsync(
+                run.Id,
+                cancelReason,
+                new HashSet<string>(StringComparer.Ordinal),
+                bestEffortToken);
         }
         finally
         {
@@ -1388,6 +1398,50 @@ internal sealed partial class SurefireExecutorService(
         var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         cts.CancelAfter(options.ShutdownTimeout);
         return cts;
+    }
+
+    private async Task CancelDescendantRunsAsync(string parentRunId, string reason, ISet<string> visited,
+        CancellationToken cancellationToken)
+    {
+        if (!visited.Add(parentRunId))
+        {
+            return;
+        }
+
+        var cancelledChildIds = await store.CancelChildRunsAsync(parentRunId, reason, cancellationToken);
+        foreach (var childId in cancelledChildIds.Distinct(StringComparer.Ordinal))
+        {
+            await PublishCancellationNotificationsAsync(childId, cancellationToken);
+            await CancelDescendantRunsAsync(childId, reason, visited, cancellationToken);
+        }
+    }
+
+    private async Task PublishCancellationNotificationsAsync(string runId, CancellationToken cancellationToken)
+    {
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            return;
+        }
+
+        await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
+        if (run.Status.IsTerminal)
+        {
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
+        }
+
+        await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
+        if (run.BatchId is { } batchId)
+        {
+            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId, cancellationToken);
+            var batch = await store.GetBatchAsync(batchId, cancellationToken);
+            if (batch?.Status.IsTerminal is true)
+            {
+                await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId,
+                    cancellationToken);
+            }
+        }
     }
 
     private async Task WaitForActiveRunsAsync()

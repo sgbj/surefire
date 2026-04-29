@@ -1544,7 +1544,6 @@ internal sealed partial class JobClient(
             cancellationToken);
         foreach (var childId in cancelledChildIds)
         {
-            visited.Add(childId);
             await PublishCancellationNotificationsAsync(childId, cancellationToken);
 
             // Recurse to handle nested batch coordinators.

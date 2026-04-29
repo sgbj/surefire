@@ -462,6 +462,101 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
+    public async Task RunAsync_CallerCancellationInsideJob_CancelsOwnedRunAndNestedBatchChildren()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+            options.MaxNodeConcurrency = 8;
+        });
+
+        harness.Host.AddJob("NestedBatchSlow", async (int value, CancellationToken ct) =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), ct);
+            return value;
+        });
+
+        harness.Host.AddJob("NestedBatchOwner", async (IJobClient client, CancellationToken ct) =>
+        {
+            var results = await client.RunBatchAsync<int>(
+                "NestedBatchSlow",
+                Enumerable.Range(1, 3).Select(i => new { value = i }),
+                cancellationToken: ct);
+            return results.Sum();
+        });
+
+        harness.Host.AddJob("CustomTokenOwner", async (IJobClient client) =>
+        {
+            using var timeout = new CancellationTokenSource();
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(500));
+            return await client.RunAsync<int>("NestedBatchOwner", cancellationToken: timeout.Token);
+        });
+
+        await harness.StartAsync(ct);
+
+        var ownerRun = await harness.Client.TriggerAsync("CustomTokenOwner", cancellationToken: ct);
+        using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        waitCts.CancelAfter(TimeSpan.FromSeconds(10));
+
+        var ownerFinal = await harness.Client.WaitAsync(ownerRun.Id, waitCts.Token);
+        Assert.Equal(JobStatus.Cancelled, ownerFinal.Status);
+
+        var ownerFailure = Assert.Single(await harness.Store.GetEventsAsync(
+            ownerRun.Id,
+            0,
+            [RunEventType.AttemptFailure],
+            cancellationToken: waitCts.Token));
+        using (var payload = JsonDocument.Parse(ownerFailure.Payload!))
+        {
+            var root = payload.RootElement;
+            Assert.Equal("run_cancelled", root.GetProperty("failureCode").GetString());
+            Assert.EndsWith("CanceledException", root.GetProperty("exceptionType").GetString());
+            Assert.Contains("CanceledException", root.GetProperty("stackTrace").GetString());
+        }
+
+        var nestedOwner = await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { ParentRunId = ownerRun.Id, JobName = "NestedBatchOwner" },
+                    0,
+                    10,
+                    ct);
+                return page.Items.SingleOrDefault();
+            },
+            run => run?.Status == JobStatus.Cancelled,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the owned run to be cancelled.",
+            ct);
+
+        var nestedChildren = await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { ParentRunId = nestedOwner.Id, JobName = "NestedBatchSlow" },
+                    0,
+                    10,
+                    ct);
+                return page.Items;
+            },
+            items => items.Count == 3 && items.All(r => r.Status == JobStatus.Cancelled),
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for nested batch children to be cancelled.",
+            ct);
+
+        var batchId = Assert.Single(nestedChildren.Select(r => r.BatchId).Distinct());
+        Assert.NotNull(batchId);
+        var batch = await harness.Client.GetBatchAsync(batchId, waitCts.Token);
+        Assert.NotNull(batch);
+        Assert.Equal(JobStatus.Cancelled, batch.Status);
+    }
+
+    [Fact]
     public async Task StreamAsync_FallsBackToResultJsonList_WhenNoOutputEvents()
     {
         var ct = TestContext.Current.CancellationToken;

@@ -28,7 +28,7 @@ builder.Services.AddSurefire(options =>
 | `ShutdownTimeout` | 15s | Time allowed for in-flight runs during host shutdown |
 | `MaxNodeConcurrency` | `min(ProcessorCount * 5, 20)` | Maximum concurrent executions on this node. Set to `null` for unlimited |
 | `AutoMigrate` | `true` | Runs store migrations at startup |
-| `SerializerOptions` | `JsonSerializerOptions.Web`-based | JSON options for arguments and results |
+| `SerializerOptions` | camelCase, case-insensitive, numbers from strings | JSON options for job arguments and results |
 
 ## Health checks
 
