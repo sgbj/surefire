@@ -1,9 +1,12 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Surefire;
 
 internal static class TypeHelpers
 {
     private static readonly Type AsyncEnumerableGenericDefinition = typeof(IAsyncEnumerable<>);
 
+    [RequiresUnreferencedCode("Inspects interfaces of a runtime type which may be trimmed.")]
     public static bool TryGetAsyncEnumerableElementType(Type type, out Type elementType)
     {
         if (type.IsGenericType && type.GetGenericTypeDefinition() == AsyncEnumerableGenericDefinition)

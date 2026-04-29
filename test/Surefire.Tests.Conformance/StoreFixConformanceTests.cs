@@ -3,8 +3,8 @@ using System.Collections.Concurrent;
 namespace Surefire.Tests.Conformance;
 
 /// <summary>
-///     Tests for store fixes: sliding window decay, batch coordinator pending count,
-///     TryCreateRunAsync for non-existent jobs, LIKE wildcard escaping, and BatchTotal=0.
+///     Mixed coverage for store edge cases (LIKE wildcard escaping, sliding-window decay,
+///     batch counters, runs for unregistered jobs, BatchTotal=0).
 /// </summary>
 public abstract class StoreFixConformanceTests : StoreConformanceBase
 {
@@ -137,7 +137,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         await Store.UpsertJobsAsync([CreateJob(job1Name)], ct);
         await Store.UpsertJobsAsync([CreateJob(job2Name)], ct);
 
-        // Search for literal "_a_" â€” should not treat _ as single-char wildcard
+        // Literal "_a_" must not treat _ as a single-char wildcard.
         var results = await Store.GetJobsAsync(new() { Name = $"_a_{suffix}" }, ct);
 
         Assert.Single(results);
@@ -164,7 +164,6 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
 
         var queueStats = await Store.GetQueueStatsAsync(ct);
         Assert.True(queueStats.ContainsKey(queueName));
-        // All 3 batch children should be pending
         Assert.Equal(3, queueStats[queueName].PendingCount);
     }
 
@@ -182,11 +181,10 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        // Move the job to the "high" queue
         job.Queue = "high";
         await Store.UpsertJobsAsync([job], ct);
 
-        // The pending run should still be claimable when the node registers for both queues
+        // The pending run should still be claimable when the node registers for both queues.
         var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["low", "high"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
     }
@@ -198,7 +196,6 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var queueName = $"conc-q-{Guid.CreateVersion7():N}";
         await Store.UpsertQueuesAsync([new() { Name = queueName, MaxConcurrency = 2 }], ct);
 
-        // Create 10 different jobs all in the same concurrency-limited queue
         var jobNames = new List<string>();
         for (var i = 0; i < 10; i++)
         {
@@ -212,7 +209,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
             await Store.CreateRunsAsync([run], cancellationToken: ct);
         }
 
-        // Claim concurrently from 10 threads â€” only 2 should succeed due to queue max_concurrency=2
+        // Claim concurrently from 10 threads; only 2 should succeed due to queue max_concurrency=2.
         var results = new ConcurrentBag<JobRun?>();
         var tasks = Enumerable.Range(0, 10).Select(t => Task.Run(async () =>
         {
@@ -238,17 +235,14 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var child1 = CreateRun(jobName) with { BatchId = batchId };
         var child2 = CreateRun(jobName) with { BatchId = batchId };
 
-        // An unrelated run in the same queue
         var unrelated = CreateRun(jobName);
 
         await Store.CreateRunsAsync([child1, child2, unrelated], cancellationToken: ct);
 
-        // 3 pending: 2 children + 1 unrelated
         var stats1 = await Store.GetQueueStatsAsync(ct);
         Assert.True(stats1.ContainsKey(queueName));
         Assert.Equal(3, stats1[queueName].PendingCount);
 
-        // Claim and complete the unrelated run
         var claimed = (await Store.ClaimRunsAsync("node1", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
@@ -256,7 +250,6 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
             claimed.Id, claimed.Attempt, now, claimed.NotBefore, "node1", 1, null, null,
             claimed.StartedAt, now), ct);
 
-        // 2 pending: only the batch children remain
         var stats2 = await Store.GetQueueStatsAsync(ct);
         Assert.True(stats2.ContainsKey(queueName));
         Assert.Equal(2, stats2[queueName].PendingCount);
@@ -272,7 +265,6 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        // Append 200 events in batches
         for (var batch = 0; batch < 4; batch++)
         {
             var events = Enumerable.Range(batch * 50, 50)
@@ -290,7 +282,6 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var all = await Store.GetEventsAsync(run.Id, cancellationToken: ct);
         Assert.Equal(200, all.Count);
 
-        // Use a cursor from early in the list
         var earlyCursor = all[9].Id;
         var afterCursor = await Store.GetEventsAsync(run.Id, earlyCursor, cancellationToken: ct);
 
@@ -309,11 +300,10 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var past = now.AddMinutes(-10);
 
-        // Create 1 expired pending run
         var pending1 = CreateRun(jobName) with { NotAfter = past };
         await Store.CreateRunsAsync([pending1], cancellationToken: ct);
 
-        // Create a Running run with expired NotAfter (should NOT be cancelled)
+        // Running run with expired NotAfter; should NOT be cancelled.
         var running = CreateRun(jobName, JobStatus.Running) with
         {
             NotAfter = past,
@@ -324,18 +314,16 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         };
         await Store.CreateRunsAsync([running], cancellationToken: ct);
 
-        // Create another expired Pending run (SHOULD be cancelled)
+        // Another expired Pending run; should be cancelled.
         var pending2 = CreateRun(jobName) with
         {
             NotAfter = past
         };
         await Store.CreateRunsAsync([pending2], cancellationToken: ct);
 
-        // 2 Pending runs should be cancelled
         var cancelled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
         Assert.Equal(2, cancelled);
 
-        // The Running one should still be Running
         var loaded = await Store.GetRunAsync(running.Id, ct);
         Assert.Equal(JobStatus.Running, loaded!.Status);
     }

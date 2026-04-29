@@ -1,13 +1,9 @@
-import { Outlet, Link } from "react-router";
-import { useState, useEffect, useCallback } from "react";
-import {
-  SidebarInset,
-  SidebarProvider,
-  SidebarTrigger,
-} from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/app-sidebar";
-import { CommandPalette } from "@/components/command-palette";
-import { useCommandPalette } from "@/hooks/use-command-palette";
+import {Link, Outlet} from "react-router";
+import {useCallback, useEffect, useState} from "react";
+import {SidebarInset, SidebarProvider, SidebarTrigger,} from "@/components/ui/sidebar";
+import {AppSidebar} from "@/components/app-sidebar";
+import {CommandPalette} from "@/components/command-palette";
+import {useCommandPalette} from "@/hooks/use-command-palette";
 
 export type Theme = "system" | "light" | "dark";
 
@@ -63,8 +59,9 @@ export function Layout() {
         onOpenSearch={commandPalette.toggle}
       />
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
-          <SidebarTrigger />
+        <header
+          className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
+          <SidebarTrigger/>
           <Link to="/" className="flex items-center gap-2">
             <img
               src={`${import.meta.env.BASE_URL}surefire.svg`}
@@ -77,7 +74,7 @@ export function Layout() {
           </Link>
         </header>
         <div className="p-4 md:p-6 lg:p-8 overflow-x-clip">
-          <Outlet />
+          <Outlet/>
         </div>
       </SidebarInset>
       <CommandPalette

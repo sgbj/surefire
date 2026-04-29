@@ -1,41 +1,35 @@
-import { useMemo, useState } from "react";
-import { useQuery, keepPreviousData } from "@tanstack/react-query";
-import { type ColumnDef, type PaginationState } from "@tanstack/react-table";
-import { useParams } from "react-router";
-import { CircleAlert, ListFilter, Search } from "lucide-react";
-import { api, JobStatusLabels, type JobResponse, type JobRun } from "@/lib/api";
-import { DataTable } from "@/components/data-table";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
+import {useMemo, useState} from "react";
+import {keepPreviousData, useQuery} from "@tanstack/react-query";
+import {type ColumnDef, type PaginationState} from "@tanstack/react-table";
+import {useParams} from "react-router";
+import {CircleAlert, ListFilter, Search} from "lucide-react";
+import {api, type JobResponse, type JobRun, JobStatusLabels} from "@/lib/api";
+import {DataTable} from "@/components/data-table";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {Button} from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { formatDate, formatRelative } from "@/lib/format";
-import { DtDd } from "@/components/dt-dd";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { buildRunColumns } from "@/components/run-columns";
-import { buildJobColumns } from "@/components/job-columns";
-import { RUN_DATE_PRESETS } from "@/lib/run-date-presets";
-import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import {Input} from "@/components/ui/input";
+import {Skeleton} from "@/components/ui/skeleton";
+import {Tabs, TabsContent, TabsList, TabsTrigger} from "@/components/ui/tabs";
+import {formatDate, formatRelative} from "@/lib/format";
+import {DtDd} from "@/components/dt-dd";
+import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
+import {buildRunColumns} from "@/components/run-columns";
+import {buildJobColumns} from "@/components/job-columns";
+import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
+import {useDebouncedValue} from "@/hooks/use-debounced-value";
 
-const runColumns: ColumnDef<JobRun>[] = buildRunColumns({ showStarted: true });
+const runColumns: ColumnDef<JobRun>[] = buildRunColumns({showStarted: true});
 const jobColumns: ColumnDef<JobResponse>[] = buildJobColumns();
 
 export function NodeDetailPage() {
-  const { name } = useParams();
-  const { data: node, isError } = useQuery({
+  const {name} = useParams();
+  const {data: node, isError} = useQuery({
     queryKey: ["node", name],
     queryFn: () => api.getNode(name!),
     refetchInterval: (query) => (query.state.error ? false : 10000),
@@ -65,7 +59,7 @@ export function NodeDetailPage() {
     [name, debouncedJobName, statusFilter, datePreset, pagination],
   );
 
-  const { data: runs } = useQuery({
+  const {data: runs} = useQuery({
     queryKey: ["runs", "node", name, runsQueryKey],
     queryFn: () => {
       const preset = RUN_DATE_PRESETS.find((p) => p.value === datePreset);
@@ -82,10 +76,10 @@ export function NodeDetailPage() {
     placeholderData: keepPreviousData,
   });
 
-  const { data: jobs } = useQuery({
+  const {data: jobs} = useQuery({
     queryKey: ["jobs", "node", name, showInactiveJobs],
     queryFn: () =>
-      api.getJobs({ includeInactive: showInactiveJobs || undefined }),
+      api.getJobs({includeInactive: showInactiveJobs || undefined}),
   });
 
   const nodeScopedJobs = useMemo(() => {
@@ -110,7 +104,7 @@ export function NodeDetailPage() {
           {name}
         </h2>
         <Alert variant="destructive">
-          <CircleAlert />
+          <CircleAlert/>
           <AlertDescription>Failed to load node</AlertDescription>
         </Alert>
       </div>
@@ -119,16 +113,16 @@ export function NodeDetailPage() {
   if (!node)
     return (
       <div className="space-y-6">
-        <Skeleton className="h-7 w-48" />
+        <Skeleton className="h-7 w-48"/>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-          {Array.from({ length: 4 }).map((_, i) => (
+          {Array.from({length: 4}).map((_, i) => (
             <div key={i}>
-              <Skeleton className="h-3 w-16 mb-1.5" />
-              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-3 w-16 mb-1.5"/>
+              <Skeleton className="h-4 w-24"/>
             </div>
           ))}
         </div>
-        <Skeleton className="h-64 w-full rounded-lg" />
+        <Skeleton className="h-64 w-full rounded-lg"/>
       </div>
     );
 
@@ -166,7 +160,7 @@ export function NodeDetailPage() {
             toolbar={
               <>
                 <div className="relative max-w-sm">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
                   <Input
                     aria-label="Search node runs"
                     placeholder="Search..."
@@ -175,7 +169,7 @@ export function NodeDetailPage() {
                       const next = e.target.value;
                       setJobNameInput(next);
                       if (pagination.pageIndex !== 0) {
-                        setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+                        setPagination((prev) => ({...prev, pageIndex: 0}));
                       }
                     }}
                     className="pl-8"
@@ -185,11 +179,11 @@ export function NodeDetailPage() {
                   value={statusFilter}
                   onValueChange={(v) => {
                     setStatusFilter(v);
-                    setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+                    setPagination((prev) => ({...prev, pageIndex: 0}));
                   }}
                 >
                   <SelectTrigger size="sm" className="w-[140px]">
-                    <SelectValue />
+                    <SelectValue/>
                   </SelectTrigger>
                   <SelectContent position="popper">
                     <SelectItem value="all">All statuses</SelectItem>
@@ -204,11 +198,11 @@ export function NodeDetailPage() {
                   value={datePreset}
                   onValueChange={(v) => {
                     setDatePreset(v);
-                    setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+                    setPagination((prev) => ({...prev, pageIndex: 0}));
                   }}
                 >
                   <SelectTrigger size="sm" className="w-[140px]">
-                    <SelectValue />
+                    <SelectValue/>
                   </SelectTrigger>
                   <SelectContent position="popper">
                     {RUN_DATE_PRESETS.map((p) => (
@@ -235,7 +229,7 @@ export function NodeDetailPage() {
             toolbar={
               <>
                 <div className="relative max-w-sm">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
                   <Input
                     aria-label="Search node jobs"
                     placeholder="Search..."
@@ -251,7 +245,7 @@ export function NodeDetailPage() {
                       size="sm"
                       className={showInactiveJobs ? "border-primary/50" : ""}
                     >
-                      <ListFilter className="size-4" />
+                      <ListFilter className="size-4"/>
                       Filter
                     </Button>
                   </DropdownMenuTrigger>

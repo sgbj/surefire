@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 
@@ -5,36 +6,33 @@ namespace Surefire;
 
 internal sealed class HandlerMetadata
 {
-    // Avoids GetParameters() per invocation
     public required ParameterInfo[] Parameters { get; init; }
 
-    // Replaces DynamicInvoke — compiled expression tree
-    // (object?[] args) => raw handler return value (Task/ValueTask/T/IAsyncEnumerable/null)
+    // (object?[] args) => raw handler return value (Task/ValueTask/T/IAsyncEnumerable/null).
     public required Func<object?[], object?> Invoke { get; init; }
 
-    // Return type info
     public required Type ReturnType { get; init; }
-    public required bool HasResult { get; init; } // false for void/Task/ValueTask
 
-    // null if output type is not IAsyncEnumerable<T>
+    // false for void/Task/ValueTask.
+    public required bool HasResult { get; init; }
+
+    // null if return type is not IAsyncEnumerable<T> (or Task/ValueTask wrapping one).
     public Type? AsyncEnumerableElementType { get; init; }
 
-    // Compiled Task<T>.Result extractor — replaces GetProperty("Result").GetValue()
-    // null if return type has no result (void/Task/ValueTask)
+    // null if return type has no result (void/Task/ValueTask).
     public Func<Task, object?>? ExtractTaskResult { get; init; }
 
-    // Compiled ValueTask<T>.AsTask() — replaces per-call reflection for ValueTask<T> returns
-    // null if return type is not ValueTask<T>
+    // null if return type is not ValueTask<T>.
     public Func<object, Task>? AsTaskDelegate { get; init; }
 
-    // Compiled output stream materializer — replaces MakeGenericMethod per call in MaterializeAsyncEnumerableAsync
-    // null if output is not IAsyncEnumerable<T>
+    // null if return type is not IAsyncEnumerable<T>.
     public MaterializerDelegate? Materializer { get; init; }
 
-    // Per-parameter input stream binders (indexed by parameter position) — replaces MakeGenericMethod per call in BindStreamInputParameterAsync
-    // null entries for parameters that cannot bind from input stream
+    // Indexed by parameter position. null for parameters that cannot bind from an input stream.
     public required IReadOnlyList<StreamBinderDelegate?> StreamBinders { get; init; }
 
+    [RequiresUnreferencedCode("Reflects over a user-supplied handler delegate.")]
+    [RequiresDynamicCode("Reflects over a user-supplied handler delegate.")]
     public static HandlerMetadata Build(Delegate handler)
     {
         var parameters = handler.Method.GetParameters();
@@ -67,6 +65,7 @@ internal sealed class HandlerMetadata
         && returnType != typeof(Task)
         && returnType != typeof(ValueTask);
 
+    [RequiresUnreferencedCode("Inspects interfaces of a runtime type which may be trimmed.")]
     private static Type? GetAsyncEnumerableElementType(Type type)
     {
         if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
@@ -74,7 +73,7 @@ internal sealed class HandlerMetadata
             return type.GetGenericArguments()[0];
         }
 
-        // Handle Task<IAsyncEnumerable<T>> and ValueTask<IAsyncEnumerable<T>> — the handler
+        // Handle Task<IAsyncEnumerable<T>> and ValueTask<IAsyncEnumerable<T>>: the handler
         // returns a wrapped async enumerable that AwaitResultAsync unwraps before materializing.
         if (type.IsGenericType)
         {
@@ -95,6 +94,8 @@ internal sealed class HandlerMetadata
             ?.GetGenericArguments()[0];
     }
 
+    [RequiresUnreferencedCode("Compiles an Expression that materializes a Task<T> result.")]
+    [RequiresDynamicCode("Compiles an Expression that materializes a Task<T> result.")]
     private static Func<Task, object?>? CompileExtractTaskResult(Type returnType)
     {
         // Works for both Task<T> and ValueTask<T> returns (after the caller has called AsTask on ValueTask<T>)
@@ -121,6 +122,8 @@ internal sealed class HandlerMetadata
         return Expression.Lambda<Func<Task, object?>>(body, taskParam).Compile();
     }
 
+    [RequiresUnreferencedCode("Constructs a generic method instantiation from a runtime element type.")]
+    [RequiresDynamicCode("Constructs a generic method instantiation from a runtime element type.")]
     private static MaterializerDelegate BuildMaterializer(Type elementType)
     {
         var method = typeof(HandlerMetadata)
@@ -129,10 +132,14 @@ internal sealed class HandlerMetadata
         return (MaterializerDelegate)method.Invoke(null, null)!;
     }
 
+    [RequiresUnreferencedCode("Uses JSON serialization.")]
+    [RequiresDynamicCode("Uses JSON serialization.")]
     private static MaterializerDelegate BuildMaterializerCore<T>() =>
         (executor, stream, run, ct) =>
-            executor.MaterializeCoreAsync<T>((IAsyncEnumerable<T>)stream, run, ct);
+            executor.MaterializeAsyncCore<T>((IAsyncEnumerable<T>)stream, run, ct);
 
+    [RequiresUnreferencedCode("Constructs a generic method instantiation from a runtime element type.")]
+    [RequiresDynamicCode("Constructs a generic method instantiation from a runtime element type.")]
     private static StreamBinderDelegate? BuildStreamBinder(ParameterInfo parameter)
     {
         var paramType = parameter.ParameterType;
@@ -157,10 +164,14 @@ internal sealed class HandlerMetadata
         return null;
     }
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    [RequiresDynamicCode("Uses JSON deserialization.")]
     private static StreamBinderDelegate BuildAsyncEnumerableBinderCore<T>() =>
         (executor, runId, argName, ct) =>
             Task.FromResult<object?>(executor.CreateInputStreamAsync<T>(runId, argName, ct));
 
+    [RequiresUnreferencedCode("Uses JSON deserialization.")]
+    [RequiresDynamicCode("Uses JSON deserialization.")]
     private static StreamBinderDelegate BuildCollectionBinderCore<T>(bool asArray) =>
         async (executor, runId, argName, ct) =>
         {

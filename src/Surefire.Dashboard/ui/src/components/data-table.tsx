@@ -1,18 +1,18 @@
 import {
+  type ColumnDef,
   flexRender,
   getCoreRowModel,
   getPaginationRowModel,
   getSortedRowModel,
-  useReactTable,
-  type ColumnDef,
   type PaginationState,
   type SortingState,
+  useReactTable,
   type VisibilityState,
 } from "@tanstack/react-table";
-import { type Dispatch, type SetStateAction, useState } from "react";
-import { Settings2 } from "lucide-react";
+import {type Dispatch, type SetStateAction, useState} from "react";
+import {Settings2} from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import {Button} from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -28,27 +28,14 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
+import {Table, TableBody, TableCell, TableHead, TableHeader, TableRow,} from "@/components/ui/table";
 
 function getPageNumbers(
   current: number,
   total: number,
 ): (number | "ellipsis")[] {
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  if (total <= 7) return Array.from({length: total}, (_, i) => i + 1);
   const pages: (number | "ellipsis")[] = [1];
   if (current > 3) pages.push("ellipsis");
   for (
@@ -98,14 +85,14 @@ type DataTableProps<TData, TValue> =
   | DataTableServerProps<TData, TValue>;
 
 export function DataTable<TData, TValue>({
-  columns,
-  data,
-  toolbar,
-  header,
-  showColumnVisibility = false,
-  defaultPageSize = 15,
-  ...rest
-}: DataTableProps<TData, TValue>) {
+                                           columns,
+                                           data,
+                                           toolbar,
+                                           header,
+                                           showColumnVisibility = false,
+                                           defaultPageSize = 15,
+                                           ...rest
+                                         }: DataTableProps<TData, TValue>) {
   const isServer = rest.manualPagination === true;
 
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -120,7 +107,7 @@ export function DataTable<TData, TValue>({
     ? rest.onPaginationChange
     : setClientPagination;
 
-  // TanStack Table's hook currently trips react-hooks/incompatible-library; local suppression keeps compiler diagnostics focused elsewhere.
+  // TanStack Table's hook trips react-hooks/incompatible-library.
   // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
     data,
@@ -147,8 +134,8 @@ export function DataTable<TData, TValue>({
     onColumnVisibilityChange: setColumnVisibility,
     onPaginationChange,
     getCoreRowModel: getCoreRowModel(),
-    ...(!isServer && { getSortedRowModel: getSortedRowModel() }),
-    ...(!isServer && { getPaginationRowModel: getPaginationRowModel() }),
+    ...(!isServer && {getSortedRowModel: getSortedRowModel()}),
+    ...(!isServer && {getPaginationRowModel: getPaginationRowModel()}),
     ...(isServer && {
       manualPagination: true,
       pageCount: rest.pageCount,
@@ -167,12 +154,12 @@ export function DataTable<TData, TValue>({
               {toolbar}
             </div>
           )}
-          {!toolbar && <div className="flex-1" />}
+          {!toolbar && <div className="flex-1"/>}
           {showColumnVisibility && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm" className="shrink-0">
-                  <Settings2 className="size-4" />
+                  <Settings2 className="size-4"/>
                   Columns
                 </Button>
               </DropdownMenuTrigger>
@@ -215,9 +202,9 @@ export function DataTable<TData, TValue>({
                     {header.isPlaceholder
                       ? null
                       : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext(),
-                        )}
+                        header.column.columnDef.header,
+                        header.getContext(),
+                      )}
                   </TableHead>
                 ))}
               </TableRow>
@@ -280,7 +267,7 @@ export function DataTable<TData, TValue>({
                   (page, i) =>
                     page === "ellipsis" ? (
                       <PaginationItem key={`e${i}`}>
-                        <PaginationEllipsis />
+                        <PaginationEllipsis/>
                       </PaginationItem>
                     ) : (
                       <PaginationItem key={page}>
@@ -324,7 +311,7 @@ export function DataTable<TData, TValue>({
               }
             >
               <SelectTrigger size="sm" className="w-[80px]">
-                <SelectValue />
+                <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper" align="end">
                 {[15, 25, 50, 100].map((size) => (

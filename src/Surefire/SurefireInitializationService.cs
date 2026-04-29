@@ -24,13 +24,10 @@ internal sealed class SurefireInitializationService(
             registrations.Select(r => r.Definition).ToList(),
             cancellationToken);
 
-        // Upsert every queue this node will use before executors start so claim's queue join
-        // sees a real row (with its pause / concurrency / rate-limit state). Two sources:
-        //   - options.Queues: explicitly configured via AddQueue(...). Settings persist as given.
-        //   - registry queues not in options: implicit fallbacks (e.g. the built-in "default"
-        //     queue when a job omits a queue name). These get a minimal definition; if the user
-        //     later configures the same name via AddQueue, that configuration wins on the next
-        //     maintenance tick.
+        // Upsert every queue before executors start so claim's queue join sees a real row.
+        // Configured queues persist their pause/concurrency/rate-limit settings; registry
+        // fallbacks (e.g. implicit "default") get a minimal definition that AddQueue can later
+        // overwrite on the next maintenance tick.
         var configuredQueueNames = new HashSet<string>(
             options.Queues.Select(q => q.Name), StringComparer.Ordinal);
         var queuesToUpsert = new List<QueueDefinition>(options.Queues);

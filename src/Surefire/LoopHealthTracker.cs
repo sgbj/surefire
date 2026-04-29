@@ -4,21 +4,14 @@ namespace Surefire;
 
 /// <summary>
 ///     Per-loop health snapshot consumed by <see cref="SurefireHealthCheck" />. Each background
-///     loop (executor, scheduler, maintenance, retention) calls <see cref="Register" /> once at
-///     <c>ExecuteAsync</c> entry to declare its expected tick cadence, then <see cref="RecordSuccess" />
-///     on a successful tick and <see cref="RecordFailure" /> when an exception escapes the tick
-///     body. The health check flags the host Degraded when any loop accumulates too many
-///     consecutive failures or has not had a successful tick inside a budget that scales with
-///     the loop's own cadence — fast loops are caught quickly, slow loops are given proportional
-///     room.
+///     loop calls <see cref="Register" /> once at <c>ExecuteAsync</c> entry, then
+///     <see cref="RecordSuccess" /> per successful tick and <see cref="RecordFailure" /> when an
+///     exception escapes. The health check uses these to flag stalled or wedged loops.
 ///     <para>
-///         Concurrency contract: each loop name has <b>exactly one writer</b>. A loop's own
-///         <c>ExecuteAsync</c> is the only site that calls <see cref="Register" />,
-///         <see cref="RecordSuccess" />, or <see cref="RecordFailure" /> for that loop's name,
-///         and <see cref="Register" /> always runs before the first record. Under that contract
-///         the record path's read-modify-write on <c>_states[loop]</c> never races another writer.
-///         Readers (<see cref="Snapshot" />) are safe against writers via
-///         <see cref="ConcurrentDictionary{TKey,TValue}" />'s built-in enumerator guarantees.
+///         Concurrency contract: each loop name has exactly one writer (its own
+///         <c>ExecuteAsync</c>), so the read-modify-write on <c>_states[loop]</c> never races.
+///         Readers are safe via <see cref="ConcurrentDictionary{TKey,TValue}" />'s enumerator
+///         guarantees.
 ///     </para>
 /// </summary>
 internal sealed class LoopHealthTracker(TimeProvider timeProvider)

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Description>PostgreSQL storage and notifications provider for Surefire.</Description>
+        <PackageTags>$(PackageTags);postgresql;postgres;npgsql</PackageTags>
     </PropertyGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="Surefire.Tests.PostgreSql"/>

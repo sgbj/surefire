@@ -204,7 +204,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var run1 = CreateRun(jobName) with { NotAfter = past };
         var run2 = CreateRun(jobName) with { NotAfter = past };
 
-        // Create run3 as another expired Pending run
         var run3 = CreateRun(jobName) with
         {
             NotAfter = past
@@ -233,8 +232,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        // Claim transitions to Running - but since we fixed ClaimRunAsync to check NotAfter,
-        // this run won't be claimed. Instead test that the expired pending run IS cancelled.
+        // ClaimRunsAsync skips expired runs, so the expired pending run won't be claimed;
+        // assert it is cancelled instead.
         var cancelled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
         Assert.Equal(1, cancelled);
 
@@ -242,8 +241,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.NotNull(loaded);
         Assert.Equal(JobStatus.Cancelled, loaded.Status);
     }
-
-    // â”€â”€ GetExternallyStoppedRunIdsAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [Fact]
     public async Task GetExternallyStoppedRunIds_EmptyInput_ReturnsEmpty()
@@ -318,7 +315,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
-        // Cancel the running run (Running â†’ Cancelled, direct)
+        // Cancel the running run directly (Running to Cancelled).
         Assert.True((await Store.TryCancelRunAsync(claimed.Id, cancellationToken: ct)).Transitioned);
 
         var stopped = await Store.GetExternallyStoppedRunIdsAsync([claimed.Id], ct);
@@ -333,7 +330,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var jobName = $"StoppedDeleted_{Guid.CreateVersion7():N}";
         await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
-        // Use an ID that was never inserted â€” simulates a purged run
+        // An ID that was never inserted simulates a purged run.
         var fakeId = Guid.CreateVersion7().ToString("N");
 
         var stopped = await Store.GetExternallyStoppedRunIdsAsync([fakeId], ct);
@@ -376,8 +373,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.Contains(fakeId, stopped);
         Assert.DoesNotContain(claimedA.Id, stopped);
     }
-
-    // â”€â”€ CancelExpiredRuns batch counter integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [Fact]
     public async Task CancelExpiredRuns_BatchChild_IncrementsBatchCancelledCounter()
@@ -438,8 +433,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
             updatedBatch.Succeeded + updatedBatch.Failed + updatedBatch.Cancelled);
     }
 
-    // â”€â”€ Purge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     [Fact]
     public async Task PurgeAsync_DoesNotRemoveTerminalBatchChildren_WhenBatchIsNotPurgeEligible()
     {
@@ -450,7 +443,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var old = now.AddHours(-3);
 
-        // Batch is still Running (not terminal) â€” children should not be purged
+        // Batch is still Running (not terminal); children should not be purged.
         var batch = new JobBatch
         {
             Id = Guid.CreateVersion7().ToString("N"),
@@ -513,8 +506,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var childAfter = await Store.GetRunAsync(child.Id, ct);
         Assert.Null(childAfter);
     }
-
-    // ── GetStaleRunningRunIdsAsync ──────────────────────────────────────────────
 
     [Fact]
     public async Task GetStaleRunningRunIds_ReturnsOldestFirst()
@@ -644,8 +635,6 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var second = await Store.GetStaleRunningRunIdsAsync(now.AddMinutes(-5), 10, ct);
         Assert.Empty(second);
     }
-
-    // ── non_terminal_count invariant (via maxActiveForJob behavior) ──────────
 
     [Fact]
     public async Task MaxActiveForJob_DecrementsOnTerminalTransition()

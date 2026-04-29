@@ -5,7 +5,7 @@ export interface DatePreset {
 }
 
 export const RUN_DATE_PRESETS: DatePreset[] = [
-  { label: "All time", value: "all", getAfter: () => undefined },
+  {label: "All time", value: "all", getAfter: () => undefined},
   {
     label: "Last hour",
     value: "1h",

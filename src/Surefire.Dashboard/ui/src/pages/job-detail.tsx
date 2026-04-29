@@ -1,37 +1,26 @@
-import {
-  useQuery,
-  useMutation,
-  useQueryClient,
-  keepPreviousData,
-} from "@tanstack/react-query";
-import { type PaginationState } from "@tanstack/react-table";
-import { useParams } from "react-router";
-import { useState, useMemo } from "react";
-import { Pause, CirclePlay, CircleAlert } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { toast } from "sonner";
-import { api, JobStatusLabels } from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
-import { DataTable } from "@/components/data-table";
-import { formatDate, formatTimeSpan } from "@/lib/format";
-import { DtDd } from "@/components/dt-dd";
-import { TriggerDialog } from "@/components/trigger-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { buildRunColumns } from "@/components/run-columns";
-import { RUN_DATE_PRESETS } from "@/lib/run-date-presets";
+import {keepPreviousData, useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
+import {type PaginationState} from "@tanstack/react-table";
+import {useParams} from "react-router";
+import {useMemo, useState} from "react";
+import {CircleAlert, CirclePlay, Pause} from "lucide-react";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {toast} from "sonner";
+import {api, JobStatusLabels} from "@/lib/api";
+import {Button} from "@/components/ui/button";
+import {Badge} from "@/components/ui/badge";
+import {Skeleton} from "@/components/ui/skeleton";
+import {DataTable} from "@/components/data-table";
+import {formatDate, formatTimeSpan} from "@/lib/format";
+import {DtDd} from "@/components/dt-dd";
+import {TriggerDialog} from "@/components/trigger-dialog";
+import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
+import {buildRunColumns} from "@/components/run-columns";
+import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 
-const runColumns = buildRunColumns({ showJob: false, showAttempt: true });
+const runColumns = buildRunColumns({showJob: false, showAttempt: true});
 
 export function JobDetailPage() {
-  const { name } = useParams();
+  const {name} = useParams();
   const queryClient = useQueryClient();
 
   const [pagination, setPagination] = useState<PaginationState>({
@@ -41,13 +30,13 @@ export function JobDetailPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [datePreset, setDatePreset] = useState("all");
 
-  const { data: job, isError } = useQuery({
+  const {data: job, isError} = useQuery({
     queryKey: ["job", name],
     queryFn: () => api.getJob(name!),
     refetchInterval: (query) => (query.state.error ? false : 5000),
   });
 
-  const { data: stats } = useQuery({
+  const {data: stats} = useQuery({
     queryKey: ["job-stats", name],
     queryFn: () => api.getJobStats(name!),
     refetchInterval: 10000,
@@ -64,7 +53,7 @@ export function JobDetailPage() {
     [name, statusFilter, datePreset, pagination],
   );
 
-  const { data: runs } = useQuery({
+  const {data: runs} = useQuery({
     queryKey: ["runs", "job", name, runsQueryParams],
     queryFn: () => {
       const preset = RUN_DATE_PRESETS.find((p) => p.value === datePreset);
@@ -77,7 +66,7 @@ export function JobDetailPage() {
     placeholderData: keepPreviousData,
   });
 
-  const resetPage = () => setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+  const resetPage = () => setPagination((prev) => ({...prev, pageIndex: 0}));
 
   const trigger = useMutation({
     mutationFn: (opts?: {
@@ -88,17 +77,17 @@ export function JobDetailPage() {
       deduplicationId?: string;
     }) => api.triggerJob(name!, opts),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["runs", "job", name] });
+      queryClient.invalidateQueries({queryKey: ["runs", "job", name]});
       toast.success("Job triggered");
     },
     onError: () => toast.error("Failed to trigger job"),
   });
 
   const toggleEnabled = useMutation({
-    mutationFn: (isEnabled: boolean) => api.updateJob(name!, { isEnabled }),
+    mutationFn: (isEnabled: boolean) => api.updateJob(name!, {isEnabled}),
     onSuccess: (_data, isEnabled) => {
-      queryClient.invalidateQueries({ queryKey: ["job", name] });
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.invalidateQueries({queryKey: ["job", name]});
+      queryClient.invalidateQueries({queryKey: ["jobs"]});
       toast.success(isEnabled ? "Job enabled" : "Job disabled");
     },
     onError: () => toast.error("Failed to update job"),
@@ -111,7 +100,7 @@ export function JobDetailPage() {
           {name}
         </h2>
         <Alert variant="destructive">
-          <CircleAlert />
+          <CircleAlert/>
           <AlertDescription>Failed to load job</AlertDescription>
         </Alert>
       </div>
@@ -123,23 +112,23 @@ export function JobDetailPage() {
         <div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Skeleton className="h-7 w-48" />
+              <Skeleton className="h-7 w-48"/>
             </div>
             <div className="flex items-center gap-2">
-              <Skeleton className="h-9 w-[5.5rem]" />
-              <Skeleton className="h-9 w-16" />
+              <Skeleton className="h-9 w-[5.5rem]"/>
+              <Skeleton className="h-9 w-16"/>
             </div>
           </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-          {Array.from({ length: 4 }).map((_, i) => (
+          {Array.from({length: 4}).map((_, i) => (
             <div key={i}>
-              <Skeleton className="h-3 w-16 mb-1.5" />
-              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-3 w-16 mb-1.5"/>
+              <Skeleton className="h-4 w-24"/>
             </div>
           ))}
         </div>
-        <Skeleton className="h-64 w-full rounded-lg" />
+        <Skeleton className="h-64 w-full rounded-lg"/>
       </div>
     );
 
@@ -168,9 +157,9 @@ export function JobDetailPage() {
               disabled={toggleEnabled.isPending}
             >
               {job.isEnabled ? (
-                <Pause className="size-3.5" />
+                <Pause className="size-3.5"/>
               ) : (
-                <CirclePlay className="size-3.5" />
+                <CirclePlay className="size-3.5"/>
               )}
               {job.isEnabled ? "Disable" : "Enable"}
             </Button>
@@ -256,7 +245,7 @@ export function JobDetailPage() {
               }}
             >
               <SelectTrigger size="sm" className="w-[140px]">
-                <SelectValue />
+                <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
                 <SelectItem value="all">All statuses</SelectItem>
@@ -275,7 +264,7 @@ export function JobDetailPage() {
               }}
             >
               <SelectTrigger size="sm" className="w-[140px]">
-                <SelectValue />
+                <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
                 {RUN_DATE_PRESETS.map((p) => (

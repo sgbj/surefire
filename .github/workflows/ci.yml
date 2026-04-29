@@ -32,11 +32,32 @@ jobs:
           cache: npm
           cache-dependency-path: src/Surefire.Dashboard/ui/package-lock.json
 
+      - name: Install dashboard UI dependencies
+        working-directory: src/Surefire.Dashboard/ui
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint dashboard UI
+        working-directory: src/Surefire.Dashboard/ui
+        run: npm run lint
+
       - name: Restore solution
         run: dotnet restore surefire.slnx
 
       - name: Build solution
-        run: dotnet build surefire.slnx --configuration Release --no-restore
+        run: dotnet build surefire.slnx --configuration Release --no-restore -p:ContinuousIntegrationBuild=true
 
       - name: Run all tests (including store suites)
         run: dotnet test surefire.slnx --configuration Release --no-build --verbosity normal
+
+      - name: Pack
+        run: dotnet pack surefire.slnx --configuration Release --no-build --output ./artifacts -p:ContinuousIntegrationBuild=true
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: |
+            ./artifacts/*.nupkg
+            ./artifacts/*.snupkg
+          if-no-files-found: error
+          retention-days: 14

@@ -10,12 +10,10 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  --font-sans:
-    "Geist Sans", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
-    "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-  --font-mono:
-    "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    monospace;
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
+  "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+  monospace;
   --text-sm: 0.9375rem;
   --text-sm--line-height: 1.375rem;
 }
@@ -27,9 +25,10 @@
        light mode. .dark overrides below for dark theme. */
     color-scheme: light;
     /* Removes the default grey tap highlight on touch devices so buttons/
-       links don't flash when tapped — rely on our own hover/active styles. */
+       links don't flash when tapped; rely on our own hover/active styles. */
     -webkit-tap-highlight-color: transparent;
   }
+
   body {
     @apply bg-background text-foreground;
     /* Crisper glyph rendering on macOS; matches what most design-system sites
@@ -40,15 +39,19 @@
        slower than default on extremely long text; fine for a dashboard. */
     text-rendering: optimizeLegibility;
   }
+
   * {
     @apply border-border outline-ring/50;
   }
+
   ::selection {
     background: oklch(from var(--primary) l c h / 20%);
   }
+
   .dark {
     color-scheme: dark;
   }
+
   .dark input[type="datetime-local"],
   .dark input[type="date"],
   .dark input[type="time"] {
@@ -144,15 +147,6 @@
   --sidebar-accent-foreground: oklch(0.92 0.01 250);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.6 0.1 250);
-}
-
-.dark body {
-  background: linear-gradient(
-      180deg,
-      oklch(0.14 0.015 270) 0%,
-      oklch(0.12 0.01 255) 100%
-    )
-    fixed;
 }
 
 @keyframes indeterminate {

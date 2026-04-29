@@ -12,12 +12,11 @@ public static class NotificationChannels
 
     /// <summary>
     ///     Wakeup signal published whenever new claimable work has been persisted (single-run
-    ///     creation, rerun, scheduled trigger, batch creation, maintenance requeue, etc.). The
-    ///     payload is unused — publishers pass <c>null</c>. Subscribers (currently only
-    ///     <c>SurefireExecutorService</c>) treat receipt as an edge trigger to break out of
-    ///     their poll wait and re-attempt <c>ClaimRunsAsync</c>. Coalescing many creations into
-    ///     a single publish per producer call is intentional: the consumer claims in batches
-    ///     keyed on (job, queue), not on individual run ids.
+    ///     creation, rerun, scheduled trigger, batch creation, maintenance requeue). Payload is
+    ///     unused; publishers pass <c>null</c>. Subscribers (executor) use receipt as an edge
+    ///     trigger to break their poll wait and re-attempt <c>ClaimRunsAsync</c>. Coalescing
+    ///     many creations into one publish is intentional: consumers claim in batches keyed
+    ///     on (job, queue), not individual run IDs.
     /// </summary>
     public const string RunCreated = "surefire:run:created";
 

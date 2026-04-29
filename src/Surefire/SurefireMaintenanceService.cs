@@ -47,9 +47,8 @@ internal sealed partial class SurefireMaintenanceService(
                         break;
                     }
 
-                    // A job scheduler should never crash the host on a single bad tick. Log the
-                    // exception, record instrumentation, back off and continue so operators see
-                    // the failure via metrics/health-check while the host stays up.
+                    // Never crash the host on a single bad tick. Operators see the failure via
+                    // metrics/health-check while the host stays up.
                     Log.MaintenanceTickFailed(logger, ex);
                     instrumentation.RecordLoopError(LoopName);
                     loopHealth.RecordFailure(LoopName);
@@ -71,10 +70,10 @@ internal sealed partial class SurefireMaintenanceService(
             registrations.Select(r => r.Definition).ToList(),
             cancellationToken);
 
-        // UpsertQueuesAsync is a bulk upsert that also refreshes last_heartbeat_at, so per-tick
-        // calls double as the heartbeat that keeps retention from sweeping queues this node
-        // serves. Upsert both explicitly configured queues and any registry-derived queues
-        // (e.g. the implicit "default") so all queues visited by claim stay alive.
+        // UpsertQueuesAsync also refreshes last_heartbeat_at, doubling as the heartbeat that
+        // keeps retention from sweeping queues this node serves. Include both configured queues
+        // and registry-derived ones (e.g. the implicit "default") so every queue this node
+        // claims from stays alive.
         var configuredQueueNames = new HashSet<string>(
             options.Queues.Select(q => q.Name), StringComparer.Ordinal);
         var queuesToUpsert = new List<QueueDefinition>(options.Queues);
@@ -169,10 +168,8 @@ internal sealed partial class SurefireMaintenanceService(
 
         while (true)
         {
-            // Dedicated maintenance query: returns IDs only, ordered oldest-heartbeat first,
-            // backed by a filtered index on (last_heartbeat_at) WHERE status = Running.
-            // Each processed run transitions out of Running, so the filter set shrinks
-            // monotonically; we loop until fewer than `take` IDs come back.
+            // Returns IDs ordered oldest-heartbeat first. Each processed run transitions out
+            // of Running, so the filter set shrinks monotonically; loop until fewer than `take`.
             var staleIds = await store.GetStaleRunningRunIdsAsync(staleBefore, take, cancellationToken);
 
             if (staleIds.Count == 0)
@@ -195,10 +192,8 @@ internal sealed partial class SurefireMaintenanceService(
                 if (run.Attempt > retryPolicy.MaxRetries)
                 {
                     var now = timeProvider.GetUtcNow();
-                    // Stale recovery dead-letter: detail lives on the AttemptFailure
-                    // event (see `StaleRecovery` message below). Preserve any non-exception
-                    // Reason the run already carried (e.g. set during a prior claim); don't
-                    // synthesize one here.
+                    // Detail lives on the AttemptFailure event below. Preserve any Reason the
+                    // run already carried; don't synthesize one here.
                     var deadLetter = RunStatusTransition.RunningToFailed(
                         run.Id,
                         run.Attempt,
@@ -217,10 +212,8 @@ internal sealed partial class SurefireMaintenanceService(
                         continue;
                     }
 
-                    // Stale-recovery dead-letters previously weren't counted at all, so
-                    // surefire.runs.failed undercounted reality whenever orphan recovery
-                    // dead-lettered a run. Tag with StaleRecovery so operators can split
-                    // "node died and we cleaned up its work" from "handler kept failing".
+                    // Tag with StaleRecovery so operators can split "node died and we cleaned
+                    // up its work" from "handler kept failing".
                     instrumentation.RecordRunFailed(run.JobName, run.StartedAt, now,
                         DeadLetterReason.StaleRecovery);
 

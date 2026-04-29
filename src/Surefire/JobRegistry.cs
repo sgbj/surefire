@@ -6,16 +6,17 @@ namespace Surefire;
 
 internal sealed class JobRegistry
 {
-    // `_jobs` is ordinal — case differences create distinct keys, which surfaces as two duplicate
-    // rows on the dashboard or a primary-key violation on stores with case-insensitive collations
-    // (SQL Server's default). The case-divergence guard in AddOrUpdate refuses that configuration
-    // at registration time. `_writeGate` makes the read-then-write sequence in that guard atomic
-    // against concurrent callers, which is required for the runtime-registration path.
+    // Ordinal: case differences create distinct keys, which surfaces as duplicate dashboard rows
+    // or PK violations on case-insensitive collations (SQL Server default). AddOrUpdate's
+    // case-divergence guard refuses that configuration at registration time, with _writeGate
+    // making the read-then-write atomic against concurrent registrations.
     private readonly ConcurrentDictionary<string, RegisteredJob> _jobs =
         new(StringComparer.Ordinal);
 
     private readonly Lock _writeGate = new();
 
+    [RequiresUnreferencedCode("Reflects over a user-supplied handler delegate to build job metadata.")]
+    [RequiresDynamicCode("Reflects over a user-supplied handler delegate to build job metadata.")]
     public JobBuilder AddOrUpdate(string name, Delegate handler, IServiceProvider services)
     {
         var definition = new JobDefinition { Name = name };
@@ -33,9 +34,8 @@ internal sealed class JobRegistry
         {
             lock (_writeGate)
             {
-                // Re-check inside the lock so the duplicate-name guard and the write are atomic
-                // against any concurrent AddOrUpdate. A re-registration of the exact same name is
-                // allowed — it updates the handler.
+                // Re-check under lock so the guard and the write are atomic against concurrent
+                // AddOrUpdate. Re-registering the exact same name updates the handler.
                 foreach (var existing in _jobs.Keys)
                 {
                     if (string.Equals(existing, name, StringComparison.Ordinal))
@@ -77,10 +77,9 @@ internal sealed class JobRegistry
 
     public IReadOnlyCollection<string> GetQueueNames()
     {
-        // Only return queue names that registered jobs actually use. "default" appears here only
-        // when at least one job omits an explicit queue. This keeps the dashboard / heartbeat
-        // honest: an app that defines its own queues won't surface a phantom "default" row, and
-        // retention can sweep an unused "default" the same as any other stale queue.
+        // Only return queues registered jobs actually use. "default" appears only when a job
+        // omits an explicit queue, so an app with its own queues won't surface a phantom
+        // "default" row and retention can sweep an unused "default" like any other stale queue.
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var registration in _jobs.Values)
         {

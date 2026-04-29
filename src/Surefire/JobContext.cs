@@ -10,13 +10,8 @@ public sealed class JobContext
 {
     private static readonly AsyncLocal<JobContext?> CurrentContext = new();
 
-    // Leading + trailing throttle (standard `throttle` semantics). A burst of progress reports
-    // collapses to: one immediate flush (leading) + at most one trailing flush carrying the latest
-    // value. Outside a burst, every call is leading-edge and persists immediately. The terminal
-    // transition calls FlushPendingProgressAsync to guarantee the final value lands. The in-flight
-    // task is tracked so FlushPendingProgressAsync awaits any trailing flush already started by
-    // the timer callback before the terminal transition proceeds — without this, the late
-    // PersistProgressAsync could enqueue an event after the run is marked terminal.
+    // Leading + trailing throttle. Terminal transitions await _inFlightTrailingFlush so progress
+    // events never land after the terminal status.
     private static readonly TimeSpan MinProgressInterval = TimeSpan.FromMilliseconds(100);
     private readonly Lock _progressGate = new();
     private bool _hasReportedProgress;
@@ -134,10 +129,9 @@ public sealed class JobContext
     }
 
     /// <summary>
-    ///     Flushes any pending trailing-edge progress value synchronously, including any
-    ///     fire-and-forget flush already started by the timer callback. Called by the executor
-    ///     before transitioning the run to a terminal status so the last coalesced value is never
-    ///     lost — and never lands AFTER the terminal status, even when the timer fires concurrently.
+    ///     Flushes any pending trailing-edge progress value, awaiting any flush already started by
+    ///     the timer callback. Called by the executor before transitioning the run to a terminal
+    ///     status so the last coalesced value lands and never arrives after the terminal status.
     /// </summary>
     internal async Task FlushPendingProgressAsync(CancellationToken cancellationToken)
     {
@@ -145,10 +139,9 @@ public sealed class JobContext
         double? value;
         lock (_progressGate)
         {
-            // Snapshot any in-flight trailing flush started by the timer callback, then take
-            // ownership of any still-pending value. The lock ensures a callback in mid-flight has
-            // either (a) already published its task to _inFlightTrailingFlush, or (b) not yet
-            // entered its lock — in which case it'll find _pendingValue == null and return.
+            // Holding the lock guarantees a concurrent timer callback has either already
+            // published its task to _inFlightTrailingFlush, or will find _pendingValue null
+            // and return without persisting.
             inFlight = _inFlightTrailingFlush;
             value = _pendingValue;
             _pendingValue = null;
@@ -188,9 +181,8 @@ public sealed class JobContext
             _pendingValue = null;
             _lastFlushedTicksUtc = TimeProvider.GetUtcNow().UtcTicks;
             DisposePendingTimer();
-            // Publish the persist task INSIDE the lock so FlushPendingProgressAsync, which also
-            // takes the lock, observes either (this task) or (no in-flight task) — never a
-            // half-published state where the persist is running but the field is still null.
+            // Publish under lock so FlushPendingProgressAsync never observes a running persist
+            // with a null field.
             _inFlightTrailingFlush = PersistProgressAsync(v);
         }
     }

@@ -1,11 +1,6 @@
-import {
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import { useParams, useNavigate, Link } from "react-router";
-import { api, JobStatus, type JobRun, type RunLogEntry, LogLevelLabels } from "@/lib/api";
+import {useInfiniteQuery, useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
+import {Link, useNavigate, useParams} from "react-router";
+import {api, type JobRun, JobStatus, LogLevelLabels, type RunLogEntry} from "@/lib/api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,42 +12,23 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { StatusBadge } from "@/components/status-badge";
-import { Progress } from "@/components/ui/progress";
-import { formatDate, formatDuration, formatLogTime } from "@/lib/format";
-import { useLiveDuration } from "@/hooks/use-live-duration";
-import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Ban, CircleAlert, RotateCcw } from "lucide-react";
-import { DtDd } from "@/components/dt-dd";
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { toast } from "sonner";
-import { TraceView, type TraceItem } from "@/components/trace-view";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import {Button} from "@/components/ui/button";
+import {Skeleton} from "@/components/ui/skeleton";
+import {TableBody, TableCell, TableHead, TableHeader, TableRow,} from "@/components/ui/table";
+import {StatusBadge} from "@/components/status-badge";
+import {Progress} from "@/components/ui/progress";
+import {formatDate, formatDuration, formatLogTime} from "@/lib/format";
+import {useLiveDuration} from "@/hooks/use-live-duration";
+import {useStickToBottom} from "@/hooks/use-stick-to-bottom";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {Ban, CircleAlert, RotateCcw} from "lucide-react";
+import {DtDd} from "@/components/dt-dd";
+import {Fragment, useCallback, useEffect, useMemo, useRef, useState,} from "react";
+import {toast} from "sonner";
+import {type TraceItem, TraceView} from "@/components/trace-view";
+import {useVirtualizer} from "@tanstack/react-virtual";
+import {useInfiniteScroll} from "@/hooks/use-infinite-scroll";
+import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
 
 function formatJsonDisplay(json: string): string {
   try {
@@ -67,9 +43,7 @@ const EMPTY_OUTPUT_ITEMS: unknown[] = [];
 const EMPTY_INPUT_ITEMS: { param: string; value: unknown }[] = [];
 const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
 const CHILD_RUN_PAGE_SIZE = 500;
-// Trace: tree-aware — ancestors + siblings window + direct children of focus.
-// Siblings-before uses a bounded window (typical workflows have few siblings);
-// children paginate on demand through /runs/{id}/children.
+// Tree-aware: ancestors + sibling window + direct children. Children paginate on demand.
 const TRACE_SIBLING_WINDOW = 200;
 const TRACE_CHILDREN_TAKE = 200;
 
@@ -109,13 +83,13 @@ function parseInputStreamItem(
 
   if (typeof payloadCandidate === "string") {
     try {
-      return { param: paramCandidate, value: JSON.parse(payloadCandidate) };
+      return {param: paramCandidate, value: JSON.parse(payloadCandidate)};
     } catch {
-      return { param: paramCandidate, value: payloadCandidate };
+      return {param: paramCandidate, value: payloadCandidate};
     }
   }
 
-  return { param: paramCandidate, value: payloadCandidate ?? null };
+  return {param: paramCandidate, value: payloadCandidate ?? null};
 }
 
 function parseAttemptFailureItem(raw: string): AttemptFailureItem | null {
@@ -160,11 +134,11 @@ function dedupeRuns(runs: JobRun[]): JobRun[] {
 }
 
 export function RunDetailPage() {
-  const { id } = useParams();
+  const {id} = useParams();
   const runKey = id ?? "";
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data: run, isError } = useQuery({
+  const {data: run, isError} = useQuery({
     queryKey: ["run", id],
     queryFn: () => api.getRun(id!),
     refetchInterval: (query) => {
@@ -188,7 +162,7 @@ export function RunDetailPage() {
     isFetchingNextPage: isLoadingMoreChildren,
   } = useInfiniteQuery({
     queryKey: ["runs", "children", id, childRunsSnapshotCreatedBefore],
-    queryFn: ({ pageParam }) =>
+    queryFn: ({pageParam}) =>
       api.getRuns({
         parentRunId: id!,
         skip: pageParam * CHILD_RUN_PAGE_SIZE,
@@ -213,10 +187,8 @@ export function RunDetailPage() {
     enabled: !!id,
   });
 
-  // Initial focused trace view. Single round-trip returns: ancestor chain + focus +
-  // siblings window + first page of children. Lazy expansion via api.getRunChildren
-  // for "load more" actions.
-  const { data: traceData } = useQuery({
+  // Single round-trip: ancestor chain + focus + sibling window + first page of children.
+  const {data: traceData} = useQuery({
     queryKey: ["run-trace", id],
     queryFn: () =>
       api.getRunTrace(id!, {
@@ -240,11 +212,8 @@ export function RunDetailPage() {
     },
   });
 
-  // Lazy-expansion tree state. Clicking a node's disclosure caret populates
-  // childrenByNode[nodeId] (paginated via childrenCursorByNode); collapsing
-  // removes it from expandedNodes but preserves the cache for instant re-open.
-  // Focus is always conceptually expanded: its children come from
-  // traceData.children plus any paginated extras in childrenByNode[focusId].
+  // Collapsing preserves childrenByNode cache for instant re-open. Focus is always
+  // conceptually expanded; its children merge traceData.children with childrenByNode.
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [childrenByNode, setChildrenByNode] = useState<
     Record<string, JobRun[]>
@@ -254,12 +223,8 @@ export function RunDetailPage() {
   >({});
   const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
 
-  // Extended sibling windows when the user paginates past the initial bounds.
-  // Cursor tri-state: `undefined` = user hasn't paginated in this direction yet
-  // (fall back to traceData's initial cursor); `string` = next page available;
-  // `null` = paginated to exhaustion, no more rows. Collapsing the last two into
-  // a single nullable would hide the exhaustion signal behind the initial cursor
-  // and keep the load-more button showing forever.
+  // Cursor tri-state: undefined = use traceData's initial cursor, string = more pages,
+  // null = exhausted. Collapsing null+string would lose the exhaustion signal.
   const [extraSiblingsBefore, setExtraSiblingsBefore] = useState<JobRun[]>([]);
   const [extraSiblingsBeforeCursor, setExtraSiblingsBeforeCursor] = useState<
     string | null | undefined
@@ -304,11 +269,8 @@ export function RunDetailPage() {
     null,
   );
 
-  // DFS-flatten the tree into ordered TraceItems. Focus is always expanded; its
-  // children merge traceData.children (refreshed by the 5s poll — so status
-  // changes and new first-page children flow live) with childrenByNode[focusId]
-  // (the fully-paginated set from the auto-paginate effect). Non-focus expanded
-  // nodes draw solely from childrenByNode (one-shot auto-paginate on expand).
+  // DFS-flatten the tree. Focus children merge fresh-polled traceData.children with
+  // the fully-paginated childrenByNode[focusId]; other expanded nodes use only the latter.
   const traceItems = useMemo(() => {
     if (!traceData) return [] as TraceItem[];
 
@@ -320,8 +282,7 @@ export function RunDetailPage() {
         const paginated = childrenByNode[focusId];
         const fresh = traceData!.children;
         if (paginated === undefined || paginated.length === 0) return fresh;
-        // Overlay fresh (polled) first-page statuses onto the paginated set;
-        // append any brand-new items from fresh that aren't yet paginated.
+        // Overlay fresh statuses onto paginated; append brand-new items from fresh.
         const byId = new Map<string, JobRun>();
         for (const r of paginated) byId.set(r.id, r);
         for (const r of fresh) byId.set(r.id, r);
@@ -347,7 +308,7 @@ export function RunDetailPage() {
     }
 
     function flatten(node: JobRun, depth: number): TraceItem[] {
-      const result: TraceItem[] = [{ kind: "run", ...node, depth }];
+      const result: TraceItem[] = [{kind: "run", ...node, depth}];
       const childDepth = depth + 1;
       const seen = new Set<string>();
       for (const child of childrenOf(node)) {
@@ -359,10 +320,8 @@ export function RunDetailPage() {
     }
 
     const siblingDepth = focusDepth;
-    // Every node that can be expanded (siblings too, not just focus) must route
-    // through flatten() so its children appear in the flat list when the user
-    // toggles its caret. Ancestors are never expandable, so flattening them is a
-    // no-op — but going through flatten keeps the shape uniform.
+    // Route every node through flatten() so expansion works on siblings too. Ancestors
+    // aren't expandable but pass through for shape uniformity.
     const ordered: TraceItem[] = [
       ...traceData.ancestors.flatMap((a) => flatten(a, a.depth ?? 0)),
       ...extraSiblingsBefore.flatMap((s) => flatten(s, siblingDepth)),
@@ -393,8 +352,7 @@ export function RunDetailPage() {
     extraSiblingsAfter,
   ]);
 
-  // Once expansion has loaded an empty first page and there's no cursor for more,
-  // the node is known to have no children — hide its caret.
+  // Hide the caret once a node is known to have no children.
   const knownEmptyNodes = useMemo(() => {
     const empty = new Set<string>();
     for (const [id, items] of Object.entries(childrenByNode)) {
@@ -405,18 +363,15 @@ export function RunDetailPage() {
     return empty;
   }, [childrenByNode, childrenCursorByNode]);
 
-  // Ancestors render as a linear chain above the focus; they don't get a caret
-  // (their one displayed "child" is the path down to focus).
+  // Ancestors render as a linear chain; no caret.
   const ancestorIds = useMemo(() => {
     const ids = new Set<string>();
     for (const a of traceData?.ancestors ?? []) ids.add(a.id);
     return ids;
   }, [traceData]);
 
-  // `undefined` means the user hasn't paginated in this direction yet — fall
-  // back to the initial cursor from the trace endpoint. Any explicit value
-  // (string OR null) is the authoritative state from the latest paginate call,
-  // including the "exhausted" null that must suppress the load-more button.
+  // undefined: not yet paginated, use traceData's initial cursor. Any explicit value
+  // (string or null) is authoritative; null suppresses the load-more button.
   const siblingsAfterCursor =
     extraSiblingsAfterCursor !== undefined
       ? extraSiblingsAfterCursor
@@ -499,7 +454,7 @@ export function RunDetailPage() {
   }, [isDeadLetter, failureRows, runKey]);
 
   const setCurrentLogFilter = (value: number | null) => {
-    setLogFilterByRun((prev) => ({ ...prev, [runKey]: value }));
+    setLogFilterByRun((prev) => ({...prev, [runKey]: value}));
   };
 
   const filteredLogs = useMemo(
@@ -508,9 +463,7 @@ export function RunDetailPage() {
     [logs, logFilter],
   );
 
-  // All three virtualizers wrap rows to full content; measureElement rounds up
-  // to integer pixels via Math.ceil so sub-pixel drift doesn't jitter
-  // getTotalSize() mid-scroll.
+  // Math.ceil prevents sub-pixel drift from jittering getTotalSize() mid-scroll.
   const LOG_ROW_HEIGHT = 24;
   const LIST_ROW_HEIGHT = 24;
   const measureRow = (el: Element) =>
@@ -546,15 +499,27 @@ export function RunDetailPage() {
     measureElement: measureRow,
   });
 
-  useStickToBottom({ scrollElement: logScrollContainerRef.current, virtualizer: logVirtualizer, count: filteredLogs.length });
-  useStickToBottom({ scrollElement: inputScrollContainerRef.current, virtualizer: inputVirtualizer, count: inputItems.length });
-  useStickToBottom({ scrollElement: outputScrollContainerRef.current, virtualizer: outputVirtualizer, count: outputItems.length });
+  useStickToBottom({
+    scrollElement: logScrollContainerRef.current,
+    virtualizer: logVirtualizer,
+    count: filteredLogs.length
+  });
+  useStickToBottom({
+    scrollElement: inputScrollContainerRef.current,
+    virtualizer: inputVirtualizer,
+    count: inputItems.length
+  });
+  useStickToBottom({
+    scrollElement: outputScrollContainerRef.current,
+    virtualizer: outputVirtualizer,
+    count: outputItems.length
+  });
 
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(id!),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["run", id] });
-      queryClient.invalidateQueries({ queryKey: ["run-trace", id] });
+      queryClient.invalidateQueries({queryKey: ["run", id]});
+      queryClient.invalidateQueries({queryKey: ["run-trace", id]});
       toast.success("Run cancelled");
     },
     onError: () => toast.error("Failed to cancel run"),
@@ -723,34 +688,33 @@ export function RunDetailPage() {
       }
     });
     es.addEventListener("status", () => {
-      queryClient.invalidateQueries({ queryKey: ["run", id] });
-      queryClient.invalidateQueries({ queryKey: ["run-trace", id] });
+      queryClient.invalidateQueries({queryKey: ["run", id]});
+      queryClient.invalidateQueries({queryKey: ["run-trace", id]});
     });
     es.addEventListener("done", () => {
       doneReceived = true;
       es.close();
-      queryClient.invalidateQueries({ queryKey: ["run", id] });
-      queryClient.invalidateQueries({ queryKey: ["run-trace", id] });
-      queryClient.invalidateQueries({ queryKey: ["runs", "job"] });
-      queryClient.invalidateQueries({ queryKey: ["runs", "children", id] });
+      queryClient.invalidateQueries({queryKey: ["run", id]});
+      queryClient.invalidateQueries({queryKey: ["run-trace", id]});
+      queryClient.invalidateQueries({queryKey: ["runs", "job"]});
+      queryClient.invalidateQueries({queryKey: ["runs", "children", id]});
     });
     es.onerror = () => {
       if (doneReceived) {
         es.close();
         return;
       }
-      // Don't close — let the browser's built-in EventSource reconnection handle
-      // transient network errors. Only fetch logs as fallback if the connection
-      // is fully dead (readyState === CLOSED).
+      // Let EventSource auto-reconnect; only fall back to fetch if fully dead.
       if (es.readyState === EventSource.CLOSED) {
         api
           .getRunLogs(id)
           .then((fetched) => {
             if (!stale && fetched.length > 0) {
-              setLogsByRun((prev) => ({ ...prev, [runKey]: fetched }));
+              setLogsByRun((prev) => ({...prev, [runKey]: fetched}));
             }
           })
-          .catch(() => {});
+          .catch(() => {
+          });
       }
     };
     return () => {
@@ -830,9 +794,7 @@ export function RunDetailPage() {
     }
   }, [traceData, siblingsAfterCursor, isLoadingMoreSiblingsAfter]);
 
-  // Scroll preservation on siblings-before prepend is handled inside TraceView
-  // by shifting scrollTop by the prepended rows' height when
-  // extraSiblingsBeforeCount grows.
+  // TraceView preserves scroll on prepend by shifting scrollTop when extraSiblingsBeforeCount grows.
   const loadMoreSiblingsBefore = useCallback(async () => {
     if (
       !traceData ||
@@ -847,8 +809,7 @@ export function RunDetailPage() {
         beforeCursor: siblingsBeforeCursor,
         take: TRACE_SIBLING_WINDOW,
       });
-      // Before-cursor pagination returns rows in DESC order (newest-first among
-      // older siblings). Reverse so the combined list stays chronological.
+      // Before-cursor pagination returns DESC; reverse for chronological display.
       const reversed = [...page.items].reverse();
       setExtraSiblingsBefore((prev) => [...reversed, ...prev]);
       setExtraSiblingsBeforeCursor(page.nextCursor ?? null);
@@ -860,15 +821,12 @@ export function RunDetailPage() {
   const canLoadMoreSiblingsAfter = siblingsAfterCursor != null;
   const canLoadMoreSiblingsBefore = siblingsBeforeCursor != null;
 
-  // Ref-based lock for pagination dedup — protects against re-entrant expand/
-  // collapse/expand bursts and concurrent auto-paginations triggered by polling.
+  // Dedup against re-entrant expand bursts and concurrent auto-paginations from polling.
   const inFlightPaginationRef = useRef<Set<string>>(new Set());
-  // Guard: only auto-paginate focus's children once per focus id per mount,
-  // otherwise the 5s trace poll would refire it on every refetch.
+  // Auto-paginate focus once per mount; the 5s trace poll would otherwise refire it.
   const focusPaginatedRef = useRef<string | null>(null);
 
-  // Paginate *all* cursor pages for a node into childrenByNode. Runs to
-  // completion; safe to call again later (skips if already loaded or in flight).
+  // Paginate every cursor page for a node into childrenByNode. Idempotent.
   const paginateAllChildren = useCallback(
     async (nodeId: string, firstCursor?: string) => {
       if (inFlightPaginationRef.current.has(nodeId)) return;
@@ -880,20 +838,17 @@ export function RunDetailPage() {
       });
       try {
         let cursor: string | undefined = firstCursor;
-        // If no firstCursor and we already have the node cached, we're done.
         if (cursor === undefined) {
-          // Fetch first page.
           const page = await api.getRunChildren(nodeId, {
             take: TRACE_CHILDREN_TAKE,
           });
-          setChildrenByNode((prev) => ({ ...prev, [nodeId]: page.items }));
+          setChildrenByNode((prev) => ({...prev, [nodeId]: page.items}));
           setChildrenCursorByNode((prev) => ({
             ...prev,
             [nodeId]: page.nextCursor ?? null,
           }));
           cursor = page.nextCursor ?? undefined;
         }
-        // Continue paginating until cursor exhausted.
         while (cursor) {
           const page = await api.getRunChildren(nodeId, {
             afterCursor: cursor,
@@ -930,7 +885,6 @@ export function RunDetailPage() {
         next.add(nodeId);
         return next;
       });
-      // Skip fetch if we've already paginated this node fully.
       if (childrenByNode[nodeId] !== undefined) return;
       void paginateAllChildren(nodeId);
     },
@@ -957,10 +911,8 @@ export function RunDetailPage() {
     [expandedNodes, expandNode, collapseNode],
   );
 
-  // Focus is always conceptually expanded; traceData.children carries its first
-  // page. If there's a cursor for more, paginate the remainder in the background
-  // so the tree shows every child without requiring user action. Guarded by
-  // focusPaginatedRef so the 5s poll doesn't refire this.
+  // Auto-paginate focus's children in the background so the tree shows every child without
+  // user action. focusPaginatedRef prevents the 5s poll from refiring this.
   useEffect(() => {
     if (!traceData) return;
     const focusId = traceData.focus.id;
@@ -969,25 +921,23 @@ export function RunDetailPage() {
     if (focusPaginatedRef.current === focusId) return;
     focusPaginatedRef.current = focusId;
 
-    // Seed childrenByNode[focusId] with the first page from traceData so the
-    // subsequent cursor pages append cleanly. childrenOf() merges traceData's
-    // fresh statuses over this on every render, so polling updates still flow.
+    // Seed with traceData's first page so cursor pages append cleanly; childrenOf()
+    // overlays fresh polled statuses on every render.
     setChildrenByNode((prev) =>
-      prev[focusId] !== undefined ? prev : { ...prev, [focusId]: traceData.children },
+      prev[focusId] !== undefined ? prev : {...prev, [focusId]: traceData.children},
     );
-    setChildrenCursorByNode((prev) => ({ ...prev, [focusId]: initialCursor }));
+    setChildrenCursorByNode((prev) => ({...prev, [focusId]: initialCursor}));
     void paginateAllChildren(focusId, initialCursor);
   }, [traceData, paginateAllChildren]);
 
-  // Reset per-focus paginate guards whenever the URL changes. Clearing
-  // inFlightPaginationRef guarantees that a paginate left mid-flight during
-  // the previous focus won't block a fresh expand of the same nodeId here.
+  // Clear pagination guards on focus change so a stale in-flight paginate doesn't
+  // block a fresh expand of the same nodeId.
   useEffect(() => {
     focusPaginatedRef.current = null;
     inFlightPaginationRef.current.clear();
   }, [id]);
 
-  const { sentinelRef: triggeredRunsSentinelRef } = useInfiniteScroll({
+  const {sentinelRef: triggeredRunsSentinelRef} = useInfiniteScroll({
     scrollContainerRef: triggeredRunsScrollRef,
     hasMore: canLoadMoreChildren,
     isLoading: isLoadingMoreChildren,
@@ -1001,7 +951,7 @@ export function RunDetailPage() {
           Run {id}
         </h2>
         <Alert variant="destructive">
-          <CircleAlert />
+          <CircleAlert/>
           <AlertDescription>Failed to load run</AlertDescription>
         </Alert>
       </div>
@@ -1011,22 +961,22 @@ export function RunDetailPage() {
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
-            <Skeleton className="h-7 w-56" />
-            <Skeleton className="h-5 w-[4.5rem] rounded-full" />
+            <Skeleton className="h-7 w-56"/>
+            <Skeleton className="h-5 w-[4.5rem] rounded-full"/>
           </div>
           <div className="flex gap-2 shrink-0">
-            <Skeleton className="h-8 w-20" />
+            <Skeleton className="h-8 w-20"/>
           </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-          {Array.from({ length: 6 }).map((_, i) => (
+          {Array.from({length: 6}).map((_, i) => (
             <div key={i}>
-              <Skeleton className="h-3 w-16 mb-1.5" />
-              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-3 w-16 mb-1.5"/>
+              <Skeleton className="h-4 w-24"/>
             </div>
           ))}
         </div>
-        <Skeleton className="h-48 w-full rounded-lg" />
+        <Skeleton className="h-48 w-full rounded-lg"/>
       </div>
     );
 
@@ -1037,14 +987,14 @@ export function RunDetailPage() {
           <h2 className="text-xl font-semibold tracking-tight truncate">
             Run {run.id}
           </h2>
-          <StatusBadge status={run.status} />
+          <StatusBadge status={run.status}/>
         </div>
         <div className="flex gap-2 shrink-0">
           {isActive && (
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button variant="outline" size="sm" className="cursor-pointer">
-                  <Ban className="size-3.5" />
+                  <Ban className="size-3.5"/>
                   Cancel
                 </Button>
               </AlertDialogTrigger>
@@ -1072,7 +1022,7 @@ export function RunDetailPage() {
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button variant="outline" size="sm" className="cursor-pointer">
-                  <RotateCcw className="size-3.5" />
+                  <RotateCcw className="size-3.5"/>
                   Re-run
                 </Button>
               </AlertDialogTrigger>
@@ -1212,7 +1162,8 @@ export function RunDetailPage() {
       {run.reason && (
         <div className="rounded-lg border border-destructive/15 overflow-hidden">
           <div className="max-h-[26rem] overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/10 backdrop-blur-sm">
+            <div
+              className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/10 backdrop-blur-sm">
               <span className="text-sm text-destructive/80">Reason</span>
             </div>
             <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
@@ -1225,70 +1176,70 @@ export function RunDetailPage() {
       {failureRows.length > 0 && (
         <div className="rounded-lg border border-destructive/15 overflow-hidden">
           <div className="max-h-[26rem] overflow-auto">
-          <table className="w-full caption-bottom text-sm min-w-[768px]">
-            <TableHeader className="sticky top-0 z-10 bg-destructive/10 backdrop-blur-sm">
-              <TableRow className="hover:bg-transparent border-destructive/10">
-                <TableCell colSpan={4} className="text-destructive/80">
-                  Errors ({failureRows.length})
-                </TableCell>
-              </TableRow>
-              <TableRow className="hover:bg-transparent border-destructive/10">
-                <TableHead>Attempt</TableHead>
-                <TableHead>Occurred</TableHead>
-                <TableHead>Exception</TableHead>
-                <TableHead>Message</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {failureRows.map(({ failure, key }) => {
-                const isExpanded = expandedFailureRow === key;
-                return (
-                  <Fragment key={key}>
-                    <TableRow
-                      className={`cursor-pointer ${
-                        isExpanded ? "bg-muted/20" : ""
-                      }`}
-                      onClick={() =>
-                        setExpandedFailureRow((prev) =>
-                          prev === key ? null : key,
-                        )
-                      }
-                    >
-                      <TableCell className="tabular-nums">
-                        #{failure.attempt}
-                      </TableCell>
-                      <TableCell className="tabular-nums">
-                        {failure.occurredAt
-                          ? formatDate(failure.occurredAt)
-                          : ""}
-                      </TableCell>
-                      <TableCell className="whitespace-normal break-all">
-                        {failure.exceptionType ?? ""}
-                      </TableCell>
-                      <TableCell className="whitespace-normal break-all">
-                        {failure.message ?? ""}
-                      </TableCell>
-                    </TableRow>
-                    {isExpanded && (
-                      <TableRow className="hover:bg-transparent cursor-default">
-                        <TableCell colSpan={4} className="max-w-0 w-full">
-                          {failure.stackTrace ? (
-                            <pre className="text-[13px] whitespace-pre-wrap break-words font-mono">
-                              {failure.stackTrace}
-                            </pre>
-                          ) : (
-                            <div className="text-sm">
-                              No stack trace recorded.
-                            </div>
-                          )}
+            <table className="w-full caption-bottom text-sm min-w-[768px]">
+              <TableHeader className="sticky top-0 z-10 bg-destructive/10 backdrop-blur-sm">
+                <TableRow className="hover:bg-transparent border-destructive/10">
+                  <TableCell colSpan={4} className="text-destructive/80">
+                    Errors ({failureRows.length})
+                  </TableCell>
+                </TableRow>
+                <TableRow className="hover:bg-transparent border-destructive/10">
+                  <TableHead>Attempt</TableHead>
+                  <TableHead>Occurred</TableHead>
+                  <TableHead>Exception</TableHead>
+                  <TableHead>Message</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {failureRows.map(({failure, key}) => {
+                  const isExpanded = expandedFailureRow === key;
+                  return (
+                    <Fragment key={key}>
+                      <TableRow
+                        className={`cursor-pointer ${
+                          isExpanded ? "bg-muted/20" : ""
+                        }`}
+                        onClick={() =>
+                          setExpandedFailureRow((prev) =>
+                            prev === key ? null : key,
+                          )
+                        }
+                      >
+                        <TableCell className="tabular-nums">
+                          #{failure.attempt}
+                        </TableCell>
+                        <TableCell className="tabular-nums">
+                          {failure.occurredAt
+                            ? formatDate(failure.occurredAt)
+                            : ""}
+                        </TableCell>
+                        <TableCell className="whitespace-normal break-all">
+                          {failure.exceptionType ?? ""}
+                        </TableCell>
+                        <TableCell className="whitespace-normal break-all">
+                          {failure.message ?? ""}
                         </TableCell>
                       </TableRow>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </TableBody>
-          </table>
+                      {isExpanded && (
+                        <TableRow className="hover:bg-transparent cursor-default">
+                          <TableCell colSpan={4} className="max-w-0 w-full">
+                            {failure.stackTrace ? (
+                              <pre className="text-[13px] whitespace-pre-wrap break-words font-mono">
+                              {failure.stackTrace}
+                            </pre>
+                            ) : (
+                              <div className="text-sm">
+                                No stack trace recorded.
+                              </div>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+            </table>
           </div>
         </div>
       )}
@@ -1298,147 +1249,144 @@ export function RunDetailPage() {
           <div
             ref={traceScrollRef}
             className="max-h-[32rem] overflow-auto"
-            // scroll-padding-top keeps the sticky header/pill out of the
-            // "center" area scrollIntoView targets, so auto-centering lands
-            // the focus row below them rather than behind them.
-            style={{ scrollPaddingTop: "2.75rem" }}
+            // scroll-padding-top so scrollIntoView lands focus below the sticky header.
+            style={{scrollPaddingTop: "2.75rem"}}
           >
-          <TraceView
-            items={traceItems}
-            currentRunId={id!}
-            ancestorIds={ancestorIds}
-            expandedNodes={expandedNodes}
-            knownEmptyNodes={knownEmptyNodes}
-            loadingNodes={loadingNodes}
-            onToggle={toggleNode}
-            scrollContainerRef={traceScrollRef}
-            header={<span>Trace</span>}
-            loadEarlierSiblings={
-              canLoadMoreSiblingsBefore
-                ? {
+            <TraceView
+              items={traceItems}
+              currentRunId={id!}
+              ancestorIds={ancestorIds}
+              expandedNodes={expandedNodes}
+              knownEmptyNodes={knownEmptyNodes}
+              loadingNodes={loadingNodes}
+              onToggle={toggleNode}
+              scrollContainerRef={traceScrollRef}
+              header={<span>Trace</span>}
+              loadEarlierSiblings={
+                canLoadMoreSiblingsBefore
+                  ? {
                     onClick: () => void loadMoreSiblingsBefore(),
                     isLoading: isLoadingMoreSiblingsBefore,
                   }
-                : undefined
-            }
-            loadMoreLaterSiblings={
-              canLoadMoreSiblingsAfter
-                ? {
+                  : undefined
+              }
+              loadMoreLaterSiblings={
+                canLoadMoreSiblingsAfter
+                  ? {
                     onClick: () => void loadMoreSiblingsAfter(),
                     isLoading: isLoadingMoreSiblingsAfter,
                   }
-                : undefined
-            }
-            extraSiblingsBeforeCount={extraSiblingsBefore.length}
-          />
+                  : undefined
+              }
+              extraSiblingsBeforeCount={extraSiblingsBefore.length}
+            />
           </div>
         </div>
       )}
 
       {sortedStepRuns.length > 0 && (
         <div className="rounded-lg border overflow-hidden">
-        <div
-          ref={triggeredRunsScrollRef}
-          className="max-h-[32rem] overflow-auto"
-          style={{
-            // Explicit fractions on every column: auto would measure each row
-            // independently (StatusBadge width vs "STATUS" header text) and
-            // misalign the grid between header and virtualized rows.
-            ["--trigrun-cols" as string]:
-              "minmax(0,2fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.25fr)",
-          }}
-        >
-        <div className="min-w-[768px]">
-          <div className="sticky top-0 z-10 bg-muted/30 backdrop-blur-sm border-b">
-            <div className="flex items-center py-2.5 px-2">
+          <div
+            ref={triggeredRunsScrollRef}
+            className="max-h-[32rem] overflow-auto"
+            style={{
+              // Explicit fractions: auto would measure rows independently and misalign
+              // the header against virtualized rows.
+              ["--trigrun-cols" as string]:
+                "minmax(0,2fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.25fr)",
+            }}
+          >
+            <div className="min-w-[768px]">
+              <div className="sticky top-0 z-10 bg-muted/30 backdrop-blur-sm border-b">
+                <div className="flex items-center py-2.5 px-2">
               <span className="text-sm text-muted-foreground">
                 Triggered runs ({sortedStepRuns.length} /{" "}
                 {childTotalCount || sortedStepRuns.length})
               </span>
-            </div>
-            <div
-              className="grid items-center border-t border-border/50 text-xs font-medium uppercase tracking-wider text-muted-foreground"
-              style={{ gridTemplateColumns: "var(--trigrun-cols)" }}
-            >
-              <div className="px-2 py-2.5 pl-4">ID</div>
-              <div className="px-2 py-2.5">Job</div>
-              <div className="px-2 py-2.5">Status</div>
-              <div className="px-2 py-2.5">Started</div>
-              <div className="px-2 py-2.5">Duration</div>
-              <div className="px-2 py-2.5">Node</div>
-            </div>
-          </div>
-          <div
-            className="relative"
-            style={{ height: `${triggeredRunsVirtualizer.getTotalSize()}px` }}
-          >
-            {triggeredRunsVirtualizer.getVirtualItems().map((virtualItem) => {
-              const r = sortedStepRuns[virtualItem.index];
-              return (
-                <div
-                  key={r.id}
-                  data-index={virtualItem.index}
-                  className="absolute top-0 left-0 w-full grid items-center border-b border-border/50 text-sm hover:bg-muted/50 transition-colors"
-                  style={{
-                    gridTemplateColumns: "var(--trigrun-cols)",
-                    height: `${TRIGRUN_ROW_HEIGHT}px`,
-                    transform: `translateY(${virtualItem.start}px)`,
-                  }}
-                >
-                  <div className="px-2 pl-4 flex items-center min-w-0">
-                    <Link
-                      to={`/runs/${r.id}`}
-                      className="text-primary hover:underline truncate block"
-                      title={r.id}
-                    >
-                      {r.id}
-                    </Link>
-                  </div>
-                  <div className="px-2 flex items-center min-w-0">
-                    <Link
-                      to={`/jobs/${encodeURIComponent(r.jobName)}`}
-                      className="text-primary hover:underline truncate block"
-                      title={r.jobName}
-                    >
-                      {r.jobName}
-                    </Link>
-                  </div>
-                  <div className="px-2 flex items-center min-w-0">
-                    <StatusBadge status={r.status} />
-                  </div>
-                  <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
-                    {r.startedAt ? formatDate(r.startedAt) : ""}
-                  </div>
-                  <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
-                    {formatDuration(r.startedAt, r.completedAt)}
-                  </div>
-                  <div className="px-2 flex items-center min-w-0">
-                    {r.nodeName ? (
-                      <Link
-                        to={`/nodes/${encodeURIComponent(r.nodeName)}`}
-                        className="text-primary hover:underline truncate block"
-                        title={r.nodeName}
-                      >
-                        {r.nodeName}
-                      </Link>
-                    ) : (
-                      ""
-                    )}
-                  </div>
                 </div>
-              );
-            })}
-          </div>
-          {canLoadMoreChildren && (
-            <div
-              ref={triggeredRunsSentinelRef}
-              className="h-10 flex items-center justify-center text-xs text-muted-foreground"
-            >
-              {isLoadingMoreChildren ? "Loading…" : ""}
+                <div
+                  className="grid items-center border-t border-border/50 text-xs font-medium uppercase tracking-wider text-muted-foreground"
+                  style={{gridTemplateColumns: "var(--trigrun-cols)"}}
+                >
+                  <div className="px-2 py-2.5 pl-4">ID</div>
+                  <div className="px-2 py-2.5">Job</div>
+                  <div className="px-2 py-2.5">Status</div>
+                  <div className="px-2 py-2.5">Started</div>
+                  <div className="px-2 py-2.5">Duration</div>
+                  <div className="px-2 py-2.5">Node</div>
+                </div>
+              </div>
+              <div
+                className="relative"
+                style={{height: `${triggeredRunsVirtualizer.getTotalSize()}px`}}
+              >
+                {triggeredRunsVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const r = sortedStepRuns[virtualItem.index];
+                  return (
+                    <div
+                      key={r.id}
+                      data-index={virtualItem.index}
+                      className="absolute top-0 left-0 w-full grid items-center border-b border-border/50 text-sm hover:bg-muted/50 transition-colors"
+                      style={{
+                        gridTemplateColumns: "var(--trigrun-cols)",
+                        height: `${TRIGRUN_ROW_HEIGHT}px`,
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      <div className="px-2 pl-4 flex items-center min-w-0">
+                        <Link
+                          to={`/runs/${r.id}`}
+                          className="text-primary hover:underline truncate block"
+                          title={r.id}
+                        >
+                          {r.id}
+                        </Link>
+                      </div>
+                      <div className="px-2 flex items-center min-w-0">
+                        <Link
+                          to={`/jobs/${encodeURIComponent(r.jobName)}`}
+                          className="text-primary hover:underline truncate block"
+                          title={r.jobName}
+                        >
+                          {r.jobName}
+                        </Link>
+                      </div>
+                      <div className="px-2 flex items-center min-w-0">
+                        <StatusBadge status={r.status}/>
+                      </div>
+                      <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
+                        {r.startedAt ? formatDate(r.startedAt) : ""}
+                      </div>
+                      <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
+                        {formatDuration(r.startedAt, r.completedAt)}
+                      </div>
+                      <div className="px-2 flex items-center min-w-0">
+                        {r.nodeName ? (
+                          <Link
+                            to={`/nodes/${encodeURIComponent(r.nodeName)}`}
+                            className="text-primary hover:underline truncate block"
+                            title={r.nodeName}
+                          >
+                            {r.nodeName}
+                          </Link>
+                        ) : (
+                          ""
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {canLoadMoreChildren && (
+                <div
+                  ref={triggeredRunsSentinelRef}
+                  className="h-10 flex items-center justify-center text-xs text-muted-foreground"
+                >
+                  {isLoadingMoreChildren ? "Loading…" : ""}
+                </div>
+              )}
             </div>
-          )}
-        </div>
-        </div>
+          </div>
         </div>
       )}
 
@@ -1455,7 +1403,7 @@ export function RunDetailPage() {
             </div>
             <div
               className="relative px-2"
-              style={{ height: `${inputVirtualizer.getTotalSize()}px` }}
+              style={{height: `${inputVirtualizer.getTotalSize()}px`}}
             >
               {inputVirtualizer.getVirtualItems().map((virtualItem) => {
                 const item = inputItems[virtualItem.index];
@@ -1492,7 +1440,7 @@ export function RunDetailPage() {
             </div>
             <div
               className="relative px-2"
-              style={{ height: `${outputVirtualizer.getTotalSize()}px` }}
+              style={{height: `${outputVirtualizer.getTotalSize()}px`}}
             >
               {outputVirtualizer.getVirtualItems().map((virtualItem) => {
                 const item = outputItems[virtualItem.index];
@@ -1521,7 +1469,8 @@ export function RunDetailPage() {
             ref={logScrollContainerRef}
             className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
           >
-            <div className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+            <div
+              className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Logs (
                 {logFilter !== null
@@ -1535,8 +1484,9 @@ export function RunDetailPage() {
                   setCurrentLogFilter(v === "all" ? null : Number(v))
                 }
               >
-                <SelectTrigger className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground font-sans gap-0.5 [&_svg]:size-3">
-                  <SelectValue />
+                <SelectTrigger
+                  className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground font-sans gap-0.5 [&_svg]:size-3">
+                  <SelectValue/>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All</SelectItem>
@@ -1551,7 +1501,7 @@ export function RunDetailPage() {
             </div>
             <div
               className="relative px-2"
-              style={{ height: `${logVirtualizer.getTotalSize()}px` }}
+              style={{height: `${logVirtualizer.getTotalSize()}px`}}
             >
               {logVirtualizer.getVirtualItems().map((virtualItem) => {
                 const log = filteredLogs[virtualItem.index];

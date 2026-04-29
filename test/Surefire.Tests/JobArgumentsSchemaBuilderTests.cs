@@ -6,16 +6,12 @@ public sealed class JobArgumentsSchemaBuilderTests
 {
     private static bool NoServices(Type _) => false;
 
-    // ── No parameters ──────────────────────────────────────────────────────────
-
     [Fact]
     public void Build_NoParams_ReturnsNull()
     {
         Delegate handler = () => { };
         Assert.Null(JobArgumentsSchemaBuilder.Build(handler, NoServices));
     }
-
-    // ── Scalar types ──────────────────────────────────────────────────────────
 
     [Fact]
     public void Build_IntParam_SchemaHasIntegerProperty()
@@ -40,8 +36,6 @@ public sealed class JobArgumentsSchemaBuilderTests
         // String maps to {"type": "string"} or {"type": ["string","null"]} depending on schema options
         Assert.True(doc.RootElement.GetProperty("properties").TryGetProperty("name", out _));
     }
-
-    // ── Required vs optional ──────────────────────────────────────────────────
 
     [Fact]
     public void Build_NonNullableReferenceParam_IsRequired()
@@ -96,8 +90,6 @@ public sealed class JobArgumentsSchemaBuilderTests
         }
     }
 
-    // ── Framework parameter exclusions ────────────────────────────────────────
-
     [Fact]
     public void Build_JobContextOnly_ReturnsNull()
     {
@@ -125,8 +117,6 @@ public sealed class JobArgumentsSchemaBuilderTests
         Assert.False(props.TryGetProperty("ct", out _));
     }
 
-    // ── Service type exclusion ────────────────────────────────────────────────
-
     [Fact]
     public void Build_ServiceTypeParam_Excluded()
     {
@@ -145,8 +135,6 @@ public sealed class JobArgumentsSchemaBuilderTests
         Delegate handler = (MyService svc) => { };
         Assert.Null(JobArgumentsSchemaBuilder.Build(handler, t => t == typeof(MyService)));
     }
-
-    // ── Multiple params ───────────────────────────────────────────────────────
 
     [Fact]
     public void Build_MultipleParams_AllAppearInProperties()

@@ -1,6 +1,14 @@
 <Project>
     <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
 
+    <PropertyGroup>
+        <GenerateDocumentationFile>false</GenerateDocumentationFile>
+        <!-- Tests aren't trimmed or AOT-published, so the trim/AOT analyzers add noise without
+             protecting anything. Match what ASP.NET Core / EF Core do in their test trees. -->
+        <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+        <EnableAotAnalyzer>false</EnableAotAnalyzer>
+    </PropertyGroup>
+
     <ItemGroup>
         <Using Include="Xunit"/>
         <Using Include="Surefire"/>

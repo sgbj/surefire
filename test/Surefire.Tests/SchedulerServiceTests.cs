@@ -7,8 +7,6 @@ namespace Surefire.Tests;
 
 public sealed class SchedulerServiceTests
 {
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
     private static (SurefireSchedulerService service, FakeSchedulerStore store, FakeTimeProvider time)
         CreateService(SurefireOptions? options = null)
     {
@@ -46,8 +44,6 @@ public sealed class SchedulerServiceTests
             Priority = 0
         };
 
-    // ── First fire (LastCronFireAt is null) ───────────────────────────────────
-
     [Fact]
     public async Task FirstFire_SetsLastCronFireAt_NoRunCreated()
     {
@@ -60,8 +56,6 @@ public sealed class SchedulerServiceTests
         Assert.Equal(now, store.LastCronFireAtUpdates["TestJob"]);
         Assert.Empty(store.CreatedRuns);
     }
-
-    // ── MisfirePolicy.Skip ────────────────────────────────────────────────────
 
     [Fact]
     public async Task Skip_UpdatesLastCronFireAt_NoRunCreated()
@@ -78,8 +72,6 @@ public sealed class SchedulerServiceTests
         Assert.True(store.LastCronFireAtUpdates["TestJob"] < time.GetUtcNow());
         Assert.True(store.LastCronFireAtUpdates["TestJob"] > lastFire);
     }
-
-    // ── MisfirePolicy.FireOnce ────────────────────────────────────────────────
 
     [Fact]
     public async Task FireOnce_MultipleMissed_CreatesExactlyOneRun()
@@ -108,8 +100,6 @@ public sealed class SchedulerServiceTests
         // The cron fire at passed to the store should be the most recent missed fire
         Assert.True(cronFireAt > lastFire);
     }
-
-    // ── MisfirePolicy.FireAll ─────────────────────────────────────────────────
 
     [Fact]
     public async Task FireAll_MultipleMissed_CreatesOneRunPerFireTime()
@@ -209,28 +199,23 @@ public sealed class SchedulerServiceTests
         Assert.Empty(store.LastCronFireAtUpdates);
     }
 
-    // ── Invalid cron ──────────────────────────────────────────────────────────
-
     [Fact]
     public async Task InvalidCron_SkipsJob_NoException()
     {
         var (service, store, time) = CreateService();
         store.Jobs.Add(MakeJob(cron: "not a cron", lastCronFireAt: time.GetUtcNow().AddMinutes(-1)));
 
-        // Should not throw
         await service.ScheduleDueJobsAsync(CancellationToken.None);
 
         Assert.Empty(store.CreatedRuns);
         Assert.Empty(store.LastCronFireAtUpdates);
     }
 
-    // ── No missed fires ───────────────────────────────────────────────────────
-
     [Fact]
     public async Task NoMissedFires_NoRunCreated()
     {
         var (service, store, time) = CreateService();
-        // lastCronFireAt is 10 seconds ago on a per-minute cron — next fire not due yet
+        // lastCronFireAt is 10s ago on a per-minute cron, so next fire is not due yet.
         store.Jobs.Add(MakeJob(cron: "* * * * *", policy: MisfirePolicy.FireOnce,
             lastCronFireAt: time.GetUtcNow().AddSeconds(-10)));
 
@@ -240,8 +225,6 @@ public sealed class SchedulerServiceTests
         Assert.Empty(store.LastCronFireAtUpdates);
     }
 
-    // ── Deduplication ─────────────────────────────────────────────────────────
-
     [Fact]
     public async Task Deduplication_SameFireTime_OnlyOneRunCreated()
     {
@@ -249,20 +232,16 @@ public sealed class SchedulerServiceTests
         var lastFire = time.GetUtcNow().AddMinutes(-1).AddSeconds(-30);
         store.Jobs.Add(MakeJob(cron: "* * * * *", policy: MisfirePolicy.FireOnce, lastCronFireAt: lastFire));
 
-        // First tick succeeds
         await service.ScheduleDueJobsAsync(CancellationToken.None);
         Assert.Equal(1, store.TryCreateCallCount);
 
-        // Pretend time hasn't advanced — store rejects duplicate via dedup
+        // Time hasn't advanced; the store rejects the duplicate via dedup.
         store.RejectNextCreate = true;
         await service.ScheduleDueJobsAsync(CancellationToken.None);
 
-        // TryCreate was called again but rejected; only one run persisted
         Assert.Equal(2, store.TryCreateCallCount);
         Assert.Single(store.CreatedRuns);
     }
-
-    // ── Disabled jobs ─────────────────────────────────────────────────────────
 
     [Fact]
     public async Task DisabledJob_NotScheduled()
@@ -276,14 +255,11 @@ public sealed class SchedulerServiceTests
         Assert.Empty(store.CreatedRuns);
     }
 
-    // ── Loop resilience (C4) ──────────────────────────────────────────────────
-
     [Fact]
     public async Task SchedulerLoop_NonTransientStoreError_LoopContinuesAndRecordsFailure()
     {
-        // C4 regression: the loop must never rethrow out of ExecuteAsync and kill the host. A
-        // non-transient error (InvalidOperationException) must be logged and counted, and the
-        // next tick must keep firing.
+        // The scheduler loop must not rethrow out of ExecuteAsync. A non-transient error
+        // must be logged and counted, and the next tick must keep firing.
         var time = new FakeTimeProvider();
         time.SetUtcNow(new(2025, 1, 1, 12, 0, 0, TimeSpan.Zero));
         var store = new ExplodingSchedulerStore();
@@ -315,8 +291,6 @@ public sealed class SchedulerServiceTests
             $"Expected at least one recorded failure, got {state.ConsecutiveFailures}");
         Assert.True(store.Calls >= 2, $"Loop should survive to retry; Calls={store.Calls}");
     }
-
-    // ── Fake infrastructure ───────────────────────────────────────────────────
 
     private sealed class FakeNotificationProvider : INotificationProvider
     {

@@ -54,7 +54,7 @@ internal sealed partial class SurefireLogEventPump(
     }
 
     /// <summary>
-    ///     Drops the per-run flush bookkeeping. Must be called after a successful terminal transition,
+    ///     Drops the per-run flush bookkeeping. Call after a successful terminal transition,
     ///     once no further log entries can be enqueued for the run.
     /// </summary>
     public void DropRunState(string runId) => _runFlushStates.TryRemove(runId, out _);
@@ -94,8 +94,8 @@ internal sealed partial class SurefireLogEventPump(
             }
         }
 
-        // Drain remaining items on shutdown so final job logs aren't lost.
-        // Bound the drain to ShutdownTimeout so a hanging store doesn't block process exit.
+        // Drain remaining items so final job logs aren't lost; bound to ShutdownTimeout so a
+        // hanging store doesn't block process exit.
         _channel.Writer.TryComplete();
         try
         {

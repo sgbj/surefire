@@ -3,16 +3,10 @@ using System.Text.Json.Serialization;
 namespace Surefire;
 
 /// <summary>
-///     Immutable snapshot of a job run's state. Pure data — hydration lives on
-///     <see cref="IJobClient.WaitAsync{T}(string, System.Threading.CancellationToken)" /> /
-///     <see cref="IJobClient.StreamAsync{T}(string, System.Threading.CancellationToken)" />.
+///     Immutable snapshot of a job run's state.
 /// </summary>
 public sealed record JobRun
 {
-    // ------------------------------------------------------------------
-    // Identity / immutable — set at trigger time, never change
-    // ------------------------------------------------------------------
-
     /// <summary>Gets the unique identifier of the run.</summary>
     public required string Id { get; init; }
 
@@ -75,10 +69,6 @@ public sealed record JobRun
     /// <summary>Gets the run ID that this run is a rerun of.</summary>
     public string? RerunOfRunId { get; init; }
 
-    // ------------------------------------------------------------------
-    // Live — set via `with` when run state changes
-    // ------------------------------------------------------------------
-
     /// <summary>Gets the current status of the run.</summary>
     public JobStatus Status { get; init; }
 
@@ -86,10 +76,10 @@ public sealed record JobRun
     public double Progress { get; init; }
 
     /// <summary>
-    ///     Gets the termination reason for this run, only for non-exception causes such as
-    ///     client-requested cancellation, expiration past the <see cref="NotAfter" /> deadline,
-    ///     missing handler registration, or shutdown interruption. Null when the run terminated
-    ///     by exception (retry exhaustion) — per-attempt exception detail lives on
+    ///     Gets the termination reason for this run when it terminated for a non-exception cause
+    ///     (client-requested cancellation, expiration past <see cref="NotAfter" />, missing handler
+    ///     registration, or shutdown interruption). Null when the run terminated by exception
+    ///     (retry exhaustion); per-attempt exception detail lives on
     ///     <see cref="RunEventType.AttemptFailure" /> events.
     /// </summary>
     public string? Reason { get; init; }
@@ -114,10 +104,6 @@ public sealed record JobRun
 
     /// <summary>Gets the name of the node that claimed this run.</summary>
     public string? NodeName { get; init; }
-
-    // ------------------------------------------------------------------
-    // Derived state — excluded from wire serialization; consumers compute from Status.
-    // ------------------------------------------------------------------
 
     /// <summary>Gets whether the run has reached a terminal status.</summary>
     [JsonIgnore]

@@ -16,10 +16,9 @@ internal sealed class RedisNotificationProvider(
 
     private const int OutgoingQueueCapacity = MaxPublishBatch * 16;
 
-    // Outgoing publish coalescing: a burst of identical (channel, message) pairs issued by a
-    // batch of completions collapses to a single PUBLISH within a 2 ms window, and the surviving
-    // publishes are dispatched in a single pipeline via IDatabase.CreateBatch so round-trip cost
-    // is one socket write regardless of batch size.
+    // Coalesces identical (channel, message) pairs within a 2 ms window into a single PUBLISH;
+    // survivors flush in one IDatabase.CreateBatch pipeline so round-trip cost is a single
+    // socket write regardless of batch size.
     private static readonly TimeSpan PublishFlushInterval = TimeSpan.FromMilliseconds(2);
 
     private readonly Channel<DispatchWorkItem> _dispatchChannel =
@@ -29,8 +28,8 @@ internal sealed class RedisNotificationProvider(
             SingleWriter = false
         });
 
-    // Bounded with Wait — producers apply real backpressure if Redis publishing stalls rather
-    // than the queue growing unbounded.
+    // Bounded+Wait applies backpressure to producers if publishing stalls, instead of growing
+    // the queue unbounded.
     private readonly Channel<OutgoingPublish> _outgoingChannel =
         Channel.CreateBounded<OutgoingPublish>(new BoundedChannelOptions(OutgoingQueueCapacity)
         {
@@ -49,10 +48,8 @@ internal sealed class RedisNotificationProvider(
 
     public async ValueTask DisposeAsync()
     {
-        // Drain outgoing publishes before cancelling dispatch. Completing the writer causes the
-        // publish loop to exit naturally when the queue empties, preserving every enqueued
-        // notification. Cancellation comes after so in-flight flushes continue through their
-        // best-effort error handling.
+        // Complete the writer so the publish loop drains naturally and every enqueued
+        // notification is flushed; cancel dispatch only after, so in-flight flushes finish.
         _outgoingChannel.Writer.TryComplete();
         if (_publishLoop is { } publishLoop)
         {
@@ -90,8 +87,8 @@ internal sealed class RedisNotificationProvider(
         _subscriber = connection.GetSubscriber();
         _cts = new();
         _dispatchLoop = DispatchLoopAsync(_cts.Token);
-        // Publish loop runs under CancellationToken.None so DisposeAsync can drain it purely via
-        // channel completion without losing queued publishes.
+        // Runs under CancellationToken.None so DisposeAsync drains via channel completion
+        // without losing queued publishes.
         _publishLoop = PublishLoopAsync(CancellationToken.None);
         return Task.CompletedTask;
     }
@@ -216,9 +213,8 @@ internal sealed class RedisNotificationProvider(
             return;
         }
 
-        // Pipeline all publishes onto a single multiplexer connection via IBatch. Tasks are
-        // collected eagerly; Execute flushes them together; WhenAll completes when every publish
-        // has been acknowledged. One network round trip amortized across the whole batch.
+        // Pipeline every publish through one IBatch: collect tasks, Execute flushes them
+        // together, WhenAll waits for ack. One network round trip amortized across the batch.
         var redisBatch = connection.GetDatabase().CreateBatch();
         var tasks = new Task[batch.Count];
         for (var i = 0; i < batch.Count; i++)

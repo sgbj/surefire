@@ -35,7 +35,7 @@ Each node sends a heartbeat every `HeartbeatInterval` (default 30 seconds). If a
 
 Every store implements the same surface. The in-memory store keeps state in the hosting process and loses it on restart. The other stores persist state and coordinate work across nodes:
 
-- **In-memory**: default, process-local, non-durable.
+- In-memory: default, process-local, non-durable.
 - [PostgreSQL](/surefire/storage/postgresql/): durable store with `LISTEN`/`NOTIFY` for cross-node notifications.
 - [SQL Server](/surefire/storage/sqlserver/): durable store with polling-based wakeups.
 - [SQLite](/surefire/storage/sqlite/): file-backed store for single-node setups.

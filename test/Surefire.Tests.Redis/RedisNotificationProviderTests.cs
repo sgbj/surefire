@@ -25,9 +25,9 @@ public sealed class RedisNotificationProviderTests
     [Fact]
     public async Task DisposingOneSubscription_LeavesOtherSubscriptionsOnSameChannelIntact()
     {
-        // Regression: Subscription.DisposeAsync previously called UnsubscribeAsync(channel) without
-        // the handler arg, which removes EVERY handler for the channel — silently breaking the
-        // dashboard SSE + executor RunCancel + JobClient.WaitAsync co-tenancy on the same run id.
+        // Disposing one subscription must remove only its own handler, not every handler for the
+        // channel. Otherwise dashboard SSE, executor RunCancel, and JobClient.WaitAsync would
+        // interfere on the same run id.
         var ct = TestContext.Current.CancellationToken;
         await using var container = new RedisBuilder().WithImage("redis:7-alpine").Build();
         await container.StartAsync(ct);
@@ -61,7 +61,7 @@ public sealed class RedisNotificationProviderTests
 
         await provider.PublishAsync(NotificationChannels.RunCreated, "run-2", ct);
         await WaitForCountAsync(() => Volatile.Read(ref bFired), 2, ct);
-        Assert.Equal(1, Volatile.Read(ref aFired)); // unchanged — A was disposed
+        Assert.Equal(1, Volatile.Read(ref aFired)); // A was disposed
     }
 
     private static async Task WaitForCountAsync(Func<int> read, int expected, CancellationToken cancellationToken)

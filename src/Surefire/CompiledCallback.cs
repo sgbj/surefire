@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 
@@ -5,7 +6,7 @@ namespace Surefire;
 
 /// <summary>
 ///     Pre-compiled lifecycle callback invoker. Built once per registered callback at registration
-///     time — avoids <see cref="Delegate.DynamicInvoke" />, <see cref="MethodBase.GetParameters()" />,
+///     time to avoid <see cref="Delegate.DynamicInvoke" />, <see cref="MethodBase.GetParameters()" />,
 ///     and per-call reflection for ValueTask&lt;T&gt; awaiting on every invocation.
 /// </summary>
 internal sealed class CompiledCallback
@@ -28,6 +29,8 @@ internal sealed class CompiledCallback
     }
 
     /// <summary>Compiles a callback delegate into a fast invoker. Call once at registration time.</summary>
+    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
+    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
     public static CompiledCallback Build(Delegate callback)
     {
         var parameters = callback.Method.GetParameters();
@@ -144,7 +147,7 @@ internal sealed class CompiledCallback
             return ReturnKind.ValueTaskOfT;
         }
 
-        // Task<T> is still a Task — the base case handles it.
+        // Task<T> is still a Task; the base case handles it.
         if (typeof(Task).IsAssignableFrom(returnType))
         {
             return ReturnKind.Task;

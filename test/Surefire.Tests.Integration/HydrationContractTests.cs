@@ -7,14 +7,9 @@ namespace Surefire.Tests.Integration;
 
 /// <summary>
 ///     Contract tests for the hydration resolver, exception semantics, and batch streaming.
-///     Mirrors the matrices and invariants locked down in <c>todo.md</c> §9.
 /// </summary>
 public sealed class HydrationContractTests
 {
-    // =========================================================================
-    // Non-generic metadata APIs must NOT throw on non-success terminals
-    // =========================================================================
-
     [Fact]
     public async Task WaitAsync_NonGeneric_OnFailedRun_ReturnsRunWithoutThrowing()
     {
@@ -78,15 +73,11 @@ public sealed class HydrationContractTests
             statuses.Add(child.Status);
         }
 
-        // WaitEachAsync yields ALL children regardless of outcome — no AggregateException.
+        // WaitEachAsync yields all children regardless of outcome; no AggregateException.
         Assert.Equal(2, statuses.Count);
         Assert.Contains(JobStatus.Succeeded, statuses);
         Assert.Contains(JobStatus.Failed, statuses);
     }
-
-    // =========================================================================
-    // Typed WaitAsync<T> / WaitBatchAsync<T> DO throw on non-success
-    // =========================================================================
 
     [Fact]
     public async Task WaitAsyncT_OnFailedRun_ThrowsJobRunExceptionWithFailedStatus()
@@ -141,10 +132,6 @@ public sealed class HydrationContractTests
         Assert.Equal(JobStatus.Failed, inner.Status);
     }
 
-    // =========================================================================
-    // Void job has no result — typed WaitAsync throws InvalidOperationException
-    // =========================================================================
-
     [Fact]
     public async Task WaitAsyncT_OnVoidJob_ThrowsInvalidOperationException()
     {
@@ -157,10 +144,6 @@ public sealed class HydrationContractTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Client.WaitAsync<int>(run.Id, ct));
     }
-
-    // =========================================================================
-    // Hydration matrix — scalar / collection / IAsyncEnumerable × int / List<int> / int[] / IAsyncEnumerable<int>
-    // =========================================================================
 
     [Fact]
     public async Task ScalarJob_WaitAsyncT_Scalar_ReturnsValue()
@@ -250,7 +233,7 @@ public sealed class HydrationContractTests
     [Fact]
     public async Task CollectionJob_StreamAsyncT_YieldsCollectionAsStream()
     {
-        // Collection-returning job consumed as a stream — resolver iterates the collection.
+        // Collection-returning job consumed as a stream; resolver iterates the collection.
         var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync();
         harness.Host.AddJob("Collection", () => new List<int> { 1, 2, 3 });
@@ -269,7 +252,7 @@ public sealed class HydrationContractTests
     [Fact]
     public async Task ScalarJob_StreamAsyncT_YieldsScalarAsSingleItem()
     {
-        // Scalar-returning job consumed as a stream — resolver yields once.
+        // Scalar-returning job consumed as a stream; resolver yields once.
         var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync();
         harness.Host.AddJob("Scalar", () => 42);
@@ -284,10 +267,6 @@ public sealed class HydrationContractTests
 
         Assert.Equal([42], items);
     }
-
-    // =========================================================================
-    // Batch hydration — mixed-shape children, collect-all, fail-fast
-    // =========================================================================
 
     [Fact]
     public async Task WaitBatchAsyncT_AllSucceeded_ReturnsResultsInOrder()
@@ -423,10 +402,6 @@ public sealed class HydrationContractTests
         Assert.All(observed, v => Assert.NotEqual(10, v));
     }
 
-    // =========================================================================
-    // Cancellation ownership — observation overloads must NOT cancel the run
-    // =========================================================================
-
     [Fact]
     public async Task WaitAsync_Observation_Cancellation_DoesNotCancelRun()
     {
@@ -450,7 +425,7 @@ public sealed class HydrationContractTests
         waitCts.Cancel();
         await Assert.ThrowsAsync<OperationCanceledException>(() => waitTask);
 
-        // Run MUST still be non-terminal — observation does not own the run.
+        // Run must still be non-terminal: observation does not own the run.
         var snapshot = await harness.Client.GetRunAsync(run.Id, ct);
         Assert.NotNull(snapshot);
         Assert.False(snapshot.Status.IsTerminal);
@@ -509,10 +484,6 @@ public sealed class HydrationContractTests
         Assert.Equal(JobStatus.Cancelled, final.Status);
     }
 
-    // =========================================================================
-    // Arg composability — handler declares IAsyncEnumerable<T>, caller passes collection
-    // =========================================================================
-
     [Fact]
     public async Task HandlerIAsyncEnumerable_CallerConcreteArray_MaterializesCorrectly()
     {
@@ -535,10 +506,6 @@ public sealed class HydrationContractTests
 
         Assert.Equal(10, result);
     }
-
-    // =========================================================================
-    // Batch efficiency — bulk fetch window
-    // =========================================================================
 
     [Fact]
     public async Task StreamBatchAsync_LargeBatch_UsesBulkFetchNotPerChildRoundTrips()
@@ -564,10 +531,6 @@ public sealed class HydrationContractTests
         // Assert the number of GetRunsByIdsAsync calls is much lower than 200 (not per-child).
         Assert.InRange(counter.GetRunsByIdsCalls, 1, 20);
     }
-
-    // =========================================================================
-    // Harness
-    // =========================================================================
 
     private static Task<RuntimeHarness> CreateHarnessAsync(
         Action<SurefireOptions>? configureOptions = null,
@@ -607,6 +570,7 @@ public sealed class HydrationContractTests
     {
         public Task MigrateAsync(CancellationToken ct = default) => inner.MigrateAsync(ct);
         public Task PingAsync(CancellationToken ct = default) => inner.PingAsync(ct);
+        public bool IsTransientException(Exception ex) => inner.IsTransientException(ex);
 
         public Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken ct = default) =>
             inner.UpsertJobsAsync(jobs, ct);

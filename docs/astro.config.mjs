@@ -23,7 +23,7 @@ export default defineConfig({
       ],
       customCss: ["./src/styles/custom.css"],
       expressiveCode: {
-        styleOverrides: { borderRadius: "0.5rem" },
+        styleOverrides: { borderRadius: "0.625rem" },
       },
       sidebar: [
         {
@@ -64,6 +64,7 @@ export default defineConfig({
             { label: "Redis", slug: "storage/redis" },
           ],
         },
+        { label: "Roadmap", slug: "roadmap" },
       ],
     }),
   ],

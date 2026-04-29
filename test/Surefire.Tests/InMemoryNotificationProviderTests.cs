@@ -37,8 +37,7 @@ public sealed class InMemoryNotificationProviderTests
     {
         var ct = TestContext.Current.CancellationToken;
 
-        // Regression: Redis previously called UnsubscribeAsync(channel) without the handler arg,
-        // which removes EVERY handler for the channel, not just the one being disposed.
+        // Disposing one subscription must not remove other handlers for the same channel.
         var provider = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
 
         var aFired = 0;
@@ -63,7 +62,7 @@ public sealed class InMemoryNotificationProviderTests
         await subA.DisposeAsync();
 
         await provider.PublishAsync(NotificationChannels.RunCreated, "run-2", ct);
-        Assert.Equal(1, Volatile.Read(ref aFired)); // unchanged — A was disposed
-        Assert.Equal(2, Volatile.Read(ref bFired)); // still receiving — B is intact
+        Assert.Equal(1, Volatile.Read(ref aFired)); // A was disposed
+        Assert.Equal(2, Volatile.Read(ref bFired)); // B is intact
     }
 }

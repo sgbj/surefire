@@ -49,7 +49,7 @@ public sealed class BatchedEventWriterTests
     [Fact]
     public async Task FlushRunAsync_TransientStoreErrors_RetriesUntilSuccess()
     {
-        // Transient errors (deadlock, connection reset) must retry indefinitely with backoff —
+        // Transient errors (deadlock, connection reset) retry indefinitely with backoff;
         // FlushRunAsync should eventually return successfully and the events should be persisted.
         var store = new RecordingStore { FailNextTransientCount = 2 };
         await using var harness = await StartAsync(store);
@@ -91,10 +91,9 @@ public sealed class BatchedEventWriterTests
     [Fact]
     public async Task FlushRunAsync_EarlierBatchFailedPermanently_LaterBatchSucceeded_ThrowsOriginalException()
     {
-        // Durability regression guard: the sticky-within-run Error stays set across later batches
-        // for the same run. A caller flushing after a later success still observes the earlier
-        // failure so the terminal transition can't silently proceed with a hole in the event
-        // stream.
+        // The sticky-within-run Error stays set across later batches for the same run. A caller
+        // flushing after a later success still observes the earlier failure, so the terminal
+        // transition cannot silently proceed with a hole in the event stream.
         var failure = new InvalidOperationException("permanent");
         var store = new SequencedStore { FailOnFirst = failure };
         await using var harness = await StartAsync(store);
@@ -107,7 +106,7 @@ public sealed class BatchedEventWriterTests
         // Second batch succeeds, advancing FlushedSeq past the first failed batch's range.
         await harness.Writer.EnqueueAsync(MakeEvent(RunA, 2), [], ct);
 
-        // FlushRunAsync MUST still throw — the caller's target reaches past the first-batch
+        // FlushRunAsync must still throw: the caller's target reaches past the first-batch
         // failure and that hole is permanent for this run.
         var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Writer.FlushRunAsync(RunA, ct));
         Assert.Same(failure, thrown);
@@ -139,13 +138,13 @@ public sealed class BatchedEventWriterTests
     public async Task FlushRunAsync_PermanentFailureForOneRun_DoesNotPoisonSiblingRuns()
     {
         // Cross-run isolation. One run's permanent event failure must not block a sibling run's
-        // FlushRunAsync — the writer is a node-wide singleton, so a poisoned global flush cursor
+        // FlushRunAsync. The writer is a node-wide singleton, so a poisoned global flush cursor
         // would wedge every other run on the node until process restart.
         //
         // Batches are atomic at the store (all-or-nothing append), so to test cross-run isolation
         // we need the failing batch to contain ONLY RunA's events. We get that natural separation
-        // by enqueuing + flushing RunA before any other run enqueues — the flush drains the
-        // single-run batch and stamps RunA's error before RunB's event even enters the channel.
+        // by enqueuing + flushing RunA before any other run enqueues; the flush drains the
+        // single-run batch and stamps RunA's error before RunB's event enters the channel.
         var failure = new InvalidOperationException("runA-only failure");
         var store = new PerRunFailureStore { FailRunIds = { RunA }, Failure = failure };
         await using var harness = await StartAsync(store);
@@ -164,7 +163,7 @@ public sealed class BatchedEventWriterTests
         await harness.Writer.EnqueueAsync(MakeEvent(RunB, 1), [], ct);
         await harness.Writer.FlushRunAsync(RunB, ct);
 
-        // A later RunA flush still throws — sticky-within-run error survives sibling traffic.
+        // A later RunA flush still throws; sticky-within-run error survives sibling traffic.
         var thrownAgain = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             harness.Writer.FlushRunAsync(RunA, ct));
         Assert.Same(failure, thrownAgain);

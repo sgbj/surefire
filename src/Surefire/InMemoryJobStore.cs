@@ -13,9 +13,10 @@ internal sealed class InMemoryJobStore : IJobStore
 {
     private readonly Dictionary<string, JobBatch> _batches = new();
 
-    // Deduplication index scoped by (JobName, DeduplicationId) for non-terminal runs.
     private readonly Dictionary<string, List<RunEvent>> _batchEventsByBatchId = new();
     private readonly Dictionary<string, List<RunEvent>> _batchOutputEventsByBatchId = new();
+
+    // (JobName, DeduplicationId) of non-terminal runs.
     private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
     private readonly Dictionary<string, List<RunEvent>> _eventsByRunId = new();
     private readonly Lock _gate = new();
@@ -24,8 +25,8 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, int> _nonTerminalCountByJob = new();
 
     // Per-run pending entries keyed by runId. Sorted globally at claim time using
-    // the live queue priority from _queues — no denormalized snapshot means queue
-    // priority changes take effect on the very next claim without any index rebuild.
+    // the live queue priority from _queues, so queue priority changes take effect on
+    // the very next claim without any index rebuild.
     private readonly Dictionary<string, PendingRunEntry> _pending = new();
     private readonly Dictionary<string, int> _pendingCountByQueue = new();
     private readonly Dictionary<string, QueueDefinition> _queues = new();
@@ -43,6 +44,8 @@ internal sealed class InMemoryJobStore : IJobStore
     public Task MigrateAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
     public Task PingAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    public bool IsTransientException(Exception ex) => false;
 
     public Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken cancellationToken = default)
     {
@@ -151,13 +154,13 @@ internal sealed class InMemoryJobStore : IJobStore
     public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => CreateRunsCoreAsync(runs, initialEvents);
+        => CreateRunsAsyncCore(runs, initialEvents);
 
     public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents);
 
     public Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -499,11 +502,8 @@ internal sealed class InMemoryJobStore : IJobStore
             var jobNameSet = jobNames as ISet<string> ?? new HashSet<string>(jobNames);
             var queueNameSet = queueNames as ISet<string> ?? new HashSet<string>(queueNames);
 
-            // Materialize a sorted snapshot of candidate runs using live queue priority.
-            // Queue priority is looked up from _queues (falling back to 0 for queues with
-            // no definition) so runtime priority changes take effect immediately without
-            // any denormalized field on runs. Sort order matches the SQL/Redis stores:
-            // queue priority DESC, run priority DESC, not_before ASC, id ASC.
+            // Sort order matches the SQL/Redis stores: queue priority DESC, run priority DESC,
+            // not_before ASC, id ASC.
             var candidates = new PendingCandidate[_pending.Count];
             var idx = 0;
             foreach (var (runId, entry) in _pending)
@@ -514,9 +514,8 @@ internal sealed class InMemoryJobStore : IJobStore
 
             Array.Sort(candidates, PendingCandidate.ClaimOrder);
 
-            // Running/pending counters and rate-limit state are updated in place so subsequent
-            // iterations see the effect of earlier claims in this same call — this preserves
-            // per-job/queue concurrency and rate-limit guarantees when batch-claiming.
+            // Counters and rate-limit state are updated in place so subsequent iterations see
+            // the effect of earlier claims, preserving concurrency and rate-limit guarantees.
             var claimed = new List<JobRun>(Math.Min(maxCount, candidates.Length));
 
             foreach (var c in candidates)
@@ -730,9 +729,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 ? query.OrderBy(r => r.CreatedAt).ThenBy(r => r.Id, StringComparer.Ordinal)
                 : query.OrderByDescending(r => r.CreatedAt).ThenByDescending(r => r.Id, StringComparer.Ordinal);
 
-            // Keyset pagination with take+1 lookahead: NextCursor is non-null iff
-            // a strictly additional row exists beyond the page boundary, per the
-            // DirectChildrenPage contract.
+            // take+1 lookahead so NextCursor is set iff a row exists beyond the page boundary.
             var items = ordered.Take(take + 1).ToList();
             var hasMore = items.Count > take;
             if (hasMore)
@@ -1165,7 +1162,6 @@ internal sealed class InMemoryJobStore : IJobStore
 
         var bucketSpan = TimeSpan.FromMinutes(bucketMinutes);
 
-        // Pre-compute bucket boundaries
         var bucketCount = 0;
         var temp = sinceTime;
         while (temp < now)
@@ -1494,7 +1490,7 @@ internal sealed class InMemoryJobStore : IJobStore
         _ => run.CreatedAt
     };
 
-    private Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs, IReadOnlyList<RunEvent>? initialEvents)
+    private Task CreateRunsAsyncCore(IReadOnlyList<JobRun> runs, IReadOnlyList<RunEvent>? initialEvents)
     {
         lock (_gate)
         {
@@ -1542,7 +1538,7 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    private Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private Task<bool> TryCreateRunAsyncCore(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents)
     {
@@ -1739,10 +1735,8 @@ internal sealed class InMemoryJobStore : IJobStore
     private static int GetCount(Dictionary<string, int> dict, string key) =>
         dict.TryGetValue(key, out var count) ? count : 0;
 
-    // Same algorithm used by all stores (SQL inline, Redis Lua, InMemory).
-    // FixedWindow: count resets when window elapses.
+    // FixedWindow: count resets when the window elapses.
     // SlidingWindow: effective_count = current + previous * (1 - elapsed/window).
-
     private bool TryCheckRateLimit(string? rateLimitName, DateTimeOffset now)
     {
         if (rateLimitName is null)

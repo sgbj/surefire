@@ -1,4 +1,4 @@
-export function DtDd({ label, children }: { label: string; children: React.ReactNode }) {
+export function DtDd({label, children}: { label: string; children: React.ReactNode }) {
   return (
     <div>
       <dt className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{label}</dt>

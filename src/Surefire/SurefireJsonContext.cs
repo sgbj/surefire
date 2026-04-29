@@ -3,33 +3,16 @@ using System.Text.Json.Serialization;
 namespace Surefire;
 
 /// <summary>
-///     Source-generated JSON context used for every internal wire payload: the run / event /
-///     batch shapes written to Redis, the bulk-upsert payloads read by each store's native
-///     JSON-to-rowset primitive, AOT-safe deserialization of tag arrays and registered-name
-///     lists, and the failure / input envelopes written into run event payloads.
+///     Source-generated JSON context for every internal wire payload (Redis run/event/batch
+///     shapes, bulk-upsert payloads, AOT-safe tag and name lists, failure/input envelopes).
 ///     <para>
-///         This context is deliberately separate from <see cref="SurefireOptions.SerializerOptions" />.
-///         That serializer is for user-owned data (job arguments, results) and can be customized
-///         at runtime. This context is Surefire's internal protocol and must stay stable
-///         regardless of what callers configure.
+///         Separate from <see cref="SurefireOptions.SerializerOptions" />, which is user-facing
+///         and runtime-configurable. This context is Surefire's internal protocol and must stay
+///         stable regardless of caller configuration.
 ///     </para>
 ///     <para>
-///         Conventions:
-///         <list type="bullet">
-///             <item>
-///                 JSON property names are camelCase so payloads match standard web JSON — the
-///                 shape a .NET or browser client naturally produces.
-///             </item>
-///             <item>
-///                 <see cref="System.TimeSpan" /> serializes as a JSON number of ticks via
-///                 <see cref="TimeSpanTicksConverter" />.
-///             </item>
-///             <item>
-///                 <see cref="System.DateTimeOffset" /> serializes as unix milliseconds via
-///                 <see cref="DateTimeOffsetUnixMsConverter" /> so Lua scripts and SQL JSON paths
-///                 can do numeric comparisons on it directly.
-///             </item>
-///         </list>
+///         <see cref="System.TimeSpan" /> serializes as ticks; <see cref="System.DateTimeOffset" />
+///         as unix milliseconds, so Lua scripts and SQL JSON paths can compare them numerically.
 ///     </para>
 /// </summary>
 [JsonSourceGenerationOptions(

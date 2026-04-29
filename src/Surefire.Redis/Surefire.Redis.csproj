@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Description>Redis storage and notifications provider for Surefire.</Description>
+        <PackageTags>$(PackageTags);redis;stackexchange-redis</PackageTags>
     </PropertyGroup>
     <ItemGroup>
         <ProjectReference Include="..\Surefire\Surefire.csproj"/>

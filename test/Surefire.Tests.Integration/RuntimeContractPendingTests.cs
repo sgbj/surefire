@@ -804,8 +804,8 @@ public sealed class RuntimeContractPendingTests
             await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId, ct);
         }
 
-        // Resume at the cursor â€” should see only events with Id > cursorId, including childB's Output
-        // and both children's terminal Status events. Events pre-cursor are skipped.
+        // Resume at the cursor: only events with Id > cursorId are emitted, so childB's Output
+        // and both children's terminal Status events appear; pre-cursor events are skipped.
         var resumedOutputs = new List<(string RunId, string Payload)>();
         await foreach (var @event in client.ObserveBatchEventsAsync(batchId, cursorId, ct))
         {
@@ -887,8 +887,8 @@ public sealed class RuntimeContractPendingTests
     public async Task WaitEachAsync_FastPath_Terminates_WithoutPollingDelay_WhenAllRunsAlreadyComplete()
     {
         var ct = TestContext.Current.CancellationToken;
-        // Verifies the cleaned-up termination logic: once batch is terminal AND we've observed
-        // all child runs in a single drain pass, we exit immediately â€” no extra polling delay.
+        // Once the batch is terminal and all child runs are observed in a single drain pass,
+        // WaitEachAsync exits immediately without an extra polling delay.
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);

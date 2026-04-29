@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 
@@ -5,6 +6,8 @@ namespace Surefire;
 
 internal static class DelegateCompiler
 {
+    [RequiresUnreferencedCode("Reflects over user-supplied delegate parameters and compiles an Expression.")]
+    [RequiresDynamicCode("Reflects over user-supplied delegate parameters and compiles an Expression.")]
     public static Func<object?[], object?> CompileInvoke(Delegate handler, ParameterInfo[] parameters)
     {
         var argsParam = Expression.Parameter(typeof(object?[]), "args");
@@ -19,6 +22,8 @@ internal static class DelegateCompiler
         return Expression.Lambda<Func<object?[], object?>>(body, argsParam).Compile();
     }
 
+    [RequiresUnreferencedCode("Reflects over user-supplied delegate return type and compiles an Expression.")]
+    [RequiresDynamicCode("Reflects over user-supplied delegate return type and compiles an Expression.")]
     public static Func<object, Task>? CompileAsTask(Type returnType)
     {
         if (!returnType.IsGenericType || returnType.GetGenericTypeDefinition() != typeof(ValueTask<>))

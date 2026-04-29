@@ -539,8 +539,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
             .ToList();
         await Store.CreateRunsAsync(runs, cancellationToken: ct);
 
-        // Skip past the end of the result set. The PG/SQL Server original used
-        // COUNT(*) OVER() and silently returned TotalCount=0 here, breaking dashboard pagination.
+        // Skipping past the end must still return the true TotalCount, not 0.
         var pastEnd = await Store.GetRunsAsync(
             new() { JobName = jobName },
             100, 10, ct);
@@ -969,7 +968,6 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     {
         var ct = TestContext.Current.CancellationToken;
         var run = CreateRun("TestJob") with { Progress = 0.5 };
-        // Should not throw
         await Store.UpdateRunAsync(run, ct);
     }
 

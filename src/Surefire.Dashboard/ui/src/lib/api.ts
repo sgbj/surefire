@@ -52,14 +52,14 @@ export interface DashboardStats {
 function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
   const timeline = Array.isArray(raw.timeline)
     ? raw.timeline.map((bucket) => ({
-        ...bucket,
-        timestamp: bucket.timestamp ?? bucket.start ?? "",
-        pending: bucket.pending ?? 0,
-        running: bucket.running ?? 0,
-        succeeded: bucket.succeeded ?? 0,
-        cancelled: bucket.cancelled ?? 0,
-        failed: bucket.failed ?? 0,
-      }))
+      ...bucket,
+      timestamp: bucket.timestamp ?? bucket.start ?? "",
+      pending: bucket.pending ?? 0,
+      running: bucket.running ?? 0,
+      succeeded: bucket.succeeded ?? 0,
+      cancelled: bucket.cancelled ?? 0,
+      failed: bucket.failed ?? 0,
+    }))
     : [];
   return {
     ...raw,
@@ -73,7 +73,7 @@ function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
 function normalizeRunIdResponse(raw: { runId?: string; RunId?: string }): {
   runId: string;
 } {
-  return { runId: raw.runId ?? raw.RunId ?? "" };
+  return {runId: raw.runId ?? raw.RunId ?? ""};
 }
 
 function normalizeJobResponse(raw: JobResponse): JobResponse {
@@ -200,7 +200,7 @@ export interface JobRun {
 
 /** Focused trace response returned by GET /api/runs/{id}/trace. */
 export interface RunTraceResponse {
-  /** Ancestors from root → immediate parent; each has `depth` starting at 0. */
+  /** Ancestors from root to immediate parent; each has `depth` starting at 0. */
   ancestors: JobRun[];
   /** Focus run; depth == ancestors.length. */
   focus: JobRun;
@@ -216,7 +216,7 @@ export interface RunTraceResponse {
   childrenCursor?: string;
 }
 
-/** Direct children pagination response — GET /api/runs/{id}/children. */
+/** Direct children pagination response. GET /api/runs/{id}/children. */
 export interface RunChildrenResponse {
   items: JobRun[];
   nextCursor?: string;
@@ -354,7 +354,7 @@ export const api = {
       `/jobs/${encodeURIComponent(name)}/trigger`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {"Content-Type": "application/json"},
         body: JSON.stringify(opts ?? {}),
       },
     ).then(normalizeRunIdResponse),
@@ -391,7 +391,7 @@ export const api = {
     const all: RunLogEntry[] = [];
     let cursor: number | null = null;
     while (true) {
-      const params = new URLSearchParams({ take: "1000" });
+      const params = new URLSearchParams({take: "1000"});
       if (cursor != null) params.set("sinceEventId", cursor.toString());
       const page = await fetchApi<LogPage>(
         `/runs/${encodeURIComponent(id)}/logs?${params}`,
@@ -432,7 +432,7 @@ export const api = {
   updateJob: (name: string, patch: { isEnabled?: boolean }) =>
     fetchApi<JobResponse>(`/jobs/${encodeURIComponent(name)}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: {"Content-Type": "application/json"},
       body: JSON.stringify(patch),
     }),
   getQueues: () =>
@@ -442,7 +442,7 @@ export const api = {
   updateQueue: (name: string, patch: { isPaused?: boolean }) =>
     fetchApi<void>(`/queues/${encodeURIComponent(name)}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: {"Content-Type": "application/json"},
       body: JSON.stringify(patch),
     }),
   getNodes: (params?: { includeInactive?: boolean }) => {
