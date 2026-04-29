@@ -11,12 +11,12 @@ public sealed class JobDefinition
     public required string Name { get; set; }
 
     /// <summary>
-    ///     Gets or sets a human-readable description shown in the dashboard.
+    ///     Gets or sets the description shown in the dashboard.
     /// </summary>
     public string? Description { get; set; }
 
     /// <summary>
-    ///     Gets or sets categorization tags for dashboard filtering.
+    ///     Gets or sets tags for dashboard filtering.
     /// </summary>
     public string[] Tags { get; set; } = [];
 
@@ -26,7 +26,7 @@ public sealed class JobDefinition
     public string? CronExpression { get; set; }
 
     /// <summary>
-    ///     Gets or sets the IANA time zone ID for cron evaluation. Null uses UTC.
+    ///     Gets or sets the time zone ID for cron evaluation. Null uses UTC.
     /// </summary>
     public string? TimeZoneId { get; set; }
 
@@ -41,7 +41,7 @@ public sealed class JobDefinition
     public int? MaxConcurrency { get; set; }
 
     /// <summary>
-    ///     Gets or sets the default priority for runs of this job. Higher values are claimed first.
+    ///     Gets or sets the priority for runs of this job. Higher values are claimed first.
     /// </summary>
     public int Priority { get; set; }
 
@@ -76,9 +76,9 @@ public sealed class JobDefinition
     public MisfirePolicy MisfirePolicy { get; set; }
 
     /// <summary>
-    ///     Gets or sets the maximum number of missed occurrences to schedule on each scheduler tick
-    ///     when <see cref="MisfirePolicy" /> is <see cref="Surefire.MisfirePolicy.FireAll" />.
-    ///     Null means unlimited.
+    ///     Gets or sets the cap on missed occurrences to catch up when <see cref="MisfirePolicy" />
+    ///     is <see cref="Surefire.MisfirePolicy.FireAll" />. Once the cap is reached, older missed
+    ///     fires are skipped and scheduling resumes from the present. Null means unlimited.
     /// </summary>
     public int? FireAllLimit { get; set; }
 

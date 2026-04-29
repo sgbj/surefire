@@ -1,44 +1,37 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/status-badge";
-import { formatRelative } from "@/lib/format";
-import { Link } from "react-router";
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts";
+import {useMemo, useState} from "react";
+import {useQuery} from "@tanstack/react-query";
+import {api} from "@/lib/api";
+import {Card, CardContent, CardHeader, CardTitle} from "@/components/ui/card";
+import {Skeleton} from "@/components/ui/skeleton";
+import {StatusBadge} from "@/components/status-badge";
+import {formatRelative} from "@/lib/format";
+import {Link} from "react-router";
+import {Area, AreaChart, CartesianGrid, XAxis, YAxis} from "recharts";
 import {
   type ChartConfig,
   ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
   ChartLegend,
   ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
 } from "@/components/ui/chart";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  CircleAlert,
-  Workflow,
-  Play,
-  Activity,
-  TrendingUp,
-  type LucideIcon,
-} from "lucide-react";
+import {Tabs, TabsList, TabsTrigger} from "@/components/ui/tabs";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {Activity, CircleAlert, type LucideIcon, Play, TrendingUp, Workflow,} from "lucide-react";
 
 const chartConfig = {
-  pending: { label: "Pending", color: "var(--status-pending)" },
-  running: { label: "Running", color: "var(--status-running)" },
-  succeeded: { label: "Succeeded", color: "var(--status-succeeded)" },
-  cancelled: { label: "Cancelled", color: "var(--status-cancelled)" },
-  failed: { label: "Failed", color: "var(--status-failed)" },
+  pending: {label: "Pending", color: "var(--status-pending)"},
+  running: {label: "Running", color: "var(--status-running)"},
+  succeeded: {label: "Succeeded", color: "var(--status-succeeded)"},
+  cancelled: {label: "Cancelled", color: "var(--status-cancelled)"},
+  failed: {label: "Failed", color: "var(--status-failed)"},
 } satisfies ChartConfig;
 
 const PERIODS: Record<string, { hours: number; bucketMinutes: number }> = {
-  "1h": { hours: 1, bucketMinutes: 5 },
-  "24h": { hours: 24, bucketMinutes: 60 },
-  "7d": { hours: 168, bucketMinutes: 1440 },
-  "30d": { hours: 720, bucketMinutes: 1440 },
+  "1h": {hours: 1, bucketMinutes: 5},
+  "24h": {hours: 24, bucketMinutes: 60},
+  "7d": {hours: 168, bucketMinutes: 1440},
+  "30d": {hours: 720, bucketMinutes: 1440},
 };
 
 function formatBucketLabel(timestamp: string, period: string) {
@@ -50,17 +43,17 @@ function formatBucketLabel(timestamp: string, period: string) {
       minute: "2-digit",
     });
   }
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return d.toLocaleDateString(undefined, {month: "short", day: "numeric"});
 }
 
 export function DashboardPage() {
   const [period, setPeriod] = useState("1h");
-  const { data: stats, isError } = useQuery({
+  const {data: stats, isError} = useQuery({
     queryKey: ["stats", period],
     queryFn: () => {
       const p = PERIODS[period];
       const since = new Date(Date.now() - p.hours * 3600_000).toISOString();
-      return api.getStats({ since, bucketMinutes: p.bucketMinutes });
+      return api.getStats({since, bucketMinutes: p.bucketMinutes});
     },
     refetchInterval: 5000,
   });
@@ -83,7 +76,7 @@ export function DashboardPage() {
 
       {isError && (
         <Alert variant="destructive">
-          <CircleAlert />
+          <CircleAlert/>
           <AlertDescription>Failed to load dashboard</AlertDescription>
         </Alert>
       )}
@@ -91,16 +84,16 @@ export function DashboardPage() {
       {!stats && !isError && (
         <>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {Array.from({ length: 4 }).map((_, i) => (
+            {Array.from({length: 4}).map((_, i) => (
               <Card key={i} className="gap-3 py-5">
                 <CardHeader>
                   <div className="flex items-center gap-2">
-                    <Skeleton className="size-4 rounded" />
-                    <Skeleton className="h-4 w-20" />
+                    <Skeleton className="size-4 rounded"/>
+                    <Skeleton className="h-4 w-20"/>
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <Skeleton className="h-8 w-16" />
+                  <Skeleton className="h-8 w-16"/>
                 </CardContent>
               </Card>
             ))}
@@ -108,24 +101,24 @@ export function DashboardPage() {
           <div className="space-y-6">
             <Card className="pt-0 gap-0">
               <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
-                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-28"/>
               </CardHeader>
-              <CardContent className="pt-4 h-[300px]" />
+              <CardContent className="pt-4 h-[300px]"/>
             </Card>
             <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
               <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
-                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-4 w-24"/>
               </CardHeader>
               <CardContent className="px-0">
-                {Array.from({ length: 5 }).map((_, i) => (
+                {Array.from({length: 5}).map((_, i) => (
                   <div
                     key={i}
                     className="flex items-center justify-between gap-4 px-6 py-2.5 border-t"
                   >
-                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-4 w-32"/>
                     <div className="flex items-center gap-3 shrink-0">
-                      <Skeleton className="h-5 w-[4.5rem] rounded-full" />
-                      <Skeleton className="h-3 w-14" />
+                      <Skeleton className="h-5 w-[4.5rem] rounded-full"/>
+                      <Skeleton className="h-3 w-14"/>
                     </div>
                   </div>
                 ))}
@@ -143,7 +136,7 @@ export function DashboardPage() {
               value={stats.totalJobs}
               icon={Workflow}
             />
-            <StatCard title="Total runs" value={stats.totalRuns} icon={Play} />
+            <StatCard title="Total runs" value={stats.totalRuns} icon={Play}/>
             <StatCard
               title="Active runs"
               value={stats.activeRuns}
@@ -169,9 +162,9 @@ export function DashboardPage() {
                     config={chartConfig}
                     className="aspect-auto h-[300px] w-full"
                   >
-                    <AreaChart data={timeline} margin={{ left: 0, right: 0 }}>
+                    <AreaChart data={timeline} margin={{left: 0, right: 0}}>
                       <defs>
-                        {Object.entries(chartConfig).map(([key, { color }]) => (
+                        {Object.entries(chartConfig).map(([key, {color}]) => (
                           <linearGradient
                             key={key}
                             id={`gradient-${key}`}
@@ -197,7 +190,7 @@ export function DashboardPage() {
                         dataKey="timestamp"
                         tickLine={false}
                         axisLine={false}
-                        tick={({ x, y, index, visibleTicksCount, payload }) => {
+                        tick={({x, y, index, visibleTicksCount, payload}) => {
                           const anchor =
                             index === 0
                               ? "start"
@@ -230,11 +223,11 @@ export function DashboardPage() {
                         width={1}
                       />
                       <ChartTooltip
-                        content={<ChartTooltipContent />}
+                        content={<ChartTooltipContent/>}
                         labelFormatter={(v) => formatBucketLabel(v, period)}
                       />
                       <ChartLegend
-                        content={<ChartLegendContent className="flex-wrap" />}
+                        content={<ChartLegendContent className="flex-wrap"/>}
                       />
                       <Area
                         type="monotone"
@@ -303,7 +296,7 @@ export function DashboardPage() {
                           {run.jobName}
                         </span>
                         <div className="flex items-center gap-3 shrink-0">
-                          <StatusBadge status={run.status} />
+                          <StatusBadge status={run.status}/>
                           <span className="text-xs text-muted-foreground tabular-nums w-14 text-right">
                             {formatRelative(run.createdAt)}
                           </span>
@@ -326,10 +319,10 @@ export function DashboardPage() {
 }
 
 function StatCard({
-  title,
-  value,
-  icon: Icon,
-}: {
+                    title,
+                    value,
+                    icon: Icon,
+                  }: {
   title: string;
   value: string | number;
   icon: LucideIcon;
@@ -338,7 +331,7 @@ function StatCard({
     <Card className="gap-3 py-5">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-          <Icon className="size-4" />
+          <Icon className="size-4"/>
           {title}
         </CardTitle>
       </CardHeader>

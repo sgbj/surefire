@@ -108,7 +108,6 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var job = CreateJob();
         await Store.UpsertJobsAsync([job], ct);
 
-        // Create a parent + 3 children (ParentRunId relationship)
         var parent = CreateRun(job.Name, JobStatus.Running) with
         {
             Attempt = 1,
@@ -132,18 +131,15 @@ public abstract class CancelConformanceTests : StoreConformanceBase
             completedChildId, claimed.Attempt, now, claimed.NotBefore, "node-1", 1, null, null,
             claimed.StartedAt, now), ct)).Transitioned);
 
-        // Cancel all children of coordinator
         var cancelledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
 
-        // The completed child should not be cancelled; the other 2 should be
+        // The completed child should not be cancelled; the other 2 should be.
         Assert.Equal(2, cancelledIds.Count);
         Assert.DoesNotContain(completedChildId, cancelledIds);
 
-        // Verify the completed child remains completed
         var storedCompleted = await Store.GetRunAsync(completedChildId, ct);
         Assert.Equal(JobStatus.Succeeded, storedCompleted!.Status);
 
-        // Verify cancelled children
         foreach (var cancelledId in cancelledIds)
         {
             var stored = await Store.GetRunAsync(cancelledId, ct);
@@ -187,10 +183,9 @@ public abstract class CancelConformanceTests : StoreConformanceBase
 
         await Store.CreateRunsAsync([parent, child], cancellationToken: ct);
 
-        // Cancel the child first
         Assert.True((await Store.TryCancelRunAsync(child.Id, cancellationToken: ct)).Transitioned);
 
-        // Now CancelChildRuns should find nothing to cancel
+        // CancelChildRuns should find nothing to cancel.
         var cancelledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
         Assert.Empty(cancelledIds);
     }

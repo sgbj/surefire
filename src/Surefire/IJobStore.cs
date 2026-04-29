@@ -155,7 +155,7 @@ public interface IJobStore
     ///     <para>
     ///         When a run with a non-null <c>BatchId</c> transitions to a terminal status, the store
     ///         atomically increments the batch progress counter and, if all children are now terminal,
-    ///         completes the batch — all within the same transaction.
+    ///         completes the batch, all within the same transaction.
     ///     </para>
     /// </summary>
     /// <param name="transition">The transition request.</param>
@@ -174,7 +174,7 @@ public interface IJobStore
     ///     run's attempt matches (executor scoping). When null, any non-terminal run is cancelled.
     ///     <para>
     ///         The operation atomically inserts status events, caller-provided events, and updates
-    ///         batch counters — all in the same transaction. Returns <see cref="RunTransitionResult" />
+    ///         batch counters, all in the same transaction. Returns <see cref="RunTransitionResult" />
     ///         with batch completion info if applicable.
     ///     </para>
     /// </summary>
@@ -276,13 +276,13 @@ public interface IJobStore
     ///             </item>
     ///             <item>
     ///                 <description>
-    ///                     <paramref name="afterCursor" />: next forward page — items strictly
+    ///                     <paramref name="afterCursor" />: next forward page, items strictly
     ///                     greater than the cursor, ordered ASC.
     ///                 </description>
     ///             </item>
     ///             <item>
     ///                 <description>
-    ///                     <paramref name="beforeCursor" />: reverse page — items strictly less than
+    ///                     <paramref name="beforeCursor" />: reverse page, items strictly less than
     ///                     the cursor, returned in DESC order (most-recent-first). Callers reverse
     ///                     for chronological display.
     ///                 </description>
@@ -311,12 +311,12 @@ public interface IJobStore
 
     /// <summary>
     ///     Walks the parent chain of <paramref name="runId" /> upward to the root, returning
-    ///     the ancestors in root → immediate-parent order. The run itself is excluded. Returns
-    ///     an empty list if the run is a root (no parent). Bounded by tree depth (typically small).
+    ///     the ancestors in root-to-parent order. The run itself is excluded. Returns an empty
+    ///     list if the run is a root (no parent). Bounded by tree depth (typically small).
     /// </summary>
     /// <param name="runId">The run whose ancestors are requested.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>Ancestors in root → parent order; empty if the run has no parent.</returns>
+    /// <returns>Ancestors in root-to-parent order; empty if the run has no parent.</returns>
     Task<IReadOnlyList<JobRun>> GetAncestorChainAsync(string runId,
         CancellationToken cancellationToken = default);
 
@@ -370,8 +370,8 @@ public interface IJobStore
     /// <summary>
     ///     Upserts the node record and batch-updates heartbeat timestamps on the node's active runs.
     ///     Called on every maintenance tick. Implementations must keep this lightweight: a single
-    ///     UPDATE per target table — no MERGE-with-side-effects, no scans of <c>surefire_runs</c>
-    ///     — so the tick can run at sub-second intervals without contending with claim / transition
+    ///     UPDATE per target table, no MERGE-with-side-effects, no scans of <c>surefire_runs</c>,
+    ///     so the tick can run at sub-second intervals without contending with claim or transition
     ///     paths. Queue/rate-limit settings and their <c>last_heartbeat_at</c> are refreshed through
     ///     <see cref="UpsertQueuesAsync" /> and <see cref="UpsertRateLimitsAsync" />, which
     ///     <c>SurefireMaintenanceService</c> calls once per tick with the full set the node serves.
@@ -458,7 +458,7 @@ public interface IJobStore
     /// <summary>
     ///     Inserts or updates rate limit definitions. Runtime counters are preserved per rate
     ///     limit across updates. Rate limit acquisition is embedded inside
-    ///     <see cref="ClaimRunsAsync" /> -- there is no standalone acquire method. Implementations
+    ///     <see cref="ClaimRunsAsync" />; there is no standalone acquire method. Implementations
     ///     execute the upserts in a single connection / transaction / script so the combined call
     ///     has roughly the cost of one round-trip rather than N.
     /// </summary>
@@ -525,5 +525,5 @@ public interface IJobStore
     ///     safe to retry (e.g. deadlock, connection reset, lock timeout). Non-transient
     ///     exceptions (constraint violations, schema errors, auth failures) return false.
     /// </summary>
-    bool IsTransientException(Exception ex) => false;
+    bool IsTransientException(Exception ex);
 }

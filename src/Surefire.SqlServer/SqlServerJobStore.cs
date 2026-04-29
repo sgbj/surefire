@@ -116,7 +116,7 @@ internal sealed class SqlServerJobStore(
                                       batch_id NVARCHAR(450)
                                   );
 
-                                  -- Backs the snapshot-rank phase of ClaimRunsCoreAsync. Key columns
+                                  -- Backs the snapshot-rank phase of ClaimRunsAsyncCore. Key columns
                                   -- match the priority/not_before/id ordering the claim sorts by; INCLUDE
                                   -- carries job_name, not_after, and queue so the seek satisfies the rank
                                   -- predicate without RID-looking-up the base table for every status=0 row.
@@ -284,16 +284,13 @@ internal sealed class SqlServerJobStore(
             return;
         }
 
-        // One JSON payload → one OPENJSON → one MERGE → one round trip. JSON paths match the
-        // camelCase keys emitted by SurefireJsonContext; column aliases stay snake_case to mirror
-        // the target columns directly. tags and retry_policy use `AS JSON` so OPENJSON hands them
-        // back as the original sub-JSON text. is_enabled is set from the payload on INSERT and is
-        // absent from the UPDATE SET list so dashboard toggles survive re-upserts.
+        // One JSON payload, one OPENJSON, one MERGE, one round trip. tags and retry_policy use
+        // `AS JSON` so OPENJSON returns the original sub-JSON. is_enabled is INSERT-only (omitted
+        // from UPDATE SET) so dashboard toggles survive re-upserts.
         //
-        // Transaction + 'surefire_writes' applock serialize this against every other mutating
-        // path (claim, transition, cancel, create, purge, heartbeat). MERGE WITH (HOLDLOCK)
-        // takes key-range serializable locks across the upserted rows; without the applock,
-        // overlapping ranges between two replicas' simultaneous heartbeat upserts can deadlock.
+        // The 'surefire_writes' applock serializes this against every mutating path. MERGE WITH
+        // (HOLDLOCK) takes key-range serializable locks; without the applock, two replicas'
+        // simultaneous heartbeat upserts could deadlock on overlapping ranges.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx =
@@ -476,13 +473,13 @@ internal sealed class SqlServerJobStore(
     public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
+        => CreateRunsAsyncCore(runs, initialEvents, cancellationToken);
 
     public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -509,11 +506,8 @@ internal sealed class SqlServerJobStore(
             return [];
         }
 
-        // SQL Server's hard cap is 2,100 parameters per RPC. Each id binds one parameter, so
-        // anything over ~2,099 throws SqlException 8003. Chunk well under the cap to leave
-        // headroom and to bound per-statement parsing cost on pathological IN-lists. All
-        // current callers stay under 500, but a defensive ceiling here means future callers
-        // don't silently regress at the ~2k boundary.
+        // SQL Server caps RPCs at 2,100 parameters; chunk well under so future callers don't
+        // silently regress at the boundary.
         const int chunkSize = 1000;
 
         await using var conn = new SqlConnection(_connectionString);
@@ -532,10 +526,8 @@ internal sealed class SqlServerJobStore(
             await using var cmd = CreateCommand(conn);
             for (var i = offset; i < end; i++)
             {
-                // Reset parameter index per chunk so the SQL text shape (and therefore the
-                // SQL Server plan cache key) is identical across chunks — same chunk-size
-                // queries reuse one cached plan instead of producing a new entry for every
-                // unique index range.
+                // Reset per chunk so SQL text (and the plan cache key) is identical across
+                // chunks; same-size queries share one cached plan.
                 var paramIndex = i - offset;
                 if (paramIndex > 0)
                 {
@@ -558,9 +550,8 @@ internal sealed class SqlServerJobStore(
             }
         }
 
-        // Project in caller-supplied order so the input/output index relationship the
-        // hot callers (JobClient hydration, stale recovery) rely on is preserved across
-        // chunk boundaries.
+        // Preserve caller-supplied order so the input/output index relationship survives
+        // chunk boundaries (hot callers depend on it).
         var result = new List<JobRun>(byId.Count);
         foreach (var id in ids)
         {
@@ -622,9 +613,7 @@ internal sealed class SqlServerJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = sql;
         cmd.Parameters.Add(CreateParameter("@parent", parentRunId));
-        // Keyset pagination with take+1 lookahead: NextCursor is non-null iff
-        // a strictly additional row exists beyond the page boundary, per the
-        // DirectChildrenPage contract.
+        // take+1 lookahead: NextCursor is non-null iff a row exists beyond the page boundary.
         cmd.Parameters.Add(CreateParameter("@take", take + 1));
         if ((after ?? before) is { } c)
         {
@@ -948,7 +937,7 @@ internal sealed class SqlServerJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Capture prior status in OUTPUT (via DELETED) so the follow-up counter UPDATEs only
-        // decrement when the row was Running. Pending → Cancelled is a no-op for counters.
+        // decrement when the row was Running. Pending-to-Cancelled is a no-op for counters.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
@@ -1084,7 +1073,7 @@ internal sealed class SqlServerJobStore(
             return Task.FromResult<IReadOnlyList<JobRun>>(Array.Empty<JobRun>());
         }
 
-        return ClaimRunsCoreAsync(nodeName, jobNames, queueNames, maxCount, cancellationToken);
+        return ClaimRunsAsyncCore(nodeName, jobNames, queueNames, maxCount, cancellationToken);
     }
 
 
@@ -1554,13 +1543,11 @@ internal sealed class SqlServerJobStore(
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
 
-        // Horizon clamp is conditional on run status. The clamp protects the tail cursor from
-        // skipping in-flight low-id rows that haven't yet committed; once the run is terminal
-        // (statuses 2/4/5), no writer can append to it, so every event for this run is committed
-        // and visible. Applying the clamp anyway would spuriously hide already-committed rows
-        // when an unrelated long-running transaction holds MIN_ACTIVE_ROWVERSION back — the
-        // reader observes the run as terminal, drains zero events, and exits with a hole. Same
-        // shape of bug as the batch-events clamp; same fix.
+        // The MIN_ACTIVE_ROWVERSION clamp prevents skipping in-flight low-id rows. It is gated
+        // on run status because a terminal run has no further writers; applying the clamp anyway
+        // would hide already-committed rows when an unrelated long TX holds the rowversion back,
+        // letting the reader drain zero events and exit with a hole. (Same shape as
+        // GetBatchEventsAsync.)
         var sb = new StringBuilder("""
                                    SELECT e.* FROM dbo.surefire_events e
                                    INNER JOIN dbo.surefire_runs r ON r.id = e.run_id
@@ -1625,9 +1612,7 @@ internal sealed class SqlServerJobStore(
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        // See GetBatchEventsAsync below for the conditional-clamp rationale: once the batch
-        // is terminal, no further writers exist and the clamp would spuriously hide already-
-        // committed rows when an unrelated long-running TX holds MIN_ACTIVE_ROWVERSION back.
+        // See GetBatchEventsAsync for the conditional-clamp rationale.
         cmd.CommandText = """
                           SELECT TOP (@take) e.*
                           FROM dbo.surefire_events e
@@ -1671,12 +1656,10 @@ internal sealed class SqlServerJobStore(
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        // Horizon clamp is conditional on batch status. The clamp protects the tail cursor
-        // from skipping in-flight low-id rows that haven't yet committed; once the batch is
-        // terminal (statuses 2/4/5), no writer can append to it, so every event for this
-        // batch is committed and visible. Applying the clamp anyway would spuriously hide
-        // rows when an unrelated long-running transaction holds MIN_ACTIVE_ROWVERSION back —
-        // the reader observes the batch as terminal, drains zero events, and exits with a hole.
+        // The MIN_ACTIVE_ROWVERSION clamp prevents skipping in-flight low-id rows. It is gated
+        // on batch status because a terminal batch has no further writers; applying the clamp
+        // anyway would hide already-committed rows when an unrelated long TX holds the
+        // rowversion back, letting the reader drain zero events and exit with a hole.
         cmd.CommandText = """
                           SELECT TOP (@take) e.*
                           FROM dbo.surefire_events e
@@ -1814,9 +1797,8 @@ internal sealed class SqlServerJobStore(
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        // Backed by ix_surefire_runs_stale_heartbeat (filtered WHERE status = 1 on last_heartbeat_at).
-        // Returns IDs only; no COUNT, no total, no pagination state. Oldest heartbeat first so the
-        // caller's processing loop makes monotonic progress against a shrinking filter set.
+        // Backed by ix_surefire_runs_stale_heartbeat. Oldest-first so the caller's loop makes
+        // monotonic progress against a shrinking filter set.
         cmd.CommandText = """
                           SELECT TOP (@take) id
                           FROM dbo.surefire_runs
@@ -1878,9 +1860,8 @@ internal sealed class SqlServerJobStore(
             return;
         }
 
-        // is_paused stays out of the WHEN MATCHED SET list so the dashboard pause flag survives
-        // the maintenance tick's periodic re-upsert. Transaction + 'surefire_writes' applock
-        // serializes against every other mutating path; see AcquireWriteLockAsync for rationale.
+        // is_paused is omitted from the UPDATE SET list so dashboard pauses survive re-upserts.
+        // The 'surefire_writes' applock serializes against every other mutating path.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx =
@@ -1962,10 +1943,8 @@ internal sealed class SqlServerJobStore(
             return;
         }
 
-        // Runtime counters (current_count, previous_count, window_start) are never touched by
-        // this statement, so they are preserved verbatim. Transaction + 'surefire_writes'
-        // applock serializes against every other mutating path; see AcquireWriteLockAsync for
-        // rationale.
+        // Runtime counters are omitted from the UPDATE SET list so they're preserved verbatim.
+        // The 'surefire_writes' applock serializes against every other mutating path.
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         await using var tx =
@@ -2127,22 +2106,16 @@ internal sealed class SqlServerJobStore(
 
         while (true)
         {
-            // Two-phase deletion to keep canonical jobs → runs lock order. The previous shape
-            // (DELETE TOP(1000) runs … then UPDATE jobs) acquired runs X-locks before the jobs
-            // X-conversion — runs → jobs ordering, opposite of every other path — so a claim
-            // holding jobs(JobX) UPDLOCK and a purge holding run(R) X-lock for that same job
-            // could deadlock when the claim tried to UPDATE run(R) and the purge tried to
-            // UPDATE jobs(JobX). Now: snapshot-read the candidate IDs under RCSI, derive the
-            // distinct job_names, UPDLOCK those jobs in alpha order, then DELETE the runs by ID
-            // and apply the counter delta. Same canonical order as claim, transition, cancel,
-            // and create paths.
+            // Two-phase deletion to keep canonical jobs-then-runs lock order. Snapshot-read
+            // candidate IDs under RCSI, UPDLOCK their jobs in alpha order, then DELETE the runs
+            // and apply the counter delta. Reversing the order would deadlock against claim,
+            // transition, cancel, and create.
             await using var tx =
                 (SqlTransaction)await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
-            // Phase 1 (snapshot read): pick up to 1000 candidate run IDs and capture their
-            // job_name + status under RCSI — no row locks. The IDs go into a sorted-by-PK temp
-            // table so the DELETE in phase 3 hits them in id order without a sort step.
+            // Phase 1: snapshot-read up to 1000 candidate IDs under RCSI (no row locks),
+            // sorted by PK so phase 3's DELETE hits them in id order without a sort step.
             await using var pickCmd = CreateCommand(conn);
             pickCmd.Transaction = tx;
             pickCmd.CommandText = """
@@ -2189,11 +2162,8 @@ internal sealed class SqlServerJobStore(
                 break;
             }
 
-            // Phase 2 (canonical jobs UPDLOCK): pre-lock the surefire_jobs rows whose
-            // non_terminal_count we'll decrement, in alphabetical order via VALUES seek with
-            // FORCE ORDER LOOP JOIN MAXDOP 1. Only jobs that had non-terminal candidates are
-            // locked (terminal deletions don't touch the counter). If everything we picked is
-            // terminal, the lock set is empty and we skip straight to phase 3.
+            // Phase 2: pre-lock surefire_jobs rows whose non_terminal_count we'll decrement,
+            // in alphabetical order. Terminal-only deletions skip to phase 3 with no lock set.
             if (nonTerminalDecrementsByJob.Count > 0)
             {
                 var lockJobNames = nonTerminalDecrementsByJob.Keys
@@ -2227,12 +2197,8 @@ internal sealed class SqlServerJobStore(
                 await lockCmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            // Phase 3 (DELETE by ID): runs are deleted by exact PK list, so X-locks land on
-            // exactly the rows we picked. The jobs counter UPDATE is a U→X conversion on rows
-            // we already hold UPDLOCK on — no fresh lock acquisition surface against concurrent
-            // claims. Race tolerance: a row whose state changed since the snapshot read (e.g.
-            // a transition that took status=0 → status=1 between phase 1 and now) won't match
-            // the WHERE re-check and is silently skipped.
+            // Phase 3: DELETE by exact PK list (X-locks only the rows we picked). Rows whose
+            // state changed since phase 1 fail the WHERE re-check and are silently skipped.
             await using var deleteCmd = CreateCommand(conn);
             deleteCmd.Transaction = tx;
             var deleteSb = new StringBuilder();
@@ -2269,9 +2235,8 @@ internal sealed class SqlServerJobStore(
             deleteCmd.Parameters.Add(CreateParameter("@threshold", threshold));
             var deletedCount = await deleteCmd.ExecuteNonQueryAsync(cancellationToken);
 
-            // Phase 4 (counter UPDATEs): apply non_terminal_count decrements against the
-            // already-UPDLOCK'd jobs rows from phase 2. Iterate in the same alphabetical order
-            // as the lock acquisition for consistency with the canonical pattern.
+            // Phase 4: apply counter decrements against the already-UPDLOCK'd jobs rows from
+            // phase 2, iterating in the same alphabetical order.
             if (nonTerminalDecrementsByJob.Count > 0)
             {
                 var sortedDecrements = nonTerminalDecrementsByJob
@@ -2610,7 +2575,7 @@ internal sealed class SqlServerJobStore(
             or 49919 // Azure SQL: too many CREATE/UPDATE operations
             or 49920; // Azure SQL: too many operations in progress
 
-    private async Task<IReadOnlyList<JobRun>> ClaimRunsCoreAsync(string nodeName,
+    private async Task<IReadOnlyList<JobRun>> ClaimRunsAsyncCore(string nodeName,
         IReadOnlyCollection<string> jobNames, IReadOnlyCollection<string> queueNames, int maxCount,
         CancellationToken cancellationToken)
     {
@@ -2625,8 +2590,7 @@ internal sealed class SqlServerJobStore(
         var jobParams = new List<string>();
         var queueParams = new List<string>();
 
-        // Serialize against every other mutating transaction in this store via the shared
-        // 'surefire_writes' applock. See AcquireWriteLockAsync for rationale.
+        // Serialize against every other mutating path via the shared applock.
         await AcquireWriteLockAsync(conn, tx, cancellationToken);
 
         await using var cmd = CreateCommand(conn);
@@ -2648,31 +2612,16 @@ internal sealed class SqlServerJobStore(
 
         var queueNamesIn = string.Join(", ", queueParams);
 
-        // Multi-statement claim batch under the applock. Capacity reads come from the
-        // materialized j.running_count / q.running_count columns instead of scanning
-        // surefire_runs, which keeps the snapshot rank cheap.
+        // Capacity reads come from the materialized j.running_count / q.running_count columns
+        // so the snapshot rank stays cheap.
         //
-        // Lock-scope shape on surefire_runs mirrors PostgreSqlJobStore's
-        // `ranked → eligible → locked → claimed` CTE chain (see
-        // Surefire.PostgreSql/PostgreSqlJobStore.cs#L2389-2400). Two phases:
-        //
-        //   Phase 1 (snapshot rank): the `ranked` CTE reads surefire_runs without a lock hint.
-        //   READ_COMMITTED_SNAPSHOT (enabled by AppHost on database creation) makes this a
-        //   non-locking row-version read. Window functions evaluate over the full status=0
-        //   candidate set under that snapshot; `eligible` filters by capacity and applies
-        //   TOP (@max_count). Reads are O(pending), zero row locks.
-        //
-        //   Phase 2 (targeted lock + UPDATE): the eligible IDs land in @candidate so the
-        //   optimizer can't fold the rank's snapshot read with the lock acquisition. The
-        //   UPDATE references surefire_runs WITH (UPDLOCK, ROWLOCK, READPAST) joined against
-        //   @candidate — only the ≤@max_count rows we're claiming take U-locks. The WHERE
-        //   re-checks status / not_before / not_after (the SQL Server analogue of Postgres
-        //   EvalPlanQual at PostgreSqlJobStore.cs#L2390-2400) so a row whose state moved
-        //   between snapshot and UPDATE (e.g. a transition) is a silent no-op.
-        //
-        // ROW_NUMBER PARTITION BY enforces per-bucket capacity strictly. q_rl_rn check is
-        // skipped when the queue shares the job's rate limiter (same bucket → already capped
-        // by j_rl_rn).
+        // Phase 1: the `ranked` CTE reads under RCSI (no row locks). Window functions evaluate
+        //          over the status=0 set; `eligible` filters by capacity and applies TOP.
+        // Phase 2: eligible IDs land in @candidate; the UPDATE WITH (UPDLOCK, ROWLOCK, READPAST)
+        //          joins against @candidate so only those rows take U-locks. WHERE re-checks
+        //          status/not_before/not_after; rows that moved are silent no-ops.
+        // ROW_NUMBER PARTITION BY caps per-bucket strictly. q_rl_rn is skipped when the queue
+        // shares the job's rate limiter (same bucket, already capped by j_rl_rn).
         cmd.CommandText = $"""
                            DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
@@ -2783,12 +2732,13 @@ internal sealed class SqlServerJobStore(
                            OPTION (MAXDOP 1);
 
                            -- Phase 2: lock and update only the candidate IDs. UPDLOCK,ROWLOCK on
-                           -- the inner side of the join applies to ≤@max_count rows; READPAST
-                           -- skips a row another claimer is mid-converting (U→X) so concurrent
-                           -- claims that picked an overlapping eligible set silently miss instead
-                           -- of deadlocking. The WHERE predicates are re-checked under the lock —
-                           -- a row whose status / not_before / not_after changed between the
-                           -- snapshot rank and this UPDATE is a no-op, not a correctness bug.
+                           -- the inner side of the join applies to at most @max_count rows;
+                           -- READPAST skips a row another claimer is mid-converting (U-to-X) so
+                           -- concurrent claims that picked an overlapping eligible set silently
+                           -- miss instead of deadlocking. The WHERE predicates are re-checked
+                           -- under the lock, so a row whose status / not_before / not_after
+                           -- changed between the snapshot rank and this UPDATE is a no-op,
+                           -- not a correctness bug.
                            UPDATE r SET
                                status = 1,
                                node_name = @node_name,
@@ -2886,7 +2836,7 @@ internal sealed class SqlServerJobStore(
         return claimed;
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
+    private async Task CreateRunsAsyncCore(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -2986,7 +2936,7 @@ internal sealed class SqlServerJobStore(
         await tx.CommitAsync(cancellationToken);
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunAsyncCore(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -3015,10 +2965,9 @@ internal sealed class SqlServerJobStore(
 
         if (maxActiveForJob is { })
         {
-            // Capacity check reads the maintained counter on the already-UPDLOCK'd job row —
-            // no table scan, no deadlock with concurrent transitions. If the job row does not
-            // yet exist (late registration), ISNULL maps to the "enabled, zero active" defaults
-            // so the insert proceeds per the TryCreateRunAsync contract.
+            // Capacity check reads the maintained counter on the UPDLOCK'd job row (no scan,
+            // no deadlock vs concurrent transitions). Missing job row maps via ISNULL to the
+            // "enabled, zero active" defaults per the TryCreateRunAsync contract.
             conditions.Add("""
                            ISNULL((SELECT non_terminal_count FROM dbo.surefire_jobs WHERE name = @job_name), 0) < @max_active
                            AND ISNULL((SELECT is_enabled FROM dbo.surefire_jobs WHERE name = @job_name), 1) = 1
@@ -3442,11 +3391,11 @@ internal sealed class SqlServerJobStore(
     ///     Why a single global lock instead of fine-grained row locks: SQL Server's row-level
     ///     pessimistic locking has irreducible deadlock-cycle surface across multi-table
     ///     mutations (jobs / queues / rate_limits / runs) when many writers race for the same
-    ///     hot row — Postgres avoids this via MVCC, SQL Server can't. Every production-grade
+    ///     hot row. Postgres avoids this via MVCC; SQL Server can't. Every production-grade
     ///     SQL-Server-backed scheduler (Hangfire, NServiceBus's SQL transport, MassTransit) uses
     ///     the same pattern for the same reason. Throughput is bounded by serial transaction
-    ///     duration (~5ms typical → ~200 writes/sec sustained), which is fine for a job
-    ///     scheduler — the bottleneck before this was deadlocks, not throughput.
+    ///     duration (around 5ms typical, so roughly 200 writes/sec sustained), which is fine
+    ///     for a job scheduler. The bottleneck before this was deadlocks, not throughput.
     /// </summary>
     private async Task AcquireWriteLockAsync(SqlConnection conn, SqlTransaction tx,
         CancellationToken cancellationToken)

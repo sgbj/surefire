@@ -1,15 +1,9 @@
-import {
-  type RefObject,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { Link } from "react-router";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, ChevronRight, ChevronUp } from "lucide-react";
-import { JobStatus, type JobRun } from "@/lib/api";
-import { formatMs } from "@/lib/format";
+import {type RefObject, useEffect, useMemo, useRef, useState,} from "react";
+import {Link} from "react-router";
+import {useVirtualizer} from "@tanstack/react-virtual";
+import {ChevronDown, ChevronRight, ChevronUp} from "lucide-react";
+import {type JobRun, JobStatus} from "@/lib/api";
+import {formatMs} from "@/lib/format";
 
 const statusColorVar: Record<number, string> = {
   [JobStatus.Pending]: "var(--status-pending)",
@@ -35,7 +29,7 @@ function computeTicks(rangeMs: number): number[] {
   return ticks;
 }
 
-// Bars and ticks occupy 0–SCALE of the timeline width, leaving 10% for trailing
+// Bars and ticks occupy 0 to SCALE of the timeline width, leaving 10% for trailing
 // duration labels.
 const SCALE = 0.9;
 
@@ -45,24 +39,24 @@ const ROW_HEIGHT = TRACE_ROW_HEIGHT;
 export type TraceItem = { kind: "run" } & JobRun;
 
 export function TraceView({
-  items,
-  currentRunId,
-  ancestorIds,
-  expandedNodes,
-  knownEmptyNodes,
-  loadingNodes,
-  onToggle,
-  scrollContainerRef,
-  header,
-  loadEarlierSiblings,
-  loadMoreLaterSiblings,
-  extraSiblingsBeforeCount = 0,
-}: {
+                            items,
+                            currentRunId,
+                            ancestorIds,
+                            expandedNodes,
+                            knownEmptyNodes,
+                            loadingNodes,
+                            onToggle,
+                            scrollContainerRef,
+                            header,
+                            loadEarlierSiblings,
+                            loadMoreLaterSiblings,
+                            extraSiblingsBeforeCount = 0,
+                          }: {
   items: TraceItem[];
   currentRunId: string;
   ancestorIds: Set<string>;
   expandedNodes: Set<string>;
-  /** Nodes we've expanded and confirmed to have zero children — hide their caret. */
+  /** Nodes we've expanded and confirmed to have zero children; hide their caret. */
   knownEmptyNodes: Set<string>;
   /** Nodes with an in-flight children fetch (first page or load-more). */
   loadingNodes: Set<string>;
@@ -76,9 +70,9 @@ export function TraceView({
   loadMoreLaterSiblings?: { onClick: () => void; isLoading: boolean };
   /**
    * Number of extra earlier-siblings the parent has loaded so far. An increase
-   * signals a user-initiated prepend (load-more-earlier click) — at which
-   * point we stop trying to auto-center, so the user's scroll stays at the
-   * top where the newly-loaded rows are visible.
+   * signals a user-initiated prepend (load-more-earlier click). At that point
+   * we stop trying to auto-center, so the user's scroll stays at the top where
+   * the newly-loaded rows are visible.
    */
   extraSiblingsBeforeCount?: number;
 }) {
@@ -98,7 +92,7 @@ export function TraceView({
     return () => window.clearInterval(timer);
   }, [hasActiveRuns]);
 
-  const { timeStart, timeRange, ticks } = useMemo(() => {
+  const {timeStart, timeRange, ticks} = useMemo(() => {
     let earliest = Infinity;
     let latest = -Infinity;
     for (const run of items) {
@@ -121,6 +115,7 @@ export function TraceView({
     };
   }, [items, nowMs]);
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
   const rowVirtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -133,33 +128,12 @@ export function TraceView({
     [items, currentRunId],
   );
 
-  // Centering strategy: render an invisible sentinel at the focus row's
-  // exact Y position (inside the virtualizer's rows wrapper) and directly
-  // set scrollTop on the scroll container based on the sentinel's actual
-  // bounding rect. We:
-  //
-  //   1. Run in useEffect (post-paint), not useLayoutEffect, so that any
-  //      sync re-render the virtualizer triggers from its observer callbacks
-  //      has already committed before we measure. This matters — scrolling
-  //      during layout-effect phase kept landing on stale scrollHeight.
-  //   2. Wrap the whole thing in requestAnimationFrame so any layout the
-  //      virtualizer does on its own rAF has completed too.
-  //   3. Set scrollTop directly (not scrollIntoView) to avoid the browser
-  //      also scrolling the document body — scrollIntoView walks the
-  //      scrollable-ancestor chain, which on this page would jump the main
-  //      content scroll and interact badly with the other cards loading.
-  //
-  //   • hasCenteredRef gates centering to once per currentRunId. Subsequent
-  //     items changes (polling, background child pagination) don't scroll.
-  //
-  //   • User-initiated prepend (load-earlier-siblings) shifts scrollTop by
-  //     the height of the newly-inserted rows so the content under the
-  //     user's eyes stays put.
+  // Center via invisible sentinel + scrollTop in useEffect+rAF so virtualizer measurements
+  // settle first; scrollIntoView would walk ancestors and disturb the page's main scroll.
+  // Centers once per currentRunId; user-initiated prepend shifts scrollTop by inserted rows.
   const hasCenteredRef = useRef(false);
   const prevExtraCountRef = useRef(extraSiblingsBeforeCount);
   const focusSentinelRef = useRef<HTMLDivElement>(null);
-  // Belt-and-suspenders: reset hasCenteredRef when focus changes, even if
-  // TraceView somehow stayed mounted across the transition.
   const lastCenteredRunIdRef = useRef<string>("");
 
   useEffect(() => {
@@ -191,16 +165,13 @@ export function TraceView({
       if (!sentinel || !scrollEl) return;
       if (scrollEl.clientHeight === 0) return;
 
-      // Sentinel's top position in the scroll container's scroll coordinates.
       const sentinelRect = sentinel.getBoundingClientRect();
       const containerRect = scrollEl.getBoundingClientRect();
       const sentinelTopInScroll =
         sentinelRect.top - containerRect.top + scrollEl.scrollTop;
       const sentinelCenter = sentinelTopInScroll + ROW_HEIGHT / 2;
 
-      // The sticky header (~44px = 2.75rem, matching scroll-padding-top on
-      // the container) visually hides the top of the scrollport. Center the
-      // sentinel inside the unobstructed area below the header.
+      // Sticky header (h-2.75rem) hides the top of the scroll viewport.
       const HEADER_OFFSET = 44;
       const viewportCenter =
         HEADER_OFFSET + (scrollEl.clientHeight - HEADER_OFFSET) / 2;
@@ -218,206 +189,193 @@ export function TraceView({
   const pct = (ms: number) => (ms / timeRange) * 100 * SCALE;
 
   return (
-    // min-w forces horizontal overflow on viewports narrower than 640px so the
-    // timeline keeps a usable width; the scroll container (outer) handles both
-    // axes. Sticky top-0 still sticks to the outer scroll container because
-    // the sticky element has no horizontal sticky offset.
-    // --trace-name-col keeps the header/row separator aligned.
+    // min-w forces horizontal overflow on narrow viewports so the timeline stays usable.
     <div className="min-w-[768px] [--trace-name-col:13.75rem]">
-        <div
-          className="sticky top-0 z-10 py-2.5 border-b bg-muted/30 backdrop-blur-sm px-2"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "var(--trace-name-col) 1fr",
-          }}
-        >
-          <div className="flex items-center text-sm text-muted-foreground pr-3">
-            {header}
-          </div>
-          <div className="relative h-full overflow-hidden">
-            {ticks.map((t, i) => (
-              <span
-                key={i}
-                className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/60 tabular-nums"
-                style={{ left: `${pct(t)}%` }}
-              >
+      <div
+        className="sticky top-0 z-10 py-2.5 border-b bg-muted/30 backdrop-blur-sm px-2"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "var(--trace-name-col) 1fr",
+        }}
+      >
+        <div className="flex items-center text-sm text-muted-foreground pr-3">
+          {header}
+        </div>
+        <div className="relative h-full overflow-hidden">
+          {ticks.map((t, i) => (
+            <span
+              key={i}
+              className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/60 tabular-nums"
+              style={{left: `${pct(t)}%`}}
+            >
                 {formatMs(t)}
               </span>
-            ))}
-          </div>
+          ))}
         </div>
+      </div>
 
-        {loadEarlierSiblings && (
-          <SiblingPillRow
-            direction="earlier"
-            onClick={loadEarlierSiblings.onClick}
-            isLoading={loadEarlierSiblings.isLoading}
+      {loadEarlierSiblings && (
+        <SiblingPillRow
+          direction="earlier"
+          onClick={loadEarlierSiblings.onClick}
+          isLoading={loadEarlierSiblings.isLoading}
+        />
+      )}
+
+      <div
+        className="relative w-full"
+        style={{height: `${rowVirtualizer.getTotalSize()}px`}}
+      >
+        {focusIdx >= 0 && (
+          <div
+            ref={focusSentinelRef}
+            aria-hidden="true"
+            className="pointer-events-none invisible absolute left-0 w-px"
+            style={{
+              top: `${focusIdx * ROW_HEIGHT}px`,
+              height: `${ROW_HEIGHT}px`,
+            }}
           />
         )}
-
-        <div
-          className="relative w-full"
-          style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
-        >
-          {focusIdx >= 0 && (
-            <div
-              ref={focusSentinelRef}
-              aria-hidden="true"
-              className="pointer-events-none invisible absolute left-0 w-px"
-              style={{
-                top: `${focusIdx * ROW_HEIGHT}px`,
-                height: `${ROW_HEIGHT}px`,
-              }}
-            />
-          )}
-          {rowVirtualizer.getVirtualItems().map((virtualItem) => {
-            const run = items[virtualItem.index];
-            const rowStyle = {
-              height: `${virtualItem.size}px`,
-              transform: `translateY(${virtualItem.start}px)`,
-            };
-            const depth = run.depth ?? 0;
-            const created = new Date(run.createdAt).getTime();
-            const started = run.startedAt
-              ? new Date(run.startedAt).getTime()
+        {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+          const run = items[virtualItem.index];
+          const rowStyle = {
+            height: `${virtualItem.size}px`,
+            transform: `translateY(${virtualItem.start}px)`,
+          };
+          const depth = run.depth ?? 0;
+          const created = new Date(run.createdAt).getTime();
+          const started = run.startedAt
+            ? new Date(run.startedAt).getTime()
+            : created;
+          const end = run.completedAt
+            ? new Date(run.completedAt).getTime()
+            : run.startedAt
+              ? nowMs
               : created;
-            const end = run.completedAt
-              ? new Date(run.completedAt).getTime()
-              : run.startedAt
-                ? nowMs
-                : created;
 
-            const leftPct = pct(started - timeStart);
-            const widthPct = Math.max(
-              Math.min(pct(end - started), 100 * SCALE - leftPct),
-              0.3,
-            );
-            const durationMs = end - started;
-            const isCurrent = run.id === currentRunId;
-            const barColor =
-              statusColorVar[run.status] ?? "var(--muted-foreground)";
+          const leftPct = pct(started - timeStart);
+          const widthPct = Math.max(
+            Math.min(pct(end - started), 100 * SCALE - leftPct),
+            0.3,
+          );
+          const durationMs = end - started;
+          const isCurrent = run.id === currentRunId;
+          const barColor =
+            statusColorVar[run.status] ?? "var(--muted-foreground)";
 
-            // Ancestors and confirmed-leaf nodes don't show a caret. The focus is
-            // always conceptually expanded — its caret toggles back to collapsed
-            // (which in practice would hide descendants but focus is never hidden
-            // entirely); we omit it to avoid confusing state.
-            const isAncestor = ancestorIds.has(run.id);
-            const isFocus = run.id === currentRunId;
-            const canToggle =
-              !isAncestor && !isFocus && !knownEmptyNodes.has(run.id);
-            const isExpanded = expandedNodes.has(run.id);
-            const isLoading = loadingNodes.has(run.id);
+          // No caret on ancestors, focus, or confirmed-leaf nodes.
+          const isAncestor = ancestorIds.has(run.id);
+          const isFocus = run.id === currentRunId;
+          const canToggle =
+            !isAncestor && !isFocus && !knownEmptyNodes.has(run.id);
+          const isExpanded = expandedNodes.has(run.id);
+          const isLoading = loadingNodes.has(run.id);
 
-            return (
+          return (
+            <div
+              key={run.id}
+              data-run-id={run.id}
+              className={`absolute top-0 left-0 w-full items-center transition-colors border-b border-border/50 ${
+                isCurrent
+                  ? "bg-primary/5 hover:bg-primary/10"
+                  : "hover:bg-muted/50"
+              }`}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "var(--trace-name-col) 1fr",
+                ...rowStyle,
+              }}
+            >
               <div
-                key={run.id}
-                data-run-id={run.id}
-                className={`absolute top-0 left-0 w-full items-center transition-colors border-b border-border/50 ${
-                  isCurrent
-                    ? "bg-primary/5 hover:bg-primary/10"
-                    : "hover:bg-muted/50"
-                }`}
+                className="flex items-center gap-1 min-w-0 pr-3 py-1.5"
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "var(--trace-name-col) 1fr",
-                  ...rowStyle,
+                  paddingLeft: `calc(0.25rem + ${depth * 0.875}rem)`,
                 }}
               >
-                <div
-                  className="flex items-center gap-1 min-w-0 pr-3 py-1.5"
-                  style={{
-                    paddingLeft: `calc(0.25rem + ${depth * 0.875}rem)`,
-                  }}
-                >
-                  {canToggle ? (
-                    <button
-                      type="button"
-                      aria-label={isExpanded ? "Collapse" : "Expand"}
-                      aria-expanded={isExpanded}
-                      disabled={isLoading}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        onToggle(run.id);
-                      }}
-                      className="inline-flex items-center justify-center size-4 shrink-0 rounded hover:bg-muted disabled:opacity-50 disabled:cursor-wait cursor-pointer text-muted-foreground"
-                    >
-                      {isExpanded ? (
-                        <ChevronDown className="size-3" />
-                      ) : (
-                        <ChevronRight className="size-3" />
-                      )}
-                    </button>
-                  ) : (
-                    <span className="inline-block size-4 shrink-0" />
-                  )}
-                  <span
-                    className={`size-1.5 rounded-full shrink-0 ${
-                      isCurrent ? "bg-primary" : ""
-                    }`}
-                  />
-                  <Link
-                    to={`/runs/${run.id}`}
-                    className="text-[13px] leading-none truncate hover:underline"
-                    title={run.jobName}
-                  >
-                    {run.jobName}
-                  </Link>
-                </div>
-
-                <div className="relative h-7 border-l border-border/40 overflow-hidden">
-                  {ticks.slice(1).map((t, i) => (
-                    <div
-                      key={i}
-                      className="absolute top-0 bottom-0 w-px bg-border/10"
-                      style={{ left: `${pct(t)}%` }}
-                    />
-                  ))}
-                  <div
-                    className="absolute top-1/2 -translate-y-1/2 h-[10px] rounded-sm"
-                    style={{
-                      left: `${leftPct}%`,
-                      width: `${widthPct}%`,
-                      minWidth: "3px",
-                      backgroundColor: barColor,
+                {canToggle ? (
+                  <button
+                    type="button"
+                    aria-label={isExpanded ? "Collapse" : "Expand"}
+                    aria-expanded={isExpanded}
+                    disabled={isLoading}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onToggle(run.id);
                     }}
+                    className="inline-flex items-center justify-center size-4 shrink-0 rounded hover:bg-muted disabled:opacity-50 disabled:cursor-wait cursor-pointer text-muted-foreground"
+                  >
+                    {isExpanded ? (
+                      <ChevronDown className="size-3"/>
+                    ) : (
+                      <ChevronRight className="size-3"/>
+                    )}
+                  </button>
+                ) : (
+                  <span className="inline-block size-4 shrink-0"/>
+                )}
+                <span
+                  className={`size-1.5 rounded-full shrink-0 ${
+                    isCurrent ? "bg-primary" : ""
+                  }`}
+                />
+                <Link
+                  to={`/runs/${run.id}`}
+                  className="text-[13px] leading-none truncate hover:underline"
+                  title={run.jobName}
+                >
+                  {run.jobName}
+                </Link>
+              </div>
+
+              <div className="relative h-7 border-l border-border/40 overflow-hidden">
+                {ticks.slice(1).map((t, i) => (
+                  <div
+                    key={i}
+                    className="absolute top-0 bottom-0 w-px bg-border/10"
+                    style={{left: `${pct(t)}%`}}
                   />
-                  {durationMs > 0 && (
-                    <span
-                      className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums whitespace-nowrap"
-                      style={{ left: `calc(${leftPct + widthPct}% + 6px)` }}
-                    >
+                ))}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 h-[10px] rounded-sm"
+                  style={{
+                    left: `${leftPct}%`,
+                    width: `${widthPct}%`,
+                    minWidth: "3px",
+                    backgroundColor: barColor,
+                  }}
+                />
+                {durationMs > 0 && (
+                  <span
+                    className="absolute top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground/70 tabular-nums whitespace-nowrap"
+                    style={{left: `calc(${leftPct + widthPct}% + 6px)`}}
+                  >
                       {formatMs(durationMs)}
                     </span>
-                  )}
-                </div>
+                )}
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
+      </div>
 
-        {loadMoreLaterSiblings && (
-          <SiblingPillRow
-            direction="later"
-            onClick={loadMoreLaterSiblings.onClick}
-            isLoading={loadMoreLaterSiblings.isLoading}
-          />
-        )}
+      {loadMoreLaterSiblings && (
+        <SiblingPillRow
+          direction="later"
+          onClick={loadMoreLaterSiblings.onClick}
+          isLoading={loadMoreLaterSiblings.isLoading}
+        />
+      )}
     </div>
   );
 }
 
-/**
- * Sibling-navigation row rendered at the top or bottom of the trace list.
- * Consistent styling across both directions — same height as a trace row,
- * same indent (aligned with focus-depth siblings), chevron + label, click to
- * load the next chunk in that direction.
- */
 function SiblingPillRow({
-  direction,
-  onClick,
-  isLoading,
-}: {
+                          direction,
+                          onClick,
+                          isLoading,
+                        }: {
   direction: "earlier" | "later";
   onClick: () => void;
   isLoading: boolean;
@@ -430,7 +388,7 @@ function SiblingPillRow({
       disabled={isLoading}
       className="flex items-center justify-center gap-1.5 w-full border-b border-border/50 bg-muted/30 backdrop-blur-sm px-3 py-1.5 text-[13px] text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50 disabled:cursor-wait cursor-pointer transition-colors"
     >
-      <Icon className="size-3.5 shrink-0" />
+      <Icon className="size-3.5 shrink-0"/>
       <span>{isLoading ? "Loading…" : "Load more"}</span>
     </button>
   );

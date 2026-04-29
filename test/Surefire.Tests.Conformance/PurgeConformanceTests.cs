@@ -56,9 +56,8 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var nodeName = $"stale-node-{Guid.CreateVersion7():N}";
         await Store.HeartbeatAsync(nodeName, ["Job"], ["default"], [], ct);
 
-        // The heartbeat sets LastHeartbeatAt to now, so we need a threshold in the future
-        // to purge it, or we test with a stale node. Since HeartbeatAsync uses TimeProvider,
-        // we purge with a future threshold for this test.
+        // HeartbeatAsync uses TimeProvider, so to purge a fresh heartbeat we must use a
+        // future threshold.
         var futureThreshold = DateTimeOffset.UtcNow.AddMinutes(5);
         await Store.PurgeAsync(futureThreshold, ct);
 
@@ -228,7 +227,6 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var claimed = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
-        // Purge with future threshold to remove the rate limit
         await Store.PurgeAsync(DateTimeOffset.UtcNow.AddDays(1), ct);
 
         // Re-create the rate limit and a new run - should succeed if window state was cleaned up
@@ -266,7 +264,8 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
 
-        // Purge with a future threshold â€” job heartbeat is stale, but it has a running run
+        // Future threshold makes the job heartbeat stale, but the active running run must
+        // keep the job from being purged.
         var futureThreshold = DateTimeOffset.UtcNow.AddMinutes(5);
         await Store.PurgeAsync(futureThreshold, ct);
 

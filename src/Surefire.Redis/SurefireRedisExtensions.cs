@@ -13,7 +13,7 @@ public static class SurefireRedisExtensions
 {
     /// <summary>
     ///     Configures Surefire to use Redis for both job storage and notifications.
-    ///     Resolves <see cref="IConnectionMultiplexer" /> from DI — typically registered by
+    ///     Resolves <see cref="IConnectionMultiplexer" /> from DI, typically registered by
     ///     <c>builder.AddRedisClient("name")</c> (Aspire) or
     ///     <c>services.AddSingleton&lt;IConnectionMultiplexer&gt;(...)</c>.
     /// </summary>

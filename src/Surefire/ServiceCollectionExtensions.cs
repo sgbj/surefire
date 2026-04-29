@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,6 +17,12 @@ public static class ServiceCollectionExtensions
     /// <param name="services">The service collection to configure.</param>
     /// <param name="configure">Optional callback for configuring <see cref="SurefireOptions" />.</param>
     /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    ///     Lifecycle callbacks registered on <see cref="SurefireOptions" /> are reflected over and
+    ///     compiled at registration time. A planned source generator will remove this requirement.
+    /// </remarks>
+    [RequiresUnreferencedCode("Compiles user-supplied lifecycle callback delegates.")]
+    [RequiresDynamicCode("Compiles user-supplied lifecycle callback delegates.")]
     public static IServiceCollection AddSurefire(this IServiceCollection services,
         Action<SurefireOptions>? configure = null)
     {
@@ -43,10 +50,9 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<INotificationProvider, InMemoryNotificationProvider>();
         services.TryAddSingleton<IJobClient, JobClient>();
         services.TryAddSingleton<BatchCompletionHandler>();
-        // BatchedEventWriter is NOT registered as IHostedService: its lifecycle is owned by
-        // SurefireExecutorService.StartAsync/StopAsync so draining is strictly ordered around the
-        // executor's active runs. Registering it as IHostedService would race under
-        // HostOptions.ServicesStopConcurrently = true and risk lost enqueues during shutdown.
+        // Not registered as IHostedService: lifecycle is owned by SurefireExecutorService so
+        // drain is strictly ordered around active runs. Hosted-service registration would race
+        // under HostOptions.ServicesStopConcurrently = true and risk lost enqueues at shutdown.
         services.TryAddSingleton<BatchedEventWriter>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, SurefireInitializationService>());

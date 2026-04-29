@@ -1,0 +1,8 @@
+#nullable enable
+Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions
+static Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions.UseRedis(this Surefire.SurefireOptions! options) -> Surefire.SurefireOptions!
+static Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions.UseRedis(this Surefire.SurefireOptions! options, System.Func<System.IServiceProvider!, StackExchange.Redis.IConnectionMultiplexer!>! connectionFactory) -> Surefire.SurefireOptions!
+static Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions.UseRedisNotifications(this Surefire.SurefireOptions! options) -> Surefire.SurefireOptions!
+static Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions.UseRedisNotifications(this Surefire.SurefireOptions! options, System.Func<System.IServiceProvider!, StackExchange.Redis.IConnectionMultiplexer!>! connectionFactory) -> Surefire.SurefireOptions!
+static Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions.UseRedisStore(this Surefire.SurefireOptions! options) -> Surefire.SurefireOptions!
+static Microsoft.Extensions.DependencyInjection.SurefireRedisExtensions.UseRedisStore(this Surefire.SurefireOptions! options, System.Func<System.IServiceProvider!, StackExchange.Redis.IConnectionMultiplexer!>! connectionFactory) -> Surefire.SurefireOptions!

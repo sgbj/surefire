@@ -13,7 +13,7 @@ namespace Surefire;
 ///     batch completion side-events) flow through here.
 ///     <para>
 ///         Flush durability is tracked per-run, not globally. A permanent failure on one run's
-///         events poisons only that run's <see cref="FlushRunAsync" /> — sibling runs sharing the
+///         events poisons only that run's <see cref="FlushRunAsync" />. Sibling runs sharing the
 ///         same writer keep flushing normally. The sticky-within-run semantics stay intact: once a
 ///         run's events have permanently failed, every subsequent <see cref="FlushRunAsync" /> for
 ///         that run throws until <see cref="DropRunState" /> is called on terminal.
@@ -29,15 +29,11 @@ internal sealed partial class BatchedEventWriter(
 {
     private const int MaxBatchSize = 1000;
 
-    // Bounded at 16× the flush batch size so memory is O(MaxBatchSize * 16 * sizeof(event)) — a
-    // few MB ceiling. Wait mode applies real backpressure to producers instead of silently growing
-    // unbounded when the store is slow or paused.
+    // Bounded so memory caps at a few MB. Wait mode applies real backpressure to producers
+    // instead of silently growing unbounded when the store is slow or paused.
     private const int ChannelCapacity = MaxBatchSize * 16;
 
-    // A tight stream-output loop can emit thousands of events per second on one run. Flushing
-    // every 5 ms caps the end-to-end latency waiters see while still amortizing one store round
-    // trip across ~50-500 events. The 1000-event cap prevents a huge backlog from becoming a
-    // single giant INSERT that stalls the writer.
+    // 5 ms caps waiter latency while amortizing one store round trip across ~50-500 events.
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(5);
 
     private static readonly TimeSpan RetryInitial = TimeSpan.FromMilliseconds(100);
@@ -51,13 +47,11 @@ internal sealed partial class BatchedEventWriter(
             FullMode = BoundedChannelFullMode.Wait
         });
 
-    // Per-run flush state. Each entry is created lazily on first enqueue and dropped on terminal
-    // via DropRunState. Keyed by RunEvent.RunId so that a permanent failure on one run's events
-    // can't block sibling runs — every state has its own Lock, Tcs, FlushedSeq, and sticky Error.
+    // Keyed by run id so a permanent failure on one run's events can't block sibling runs.
+    // Created lazily on first enqueue, dropped on terminal via DropRunState.
     private readonly ConcurrentDictionary<string, PerRunFlushState> _runStates = new(StringComparer.Ordinal);
 
-    // Global monotonic sequence — assigned to each enqueued event so batches stay in enqueue
-    // order and so per-run watermarks can be expressed in a single shared number space.
+    // Global monotonic sequence so per-run watermarks share one number space.
     private long _enqueueSeq;
 
     private CancellationTokenSource? _runCts;
@@ -83,8 +77,8 @@ internal sealed partial class BatchedEventWriter(
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        // Forward host cancellation onto the worker's CTS. Without this, an infinite
-        // transient-error retry inside FlushBatchAsync would prevent shutdown from completing.
+        // Forward host cancellation onto the worker's CTS so an infinite transient-retry inside
+        // FlushBatchAsync can't prevent shutdown from completing.
         await using var registration = cancellationToken.UnsafeRegister(static state =>
         {
             try
@@ -138,17 +132,15 @@ internal sealed partial class BatchedEventWriter(
 
     /// <summary>
     ///     Waits until every event enqueued for <paramref name="runId" /> before this call has been
-    ///     persisted. Callers that need ordering guarantees — e.g. before transitioning the run to
-    ///     a terminal status — should await this so readers never observe the terminal state
-    ///     missing prior events. Throws the original exception if any of the run's own events
-    ///     permanently failed. Sibling runs' failures do not propagate here.
+    ///     persisted. Callers that need ordering guarantees (e.g. before transitioning the run to a
+    ///     terminal status) should await this so readers never observe the terminal state missing
+    ///     prior events. Throws the original exception if any of the run's own events permanently
+    ///     failed. Sibling runs' failures do not propagate here.
     /// </summary>
     public async Task FlushRunAsync(string runId, CancellationToken cancellationToken = default)
     {
         if (!_runStates.TryGetValue(runId, out var state))
         {
-            // Nothing was ever enqueued for this run (or its state was already dropped). Either
-            // way, there is nothing to wait on and nothing the caller can fail to observe.
             return;
         }
 
@@ -163,11 +155,9 @@ internal sealed partial class BatchedEventWriter(
             TaskCompletionSource tcs;
             lock (state.Lock)
             {
-                // Sticky-within-run: once a permanent failure has been stamped for this run, every
-                // subsequent flush observes it until the state is dropped on terminal. The error
-                // binds the whole run because a failure in the middle of a run's event stream
-                // means downstream readers can never see a consistent prefix — claiming durability
-                // would be a lie regardless of whether later batches for the same run succeed.
+                // Sticky-within-run: a failure in the middle of a run's event stream means
+                // downstream readers can never see a consistent prefix, so every subsequent flush
+                // for this run observes the error until the state is dropped on terminal.
                 if (state.Error is { } err)
                 {
                     err.Throw();
@@ -213,8 +203,7 @@ internal sealed partial class BatchedEventWriter(
                     return;
                 }
 
-                // Short idle window so a burst of events coalesces into one flush instead of
-                // producing many small flushes as each event arrives.
+                // Coalesce bursts into one flush via a short idle window.
                 var deadline = Environment.TickCount64 + (long)FlushInterval.TotalMilliseconds;
                 while (batch.Count < MaxBatchSize)
                 {
@@ -245,7 +234,6 @@ internal sealed partial class BatchedEventWriter(
                     }
                     catch (OperationCanceledException)
                     {
-                        // Stopping — drain below.
                         break;
                     }
                 }
@@ -259,14 +247,11 @@ internal sealed partial class BatchedEventWriter(
         }
         finally
         {
-            // Complete the writer so producers waiting on capacity unblock, then drain everything
-            // already queued. The drain uses a fresh CTS bounded by ShutdownTimeout — independent
-            // of stoppingToken — so events that were accepted with backpressure aren't dropped just
-            // because the host's shutdown deadline cancelled stoppingToken first. A healthy store
-            // finishes the drain in one or two round trips well under the budget. A wedged store
-            // burns through the budget and FlushBatchAsync surfaces the timeout per-run via the
-            // sticky error capture, matching the per-run-error semantics of the running case.
-            // Same pattern as SurefireLogEventPump.ExecuteAsync's drain at L98-109.
+            // Complete the writer (unblocks producers waiting on capacity) then drain queued
+            // events under a fresh ShutdownTimeout-bounded CTS, independent of stoppingToken, so
+            // accepted events aren't dropped just because the host shutdown deadline already fired.
+            // A wedged store burns through the budget and FlushBatchAsync surfaces the timeout
+            // per-run via the sticky error capture.
             _channel.Writer.TryComplete();
             using var drainCts = new CancellationTokenSource(options.ShutdownTimeout);
             while (reader.TryRead(out var item))
@@ -288,8 +273,6 @@ internal sealed partial class BatchedEventWriter(
 
     private async Task FlushBatchAsync(List<EventRequest> batch, CancellationToken cancellationToken)
     {
-        // All call sites guard with `batch.Count > 0`; the check here makes the invariant
-        // explicit.
         if (batch.Count == 0)
         {
             return;
@@ -301,10 +284,8 @@ internal sealed partial class BatchedEventWriter(
             events[i] = batch[i].Event;
         }
 
-        // Retry transient errors indefinitely — stores define IsTransientException to cover only
-        // deadlock, connection reset, and similar conditions that clear on a retry. Permanent
-        // errors (schema, auth, constraint) propagate to FlushRunAsync callers so terminal
-        // transitions never proceed with events unpersisted.
+        // Retry transient errors indefinitely; permanent errors propagate to FlushRunAsync callers
+        // so terminal transitions never proceed with events unpersisted.
         var attempt = 0;
         while (true)
         {
@@ -342,10 +323,9 @@ internal sealed partial class BatchedEventWriter(
             }
         }
 
-        // Deduplicate notifications by channel across the whole flushed batch. A 500-event burst
-        // on the same run produces one RunEvent(run.Id) publish instead of 500. Notifications are
-        // idempotent wake-up signals, so individual failures are logged but never fail the batch:
-        // the store write already succeeded and FlushRunAsync's durability guarantee is satisfied.
+        // Dedupe notifications by channel across the whole batch (a 500-event burst on the same
+        // run produces one publish, not 500). Notifications are idempotent wake-ups, so individual
+        // failures are logged but never fail the batch: the store write already succeeded.
         HashSet<string>? published = null;
         foreach (var request in batch)
         {
@@ -378,9 +358,7 @@ internal sealed partial class BatchedEventWriter(
 
     private void SignalBatchCompleted(List<EventRequest> batch, ExceptionDispatchInfo? error)
     {
-        // Group the batch by runId so we advance/stamp each run's state exactly once per call.
-        // Tiny allocations here are amortized against a full store round trip; the batch has at
-        // most MaxBatchSize entries and typically a handful of distinct runs.
+        // Group by runId so we advance/stamp each run's state exactly once per call.
         var perRun = new Dictionary<string, (long MinSeq, long MaxSeq)>(StringComparer.Ordinal);
         foreach (var request in batch)
         {
@@ -407,10 +385,8 @@ internal sealed partial class BatchedEventWriter(
 
         foreach (var (runId, range) in perRun)
         {
-            // Success path uses TryGetValue (not GetOrAdd): if the state was dropped while this
-            // batch was in flight, the run has already terminated and no waiter needs signalling.
-            // Failure path uses TryGetValue too — a dropped run cannot observe an error either,
-            // so re-materializing the state would just leak.
+            // TryGetValue, not GetOrAdd: if state was dropped mid-flight the run already
+            // terminated, so re-materializing would just leak with no waiter to observe it.
             if (!_runStates.TryGetValue(runId, out var state))
             {
                 continue;
@@ -428,9 +404,8 @@ internal sealed partial class BatchedEventWriter(
                 }
                 else if (state.Error is null)
                 {
-                    // Sticky first-failure capture, per run. Record the failing batch's MIN
-                    // sequence for this run so debugging/metrics can identify the earliest lost
-                    // event; FlushRunAsync only reads the Error field (presence), not the min.
+                    // First-failure wins; subsequent batch failures don't overwrite. ErrorMinSeq
+                    // records the earliest lost sequence for diagnostics.
                     state.Error = error;
                     state.ErrorMinSeq = range.MinSeq;
                 }

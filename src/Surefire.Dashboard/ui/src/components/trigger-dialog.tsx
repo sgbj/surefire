@@ -1,26 +1,22 @@
-import { useState, useMemo, useEffect } from "react";
+import {useMemo, useState} from "react";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
-import { Field, FieldLabel } from "@/components/ui/field";
-import {
-  Collapsible,
-  CollapsibleTrigger,
-  CollapsibleContent,
-} from "@/components/ui/collapsible";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Play, ChevronsUpDown } from "lucide-react";
-import { toast } from "sonner";
-import type { JsonSchema, JsonSchemaProperty } from "@/lib/api";
+import {Button} from "@/components/ui/button";
+import {Input} from "@/components/ui/input";
+import {Switch} from "@/components/ui/switch";
+import {Field, FieldLabel} from "@/components/ui/field";
+import {Collapsible, CollapsibleContent, CollapsibleTrigger,} from "@/components/ui/collapsible";
+import {Tabs, TabsContent, TabsList, TabsTrigger} from "@/components/ui/tabs";
+import {ChevronsUpDown, Play} from "lucide-react";
+import {toast} from "sonner";
+import type {JsonSchema, JsonSchemaProperty} from "@/lib/api";
 
 function toUtcIsoString(localDateTime: string): string | null {
   const parsed = new Date(localDateTime);
@@ -42,11 +38,11 @@ interface TriggerDialogProps {
 }
 
 export function TriggerDialog({
-  jobName,
-  argumentsSchema,
-  isPending,
-  onTrigger,
-}: TriggerDialogProps) {
+                                jobName,
+                                argumentsSchema,
+                                isPending,
+                                onTrigger,
+                              }: TriggerDialogProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<string>("json");
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
@@ -63,12 +59,6 @@ export function TriggerDialog({
     [argumentsSchema],
   );
 
-  useEffect(() => {
-    if (open) {
-      setTab(hasSchema ? "form" : "json");
-    }
-  }, [open, hasSchema]);
-
   const resetForm = () => {
     setFormValues({});
     setJsonText("");
@@ -80,7 +70,11 @@ export function TriggerDialog({
 
   const handleOpenChange = (value: boolean) => {
     setOpen(value);
-    if (!value) resetForm();
+    if (value) {
+      setTab(hasSchema ? "form" : "json");
+    } else {
+      resetForm();
+    }
   };
 
   const buildArgs = (): unknown | undefined => {
@@ -90,11 +84,10 @@ export function TriggerDialog({
         return JSON.parse(jsonText);
       } catch {
         toast.error("Invalid JSON");
-        return null; // signal error
+        return null;
       }
     }
 
-    // Form mode — build args object from form values
     if (Object.keys(properties).length === 0) return undefined;
 
     const args: Record<string, unknown> = {};
@@ -181,7 +174,7 @@ export function TriggerDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button variant="outline" className="cursor-pointer">
-          <Play className="size-3.5" />
+          <Play className="size-3.5"/>
           Run
         </Button>
       </DialogTrigger>
@@ -215,7 +208,7 @@ export function TriggerDialog({
                     required={requiredFields.has(name)}
                     value={formValues[name]}
                     onChange={(value) =>
-                      setFormValues((prev) => ({ ...prev, [name]: value }))
+                      setFormValues((prev) => ({...prev, [name]: value}))
                     }
                   />
                 ))}
@@ -241,8 +234,9 @@ export function TriggerDialog({
 
           {/* Run Options (collapsible) */}
           <Collapsible>
-            <CollapsibleTrigger className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
-              <ChevronsUpDown className="size-3.5" />
+            <CollapsibleTrigger
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
+              <ChevronsUpDown className="size-3.5"/>
               Run options
             </CollapsibleTrigger>
             <CollapsibleContent className="pt-3">
@@ -308,10 +302,10 @@ export function TriggerDialog({
 }
 
 function JsonEditor({
-  id,
-  value,
-  onChange,
-}: {
+                      id,
+                      value,
+                      onChange,
+                    }: {
   id: string;
   value: string;
   onChange: (v: string) => void;
@@ -386,7 +380,7 @@ function resolveSchemaProperty(
   }
 
   if (prop.allOf && prop.allOf.length > 0) {
-    const merged: JsonSchemaProperty = { ...prop, allOf: undefined };
+    const merged: JsonSchemaProperty = {...prop, allOf: undefined};
     for (const item of prop.allOf) {
       const resolvedItem = resolveSchemaProperty(item, root, seenRefs);
       Object.assign(merged, resolvedItem);
@@ -422,13 +416,13 @@ interface SchemaFieldProps {
 }
 
 function SchemaField({
-  name,
-  rootSchema,
-  schema,
-  required,
-  value,
-  onChange,
-}: SchemaFieldProps) {
+                       name,
+                       rootSchema,
+                       schema,
+                       required,
+                       value,
+                       onChange,
+                     }: SchemaFieldProps) {
   const resolvedSchema = resolveSchemaProperty(schema, rootSchema);
   const type = resolveType(resolvedSchema);
   const nullable = isNullable(resolvedSchema);
@@ -529,7 +523,6 @@ function SchemaField({
     );
   }
 
-  // Default: string input
   return (
     <Field>
       <FieldLabel htmlFor={fieldId}>{label}</FieldLabel>

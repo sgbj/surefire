@@ -177,8 +177,8 @@ public sealed class DashboardEndpointsTests
     [Fact]
     public async Task RunLogsEndpoint_WithOnlyMalformedEntriesInWindow_StillAdvancesCursor()
     {
-        // Regression for C3: cursor must advance across rows that can't be parsed. Otherwise the
-        // client sees hasMore=true with a null cursor and polls the same window forever.
+        // Cursor must advance across rows that can't be parsed; otherwise the client sees
+        // hasMore=true with a null cursor and polls the same window forever.
         var ct = TestContext.Current.CancellationToken;
         await using var app = await CreateAppAsync(ct: ct);
         var store = app.Services.GetRequiredService<IJobStore>();
@@ -200,9 +200,7 @@ public sealed class DashboardEndpointsTests
     [Fact]
     public async Task ChildrenEndpoint_WithMalformedCursor_ReturnsBadRequest()
     {
-        // Regression for M2: opaque cursors that arrive from a user-editable URL must not throw
-        // a 500. A malformed cursor is a client-provided value; translate it to 400 with a clear
-        // diagnostic.
+        // Opaque cursors arrive from user-editable URLs; a malformed cursor must yield 400, not 500.
         var ct = TestContext.Current.CancellationToken;
         await using var app = await CreateAppAsync(ct: ct);
         var store = app.Services.GetRequiredService<IJobStore>();
@@ -393,9 +391,8 @@ public sealed class DashboardEndpointsTests
     [Fact]
     public async Task RunTraceEndpoint_RunWithBothParentAndBatch_UsesParentBranch()
     {
-        // A run can have both ParentRunId (hierarchical parent) and BatchId (belongs to a
-        // batch triggered by that parent). The parent branch owns the sibling window — the
-        // batch branch only applies when ParentRunId is null.
+        // A run can have both ParentRunId and BatchId. The parent branch owns the sibling
+        // window; the batch branch applies only when ParentRunId is null.
         var ct = TestContext.Current.CancellationToken;
         await using var app = await CreateAppAsync(ct: ct);
 
@@ -444,7 +441,7 @@ public sealed class DashboardEndpointsTests
             $"/surefire/api/runs/{children[1].Id}/trace", ct);
 
         Assert.NotNull(trace);
-        // Parent branch used because ParentRunId is set — siblings populated via direct-children keyset.
+        // Parent branch used because ParentRunId is set; siblings populated via direct-children keyset.
         Assert.Single(trace.Ancestors);
         Assert.Equal(parentId, trace.Ancestors[0].Id);
         Assert.Single(trace.SiblingsBefore);
@@ -456,11 +453,11 @@ public sealed class DashboardEndpointsTests
     [Fact]
     public async Task RunTraceEndpoint_ForBatchChild_ReturnsFocusWithoutSiblings()
     {
-        // Batch children share an atomic CreatedAt across the whole batch; a
-        // (createdAt, id) keyset split around the focus is not expressible via RunFilter.
-        // The trace endpoint therefore returns no siblings for batch focus — users
-        // browse batch siblings via the dedicated batch page. The trace still carries
-        // the focus's own identity + ancestors + children so it behaves uniformly.
+        // Batch children share an atomic CreatedAt across the whole batch, so a (createdAt, id)
+        // keyset split around the focus is not expressible via RunFilter. Trace returns no
+        // siblings for batch focus; users browse batch siblings via the dedicated batch page.
+        // Focus identity, ancestors, and children are still populated so the response shape
+        // stays uniform.
         var ct = TestContext.Current.CancellationToken;
         await using var app = await CreateAppAsync(a =>
             a.AddJob("tests-batch", (int n) => n), ct);

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -8,11 +9,20 @@ namespace Surefire;
 
 internal static class JobArgumentsSchemaBuilder
 {
-    private static readonly JsonSerializerOptions SchemaSerializerOptions = new()
-    {
-        TypeInfoResolver = new DefaultJsonTypeInfoResolver()
-    };
+    private static JsonSerializerOptions? _schemaSerializerOptions;
 
+    private static JsonSerializerOptions SchemaSerializerOptions
+    {
+        [RequiresUnreferencedCode("Uses a default JSON type info resolver that reflects over user types.")]
+        [RequiresDynamicCode("Uses a default JSON type info resolver that reflects over user types.")]
+        get => _schemaSerializerOptions ??= new()
+        {
+            TypeInfoResolver = new DefaultJsonTypeInfoResolver()
+        };
+    }
+
+    [RequiresUnreferencedCode("Reflects over user-supplied handler parameters and emits a JSON schema.")]
+    [RequiresDynamicCode("Reflects over user-supplied handler parameters and emits a JSON schema.")]
     public static string? Build(Delegate handler, Func<Type, bool> isServiceType)
     {
         var nullabilityContext = new NullabilityInfoContext();
@@ -90,6 +100,8 @@ internal static class JobArgumentsSchemaBuilder
         return Nullable.GetUnderlyingType(type) is null;
     }
 
+    [RequiresUnreferencedCode("Emits a JSON schema for a runtime type via reflection.")]
+    [RequiresDynamicCode("Emits a JSON schema for a runtime type via reflection.")]
     private static JsonNode BuildSchemaForType(Type type)
     {
         var targetType = Nullable.GetUnderlyingType(type) ?? type;

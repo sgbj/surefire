@@ -283,11 +283,9 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                         if (Interlocked.Increment(ref attempts) == 1)
                         {
                             jobStarted.TrySetResult();
-                            // First attempt times out
                             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
                         }
 
-                        // Second attempt succeeds
                         return 42;
                     }).WithTimeout(TimeSpan.FromSeconds(5))
                     .WithRetry(policy =>

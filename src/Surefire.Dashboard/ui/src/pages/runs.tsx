@@ -1,21 +1,15 @@
-import { useState, useMemo } from "react";
-import { useQuery, keepPreviousData } from "@tanstack/react-query";
-import { type PaginationState } from "@tanstack/react-table";
-import { api, JobStatusLabels } from "@/lib/api";
-import { DataTable } from "@/components/data-table";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { CircleAlert, Search } from "lucide-react";
-import { buildRunColumns } from "@/components/run-columns";
-import { RUN_DATE_PRESETS } from "@/lib/run-date-presets";
-import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import {useMemo, useState} from "react";
+import {keepPreviousData, useQuery} from "@tanstack/react-query";
+import {type PaginationState} from "@tanstack/react-table";
+import {api, JobStatusLabels} from "@/lib/api";
+import {DataTable} from "@/components/data-table";
+import {Input} from "@/components/ui/input";
+import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {CircleAlert, Search} from "lucide-react";
+import {buildRunColumns} from "@/components/run-columns";
+import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
+import {useDebouncedValue} from "@/hooks/use-debounced-value";
 
 const columns = buildRunColumns();
 
@@ -43,7 +37,7 @@ export function RunsPage() {
     [debouncedJobName, statusFilter, datePreset, pagination],
   );
 
-  const { data, isError } = useQuery({
+  const {data, isError} = useQuery({
     queryKey: ["runs", queryKey],
     queryFn: () => {
       const preset = RUN_DATE_PRESETS.find((p) => p.value === datePreset);
@@ -62,14 +56,14 @@ export function RunsPage() {
   const totalCount = data?.totalCount ?? 0;
   const pageCount = Math.ceil(totalCount / pagination.pageSize);
 
-  const resetPage = () => setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+  const resetPage = () => setPagination((prev) => ({...prev, pageIndex: 0}));
 
   return (
     <div className="space-y-6">
       <h2 className="text-xl font-semibold tracking-tight">Runs</h2>
       {isError && (
         <Alert variant="destructive">
-          <CircleAlert />
+          <CircleAlert/>
           <AlertDescription>Failed to load runs</AlertDescription>
         </Alert>
       )}
@@ -85,7 +79,7 @@ export function RunsPage() {
         toolbar={
           <>
             <div className="relative max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
               <Input
                 aria-label="Search runs"
                 placeholder="Search..."
@@ -94,7 +88,7 @@ export function RunsPage() {
                   const next = e.target.value;
                   setJobNameInput(next);
                   if (pagination.pageIndex !== 0) {
-                    setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+                    setPagination((prev) => ({...prev, pageIndex: 0}));
                   }
                 }}
                 className="pl-8"
@@ -108,7 +102,7 @@ export function RunsPage() {
               }}
             >
               <SelectTrigger size="sm" className="w-[140px]">
-                <SelectValue />
+                <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
                 <SelectItem value="all">All statuses</SelectItem>
@@ -127,7 +121,7 @@ export function RunsPage() {
               }}
             >
               <SelectTrigger size="sm" className="w-[140px]">
-                <SelectValue />
+                <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
                 {RUN_DATE_PRESETS.map((p) => (

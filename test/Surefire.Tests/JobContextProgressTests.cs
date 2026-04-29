@@ -33,16 +33,16 @@ public sealed class JobContextProgressTests
     {
         await using var harness = await Harness.CreateAsync();
 
-        await harness.Context.ReportProgressAsync(0.10); // leading edge
+        await harness.Context.ReportProgressAsync(0.10);
         await harness.WaitForUpdatesAsync(1);
         Assert.Equal([0.10], harness.Store.PersistedProgress);
 
-        // Three quick reports within the window. Only the LAST should be flushed by the trailing edge.
+        // Three quick reports within the window; only the last should be flushed by the trailing edge.
         await harness.Context.ReportProgressAsync(0.20);
         await harness.Context.ReportProgressAsync(0.30);
         await harness.Context.ReportProgressAsync(0.40);
 
-        // No additional persists yet — the trailing-edge timer hasn't fired.
+        // The trailing-edge timer hasn't fired yet.
         Assert.Equal([0.10], harness.Store.PersistedProgress);
 
         // Advance past the throttle interval; the timer fires and flushes the latest pending value.
@@ -63,7 +63,7 @@ public sealed class JobContextProgressTests
         await harness.Context.ReportProgressAsync(0.50);
         await harness.Context.ReportProgressAsync(0.75);
 
-        // Handler is "returning" before the timer fires — executor calls FlushPendingProgressAsync
+        // Handler is returning before the timer fires; executor calls FlushPendingProgressAsync
         // synchronously to drain the trailing-edge value.
         await harness.Context.FlushPendingProgressAsync(CancellationToken.None);
 
@@ -73,11 +73,10 @@ public sealed class JobContextProgressTests
     [Fact]
     public async Task FlushPendingProgress_AwaitsInFlightTimerCallback()
     {
-        // Race: the timer's fire-and-forget PersistProgressAsync is in flight when the terminal
-        // transition calls FlushPendingProgressAsync. The flush must observe the trailing flush as
-        // in-flight and await it — otherwise the late progress event lands AFTER the terminal
-        // status, violating the durability invariant. This test gates the persist on a manual
-        // signal and asserts FlushPendingProgressAsync waits for it.
+        // The timer's fire-and-forget PersistProgressAsync is in flight when the terminal
+        // transition calls FlushPendingProgressAsync. The flush must observe the in-flight task
+        // and await it; otherwise the late progress event lands after the terminal status,
+        // violating the durability invariant.
         await using var harness = await Harness.CreateAsync();
 
         await harness.Context.ReportProgressAsync(0.10);
@@ -88,7 +87,6 @@ public sealed class JobContextProgressTests
         // Block the next UpdateRunAsync so the trailing flush hangs after entering the persist path.
         var release = harness.Store.GateNextUpdate();
 
-        // Fire the trailing-edge timer.
         harness.Time.Advance(ThrottleInterval);
 
         // FlushPendingProgressAsync should still see the in-flight task and await it.
@@ -105,9 +103,9 @@ public sealed class JobContextProgressTests
     [Fact]
     public async Task ReportAtFullValue_StillCoalescesWithinWindow()
     {
-        // The throttle has no special case for 1.0 — terminal value safety is guaranteed by the
-        // executor calling FlushPendingProgressAsync at the terminal transition. This test pins
-        // that 1.0 inside a throttle window does NOT bypass the throttle (no double-write).
+        // The throttle has no special case for 1.0; terminal-value safety comes from the executor
+        // calling FlushPendingProgressAsync at the terminal transition. This test pins that 1.0
+        // inside a throttle window does not bypass the throttle.
         await using var harness = await Harness.CreateAsync();
 
         await harness.Context.ReportProgressAsync(0.50);
@@ -115,7 +113,7 @@ public sealed class JobContextProgressTests
 
         await harness.Context.ReportProgressAsync(1.0);
 
-        // 1.0 is within the throttle window → coalesced as trailing pending value, not flushed yet.
+        // 1.0 is within the throttle window: coalesced as trailing pending value, not flushed yet.
         Assert.Equal([0.50], harness.Store.PersistedProgress);
 
         harness.Time.Advance(ThrottleInterval);
@@ -237,7 +235,7 @@ public sealed class JobContextProgressTests
 
         public override Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken ct = default) =>
             // Progress events flow through the event writer in tests but their payload is not
-            // asserted here — we observe persistence ordering via UpdateRunAsync.
+            // asserted here; persistence ordering is observed via UpdateRunAsync.
             Task.CompletedTask;
     }
 }

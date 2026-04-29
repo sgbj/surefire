@@ -1,15 +1,11 @@
-import { type RefObject, useEffect, useRef } from "react";
+import {type RefObject, useEffect, useRef} from "react";
 
 /**
- * Observes a 1px sentinel element at the bottom of a scrollable list and invokes
- * `onLoadMore` when it enters the scroll container's viewport. Replaces the
- * manual "Load more" buttons with seamless prefetch-ahead loading.
- *
- * Usage: place the returned `sentinelRef` on a 1px-tall element at the end of
- * the list, inside the same scroll container referenced by `scrollContainerRef`.
- *
- * `rootMargin` tunes how far ahead the fetch fires. 400px is appropriate for
- * ~28px row heights × ~14 rows of prefetch; raise for taller rows or larger pages.
+ * Fires `onLoadMore` when a sentinel placed at the end of the list enters the
+ * scroll container's viewport. Place `sentinelRef` on a 1px-tall element at
+ * the end of the list, inside the same container as `scrollContainerRef`.
+ * `rootMargin` of 400px prefetches ~14 rows of 28px height; raise for taller
+ * rows or larger pages.
  */
 export function useInfiniteScroll(params: {
   scrollContainerRef: RefObject<HTMLElement | null>;
@@ -28,8 +24,8 @@ export function useInfiniteScroll(params: {
   } = params;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // Callbacks change per-render but observer setup is stable — stash the latest
-  // via ref so we don't tear down & recreate the IntersectionObserver each render.
+  // Stash latest callback in a ref so the observer effect doesn't tear down
+  // and recreate IntersectionObserver every render.
   const onLoadMoreRef = useRef(onLoadMore);
   useEffect(() => {
     onLoadMoreRef.current = onLoadMore;
@@ -49,11 +45,11 @@ export function useInfiniteScroll(params: {
           }
         }
       },
-      { root, rootMargin },
+      {root, rootMargin},
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [scrollContainerRef, hasMore, isLoading, rootMargin]);
 
-  return { sentinelRef };
+  return {sentinelRef};
 }

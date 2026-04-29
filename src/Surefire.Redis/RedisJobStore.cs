@@ -206,13 +206,9 @@ internal sealed partial class RedisJobStore(
                                                                   return 1
                                                                   """;
 
-    // Bulk upsert. One Lua call regardless of jobs.Count. ARGV[1] is the JSON array produced by
-    // UpsertPayloadFactory.SerializeJobs; ARGV[2] is the shared "now" (unix ms, as a string).
-    // `tags` arrives as a JSON array and `retry_policy` as a JSON object — both round-trip back
-    // to JSON text via cjson.encode so the on-hash representation matches the single-object
-    // storage format used on read. is_enabled and last_cron_fire_at are read off the existing
-    // hash and re-set to preserve the dashboard toggle and the last cron fire timestamp; on
-    // first insert they take their input / empty-string defaults.
+    // Bulk upsert in one Lua call. tags and retry_policy round-trip via cjson.encode so the
+    // on-hash format matches the read shape. is_enabled and last_cron_fire_at are preserved
+    // from the existing hash; first insert takes their input/empty-string defaults.
     private const string UpsertJobsScript = """
                                             local payload = cjson.decode(ARGV[1])
                                             local now = ARGV[2]
@@ -279,9 +275,8 @@ internal sealed partial class RedisJobStore(
                                             return 1
                                             """;
 
-    // Bulk upsert. One Lua call regardless of queues.Count. ARGV[1] is the JSON array payload;
-    // ARGV[2] is the shared "now" (unix ms). is_paused is read off the existing hash so the
-    // dashboard pause flag survives re-upserts; on first insert it takes the input value.
+    // Bulk upsert in one Lua call. is_paused is preserved from the existing hash so dashboard
+    // pauses survive re-upserts; first insert takes the input value.
     private const string UpsertQueuesScript = """
                                               local payload = cjson.decode(ARGV[1])
                                               local now = ARGV[2]
@@ -316,9 +311,8 @@ internal sealed partial class RedisJobStore(
                                               return 1
                                               """;
 
-    // Bulk upsert. One Lua call regardless of rateLimits.Count. Runtime counter fields
-    // (current_count / previous_count / window_start) are only seeded on first insert and are
-    // left alone on update so concurrent rate-limit acquisition is never rewound.
+    // Bulk upsert in one Lua call. Runtime counters seed on first insert only; updates leave
+    // them untouched so concurrent acquisition is never rewound.
     private const string UpsertRateLimitsScript = """
                                                   local payload = cjson.decode(ARGV[1])
                                                   local now = ARGV[2]
@@ -479,13 +473,13 @@ internal sealed partial class RedisJobStore(
     public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
+        => CreateRunsAsyncCore(runs, initialEvents, cancellationToken);
 
     public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -545,9 +539,8 @@ internal sealed partial class RedisJobStore(
         var db = Db;
         var indexKey = $"{P}children:{parentRunId}";
 
-        // Children index: ZSET score = 0, member = "{created_at_ms:D20}{runId}".
-        // This yields deterministic lex ordering by (CreatedAtMs ASC, Id ASC) without
-        // tie-bucket stitching. Cursor bounds are strict and exclusive.
+        // ZSET score = 0, member = "{created_at_ms:D20}{runId}" gives deterministic lex
+        // ordering by (CreatedAtMs ASC, Id ASC) without tie-bucket stitching.
         var min = RedisValue.Null;
         var max = RedisValue.Null;
         var exclude = Exclude.None;
@@ -618,8 +611,7 @@ internal sealed partial class RedisJobStore(
     public async Task<IReadOnlyList<JobRun>> GetAncestorChainAsync(string runId,
         CancellationToken cancellationToken = default)
     {
-        // Iterative parent walk. Each GET is one round trip; trees are typically shallow
-        // (< 10 levels for business workloads), so this is bounded and simple.
+        // Iterative parent walk; trees are typically shallow.
         var db = Db;
         var chain = new List<JobRun>();
         var visited = new HashSet<string>(StringComparer.Ordinal) { runId };
@@ -630,9 +622,7 @@ internal sealed partial class RedisJobStore(
             return chain;
         }
 
-        // Parent IDs are immutable after creation; `visited` terminates any pathological
-        // cycle even though the data model makes them impossible. No length cap: a
-        // legitimately deep hierarchy should surface in full.
+        // Parent IDs are immutable; `visited` is defense-in-depth against pathological cycles.
         while (currentRun.ParentRunId is { } parentId && visited.Add(parentId))
         {
             var parent = await GetRunAsync(parentId, cancellationToken);
@@ -1660,7 +1650,7 @@ internal sealed partial class RedisJobStore(
                                   -- Batch claim: repeatedly find the highest-priority claimable candidate
                                   -- and claim it, up to max_count. Since Redis executes Lua scripts atomically,
                                   -- the SADD/HINCRBY/ZREM mutations in one iteration are visible to subsequent
-                                  -- iterations via SCARD/HGET/ZRANGE — no external bookkeeping needed. Per-job
+                                  -- iterations via SCARD/HGET/ZRANGE, with no external bookkeeping needed. Per-job
                                   -- max_concurrency, per-queue max_concurrency, and rate-limit capacity are
                                   -- therefore respected across the whole batch without double-claiming.
                                   local claimed = {}
@@ -1785,7 +1775,7 @@ internal sealed partial class RedisJobStore(
 
     public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
-        => CreateRunsCoreAsync(runs, initialEvents, cancellationToken, SerializeBatch(batch));
+        => CreateRunsAsyncCore(runs, initialEvents, cancellationToken, SerializeBatch(batch));
 
     public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
@@ -2284,11 +2274,11 @@ internal sealed partial class RedisJobStore(
 
     public async Task<IReadOnlyList<RunEvent>> GetBatchOutputEventsAsync(string batchId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
-        => await GetBatchEventsCoreAsync(batchId, sinceEventId, take, RunEventType.Output);
+        => await GetBatchEventsAsyncCore(batchId, sinceEventId, take, RunEventType.Output);
 
     public async Task<IReadOnlyList<RunEvent>> GetBatchEventsAsync(string batchId, long sinceEventId = 0,
         int take = 200, CancellationToken cancellationToken = default)
-        => await GetBatchEventsCoreAsync(batchId, sinceEventId, take, null);
+        => await GetBatchEventsAsyncCore(batchId, sinceEventId, take, null);
 
     public async Task HeartbeatAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, IReadOnlyCollection<string> activeRunIds,
@@ -2401,10 +2391,8 @@ internal sealed partial class RedisJobStore(
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
 
-        // Backed by the {surefire}:heartbeat:running ZSET (score = last_heartbeat_at in ms),
-        // maintained on every transition into/out of Running status and on each heartbeat tick.
-        // ZRANGEBYSCORE is O(log N + K) where K is the result size, so the cost is bounded by
-        // `take` rather than by total running runs.
+        // Backed by the heartbeat:running ZSET (score = last_heartbeat_at). ZRANGEBYSCORE is
+        // O(log N + K), so cost is bounded by `take`, not total running runs.
         var staleBeforeMs = staleBefore.ToUnixTimeMilliseconds();
         var values = await Db.SortedSetRangeByScoreAsync(
             $"{P}heartbeat:running",
@@ -2513,11 +2501,8 @@ internal sealed partial class RedisJobStore(
     public async Task<bool> SetQueuePausedAsync(string name, bool isPaused,
         CancellationToken cancellationToken = default)
     {
-        // Atomic "update-if-exists" keeps contract aligned with the SQL stores: callers that pass
-        // an unknown queue name get back `false` so the dashboard can 404 rather than silently
-        // creating a phantom queue. Queue rows — including `default` — materialize only when
-        // either (a) a job registered on this node references them, via SurefireInitializationService,
-        // or (b) the user explicitly configures them via `options.AddQueue(...)`.
+        // Update-if-exists matches the SQL stores' contract: unknown queue returns false so
+        // the dashboard can 404 instead of silently creating a phantom queue.
         const string script = """
                               local key = KEYS[1]
                               if redis.call('EXISTS', key) == 0 then
@@ -2689,9 +2674,8 @@ internal sealed partial class RedisJobStore(
                 break;
             }
 
-            // Cancelled/cleaned entries were ZREM'd, shifting the set.
-            // Only advance past skipped running entries, which stay in the expiring set
-            // until executor/stale-run recovery handles them.
+            // ZREM shifts the set, so only advance past skipped (running) entries, which
+            // stay until executor/stale-recovery handles them.
             offset += page.Skipped;
         }
 
@@ -3220,7 +3204,7 @@ internal sealed partial class RedisJobStore(
     ///     Mirrors the Hangfire/Sidekiq/BullMQ policy: connection drops, timeouts,
     ///     and temporary server-side unavailability (LOADING/BUSY/MASTERDOWN/CLUSTERDOWN)
     ///     are recoverable. MOVED/ASK slot redirects and NOSCRIPT are intentionally
-    ///     excluded — StackExchange.Redis handles MOVED/ASK internally and NOSCRIPT
+    ///     excluded; StackExchange.Redis handles MOVED/ASK internally and NOSCRIPT
     ///     is handled at the call site via script reload.
     /// </summary>
     public bool IsTransientException(Exception ex) => ex switch
@@ -3515,7 +3499,7 @@ internal sealed partial class RedisJobStore(
         return runs;
     }
 
-    private async Task<IReadOnlyList<RunEvent>> GetBatchEventsCoreAsync(string batchId, long sinceEventId, int take,
+    private async Task<IReadOnlyList<RunEvent>> GetBatchEventsAsyncCore(string batchId, long sinceEventId, int take,
         RunEventType? eventType)
     {
         if (take <= 0)
@@ -3638,7 +3622,7 @@ internal sealed partial class RedisJobStore(
         }
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
+    private async Task CreateRunsAsyncCore(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken,
         string? batchJson = null)
@@ -3667,7 +3651,7 @@ internal sealed partial class RedisJobStore(
             [(RedisValue)runsJson, (RedisValue)initialEventsJson, (RedisValue)(batchJson ?? "")]);
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunAsyncCore(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)

@@ -1,19 +1,19 @@
-import { useCallback, useMemo, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { type ColumnDef } from "@tanstack/react-table";
-import { api, type QueueResponse } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { DataTable } from "@/components/data-table";
-import { SortableHeader } from "@/components/sortable-header";
-import { Input } from "@/components/ui/input";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { CircleAlert, Pause, Play, Search } from "lucide-react";
-import { toast } from "sonner";
+import {useCallback, useMemo, useState} from "react";
+import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
+import {type ColumnDef} from "@tanstack/react-table";
+import {api, type QueueResponse} from "@/lib/api";
+import {Badge} from "@/components/ui/badge";
+import {Button} from "@/components/ui/button";
+import {DataTable} from "@/components/data-table";
+import {SortableHeader} from "@/components/sortable-header";
+import {Input} from "@/components/ui/input";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {CircleAlert, Pause, Play, Search} from "lucide-react";
+import {toast} from "sonner";
 
 export function QueuesPage() {
   const queryClient = useQueryClient();
-  const { data: queues, isError } = useQuery({
+  const {data: queues, isError} = useQuery({
     queryKey: ["queues"],
     queryFn: () => api.getQueues(),
     refetchInterval: 10000,
@@ -21,10 +21,10 @@ export function QueuesPage() {
   const [filter, setFilter] = useState("");
 
   const togglePause = useMutation({
-    mutationFn: ({ name, isPaused }: { name: string; isPaused: boolean }) =>
-      api.updateQueue(name, { isPaused }),
-    onSuccess: (_data, { isPaused }) => {
-      queryClient.invalidateQueries({ queryKey: ["queues"] });
+    mutationFn: ({name, isPaused}: { name: string; isPaused: boolean }) =>
+      api.updateQueue(name, {isPaused}),
+    onSuccess: (_data, {isPaused}) => {
+      queryClient.invalidateQueries({queryKey: ["queues"]});
       toast.success(isPaused ? "Queue paused" : "Queue resumed");
     },
     onError: () => toast.error("Failed to update queue"),
@@ -33,34 +33,34 @@ export function QueuesPage() {
   const isTogglePending = togglePause.isPending;
   const toggleQueuePause = useCallback(
     (name: string, isPaused: boolean) => {
-      togglePause.mutate({ name, isPaused });
+      togglePause.mutate({name, isPaused});
     },
-    [togglePause.mutate],
+    [togglePause],
   );
 
   const columns: ColumnDef<QueueResponse>[] = useMemo(
     () => [
       {
         accessorKey: "name",
-        header: ({ column }) => (
+        header: ({column}) => (
           <SortableHeader column={column}>Name</SortableHeader>
         ),
-        cell: ({ row }) => (
+        cell: ({row}) => (
           <span className="font-medium">{row.original.name}</span>
         ),
       },
       {
         accessorKey: "priority",
-        header: ({ column }) => (
+        header: ({column}) => (
           <SortableHeader column={column}>Priority</SortableHeader>
         ),
       },
       {
         accessorKey: "pendingCount",
-        header: ({ column }) => (
+        header: ({column}) => (
           <SortableHeader column={column}>Pending</SortableHeader>
         ),
-        cell: ({ row }) => (
+        cell: ({row}) => (
           <span
             className={
               row.original.pendingCount > 0
@@ -74,10 +74,10 @@ export function QueuesPage() {
       },
       {
         accessorKey: "runningCount",
-        header: ({ column }) => (
+        header: ({column}) => (
           <SortableHeader column={column}>Running</SortableHeader>
         ),
-        cell: ({ row }) => (
+        cell: ({row}) => (
           <span
             className={
               row.original.runningCount > 0
@@ -92,7 +92,7 @@ export function QueuesPage() {
       {
         id: "maxConcurrency",
         header: "Concurrency",
-        cell: ({ row }) => (
+        cell: ({row}) => (
           <span className="text-sm text-muted-foreground">
             {row.original.maxConcurrency != null
               ? `${row.original.runningCount} / ${row.original.maxConcurrency}`
@@ -103,7 +103,7 @@ export function QueuesPage() {
       {
         id: "status",
         header: "Status",
-        cell: ({ row }) =>
+        cell: ({row}) =>
           row.original.isPaused ? (
             <Badge
               variant="outline"
@@ -123,7 +123,7 @@ export function QueuesPage() {
       {
         id: "nodes",
         header: "Nodes",
-        cell: ({ row }) => (
+        cell: ({row}) => (
           <span className="text-sm text-muted-foreground">
             {row.original.processingNodes.length}
           </span>
@@ -131,7 +131,7 @@ export function QueuesPage() {
       },
       {
         id: "actions",
-        cell: ({ row }) => (
+        cell: ({row}) => (
           <div className="flex justify-end">
             <Button
               variant="ghost"
@@ -146,9 +146,9 @@ export function QueuesPage() {
               disabled={isTogglePending}
             >
               {row.original.isPaused ? (
-                <Play className="size-3.5" />
+                <Play className="size-3.5"/>
               ) : (
-                <Pause className="size-3.5" />
+                <Pause className="size-3.5"/>
               )}
             </Button>
           </div>
@@ -170,7 +170,7 @@ export function QueuesPage() {
       <h2 className="text-xl font-semibold tracking-tight">Queues</h2>
       {isError && (
         <Alert variant="destructive">
-          <CircleAlert />
+          <CircleAlert/>
           <AlertDescription>Failed to load queues</AlertDescription>
         </Alert>
       )}
@@ -179,7 +179,7 @@ export function QueuesPage() {
         data={filtered}
         toolbar={
           <div className="relative max-w-sm">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60" />
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
             <Input
               placeholder="Search..."
               aria-label="Search queues"

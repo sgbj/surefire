@@ -77,10 +77,7 @@ internal sealed class SurefireInstrumentation : IDisposable
         var tags = new TagList { { "surefire.job.name", jobName } };
         RunsClaimed.Add(1, tags);
 
-        // Scheduler lag — claimedAt minus the run's NotBefore. ClaimRunsAsync filters on
-        // NotBefore <= now, so this should always be >= 0; clamp defensively against clock
-        // skew between the scheduling node and the claiming node so the histogram domain
-        // stays non-negative.
+        // Clamp against cross-node clock skew so the histogram domain stays non-negative.
         var lagMs = Math.Max(0, (claimedAt - notBefore).TotalMilliseconds);
         SchedulerLagMs.Record(lagMs, tags);
     }
@@ -106,8 +103,7 @@ internal sealed class SurefireInstrumentation : IDisposable
         RunsFailed.Add(1, tags);
         if (startedAt is { } started)
         {
-            // Duration histogram doesn't need the reason cardinality — keep it on a slimmer
-            // tag set so chart slicing by job stays cheap.
+            // Duration histogram skips the reason tag to keep chart slicing by job cheap.
             var durationTags = new TagList { { "surefire.job.name", jobName } };
             RunDurationMs.Record((completedAt - started).TotalMilliseconds, durationTags);
         }
@@ -179,10 +175,9 @@ internal static class DeadLetterReasonExtensions
 {
     /// <summary>
     ///     Renders the reason as the snake_case string emitted on the
-    ///     <c>surefire.dead_letter.reason</c> OTel tag. Snake_case matches OpenTelemetry semantic
-    ///     convention recommendations for tag values; this helper avoids relying on
-    ///     <see cref="object.ToString" /> (which would emit the PascalCase enum name) and keeps
-    ///     the mapping explicit so reviewers see exactly which strings flow into telemetry.
+    ///     <c>surefire.dead_letter.reason</c> OTel tag. The explicit mapping avoids
+    ///     <see cref="object.ToString" /> (PascalCase) and keeps the strings flowing into
+    ///     telemetry visible at the call site.
     /// </summary>
     public static string ToTagValue(this DeadLetterReason reason) => reason switch
     {

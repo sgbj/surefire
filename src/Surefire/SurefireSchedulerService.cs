@@ -45,9 +45,7 @@ internal sealed partial class SurefireSchedulerService(
                         break;
                     }
 
-                    // A job scheduler should never crash the host on a single bad tick. Log the
-                    // exception, record instrumentation, back off and continue so operators see
-                    // the failure via metrics/health-check while the host stays up.
+                    // Loop must never crash the host. Log, instrument, back off, continue.
                     Log.SchedulerTickFailed(logger, ex);
                     instrumentation.RecordLoopError(LoopName);
                     loopHealth.RecordFailure(LoopName);
@@ -97,9 +95,7 @@ internal sealed partial class SurefireSchedulerService(
             switch (job.MisfirePolicy)
             {
                 case MisfirePolicy.Skip:
-                    // Advance LastCronFireAt to the most recent missed occurrence so the dashboard
-                    // reflects the actual last fire and the next tick resumes from the right place.
-                    // Iterate without allocating a list — we only keep the latest.
+                    // Advance the cursor to the latest missed fire so the next tick resumes correctly.
                     if (FindLatestMissedOccurrence(cron, timeZone, job.LastCronFireAt.Value, now) is { } skipTo)
                     {
                         await store.UpdateLastCronFireAtAsync(job.Name, skipTo, cancellationToken);
@@ -108,8 +104,7 @@ internal sealed partial class SurefireSchedulerService(
                     break;
 
                 case MisfirePolicy.FireOnce:
-                    // Need the latest missed occurrence — the dedup ID is derived from it and
-                    // must be deterministic across nodes.
+                    // Use the latest missed fire so the dedup ID is deterministic across nodes.
                     if (FindLatestMissedOccurrence(cron, timeZone, job.LastCronFireAt.Value, now) is { } fireAt)
                     {
                         await TryCreateScheduledRunAsync(job, now, fireAt, cancellationToken);
@@ -197,8 +192,7 @@ internal sealed partial class SurefireSchedulerService(
         DateTimeOffset now,
         int? maxOccurrences)
     {
-        // When capped, keep the most recent N occurrences (sliding window). The newest misses
-        // are usually what operators care about catching up; older ones are skipped.
+        // When capped, keep the newest N (sliding window). Older misses are skipped.
         var queue = new Queue<DateTimeOffset>(maxOccurrences ?? 16);
         var cursor = lastCronFireAt;
         var truncated = false;

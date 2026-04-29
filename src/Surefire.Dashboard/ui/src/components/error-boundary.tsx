@@ -1,5 +1,5 @@
 import React from "react";
-import { useLocation } from "react-router";
+import {useLocation} from "react-router";
 
 type ErrorBoundaryProps = {
   children: React.ReactNode;
@@ -13,17 +13,17 @@ class ErrorBoundaryInner extends React.Component<
   ErrorBoundaryProps & { locationKey: string },
   ErrorBoundaryState
 > {
-  public state: ErrorBoundaryState = { hasError: false };
+  public state: ErrorBoundaryState = {hasError: false};
 
   public static getDerivedStateFromError(): ErrorBoundaryState {
-    return { hasError: true };
+    return {hasError: true};
   }
 
   public componentDidUpdate(
     prevProps: ErrorBoundaryProps & { locationKey: string },
   ): void {
     if (this.state.hasError && prevProps.locationKey !== this.props.locationKey) {
-      this.setState({ hasError: false });
+      this.setState({hasError: false});
     }
   }
 
@@ -60,7 +60,7 @@ class ErrorBoundaryInner extends React.Component<
   }
 }
 
-export function ErrorBoundary({ children }: ErrorBoundaryProps) {
+export function ErrorBoundary({children}: ErrorBoundaryProps) {
   const location = useLocation();
   return (
     <ErrorBoundaryInner locationKey={location.pathname}>

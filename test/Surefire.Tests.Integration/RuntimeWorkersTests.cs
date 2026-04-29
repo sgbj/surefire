@@ -442,9 +442,8 @@ public sealed class RuntimeWorkersTests
             ct);
         await harness.Client.CancelBatchAsync(batchId, ct);
 
-        // CancelBatchAsync transitions Running children to Cancelling (not Cancelled).
-        // The executor finalizes Cancelling → Cancelled asynchronously. Poll until all
-        // children reach Cancelled rather than asserting immediately.
+        // CancelBatchAsync transitions Running children to Cancelling. The executor finalizes
+        // Cancelling to Cancelled asynchronously, so poll rather than asserting immediately.
         await TestWait.PollUntilAsync(
             async _ =>
             {
@@ -1366,7 +1365,7 @@ public sealed class RuntimeWorkersTests
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-        // Wait for each signal explicitly — no timing assumptions.
+        // Wait for each signal explicitly; no timing assumptions.
         await retrySignal.Task.WaitAsync(cts.Token);
         await deadLetterSignal.Task.WaitAsync(cts.Token);
         await jobRetrySignal.Task.WaitAsync(cts.Token);
@@ -1991,7 +1990,7 @@ public sealed class RuntimeWorkersTests
         Assert.Equal(2, originalChildrenPage.Items.Count);
         var originalChildIds = originalChildrenPage.Items.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
 
-        // Rerun each child individually — stream inputs are replayed
+        // Rerun each child individually; stream inputs are replayed.
         var rerunRuns = new List<JobRun>();
         foreach (var child in originalChildrenPage.Items)
         {
@@ -2006,7 +2005,6 @@ public sealed class RuntimeWorkersTests
 
         Assert.Equal([3, 165], rerunResults.OrderBy(v => v).ToArray());
 
-        // Each rerun references the original child it was derived from
         Assert.All(rerunRuns, rerun =>
         {
             Assert.NotNull(rerun.RerunOfRunId);

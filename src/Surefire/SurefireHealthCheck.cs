@@ -9,11 +9,10 @@ internal sealed class SurefireHealthCheck(
     TimeProvider timeProvider,
     LoopHealthTracker loopHealth) : IHealthCheck
 {
-    // Surfaces persistent loop failures through the health check. ConsecutiveFailureThreshold
-    // catches a loop that keeps throwing; MissedTickBudget catches a loop that has gone silent
-    // (hung on something that ignores cancellation). The budget is multiplied by each loop's own
-    // ExpectedCadence so fast loops (executor polling at seconds) alarm quickly while slow loops
-    // (retention every few minutes) get proportional room before being flagged.
+    // ConsecutiveFailureThreshold catches a loop that keeps throwing; MissedTickBudget catches
+    // a loop gone silent (hung on something that ignores cancellation). The budget multiplies
+    // each loop's ExpectedCadence so fast loops alarm quickly while slow loops get proportional
+    // room before being flagged.
     internal const int ConsecutiveFailureThreshold = 5;
     internal const int MissedTickBudget = 3;
 
@@ -34,9 +33,9 @@ internal sealed class SurefireHealthCheck(
                     ex);
             }
 
-            // Notification publishing is a separate signal from ping liveness: the server can be
-            // reachable while queued publishes fail (auth change, permission revoked, server-side
-            // rejection). Treat recent publish failures as a Degraded condition so operators see it.
+            // Publish health is a separate signal from ping: the server can be reachable while
+            // queued publishes fail (auth change, permission revoked). Recent publish failures
+            // surface as Degraded so operators see them.
             var publishHealth = notifications.GetPublishHealth();
             if (publishHealth.LastFailureAt is { } failedAt
                 && timeProvider.GetUtcNow() - failedAt < options.HeartbeatInterval)
@@ -49,22 +48,19 @@ internal sealed class SurefireHealthCheck(
             var now = timeProvider.GetUtcNow();
             foreach (var (loop, state) in loopHealth.Snapshot())
             {
-                // Five straight failures is a wedged loop, not a soft signal — Kubernetes
-                // liveness probes treat Degraded as alive, so reporting Degraded here would
-                // leave a stuck pod running forever. Report Unhealthy so the orchestrator
-                // can restart us.
+                // Five straight failures is a wedged loop. Kubernetes liveness treats Degraded
+                // as alive, which would leave a stuck pod running forever; report Unhealthy so
+                // the orchestrator restarts us.
                 if (state.ConsecutiveFailures >= ConsecutiveFailureThreshold)
                 {
                     return HealthCheckResult.Unhealthy(
                         $"Surefire '{loop}' loop has failed {state.ConsecutiveFailures} consecutive ticks.");
                 }
 
-                // Stale-tick degrade: the loop has missed MissedTickBudget consecutive expected
-                // ticks without registering a success. Covers hung-loop cases (body stuck waiting
-                // on a store call that ignores cancellation) where RecordFailure never fires —
-                // ConsecutiveFailures stays at 0 but the silence itself is the signal. Baseline
-                // against RegisteredAt until the first success so a loop that wedges on its very
-                // first tick still alarms on schedule.
+                // Catches hung loops where RecordFailure never fires (stuck on a store call that
+                // ignores cancellation), so ConsecutiveFailures stays at 0 but the silence is the
+                // signal. Baseline against RegisteredAt until the first success so a loop that
+                // wedges on its first tick still alarms on schedule.
                 var staleAfter = state.ExpectedCadence * MissedTickBudget;
                 var since = state.LastSuccessAt ?? state.RegisteredAt;
                 if (now - since > staleAfter)
@@ -81,10 +77,9 @@ internal sealed class SurefireHealthCheck(
             var nodes = await store.GetNodesAsync(cancellationToken);
             var localNode =
                 nodes.FirstOrDefault(n => string.Equals(n.Name, options.NodeName, StringComparison.Ordinal));
-            // Local heartbeat absent or stale = this node has stopped participating in the
-            // cluster. Other nodes will already be reclaiming our runs via stale recovery, so
-            // surfacing Degraded here would be actively misleading — report Unhealthy so the
-            // orchestrator restarts us.
+            // Absent or stale heartbeat means this node has stopped participating; other nodes
+            // are already reclaiming our runs via stale recovery. Degraded would be actively
+            // misleading; report Unhealthy so the orchestrator restarts us.
             if (localNode is null)
             {
                 return HealthCheckResult.Unhealthy($"Node '{options.NodeName}' heartbeat not found.");

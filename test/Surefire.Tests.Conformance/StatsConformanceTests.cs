@@ -171,7 +171,6 @@ public abstract class StatsConformanceTests : StoreConformanceBase
             StartedAt = now.AddHours(-5)
         };
 
-        // Create a completed run recently (after "since")
         var recentRun = CreateRun(jobName, JobStatus.Succeeded) with
         {
             CompletedAt = now.AddMinutes(-30),
@@ -201,10 +200,7 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         await Store.HeartbeatAsync(freshNode, ["TestJob"], ["default"], [], ct);
         await Store.HeartbeatAsync(staleNode, ["TestJob"], ["default"], [], ct);
 
-        // Purge the stale node's heartbeat by re-heartbeating with a very old time
-        // is not possible via the API. Instead, create a third fresh node and verify
-        // that the count includes recent nodes. We just check NodeCount > 0 since
-        // we can't easily make a node stale via the public API.
+        // Cannot make a node stale via the public API, so just assert NodeCount >= 2.
         var stats = await Store.GetDashboardStatsAsync(cancellationToken: ct);
         Assert.True(stats.NodeCount >= 2);
     }

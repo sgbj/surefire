@@ -60,9 +60,8 @@ public sealed class JobClientContractTests
     {
         var ct = TestContext.Current.CancellationToken;
         var time = CreateTime();
-        // Regression: the heterogeneous TriggerBatchAsync(IEnumerable<BatchItem>, RunOptions?, CT)
-        // overload silently overwrote each BatchItem's Options with the global one. The footgun
-        // is fixed by removing the global parameter; this test pins the per-item behavior.
+        // Per-item Options on each BatchItem must be preserved, not overwritten by any global
+        // RunOptions on the heterogeneous TriggerBatchAsync overload.
         var store = new InMemoryJobStore(time);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
@@ -115,24 +114,6 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
-    public async Task TriggerAllAsync_WithDeduplicationId_ThrowsArgumentException()
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var time = CreateTime();
-        var store = new InMemoryJobStore(time);
-        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
-        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
-
-        var jobName = "BatchDedup_" + Guid.CreateVersion7().ToString("N");
-        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
-
-        await Assert.ThrowsAsync<ArgumentException>(() =>
-            client.TriggerAllAsync(jobName, [1, 2], new() { DeduplicationId = "dup" }, ct));
-    }
-
-    [Fact]
     public async Task TriggerAsync_Rejected_ThrowsRunConflictException()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -146,10 +127,8 @@ public sealed class JobClientContractTests
         var jobName = "ConflictType_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName }], ct);
 
-        // Create first run with dedup id
         await client.TriggerAsync(jobName, null, new() { DeduplicationId = "unique-1" }, ct);
 
-        // Second trigger with same dedup id should throw RunConflictException specifically
         await Assert.ThrowsAsync<RunConflictException>(() =>
             client.TriggerAsync(jobName, null, new() { DeduplicationId = "unique-1" }, ct));
     }
@@ -1203,7 +1182,7 @@ public sealed class JobClientContractTests
                 Attempt = 1
             }
         ], ct);
-        // NOTE: no final run.Result — the child's collection must hydrate from Output events.
+        // No final run.Result: the child's collection must hydrate from Output events.
         var result = await store.TryTransitionRunAsync(
             RunStatusTransition.RunningToSucceeded(
                 childId,
@@ -1500,7 +1479,7 @@ public sealed class JobClientContractTests
             }
         ], ct);
 
-        // Succeed the run with null result — output events must be used to reconstruct the result.
+        // Succeed the run with null result; output events must be used to reconstruct the result.
         var succeeded = RunStatusTransition.RunningToSucceeded(
             runId, claimed.Attempt, time.GetUtcNow(), claimed.NotBefore,
             claimed.NodeName, 1, null, null,

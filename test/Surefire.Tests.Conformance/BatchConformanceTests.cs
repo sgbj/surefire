@@ -30,8 +30,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         return (batch, runs);
     }
 
-    // â”€â”€ CreateBatchAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     [Fact]
     public async Task CreateBatch_Persists_JobBatch()
     {
@@ -98,8 +96,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.Equal(0, stored.Total);
     }
 
-    // â”€â”€ GetBatchAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     [Fact]
     public async Task GetBatch_NonExistent_ReturnsNull()
     {
@@ -107,8 +103,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         var result = await Store.GetBatchAsync(Guid.CreateVersion7().ToString("N"), ct);
         Assert.Null(result);
     }
-
-    // â”€â”€ TryCompleteBatchAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     [Fact]
     public async Task CompleteBatch_Succeeded_SetsStatus()
@@ -168,8 +162,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.False(result);
     }
 
-    // â”€â”€ CancelBatchRunsAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     [Fact]
     public async Task CancelBatchRuns_CancelsAllPendingRuns()
     {
@@ -226,7 +218,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     public async Task CancelBatchRuns_NonExistentBatch_NoError()
     {
         var ct = TestContext.Current.CancellationToken;
-        // Should complete without throwing
         await Store.CancelBatchRunsAsync(Guid.CreateVersion7().ToString("N"), cancellationToken: ct);
     }
 
@@ -272,8 +263,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.Equal(0.5, jobStats.SuccessRate, 5);
     }
 
-    // â”€â”€ GetCompletableBatchIdsAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     [Fact]
     public async Task GetCompletableBatchIds_AllRunsTerminal_BatchCompletedAtomically_NotReturned()
     {
@@ -293,13 +282,13 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         };
         await Store.CreateBatchAsync(batch, [run1, run2], cancellationToken: ct);
 
-        // Transition both runs to Succeeded â€” atomic batch counter should complete the batch
+        // Transition both runs to Succeeded; the atomic batch counter should complete the batch.
         var run1Succeeded = run1 with { Status = JobStatus.Succeeded, CompletedAt = now };
         await Store.TryTransitionRunAsync(Transition(run1Succeeded, JobStatus.Running), ct);
         var run2Succeeded = run2 with { Status = JobStatus.Succeeded, CompletedAt = now };
         var result = await Store.TryTransitionRunAsync(Transition(run2Succeeded, JobStatus.Running), ct);
 
-        // Batch should already be completed atomically â€” not returned as "completable"
+        // Batch already completed atomically; not returned as "completable".
         Assert.NotNull(result.BatchCompletion);
         var ids = await Store.GetCompletableBatchIdsAsync(ct);
         Assert.DoesNotContain(batch.Id, ids);
@@ -325,7 +314,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var (batch, _) = await CreateBatchWithRunsAsync(2, ct);
 
-        // No runs are terminal â€” batch should not appear
+        // No runs are terminal; batch should not appear.
         var ids = await Store.GetCompletableBatchIdsAsync(ct);
 
         Assert.DoesNotContain(batch.Id, ids);
@@ -367,8 +356,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         Assert.Empty(fetched);
     }
 
-    // â”€â”€ Atomic batch counter via TryTransitionRunAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
     [Fact]
     public async Task TransitionToTerminal_IncrementsBatchCounter_Atomically()
     {
@@ -392,7 +379,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
 
         Assert.True(result.Transitioned);
 
-        // Batch counter should already be incremented â€” no separate call needed
+        // Batch counter should already be incremented; no separate call needed.
         var storedBatch = await Store.GetBatchAsync(batch.Id, ct);
         Assert.NotNull(storedBatch);
         Assert.Equal(1, storedBatch.Succeeded);
@@ -405,7 +392,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         var ct = TestContext.Current.CancellationToken;
         var (batch, runs) = await CreateBatchWithRunsAsync(2, ct);
 
-        // Claim and complete both children
         var completedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         for (var i = 0; i < 2; i++)
         {
@@ -449,7 +435,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
 
         var completedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow);
 
-        // First child: succeed
         var claimed1 = (await Store.ClaimRunsAsync("node1", [runs[0].JobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed1);
         await Store.TryTransitionRunAsync(
@@ -457,7 +442,6 @@ public abstract class BatchConformanceTests : StoreConformanceBase
                 claimed1.Id, claimed1.Attempt, completedAt, claimed1.NotBefore, claimed1.NodeName,
                 1, null, null, claimed1.StartedAt, claimed1.LastHeartbeatAt), ct);
 
-        // Second child: fail
         var claimed2 = (await Store.ClaimRunsAsync("node1", [runs[1].JobName], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed2);
         var result = await Store.TryTransitionRunAsync(

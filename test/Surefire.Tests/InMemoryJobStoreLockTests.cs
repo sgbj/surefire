@@ -24,8 +24,6 @@ public sealed class InMemoryJobStoreLockTests
         return run;
     }
 
-    // ── GetRunsAsync — double-enumeration fix ─────────────────────────────────
-
     [Fact]
     public async Task GetRunsAsync_TotalCount_MatchesFilteredSetNotPagedSet()
     {
@@ -33,13 +31,12 @@ public sealed class InMemoryJobStoreLockTests
         var store = CreateStore();
         var jobName = "RwlsCount_" + Guid.CreateVersion7().ToString("N");
 
-        // Seed 5 runs.
         for (var i = 0; i < 5; i++)
         {
             await SeedRunAsync(store, jobName, ct);
         }
 
-        // Page size 2 — TotalCount must still reflect the full 5, not 2.
+        // Page size 2 but TotalCount must reflect the full 5.
         var result = await store.GetRunsAsync(
             new() { JobName = jobName },
             0, 2, ct);
@@ -69,12 +66,9 @@ public sealed class InMemoryJobStoreLockTests
 
         Assert.Equal(3, page1.Items.Count);
         Assert.Equal(2, page2.Items.Count);
-        // No overlap
         var page1Ids = page1.Items.Select(r => r.Id).ToHashSet();
         Assert.DoesNotContain(page2.Items, r => page1Ids.Contains(r.Id));
     }
-
-    // ── Basic read/write under lock ───────────────────────────────────────────
 
     [Fact]
     public async Task GetRunAsync_ReturnsNull_ForUnknownId()
@@ -98,8 +92,6 @@ public sealed class InMemoryJobStoreLockTests
         Assert.Equal(run.Id, fetched.Id);
         Assert.Equal(jobName, fetched.JobName);
     }
-
-    // ── Concurrent read/write stress ──────────────────────────────────────────
 
     [Fact]
     public async Task ConcurrentReadsAndWrites_DoNotDeadlock()

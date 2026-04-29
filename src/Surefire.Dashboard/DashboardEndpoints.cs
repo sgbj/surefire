@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -14,8 +15,8 @@ using Surefire.Dashboard;
 namespace Microsoft.AspNetCore.Builder;
 
 /// <summary>
-///     Endpoint-routing extensions that mount the Surefire dashboard — both the JSON API used by
-///     external tools and the embedded UI — under a configurable URL prefix.
+///     Endpoint-routing extensions that mount the Surefire dashboard (both the JSON API used by
+///     external tools and the embedded UI) under a configurable URL prefix.
 /// </summary>
 public static class DashboardEndpoints
 {
@@ -31,17 +32,17 @@ public static class DashboardEndpoints
     ///     <list type="bullet">
     ///         <item>
     ///             <description>
-    ///                 <c>{prefix}/api/...</c> — JSON endpoints for jobs, runs, queues, nodes, stats, SSE log
+    ///                 <c>{prefix}/api/...</c>: JSON endpoints for jobs, runs, queues, nodes, stats, SSE log
     ///                 streaming, and tree-aware run traces.
     ///             </description>
     ///         </item>
     ///         <item>
-    ///             <description><c>{prefix}/...</c> — the embedded single-page UI served from the assembly's resources.</description>
+    ///             <description><c>{prefix}/...</c>: the embedded single-page UI served from the assembly's resources.</description>
     ///         </item>
     ///     </list>
     ///     The returned <see cref="IEndpointConventionBuilder" /> covers the full group, so callers
-    ///     can apply auth, CORS, or rate-limit conventions across every route in one chain — for
-    ///     example <c>app.MapSurefireDashboard().RequireAuthorization("Surefire")</c>.
+    ///     can apply auth, CORS, or rate-limit conventions across every route in one chain. For
+    ///     example: <c>app.MapSurefireDashboard().RequireAuthorization("Surefire")</c>.
     /// </summary>
     /// <param name="endpoints">The route builder to mount onto.</param>
     /// <param name="prefix">URL prefix the dashboard is served under. Must begin with <c>/</c>. Defaults to <c>/surefire</c>.</param>
@@ -52,6 +53,8 @@ public static class DashboardEndpoints
     ///     The dashboard is unauthenticated by default; production deployments should chain
     ///     <c>.RequireAuthorization(...)</c> on the returned builder.
     /// </remarks>
+    [RequiresUnreferencedCode("Minimal API endpoint mapping reflects over delegate parameters.")]
+    [RequiresDynamicCode("Minimal API endpoint mapping reflects over delegate parameters.")]
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
         string prefix = "/surefire")
     {
@@ -208,10 +211,6 @@ public static class DashboardEndpoints
                     : TypedResults.Ok(RunResponse.From(run));
             });
 
-        // Tree-aware focused trace view. Returns the ancestor chain (root → immediate
-        // parent), the focus run, a window of siblings, and the first page of children.
-        // Client renders the tree directly from `depth` on each node — no client-side
-        // reconstruction.
         api.MapGet("/runs/{id}/trace",
             async Task<Results<Ok<RunTraceResponse>, ProblemHttpResult>> (string id, int? siblingWindow,
                 int? childrenTake, IJobStore store, CancellationToken ct) =>
@@ -233,8 +232,6 @@ public static class DashboardEndpoints
                 var focusDepth = ancestorResponses.Count;
                 var focusResponse = RunResponse.From(focus, focusDepth);
 
-                // Siblings: direct children of the focus's parent, split by the focus's
-                // keyset position. We fetch `window` entries before and after the focus.
                 var siblingsBefore = new List<RunResponse>();
                 var siblingsAfter = new List<RunResponse>();
                 string? siblingsAfterCursor = null;
@@ -242,7 +239,7 @@ public static class DashboardEndpoints
 
                 if (focus.ParentRunId is { } parentId)
                 {
-                    var siblingDepth = focusDepth; // same depth as focus
+                    var siblingDepth = focusDepth;
                     var focusCursor = DirectChildrenPage.EncodeCursor(focus.CreatedAt, focus.Id);
 
                     var afterPage = await store.GetDirectChildrenAsync(parentId,
@@ -252,10 +249,8 @@ public static class DashboardEndpoints
                     siblingsAfter.AddRange(afterPage.Items.Select(r => RunResponse.From(r, siblingDepth)));
                     siblingsAfterCursor = afterPage.NextCursor;
 
-                    // Single reverse-keyset query — DESC by (createdAt, id), strict less-than.
-                    // Reverse client-side for chronological display. The store returns a
-                    // NextCursor keyed to the oldest row in the page, which is the cursor to
-                    // continue paginating further back.
+                    // Reverse keyset DESC by (createdAt, id); reverse client-side for display.
+                    // NextCursor points to the oldest row, used to paginate further back.
                     var beforePage = await store.GetDirectChildrenAsync(parentId,
                         beforeCursor: focusCursor,
                         take: window,
@@ -266,13 +261,9 @@ public static class DashboardEndpoints
                         .ToList();
                     siblingsBeforeCursor = beforePage.NextCursor;
                 }
-                // else (batch focus with no ParentRunId): siblings left empty. Batches are
-                // atomic — all children share a CreatedAt — so a (createdAt, id) keyset split
-                // around the focus is not possible with the current RunFilter. The trace view
-                // is not the right UI for browsing batch children at scale; the batch page
-                // already lists all siblings with full pagination. We surface the focus +
-                // ancestor chain + focus's own children, and let the UI show a "View batch"
-                // link when focus.BatchId is set.
+                // Batch focus (no ParentRunId): siblings stay empty. Batch children share a
+                // CreatedAt, so a keyset split around the focus isn't possible; the dedicated
+                // batch page handles browsing batch children at scale.
 
                 var childrenPage = await store.GetDirectChildrenAsync(id, take: childTake, cancellationToken: ct);
                 var childResponses = childrenPage.Items
@@ -300,12 +291,9 @@ public static class DashboardEndpoints
                 });
             });
 
-        // Direct-children pagination — used by the trace UI for expanding a collapsed node
-        // and for loading additional siblings at the focus level. Supports both forward
-        // (afterCursor) and reverse (beforeCursor) pagination; exactly one may be supplied.
-        // Items are always returned in the store's natural order: ascending (createdAt, id)
-        // for afterCursor / unset, descending for beforeCursor. Callers paginating backward
-        // reverse client-side for chronological display.
+        // Direct-children pagination. afterCursor / beforeCursor are mutually exclusive.
+        // Items return in store-natural order (ASC for afterCursor, DESC for beforeCursor);
+        // backward callers reverse client-side.
         api.MapGet("/runs/{id}/children",
             async Task<Results<Ok<RunChildrenResponse>, ProblemHttpResult>> (string id, string? afterCursor,
                 string? beforeCursor, int? take, IJobStore store, CancellationToken ct) =>
@@ -337,11 +325,8 @@ public static class DashboardEndpoints
                 }
                 catch (FormatException ex)
                 {
-                    // Cursors are opaque by contract; internal callers round-trip them verbatim.
-                    // User-facing URLs can expose them to clients that mutate or truncate the value,
-                    // so surface a 400 with a clear diagnostic rather than a 500. Do not silently
-                    // treat a malformed cursor as "start of page" — that hides paging bugs and can
-                    // cause infinite client polling loops.
+                    // Surface a 400 rather than 500 since user-facing URLs can be mutated.
+                    // Don't silently restart at page 0; that hides bugs and can livelock clients.
                     return TypedResults.Problem(
                         statusCode: StatusCodes.Status400BadRequest,
                         title: "Invalid pagination cursor",
@@ -418,9 +403,8 @@ public static class DashboardEndpoints
                     }
 
                     scanned++;
-                    // Advance the cursor unconditionally — skipped malformed payloads still
-                    // count against the window so pagination can't livelock on a run whose
-                    // take+1 window contains only unparseable events.
+                    // Advance unconditionally so malformed-skip still counts against the window;
+                    // otherwise pagination could livelock on a run with only unparseable events.
                     lastScannedId = @event.Id;
 
                     try
@@ -491,8 +475,7 @@ public static class DashboardEndpoints
                         lastSeenId = evt.Id;
                     }
 
-                    // ObserveRunEventsAsync completes when the run reaches a terminal status;
-                    // emit the SSE "done" frame so the UI can close its EventSource cleanly.
+                    // Emit the SSE "done" frame so the UI can close its EventSource cleanly.
                     await WriteSseFrameAsync(
                         response,
                         writeLock,
@@ -531,7 +514,6 @@ public static class DashboardEndpoints
                 var nodes = await store.GetNodesAsync(ct);
                 var activeCutoff = timeProvider.GetUtcNow() - surefireOpts.InactiveThreshold;
 
-                // Map active nodes to queues
                 var nodesByQueue = new Dictionary<string, List<string>>();
                 foreach (var node in nodes.Where(n => n.LastHeartbeatAt >= activeCutoff))
                 {

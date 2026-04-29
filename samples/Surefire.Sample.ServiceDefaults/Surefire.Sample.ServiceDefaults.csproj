@@ -8,11 +8,6 @@
 
         <PackageReference Include="Microsoft.Extensions.Http.Resilience"/>
         <PackageReference Include="Microsoft.Extensions.ServiceDiscovery"/>
-        <!-- Direct pins to force transitive resolution off the vulnerable 1.15.0 Api/SDK
-             pulled in by Instrumentation.* packages (GHSA-mr8r-92fq-pj8p, GHSA-g94r-2vxg-569j,
-             GHSA-q834-8qmm-v933). Versions come from Directory.Packages.props. -->
-        <PackageReference Include="OpenTelemetry"/>
-        <PackageReference Include="OpenTelemetry.Api"/>
         <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"/>
         <PackageReference Include="OpenTelemetry.Extensions.Hosting"/>
         <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore"/>

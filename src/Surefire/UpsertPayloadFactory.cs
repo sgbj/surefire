@@ -3,24 +3,17 @@ using System.Text.Json;
 namespace Surefire;
 
 /// <summary>
-///     Builds the JSON payload strings passed to each store's bulk-upsert entry point.
-///     Centralizing the <see cref="JobDefinition" /> / <see cref="QueueDefinition" /> /
-///     <see cref="RateLimitDefinition" /> → payload mapping keeps the per-store code free of
-///     serialization boilerplate and guarantees every store sees the same wire format for a
-///     given definition.
+///     Builds JSON payloads for each store's bulk-upsert entry point. Centralizing the mapping
+///     guarantees every store sees the same wire format.
 ///     <para>
-///         Deduplicates by name at the payload boundary (last-write-wins). Every store's
-///         bulk-upsert statement expects unique keys per input row — PostgreSQL's
-///         <c>INSERT ... ON CONFLICT DO UPDATE</c> and SQL Server's <c>MERGE</c> both refuse
-///         to touch the same row twice in a single statement, so deduping here is a correctness
-///         requirement, not a pre-optimization.
+///         Dedupes by name (last-write-wins) before emitting. Both PostgreSQL's
+///         <c>INSERT ... ON CONFLICT DO UPDATE</c> and SQL Server's <c>MERGE</c> refuse to touch
+///         the same row twice in one statement, so this is a correctness requirement.
 ///     </para>
 ///     <para>
-///         Emits rows in name-sorted order. Every mutating path obeys a canonical
-///         name-sorted lock-acquisition order for config rows (jobs → queues → rate_limits → runs);
-///         a bulk upsert that serialized rows in registration/insertion order would acquire row
-///         locks in a different order than concurrent claim/transition/create paths and deadlock
-///         against them. Sorting here makes the upsert participate in the same invariant.
+///         Emits rows in name-sorted order to match the canonical lock-acquisition order used
+///         by mutating paths (jobs, queues, rate_limits, runs). Any other ordering would deadlock
+///         against concurrent claim/transition/create paths.
 ///     </para>
 /// </summary>
 internal static class UpsertPayloadFactory

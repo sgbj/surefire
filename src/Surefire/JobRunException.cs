@@ -9,7 +9,7 @@ public sealed class JobRunException : Exception
 {
     /// <summary>Creates a new <see cref="JobRunException" /> for a non-success terminal run.</summary>
     /// <param name="runId">The identifier of the run.</param>
-    /// <param name="status">The terminal status — <see cref="JobStatus.Failed" /> or <see cref="JobStatus.Cancelled" />.</param>
+    /// <param name="status">The terminal status, either <see cref="JobStatus.Failed" /> or <see cref="JobStatus.Cancelled" />.</param>
     /// <param name="reason">The termination reason recorded on the run, if any.</param>
     public JobRunException(string runId, JobStatus status, string? reason)
         : base(reason is null

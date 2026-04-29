@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Surefire;
 
 /// <summary>
@@ -22,8 +24,8 @@ public sealed class JobBuilder
     /// <summary>
     ///     Sets a cron expression for scheduled execution.
     /// </summary>
-    /// <param name="cronExpression">A cron expression (5 or 6 fields).</param>
-    /// <param name="timeZoneId">An optional IANA time zone ID. Null uses UTC.</param>
+    /// <param name="cronExpression">A 5-field or 6-field cron expression.</param>
+    /// <param name="timeZoneId">An optional time zone ID. Null uses UTC.</param>
     /// <returns>This builder for chaining.</returns>
     public JobBuilder WithCron(string cronExpression, string? timeZoneId = null)
     {
@@ -40,7 +42,7 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Sets a human-readable description for the job.
+    ///     Sets a description for the job.
     /// </summary>
     /// <param name="description">The description text.</param>
     /// <returns>This builder for chaining.</returns>
@@ -53,7 +55,7 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Sets categorization tags for the job.
+    ///     Sets tags for the job.
     /// </summary>
     /// <param name="tags">One or more tags.</param>
     /// <returns>This builder for chaining.</returns>
@@ -101,9 +103,9 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Marks this job as continuous. A continuous job automatically restarts on completion.
-    ///     The default is one copy at a time; combine with <see cref="WithMaxConcurrency" /> to keep
-    ///     multiple copies running concurrently.
+    ///     Marks this job as continuous. Continuous jobs restart after each run regardless of
+    ///     outcome and default to one instance at a time. Combine with <see cref="WithMaxConcurrency" />
+    ///     to run multiple in parallel.
     /// </summary>
     /// <returns>This builder for chaining.</returns>
     public JobBuilder Continuous()
@@ -115,7 +117,7 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Sets the default priority for runs of this job. Higher values are claimed first.
+    ///     Sets the priority for runs of this job. Higher values are claimed first.
     /// </summary>
     /// <param name="priority">The priority value.</param>
     /// <returns>This builder for chaining.</returns>
@@ -161,7 +163,7 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Configures the maximum number of retries on failure, preserving any previously configured
+    ///     Sets the maximum number of retries on failure, preserving any previously configured
     ///     backoff settings.
     /// </summary>
     /// <param name="maxRetries">The maximum number of retry attempts. 3 means up to 4 total executions.</param>
@@ -220,7 +222,7 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Registers a filter for this job. Per-job filters run after global filters.
+    ///     Registers a filter for this job. Per-job filters run inside any global filters.
     /// </summary>
     /// <typeparam name="T">The filter type implementing <see cref="IJobFilter" />.</typeparam>
     /// <returns>This builder for chaining.</returns>
@@ -232,10 +234,12 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Registers a callback invoked when this job completes successfully.
+    ///     Registers a callback that fires after a successful run.
     /// </summary>
     /// <param name="callback">The callback delegate.</param>
     /// <returns>This builder for chaining.</returns>
+    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
+    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
     public JobBuilder OnSuccess(Delegate callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
@@ -245,10 +249,12 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Registers a callback invoked when this job transitions to retrying.
+    ///     Registers a callback that fires after a failed attempt when a retry is scheduled.
     /// </summary>
     /// <param name="callback">The callback delegate.</param>
     /// <returns>This builder for chaining.</returns>
+    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
+    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
     public JobBuilder OnRetry(Delegate callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
@@ -258,10 +264,12 @@ public sealed class JobBuilder
     }
 
     /// <summary>
-    ///     Registers a callback invoked when this job exhausts all retries.
+    ///     Registers a callback that fires after retries are exhausted.
     /// </summary>
     /// <param name="callback">The callback delegate.</param>
     /// <returns>This builder for chaining.</returns>
+    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
+    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
     public JobBuilder OnDeadLetter(Delegate callback)
     {
         ArgumentNullException.ThrowIfNull(callback);

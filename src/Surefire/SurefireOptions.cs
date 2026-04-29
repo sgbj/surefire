@@ -1,4 +1,6 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
@@ -20,7 +22,7 @@ public sealed class SurefireOptions
     internal List<Action<IServiceCollection>> ServiceConfigurators { get; } = [];
 
     /// <summary>
-    ///     Gets or sets the name of this processing node. Must be unique per process — two processes
+    ///     Gets or sets the name of this processing node. Must be unique per process: two processes
     ///     sharing a <c>NodeName</c> still run correctly but can't be distinguished in the dashboard.
     ///     Defaults to <c>{MachineName}:{ProcessId}:{8-char random}</c>, which is unique across
     ///     replicas, containers, and restarts while remaining human-readable.
@@ -153,7 +155,13 @@ public sealed class SurefireOptions
     {
         get;
         set => field = value ?? throw new ArgumentNullException(nameof(value));
-    } = new(JsonSerializerOptions.Web) { AllowOutOfOrderMetadataProperties = true };
+    } = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        AllowOutOfOrderMetadataProperties = true
+    };
 
     /// <summary>
     ///     Gets or sets the maximum number of runs executing simultaneously on this node.
@@ -351,6 +359,8 @@ public sealed class SurefireOptions
         }
     }
 
+    [RequiresUnreferencedCode("Compiles user-supplied lifecycle callback delegates.")]
+    [RequiresDynamicCode("Compiles user-supplied lifecycle callback delegates.")]
     internal SurefireOptions Freeze()
     {
         var clone = new SurefireOptions

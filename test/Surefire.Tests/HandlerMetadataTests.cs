@@ -2,8 +2,6 @@ namespace Surefire.Tests;
 
 public sealed class HandlerMetadataTests
 {
-    // ── Invoke ────────────────────────────────────────────────────────────────
-
     [Fact]
     public void Invoke_CallsDelegate_WithCompiledExpression()
     {
@@ -15,8 +13,6 @@ public sealed class HandlerMetadataTests
 
         Assert.Equal(42, captured);
     }
-
-    // ── HasResult ─────────────────────────────────────────────────────────────
 
     [Fact]
     public void HasResult_False_ForVoidHandler()
@@ -58,8 +54,6 @@ public sealed class HandlerMetadataTests
         Assert.True(meta.HasResult);
     }
 
-    // ── ExtractTaskResult ─────────────────────────────────────────────────────
-
     [Fact]
     public async Task ExtractTaskResult_ReturnsBoxedResult_ForTaskOfInt()
     {
@@ -80,8 +74,6 @@ public sealed class HandlerMetadataTests
         var meta = HandlerMetadata.Build(handler);
         Assert.Null(meta.ExtractTaskResult);
     }
-
-    // ── AsTaskDelegate ────────────────────────────────────────────────────────
 
     [Fact]
     public async Task AsTaskDelegate_ConvertsValueTaskOfT_ToTask()
@@ -104,8 +96,6 @@ public sealed class HandlerMetadataTests
         Assert.Null(meta.AsTaskDelegate);
     }
 
-    // ── Parameters ────────────────────────────────────────────────────────────
-
     [Fact]
     public void Parameters_CachesParameterInfoArray()
     {
@@ -115,8 +105,6 @@ public sealed class HandlerMetadataTests
         Assert.Equal(2, meta.Parameters.Length);
         Assert.Same(meta.Parameters, meta.Parameters); // reference-stable
     }
-
-    // ── StreamBinders ─────────────────────────────────────────────────────────
 
     [Fact]
     public void StreamBinders_NullForNonStreamParameters()
@@ -159,8 +147,6 @@ public sealed class HandlerMetadataTests
         Assert.NotNull(meta.StreamBinders[0]);
     }
 
-    // ── AsyncEnumerableElementType / Materializer ─────────────────────────────
-
     [Fact]
     public void AsyncEnumerableElementType_Null_ForNonStreamReturn()
     {
@@ -183,8 +169,8 @@ public sealed class HandlerMetadataTests
     [Fact]
     public void AsyncEnumerableElementType_Set_ForTaskOfIAsyncEnumerableReturn()
     {
-        // Regression: an async lambda returning IAsyncEnumerable<T> has return type
-        // Task<IAsyncEnumerable<T>>. The metadata must unwrap the Task<> to detect it.
+        // An async lambda returning IAsyncEnumerable<T> has return type Task<IAsyncEnumerable<T>>;
+        // the metadata must unwrap the Task<> to detect it.
         Delegate handler = async () =>
         {
             await Task.Yield();

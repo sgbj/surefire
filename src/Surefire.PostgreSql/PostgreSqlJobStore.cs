@@ -18,10 +18,8 @@ internal sealed class PostgreSqlJobStore(
     private OrdinalCache<EventOrdinals>? _eventOrdinals;
     private OrdinalCache<NodeOrdinals>? _nodeOrdinals;
 
-    // Cached ordinals for the fixed surefire_runs SELECT * column order. GetOrdinal is
-    // a linear scan on NpgsqlDataReader; caching removes O(columns) work per row on
-    // paginated and bulk reads. Wrapped in a reference so publication is an atomic
-    // reference assignment — concurrent callers can't observe a torn struct.
+    // GetOrdinal is a linear scan on NpgsqlDataReader; caching removes O(columns) per row.
+    // Wrapped in a reference so concurrent callers can't observe a torn struct.
     private OrdinalCache<RunOrdinals>? _runOrdinals;
 
     internal int? CommandTimeoutSeconds { get; } =
@@ -255,12 +253,9 @@ internal sealed class PostgreSqlJobStore(
             return;
         }
 
-        // One JSON payload → jsonb_array_elements → one INSERT...ON CONFLICT → one round trip,
-        // regardless of jobs.Count. Per-field extraction via `->` / `->>` keeps the camelCase JSON
-        // keys (matching SurefireJsonContext's naming policy) visible at the mapping point and
-        // frees the SQL from declaring a jsonb_to_recordset schema. is_enabled and
-        // last_cron_fire_at are deliberately absent from the DO UPDATE SET list so they are
-        // preserved on existing rows and only take their input values (or NULL) on first insert.
+        // One JSON payload, one jsonb_array_elements, one INSERT...ON CONFLICT, one round trip.
+        // is_enabled and last_cron_fire_at are omitted from DO UPDATE SET so existing rows
+        // preserve them; the input value (or NULL) only applies on first insert.
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
@@ -396,13 +391,13 @@ internal sealed class PostgreSqlJobStore(
     public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
+        => CreateRunsAsyncCore(runs, initialEvents, cancellationToken);
 
     public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -504,9 +499,7 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = sql;
         cmd.Parameters.AddWithValue("parent", parentRunId);
-        // Keyset pagination with take+1 lookahead: NextCursor is non-null iff
-        // a strictly additional row exists beyond the page boundary, per the
-        // DirectChildrenPage contract.
+        // take+1 lookahead: NextCursor is non-null iff a row exists beyond the page boundary.
         cmd.Parameters.AddWithValue("take", take + 1);
         if ((after ?? before) is { } c)
         {
@@ -659,19 +652,13 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
-        // Pre-lock the run's job and queue rows before modifying anything. Acquires in the
-        // canonical order (jobs → queues) that every other mutating path obeys, which is what
-        // keeps transitions from deadlocking with concurrent claims or enqueues. Doing this
-        // inside the transition's multi-CTE is not sufficient: Postgres does not guarantee
-        // execution order between sibling data-modifying CTEs, so only a separate statement
-        // gives a deterministic lock-acquisition order. FOR UPDATE OF scopes each lock to the
-        // specific table. LEFT JOIN handles the (rare) case where the queue row doesn't exist.
+        // Pre-lock the run's job and queue rows in canonical order (jobs, then queues) so we
+        // don't deadlock with concurrent claims or enqueues. A separate statement is required
+        // because Postgres doesn't guarantee execution order between sibling DML CTEs.
+        // INNER JOIN: FOR UPDATE can't apply to the nullable side of a LEFT JOIN. If no queue
+        // row exists, the downstream queue_dec UPDATE matches nothing anyway.
         await using var lockCmd = CreateCommand(conn);
         lockCmd.Transaction = tx;
-        // INNER JOIN (not LEFT JOIN): FOR UPDATE cannot apply to the nullable side of an outer
-        // join. If the queue row doesn't exist the downstream queue_dec UPDATE matches zero rows
-        // anyway, so no lock is needed on a non-existent row. The job_lock CTE still runs and
-        // locks the job regardless of whether the queue row exists.
         lockCmd.CommandText = """
                               WITH job_lock AS (
                                   SELECT j.name AS job_name, COALESCE(j.queue, 'default') AS queue_name
@@ -690,12 +677,9 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
-        // Always capture the affected job_name so we can maintain whichever counters this transition
-        // impacts, atomically with the row update. running_count tracks status=Running (decrement on
-        // transition OUT of Running); non_terminal_count tracks status NOT IN (2,4,5) (decrement on
-        // transition INTO a terminal status). Postgres forbids two data-modifying CTEs from
-        // targeting the same row in one statement, so both surefire_jobs decrements are merged
-        // into a single UPDATE that touches whichever columns this transition affects.
+        // running_count decrements on transition OUT of Running; non_terminal_count decrements
+        // on transition INTO a terminal status. Both surefire_jobs decrements are merged into
+        // one UPDATE because PG forbids two DML CTEs targeting the same row.
         var decrementRunning = transition.ExpectedStatus == JobStatus.Running;
         var decrementNonTerminal = transition.NewStatus is JobStatus.Succeeded or JobStatus.Failed
             or JobStatus.Cancelled;
@@ -724,7 +708,6 @@ internal sealed class PostgreSqlJobStore(
 
         if (decrementRunning || decrementNonTerminal)
         {
-            // Single UPDATE against surefire_jobs touching only the columns this transition affects.
             var setClauses = new List<string>();
             if (decrementRunning)
             {
@@ -747,7 +730,6 @@ internal sealed class PostgreSqlJobStore(
 
         if (decrementRunning)
         {
-            // surefire_queues is a different table — safe to put in its own CTE.
             sb.Append("""
                       , queue_dec AS (
                           UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - 1)
@@ -869,15 +851,11 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
-        // Pre-lock config rows in canonical order (jobs → queues) before the cancel CTE. Same
-        // rationale as TryTransitionRunAsync: keeps every mutating path aligned on the same
-        // lock order and eliminates the deadlock class with concurrent claims/enqueues.
+        // Pre-lock config rows in canonical order (jobs, then queues). See TryTransitionRunAsync
+        // for the rationale. INNER JOIN: FOR UPDATE can't apply to a LEFT JOIN's nullable side,
+        // and a missing queue row needs no lock anyway.
         await using var lockCmd = CreateCommand(conn);
         lockCmd.Transaction = tx;
-        // INNER JOIN (not LEFT JOIN): FOR UPDATE cannot apply to the nullable side of an outer
-        // join. If the queue row doesn't exist the downstream queue_dec UPDATE matches zero rows
-        // anyway, so no lock is needed on a non-existent row. The job_lock CTE still runs and
-        // locks the job regardless of whether the queue row exists.
         lockCmd.CommandText = """
                               WITH job_lock AS (
                                   SELECT j.name AS job_name, COALESCE(j.queue, 'default') AS queue_name
@@ -896,11 +874,9 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
-        // The cancellation may apply to either Pending (status=0) or Running (status=1). The
-        // `prior` CTE captures the row under U-lock and exposes the prior status; the UPDATE then
-        // transitions, and downstream CTEs decrement running_count only when the prior status was
-        // Running. SKIP LOCKED is not applied — the caller targets a specific run and expects the
-        // cancellation to wait for any concurrent transition rather than silently miss.
+        // Cancellation applies to Pending (0) or Running (1). The `prior` CTE locks the row and
+        // exposes its prior status so downstream CTEs decrement running_count only when it was
+        // Running. No SKIP LOCKED: targeting a specific run, we wait rather than silently miss.
         cmd.CommandText = """
                           WITH prior AS (
                               SELECT id, status, attempt, job_name, batch_id
@@ -919,11 +895,9 @@ internal sealed class PostgreSqlJobStore(
                               RETURNING surefire_runs.id, prior.attempt, surefire_runs.batch_id,
                                         prior.status AS prior_status, prior.job_name
                           ),
-                          -- Single UPDATE against surefire_jobs: non_terminal_count always
-                          -- decrements (every cancel targets a non-terminal row); running_count
-                          -- decrements only when the prior status was Running. Merged into one
-                          -- statement because Postgres forbids two data-modifying CTEs from
-                          -- touching the same row in a single SQL statement.
+                          -- Merged into one UPDATE because PG forbids two DML CTEs targeting
+                          -- the same row. non_terminal_count always decrements; running_count
+                          -- decrements only when the prior status was Running.
                           job_dec AS (
                               UPDATE surefire_jobs SET
                                   non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - 1),
@@ -1036,7 +1010,7 @@ internal sealed class PostgreSqlJobStore(
             return Task.FromResult<IReadOnlyList<JobRun>>(Array.Empty<JobRun>());
         }
 
-        return ClaimRunsCoreAsync(nodeName, jobNames, queueNames, maxCount, cancellationToken);
+        return ClaimRunsAsyncCore(nodeName, jobNames, queueNames, maxCount, cancellationToken);
     }
 
     public async Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
@@ -1238,9 +1212,8 @@ internal sealed class PostgreSqlJobStore(
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-        // Capture prior status under U-lock so we know which rows were Running and need
-        // running_count decremented; aggregate decrements per job and per queue and apply each in
-        // a single UPDATE within the same statement.
+        // Capture prior status under U-lock so running_count only decrements for rows that
+        // were Running; aggregate per job/queue into single UPDATEs in the same statement.
         cmd.CommandText = """
                           WITH prior AS (
                               SELECT id, status, attempt, batch_id, job_name
@@ -1408,13 +1381,10 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
 
-        // Horizon clamp is conditional on run status. The clamp protects the tail cursor from
-        // skipping in-flight low-id rows that haven't yet committed; once the run is terminal
-        // (statuses 2/4/5), no writer can append to it, so every event for this run is committed
-        // and visible. Applying the clamp anyway would spuriously hide already-committed rows
-        // when an unrelated long-running transaction holds `xmin` back — the reader observes the
-        // run as terminal, drains zero events, and exits with a hole. Same shape of bug as the
-        // batch-events clamp; same fix.
+        // The xmin clamp prevents skipping in-flight low-id rows. It is gated on run status
+        // because a terminal run has no further writers; applying it anyway would hide already-
+        // committed rows when an unrelated long TX holds xmin back, letting the reader drain
+        // zero events and exit with a hole. (Same shape as GetBatchEventsAsync.)
         var sb = new StringBuilder("""
                                    SELECT e.* FROM surefire_events e
                                    JOIN surefire_runs r ON r.id = e.run_id
@@ -1473,9 +1443,7 @@ internal sealed class PostgreSqlJobStore(
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        // See GetBatchEventsAsync below for the conditional-clamp rationale: once the batch
-        // is terminal, no further writers exist and the clamp would spuriously hide already-
-        // committed rows when an unrelated long-running TX holds `xmin` back.
+        // See GetBatchEventsAsync for the conditional-clamp rationale.
         cmd.CommandText = """
                           SELECT e.*
                           FROM surefire_events e
@@ -1519,12 +1487,10 @@ internal sealed class PostgreSqlJobStore(
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        // Horizon clamp is conditional on batch status. The clamp protects the tail cursor
-        // from skipping in-flight low-id rows that haven't yet committed; once the batch is
-        // terminal (statuses 2/4/5), no writer can append to it, so every event for this batch
-        // is committed and visible. Applying the clamp anyway would spuriously hide rows when
-        // an unrelated long-running transaction holds `xmin` back — the reader observes the
-        // batch as terminal, drains zero events, and exits with a hole.
+        // The xmin clamp prevents skipping in-flight low-id rows. It is gated on batch status
+        // because a terminal batch has no further writers; applying it anyway would hide
+        // already-committed rows when an unrelated long TX holds xmin back, letting the reader
+        // drain zero events and exit with a hole.
         cmd.CommandText = """
                           SELECT e.*
                           FROM surefire_events e
@@ -1634,9 +1600,8 @@ internal sealed class PostgreSqlJobStore(
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
-        // Backed by ix_surefire_runs_stale_heartbeat (partial WHERE status = 1 on last_heartbeat_at).
-        // Returns IDs only; no COUNT, no total, no pagination state. Oldest heartbeat first so the
-        // caller's processing loop makes monotonic progress against a shrinking filter set.
+        // Backed by ix_surefire_runs_stale_heartbeat. Oldest-first so the caller's loop makes
+        // monotonic progress against a shrinking filter set.
         cmd.CommandText = """
                           SELECT id FROM surefire_runs
                           WHERE status = 1 AND last_heartbeat_at < @stale_before
@@ -1696,9 +1661,8 @@ internal sealed class PostgreSqlJobStore(
             return;
         }
 
-        // is_paused stays out of the DO UPDATE SET list so dashboard pause state survives
-        // the maintenance tick's periodic re-upsert. On first insert is_paused comes from
-        // the input payload.
+        // is_paused is omitted from DO UPDATE SET so dashboard pauses survive re-upserts;
+        // first insert takes is_paused from the payload.
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
@@ -1757,8 +1721,7 @@ internal sealed class PostgreSqlJobStore(
             return;
         }
 
-        // Runtime counter columns (current_count, window_start) are not present on this statement
-        // at all, so they are preserved verbatim on update.
+        // Runtime counters are absent from the statement, so preserved verbatim on update.
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.CommandText = """
@@ -1788,8 +1751,8 @@ internal sealed class PostgreSqlJobStore(
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-        // Only pending rows (status = 0) are touched, so running_count is unaffected.
-        // non_terminal_count decrements once per cancelled row, grouped by job_name in the final CTE.
+        // Only pending rows are touched, so running_count is unaffected; non_terminal_count
+        // decrements once per cancelled row, grouped by job_name.
         cmd.CommandText = """
                           WITH upd AS (
                               UPDATE surefire_runs SET
@@ -1890,9 +1853,8 @@ internal sealed class PostgreSqlJobStore(
 
         while (true)
         {
-            // DELETE + non_terminal_count adjustment share a single statement via CTEs so
-            // the counter stays consistent with the rows remaining in surefire_runs.
-            // Only non-terminal deletions (status = 0 pending-abandon branch) decrement the counter.
+            // DELETE + counter adjustment in one statement via CTEs so the counter stays
+            // consistent with surefire_runs. Only non-terminal deletions decrement.
             await using var runCmd = CreateCommand(conn);
             runCmd.CommandText = """
                                  WITH deleted AS (
@@ -2217,11 +2179,9 @@ internal sealed class PostgreSqlJobStore(
         return results;
     }
 
-    // NpgsqlException.IsTransient covers connection-level failures (network, timeout) but does
-    // not include 40P01 (deadlock_detected) or 40001 (serialization_failure) — both of which are
-    // safe to retry after the victim transaction rolls back. Including them here lets callers
-    // retry transitions and event writes through deadlock races instead of surfacing the run as
-    // failed when it merely lost a lock-cycle.
+    // NpgsqlException.IsTransient covers connection failures but excludes 40P01 (deadlock) and
+    // 40001 (serialization), which are safe to retry once the victim rolls back. Adding them
+    // here lets callers retry through lock-cycle races instead of failing the run.
     public bool IsTransientException(Exception ex) =>
         ex is NpgsqlException { IsTransient: true }
         || ex is PostgresException { SqlState: "40P01" or "40001" };
@@ -2269,36 +2229,30 @@ internal sealed class PostgreSqlJobStore(
         catch (OperationCanceledException)
             when (timeoutCts.Token.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
-            // Only translate to TimeoutException when the LOCAL timer fired and the caller didn't
-            // cancel. If both fire concurrently (host shutdown + lock-wait expiry) we propagate the
-            // original OCE — the caller asked to stop, that's the truthful diagnostic.
+            // Only translate to TimeoutException when the local timer fired and the caller
+            // didn't cancel. If both fire concurrently, propagate the original OCE.
             throw new TimeoutException(
                 $"Timed out waiting {MigrationLockWaitTimeout.TotalSeconds:0}s to acquire the Surefire PostgreSQL migration lock.");
         }
     }
 
-    private async Task<IReadOnlyList<JobRun>> ClaimRunsCoreAsync(string nodeName,
+    private async Task<IReadOnlyList<JobRun>> ClaimRunsAsyncCore(string nodeName,
         IReadOnlyCollection<string> jobNames, IReadOnlyCollection<string> queueNames, int maxCount,
         CancellationToken cancellationToken)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
-        // Serialize claims across nodes on the constrained config rows. Without these locks two
-        // nodes could independently compute remaining capacity from the same committed snapshot
-        // and over-claim (both see 5 permits free → both claim 5 → 10 total). We lock every job
-        // and its queue/rate-limit even when unconstrained because running_count is now
-        // maintained on every job/queue and we need the row lock to safely INCREMENT it inside
-        // this same statement against concurrent transition decrements.
+        // Lock config rows so two nodes can't independently compute capacity from the same
+        // snapshot and over-claim. Locked unconditionally because running_count is maintained
+        // per-row and we need the lock to safely increment it inside this statement.
         //
-        // Three invariants that keep this deadlock-free across the whole store:
-        //   (1) Canonical acquisition order is config-first: jobs → queues → rate_limits → runs.
-        //       Every mutating path (claim, enqueue, transition, cancel) obeys this.
-        //   (2) ORDER BY on multi-row FOR UPDATE makes concurrent callers acquire in the same
-        //       deterministic order, eliminating the classic set-intersection deadlock.
-        //   (3) FOR UPDATE OF <alias> scopes the lock to the outer table. Without OF, Postgres
-        //       also locks rows in subquery-referenced tables, re-locking jobs here in a second
-        //       non-deterministic order and deadlocking with concurrent transitions.
+        // Three invariants for deadlock-free operation:
+        //   (1) Canonical order: jobs -> queues -> rate_limits -> runs. Every mutating path
+        //       (claim, enqueue, transition, cancel) obeys it.
+        //   (2) ORDER BY on multi-row FOR UPDATE forces deterministic acquisition order.
+        //   (3) FOR UPDATE OF <alias> scopes to the outer table; without OF, PG also locks
+        //       subquery-referenced rows in nondeterministic order.
         await using var lockJobCmd = CreateCommand(conn);
         lockJobCmd.Transaction = tx;
         lockJobCmd.CommandText =
@@ -2340,13 +2294,10 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
-        // Single-statement chained-CTE claim. ranked uses materialized j.running_count and
-        // q.running_count instead of scanning surefire_runs, which keeps the three SQL stores
-        // symmetric and removes O(running) scans on every claim. After the claim UPDATE returns
-        // claimed runs, downstream CTEs aggregate per-job, per-queue, and per-rate-limit
-        // increments and apply them in the same statement — one round trip total.
-        // ROW_NUMBER PARTITION BY enforces per-bucket capacity strictly. queue_rl_rn check is
-        // skipped when the queue shares the job's rate limiter (same bucket → already capped).
+        // ranked uses materialized running_count instead of scanning surefire_runs. After the
+        // claim UPDATE, downstream CTEs aggregate per-job/queue/rate-limit increments in the
+        // same statement (one round trip). ROW_NUMBER PARTITION BY caps per-bucket strictly;
+        // queue_rl_rn is skipped when the queue shares the job's rate limiter.
         cmd.CommandText = """
                           WITH rl_state AS (
                               SELECT rl.name,
@@ -2523,7 +2474,7 @@ internal sealed class PostgreSqlJobStore(
         return claimed;
     }
 
-    private async Task CreateRunsCoreAsync(IReadOnlyList<JobRun> runs,
+    private async Task CreateRunsAsyncCore(IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
     {
@@ -2549,11 +2500,9 @@ internal sealed class PostgreSqlJobStore(
             return;
         }
 
-        // Pre-lock the jobs rows whose counters this statement will mutate, in name order,
-        // before the INSERT. Same canonical jobs → runs order every other mutating path obeys;
-        // ORDER BY makes concurrent batch creators acquire the set in a deterministic sequence
-        // so they serialize instead of deadlocking against claim/transition paths that already
-        // lock these rows FOR UPDATE.
+        // Pre-lock jobs rows whose counters this statement mutates, in name order, before the
+        // INSERT. ORDER BY ensures concurrent batch creators serialize against claim/transition
+        // paths instead of deadlocking.
         var lockNames = runs
             .Where(r => !r.Status.IsTerminal)
             .Select(r => r.JobName)
@@ -2628,8 +2577,7 @@ internal sealed class PostgreSqlJobStore(
             batchIds[i] = r.BatchId;
         }
 
-        // UNNEST keeps the SQL text stable across input sizes so PG's plan cache hits
-        // regardless of batch size.
+        // UNNEST keeps the SQL text stable across input sizes so PG's plan cache hits.
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -2720,7 +2668,7 @@ internal sealed class PostgreSqlJobStore(
         }
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(JobRun run, int? maxActiveForJob,
+    private async Task<bool> TryCreateRunAsyncCore(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -2730,12 +2678,8 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
 
-        // Canonical config-first lock order (jobs → queues → rate_limits → runs, per the
-        // invariant at ClaimRunsCoreAsync). Acquired unconditionally so the subsequent
-        // non_terminal_count UPDATE never upgrades a lock against a concurrent claim or
-        // transition that already holds the jobs row. If the row doesn't yet exist
-        // (late registration) this locks nothing and the downstream INSERT/UPDATEs are
-        // no-ops on surefire_jobs, matching the TryCreateRunAsync contract.
+        // Canonical jobs-first lock so the counter UPDATE never upgrades a lock against a
+        // concurrent claim/transition. Missing job row (late registration) is a no-op.
         await using (var lockCmd = CreateCommand(conn))
         {
             lockCmd.Transaction = tx;
@@ -2759,10 +2703,9 @@ internal sealed class PostgreSqlJobStore(
 
         if (maxActiveForJob is { })
         {
-            // Capacity check reads the maintained counter on the already-locked job row —
-            // no table scan, no deadlock with concurrent transitions. If the job row does not
-            // yet exist (late registration), COALESCE maps to the "enabled, zero active" defaults
-            // so the insert proceeds per the TryCreateRunAsync contract.
+            // Capacity check reads the maintained counter on the locked job row (no scan,
+            // no deadlock vs concurrent transitions). Missing job row maps via COALESCE to
+            // the "enabled, zero active" defaults per the TryCreateRunAsync contract.
             conditions.Add("""
                            COALESCE((SELECT non_terminal_count FROM surefire_jobs WHERE name = @job_name), 0) < @max_active
                            AND COALESCE((SELECT is_enabled FROM surefire_jobs WHERE name = @job_name), TRUE) = TRUE
@@ -2870,8 +2813,7 @@ internal sealed class PostgreSqlJobStore(
             attempts[i] = e.Attempt;
         }
 
-        // UNNEST keeps the SQL text stable across input sizes so PG's plan cache hits
-        // regardless of how many events are being written.
+        // UNNEST keeps the SQL text stable across input sizes so PG's plan cache hits.
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = """

@@ -53,7 +53,6 @@ public sealed class RetentionServiceTests
         await service.RunRetentionAsync(CancellationToken.None);
 
         Assert.Equal(2, store.PurgeThresholds.Count);
-        // Second threshold is 5 minutes later than the first
         Assert.True(store.PurgeThresholds[1] > store.PurgeThresholds[0]);
     }
 

@@ -12,25 +12,29 @@
 
     <PropertyGroup>
         <Authors>sgbj</Authors>
+        <Copyright>Copyright (c) sgbj</Copyright>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageProjectUrl>https://github.com/sgbj/surefire</PackageProjectUrl>
+        <PackageReleaseNotes>https://github.com/sgbj/surefire/blob/main/CHANGELOG.md</PackageReleaseNotes>
         <RepositoryUrl>https://github.com/sgbj/surefire</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
     </PropertyGroup>
 
-    <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <PropertyGroup>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
         <EmbedUntrackedSources>true</EmbedUntrackedSources>
         <IncludeSymbols>true</IncludeSymbols>
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
         <PackageReadmeFile>README.md</PackageReadmeFile>
-        <PackageTags>surefire;jobs;scheduler;background-jobs;distributed;aspnetcore</PackageTags>
+        <PackageIcon>icon.png</PackageIcon>
+        <PackageTags>surefire;jobs;scheduler;background-jobs;distributed;aspnetcore;dotnet;cron;queue;workflow</PackageTags>
         <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
         <EnableAotAnalyzer>true</EnableAotAnalyzer>
     </PropertyGroup>
 
-    <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <ItemGroup>
         <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Link="README.md" Visible="false"/>
+        <None Include="$(MSBuildThisFileDirectory)icon.png" Pack="true" PackagePath="\" Link="icon.png" Visible="false"/>
     </ItemGroup>
 </Project>

@@ -1,5 +1,8 @@
 # Surefire
 
+[![CI](https://github.com/sgbj/surefire/actions/workflows/ci.yml/badge.svg)](https://github.com/sgbj/surefire/actions/workflows/ci.yml)
+[![NuGet](https://img.shields.io/nuget/v/Surefire.svg)](https://www.nuget.org/packages/Surefire)
+
 Distributed job scheduling for .NET with a minimal API style.
 
 ```csharp
@@ -20,10 +23,12 @@ app.Run();
 
 ## Features
 
-- Runs across multiple nodes with coordinated claiming and retry handling. Nodes can register the same or different jobs.
+- Runs across multiple nodes with coordinated claiming and retry handling. Nodes can register the same or different
+  jobs.
 - Built-in dashboard with live logs, progress, run history, and node monitoring.
 - Per-job cron, retries, queues, timeouts, and rate limits.
-- Stream values into and out of jobs with `IAsyncEnumerable<T>`. Run batches and consume their results as a list or a stream.
+- Stream values into and out of jobs with `IAsyncEnumerable<T>`. Run batches and consume their results as a list or a
+  stream.
 - Call jobs from other jobs using `IJobClient`.
 - OpenTelemetry traces and metrics. ASP.NET Core health checks.
 
@@ -34,7 +39,8 @@ dotnet add package Surefire
 dotnet add package Surefire.Dashboard
 ```
 
-Comes with an in-memory store and notifications. Provider packages are available for PostgreSQL, SQL Server, SQLite, and Redis.
+Comes with an in-memory store and notifications. Provider packages are available for PostgreSQL, SQL Server, SQLite, and
+Redis.
 
 ```bash
 dotnet add package Surefire.PostgreSql
@@ -51,7 +57,8 @@ builder.Services.AddSurefire(options => options.UsePostgreSql());
 
 ## Defining jobs
 
-Register jobs as delegates with `AddJob`. Parameters resolve from DI and from arguments passed when triggering a run. `AddJob` returns a builder that can be used to configure cron, retries, timeouts, rate limits, callbacks, etc.
+Register jobs as delegates with `AddJob`. Parameters resolve from DI and from arguments passed when triggering a run.
+`AddJob` returns a builder that can be used to configure cron, retries, timeouts, rate limits, callbacks, etc.
 
 ```csharp
 app.AddJob("Add", (int a, int b) => a + b);
@@ -133,7 +140,8 @@ app.AddJob("ProcessOrder", async (int orderId) => { /* ... */ })
     });
 ```
 
-`OnSuccess` fires when a run succeeds. `OnRetry` fires when Surefire schedules another attempt after a failure. `OnDeadLetter` fires when no retries remain.
+`OnSuccess` fires when a run succeeds. `OnRetry` fires when Surefire schedules another attempt after a failure.
+`OnDeadLetter` fires when no retries remain.
 
 ## Dashboard
 
@@ -148,6 +156,9 @@ Includes an embedded dashboard that lets you:
 - Cancel runs or rerun completed ones
 - View traces, child runs, errors, arguments, and results
 - Use a REST API at `{prefix}/api/` for the same actions
+
+If you expose the dashboard outside local development, be sure to configure the returned endpoint group with
+authorization.
 
 ## Documentation
 

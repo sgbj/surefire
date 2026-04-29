@@ -619,7 +619,6 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([runA], cancellationToken: ct);
         await Store.CreateRunsAsync([runB], cancellationToken: ct);
 
-        // Flip priorities: queueA becomes high, queueB becomes low
         await Store.UpsertQueuesAsync([new() { Name = queueA, Priority = 20 }], ct);
         await Store.UpsertQueuesAsync([new() { Name = queueB, Priority = 0 }], ct);
 
@@ -666,11 +665,11 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     {
         // The materialized running_count counter on each store (surefire_jobs.running_count for
         // SQL stores; SCARD on the running set for Redis; in-memory dict for InMemory) must stay
-        // in lockstep with reality across every Running ↔ terminal cycle. Counter drift would
-        // surface as either over-claim (counter underflows; capacity check sees more headroom
-        // than exists) or under-claim (counter inflates; capacity check refuses valid claims).
-        // This test runs many full cycles at a tight max_concurrency=2 and asserts that every
-        // cycle yields exactly the same claim/release behavior — any drift breaks the assertion.
+        // in lockstep with reality across every Running/terminal cycle. Counter drift would
+        // surface as either over-claim (underflow; capacity check sees more headroom than exists)
+        // or under-claim (inflation; capacity check refuses valid claims). This test runs many
+        // full cycles at a tight max_concurrency=2 and asserts every cycle yields exactly the
+        // same claim/release behavior; any drift breaks the assertion.
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob($"CycleJob_{Guid.CreateVersion7():N}");
         job.MaxConcurrency = 2;
@@ -686,7 +685,6 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
             var claimed = await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 5, ct);
             Assert.Equal(2, claimed.Count);
 
-            // No further claims allowed while two are running.
             var blocked = await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 5, ct);
             Assert.Empty(blocked);
 
@@ -701,7 +699,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
                 Assert.True(result.Transitioned);
             }
 
-            // Capacity restored — the third run can now be claimed.
+            // Capacity restored; the third run can now be claimed.
             var afterRelease = await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 5, ct);
             Assert.Single(afterRelease);
 
@@ -718,11 +716,11 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     [Fact]
     public async Task ConcurrentRunningToTerminal_SameJob_NoDeadlockOrDrift()
     {
-        // Many runs of the same job transitioning Running→terminal simultaneously all target the
-        // same surefire_jobs row. If running_count and non_terminal_count are maintained in two
-        // separate UPDATEs, the second lock acquisition widens the deadlock window against any
-        // other writer touching that row (insert, claim, cancel). Running concurrently tests that
-        // the counters stay consistent AND no deadlock victim aborts the batch.
+        // Many runs of the same job transitioning Running to terminal simultaneously all target
+        // the same surefire_jobs row. If running_count and non_terminal_count are maintained in
+        // two separate UPDATEs, the second lock acquisition widens the deadlock window against
+        // any other writer touching that row (insert, claim, cancel). Running concurrently tests
+        // that the counters stay consistent and no deadlock victim aborts the batch.
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob($"ConcurrentTerminalJob_{Guid.CreateVersion7():N}");
         job.MaxConcurrency = 32;
@@ -744,7 +742,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
 
         Assert.All(transitionResults, r => Assert.True(r.Transitioned));
 
-        // Counters must be back at zero — a new pending run must claim cleanly.
+        // Counters must be back at zero; a new pending run must claim cleanly.
         var probe = CreateRun(job.Name);
         await Store.CreateRunsAsync([probe], cancellationToken: ct);
         var afterAll = await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct);
@@ -755,14 +753,10 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     [Fact]
     public async Task Claim_DeepQueue_ConcurrentClaimAndTransition_NoDeadlocks()
     {
-        // Reproduces the production shape that surfaced SQL Server 1205s under .WithReplicas(2):
-        // a deep pending queue (1000 sample-app batch runs) with multiple claimers running in
-        // parallel AND each claimed run racing to its terminal transition. The combination —
-        // claim-vs-claim and claim-vs-transition over an overlapping run set — is what the old
-        // wide-UPDLOCK rank used to deadlock on. The fix keeps ranking under RCSI snapshot and
-        // only U-locks the LIMIT-N candidates on the UPDATE, so the lock surface scales with
-        // batch size, not pending depth. Any 1205 that escapes ClaimRunsAsync or
-        // TryTransitionRunAsync would surface here as an unhandled exception and fail the test.
+        // Stresses claim-vs-claim and claim-vs-transition over an overlapping run set under a
+        // deep pending queue. The lock surface must scale with batch size, not pending depth, so
+        // concurrent claimers and transitions never deadlock. Any 1205 (or store-equivalent)
+        // surfaces here as an unhandled exception.
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DeepQueueClaim_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
@@ -828,7 +822,6 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // expected on test cancellation
             }
             catch (Exception ex)
             {
@@ -848,15 +841,14 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     public async Task Capacity_RestoredAfterCancelRunningRun()
     {
         // TryCancelRunAsync must decrement the running counter when the prior status was Running
-        // (and leave it alone for Pending → Cancelled). Without this, cancelling a running job
-        // would either leak capacity (counter never decrements) or drop it twice (decrements
-        // even when prior status was Pending).
+        // and leave it alone for Pending to Cancelled. Without this, cancelling a running job
+        // would either leak capacity (counter never decrements) or drop it twice.
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob($"CancelJob_{Guid.CreateVersion7():N}");
         job.MaxConcurrency = 1;
         await Store.UpsertJobsAsync([job], ct);
 
-        // Cycle 1: claim → cancel running → next claim should succeed (counter decremented).
+        // Cycle 1: claim, cancel running, next claim should succeed (counter decremented).
         var run1 = CreateRun(job.Name);
         await Store.CreateRunsAsync([run1], cancellationToken: ct);
         var claimed1 = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).Single();
@@ -881,7 +873,6 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         var blocked = await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct);
         Assert.Empty(blocked);
 
-        // Now release claimed2 and run4 should claim.
         var done = claimed2 with { Status = JobStatus.Succeeded, CompletedAt = DateTimeOffset.UtcNow };
         await Store.TryTransitionRunAsync(Transition(done, JobStatus.Running), ct);
 

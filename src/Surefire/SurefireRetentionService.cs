@@ -43,9 +43,8 @@ internal sealed partial class SurefireRetentionService(
                         break;
                     }
 
-                    // A job scheduler should never crash the host on a single bad tick. Log the
-                    // exception, record instrumentation, back off and continue so operators see
-                    // the failure via metrics/health-check while the host stays up.
+                    // Never crash the host on a single bad tick. Operators see the failure via
+                    // metrics/health-check while the host stays up.
                     Log.RetentionTickFailed(logger, ex);
                     instrumentation.RecordLoopError(LoopName);
                     loopHealth.RecordFailure(LoopName);

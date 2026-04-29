@@ -13,7 +13,7 @@ public static class SurefirePostgreSqlExtensions
 {
     /// <summary>
     ///     Configures Surefire to use PostgreSQL for both job storage and notifications.
-    ///     Resolves <see cref="NpgsqlDataSource" /> from DI — typically registered by
+    ///     Resolves <see cref="NpgsqlDataSource" /> from DI, typically registered by
     ///     <c>builder.AddNpgsqlDataSource("name")</c> (Aspire) or
     ///     <c>services.AddNpgsqlDataSource(...)</c> (<c>Npgsql.DependencyInjection</c>).
     /// </summary>

@@ -1,18 +1,18 @@
-import { type ColumnDef } from "@tanstack/react-table";
-import { Link } from "react-router";
+import {type ColumnDef} from "@tanstack/react-table";
+import {Link} from "react-router";
 
-import { type JobResponse } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import { SortableHeader } from "@/components/sortable-header";
+import {type JobResponse} from "@/lib/api";
+import {Badge} from "@/components/ui/badge";
+import {SortableHeader} from "@/components/sortable-header";
 
 export function buildJobColumns(): ColumnDef<JobResponse>[] {
   return [
     {
       accessorKey: "name",
-      header: ({ column }) => (
+      header: ({column}) => (
         <SortableHeader column={column}>Name</SortableHeader>
       ),
-      cell: ({ row }) => (
+      cell: ({row}) => (
         <Link
           to={`/jobs/${encodeURIComponent(row.original.name)}`}
           className={`font-medium text-primary hover:underline truncate max-w-50 inline-block ${!row.original.isActive ? "opacity-50" : ""}`}
@@ -25,7 +25,7 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
     {
       accessorKey: "description",
       header: "Description",
-      cell: ({ row }) => (
+      cell: ({row}) => (
         <span
           className={`text-muted-foreground ${!row.original.isActive ? "opacity-50" : ""}`}
         >
@@ -36,7 +36,7 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
     {
       accessorKey: "cronExpression",
       header: "Schedule",
-      cell: ({ row }) => (
+      cell: ({row}) => (
         <span
           className={`text-sm ${!row.original.isActive ? "opacity-50" : ""}`}
         >
@@ -49,7 +49,7 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
     {
       accessorKey: "queue",
       header: "Queue",
-      cell: ({ row }) => (
+      cell: ({row}) => (
         <span
           className={`text-sm ${!row.original.isActive ? "opacity-50" : ""}`}
         >
@@ -60,7 +60,7 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
     {
       accessorKey: "isEnabled",
       header: "Status",
-      cell: ({ row }) => {
+      cell: ({row}) => {
         if (!row.original.isActive)
           return (
             <Badge
@@ -87,7 +87,7 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
     {
       accessorKey: "tags",
       header: "Tags",
-      cell: ({ row }) => (
+      cell: ({row}) => (
         <div
           className={`flex gap-1 ${!row.original.isActive ? "opacity-50" : ""}`}
         >

@@ -51,9 +51,8 @@ internal sealed class SqliteJobStore(
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
 
-        // WAL is a per-file persistent setting and cannot be set inside a transaction. The
-        // other database-scoped pragmas are likewise idempotent and safe to apply before
-        // taking the migration lock.
+        // WAL is per-file persistent and cannot be set inside a transaction. Database pragmas
+        // are idempotent and safe to apply before the migration lock.
         await using (var walCmd = CreateCommand(conn, "PRAGMA journal_mode=WAL;"))
         {
             await walCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -64,9 +63,8 @@ internal sealed class SqliteJobStore(
             await dbPragmaCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        // Bootstrap the migrations table outside the lock so the optimistic check below is
-        // safe on a fresh database. CREATE TABLE IF NOT EXISTS is idempotent and serializes
-        // through SQLite's writer lock anyway.
+        // Bootstrap outside the lock so the optimistic check below is safe on a fresh database.
+        // CREATE TABLE IF NOT EXISTS is idempotent and serializes through SQLite's writer lock.
         await using (var schemaCmd = CreateCommand(conn,
                          "CREATE TABLE IF NOT EXISTS surefire_schema_migrations (version INTEGER NOT NULL PRIMARY KEY);"))
         {
@@ -80,17 +78,14 @@ internal sealed class SqliteJobStore(
             return;
         }
 
-        // BEGIN IMMEDIATE (deferred: false) acquires SQLite's writer lock at transaction
-        // start so two nodes serialize before either touches schema. v1's DDL is entirely
-        // IF NOT EXISTS so it would survive racing nodes without a lock — but later
-        // migrations (e.g. ALTER TABLE ADD COLUMN, for which SQLite has no IF NOT EXISTS
-        // variant) will not. Doing this once here means future migrations slot in without
-        // re-architecting. The connection's busy_timeout (24s, see ConnectionPragmas)
-        // makes BEGIN IMMEDIATE wait for a peer's writer lock rather than throw SQLITE_BUSY.
+        // BEGIN IMMEDIATE acquires the writer lock so two nodes serialize before touching
+        // schema. v1's IF NOT EXISTS DDL would race-survive without the lock, but future
+        // migrations (e.g. ALTER TABLE ADD COLUMN, no IF NOT EXISTS variant) won't.
+        // busy_timeout makes the BEGIN wait rather than throw SQLITE_BUSY.
         await using var tx = conn.BeginTransaction(false);
 
-        // Re-check under the lock — another node may have completed v1 between our
-        // optimistic read and the BEGIN IMMEDIATE acquiring the writer lock.
+        // Re-check under the lock; another node may have completed v1 between the optimistic
+        // read and BEGIN IMMEDIATE acquiring the writer lock.
         if (await HasMigrationVersionAsync(conn, 1, cancellationToken, tx))
         {
             await tx.CommitAsync(cancellationToken);
@@ -237,11 +232,8 @@ internal sealed class SqliteJobStore(
             return;
         }
 
-        // One JSON payload → one json_each → one INSERT...ON CONFLICT → one statement. JSON paths
-        // match the camelCase keys emitted by SurefireJsonContext; target columns stay snake_case.
-        // tags and retry_policy are stored as JSON text; json_extract of a JSON sub-object / array
-        // yields the sub-JSON verbatim. is_enabled / is_continuous are stored as 0/1 — json_extract
-        // on a JSON boolean returns 1/0. is_enabled is not in the DO UPDATE SET list so existing
+        // One JSON payload, one json_each, one INSERT...ON CONFLICT, one statement. tags and
+        // retry_policy stay as JSON text. is_enabled is omitted from DO UPDATE SET so existing
         // toggles stick.
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
@@ -374,14 +366,14 @@ internal sealed class SqliteJobStore(
         IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => CreateRunsCoreAsync(runs, initialEvents, cancellationToken);
+        => CreateRunsAsyncCore(runs, initialEvents, cancellationToken);
 
     public Task<bool> TryCreateRunAsync(
         JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunCoreAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
 
     public async Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -485,9 +477,7 @@ internal sealed class SqliteJobStore(
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, sql);
         cmd.Parameters.AddWithValue("@parent", parentRunId);
-        // Keyset pagination with take+1 lookahead: NextCursor is non-null iff
-        // a strictly additional row exists beyond the page boundary, per the
-        // DirectChildrenPage contract.
+        // take+1 lookahead: NextCursor is non-null iff a row exists beyond the page boundary.
         cmd.Parameters.AddWithValue("@take", take + 1);
         if ((after ?? before) is { } c)
         {
@@ -518,9 +508,7 @@ internal sealed class SqliteJobStore(
     public async Task<IReadOnlyList<JobRun>> GetAncestorChainAsync(string runId,
         CancellationToken cancellationToken = default)
     {
-        // Recursive CTE walks the parent chain in a single query. Parent IDs are
-        // immutable after creation, so cycles are impossible by data model — the
-        // recursion terminates naturally when parent_run_id is null.
+        // Parent IDs are immutable; recursion terminates when parent_run_id is null.
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
                                                   WITH RECURSIVE ancestors(depth, id) AS (
@@ -699,9 +687,7 @@ internal sealed class SqliteJobStore(
 
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var tx = conn.BeginTransaction(false);
-        // RETURNING captures the affected row's job_name so the follow-up counter UPDATEs can
-        // target the right rows. Only Running → X transitions need running_count maintenance;
-        // Pending → X is a no-op for counters and skips the extra updates.
+        // RETURNING captures the affected job_name for the follow-up counter UPDATEs.
         await using var cmd = CreateCommand(conn, """
                                                   UPDATE surefire_runs
                                                   SET status = @s, reason = @e, result = @r, progress = @p,
@@ -744,8 +730,7 @@ internal sealed class SqliteJobStore(
             await DecrementRunningCountAsync(conn, tx, affectedJobName!, cancellationToken);
         }
 
-        // Transition INTO a terminal status always decrements non_terminal_count, regardless of
-        // prior status (covers Pending → Cancelled as well as Running → terminal).
+        // Any transition INTO a terminal status decrements non_terminal_count.
         if (updated && transition.NewStatus is JobStatus.Succeeded or JobStatus.Failed
                 or JobStatus.Cancelled)
         {
@@ -841,8 +826,7 @@ internal sealed class SqliteJobStore(
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var tx = conn.BeginTransaction(false);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
-        // Capture prior status so the counter decrement only fires for rows that were Running.
-        // SQLite RETURNING reflects post-update column values; we read status separately first.
+        // SQLite's RETURNING reflects post-update values, so read prior status separately.
         await using var priorCmd = CreateCommand(conn, """
                                                        SELECT status, attempt, job_name, batch_id
                                                        FROM surefire_runs
@@ -893,7 +877,7 @@ internal sealed class SqliteJobStore(
             await DecrementRunningCountAsync(conn, tx, jobName, cancellationToken);
         }
 
-        // Every cancel transitions a non-terminal row to Cancelled, so non_terminal_count always decrements.
+        // Every cancel decrements non_terminal_count.
         if (jobName is { })
         {
             await DecrementNonTerminalCountAsync(conn, tx, jobName, cancellationToken);
@@ -969,7 +953,7 @@ internal sealed class SqliteJobStore(
             return Task.FromResult<IReadOnlyList<JobRun>>(Array.Empty<JobRun>());
         }
 
-        return ClaimRunsCoreAsync(nodeName, jobNames, queueNames, maxCount, cancellationToken);
+        return ClaimRunsAsyncCore(nodeName, jobNames, queueNames, maxCount, cancellationToken);
     }
 
     public async Task CreateBatchAsync(
@@ -1066,10 +1050,8 @@ internal sealed class SqliteJobStore(
         await using var tx = conn.BeginTransaction(false);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
 
-        // Snapshot prior status + job_name BEFORE the cancel UPDATE. SQLite RETURNING reflects
-        // post-update values, so the snapshot is the only way to observe the prior status; we
-        // need both Running (→ running_count decrement) and all non-terminal (→ non_terminal_count
-        // decrement) populations.
+        // Snapshot prior status before the cancel UPDATE; SQLite RETURNING is post-update only,
+        // and we need both the Running and non-terminal populations to decrement counters.
         var priorRunning = new Dictionary<string, int>(StringComparer.Ordinal);
         var priorNonTerminal = new Dictionary<string, int>(StringComparer.Ordinal);
         await using (var snapshotCmd = CreateCommand(conn, """
@@ -1177,8 +1159,7 @@ internal sealed class SqliteJobStore(
         await using var tx = conn.BeginTransaction(false);
         var now = FormatTimestamp(timeProvider.GetUtcNow());
 
-        // Snapshot prior status + job_name BEFORE the cancel UPDATE so we know which rows were
-        // Running and need their materialized counters decremented. Mirrors CancelBatchRunsAsync.
+        // Snapshot prior status before the cancel UPDATE; mirrors CancelBatchRunsAsync.
         var priorRunning = new Dictionary<string, int>(StringComparer.Ordinal);
         var priorNonTerminal = new Dictionary<string, int>(StringComparer.Ordinal);
         await using (var snapshotCmd = CreateCommand(conn, """
@@ -1534,8 +1515,7 @@ internal sealed class SqliteJobStore(
 
         await using var conn = await CreateConnectionAsync(cancellationToken);
 
-        // Returns input IDs that no longer correspond to a Running row, including IDs that were
-        // deleted entirely (the LEFT JOIN's r.id IS NULL branch). One query per chunk.
+        // Returns IDs that no longer have a Running row (deleted or transitioned).
         const int chunkSize = 900;
         var idList = runIds as IList<string> ?? runIds.ToList();
         var stopped = new List<string>();
@@ -1578,8 +1558,7 @@ internal sealed class SqliteJobStore(
         ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
 
         await using var conn = await CreateConnectionAsync(cancellationToken);
-        // Backed by ix_runs_stale_heartbeat (partial WHERE status = 1 on last_heartbeat_at).
-        // Returns IDs only; oldest heartbeat first so the caller's processing loop makes monotonic
+        // Backed by ix_runs_stale_heartbeat. Oldest-first so the caller's loop makes monotonic
         // progress against a shrinking filter set.
         await using var cmd = CreateCommand(conn, """
                                                   SELECT id FROM surefire_runs
@@ -1705,8 +1684,7 @@ internal sealed class SqliteJobStore(
             return;
         }
 
-        // Runtime counters (current_count, previous_count, window_start) are never touched by
-        // this statement, so existing values survive.
+        // Runtime counters are absent from the statement, so preserved verbatim on update.
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
                                                   INSERT INTO surefire_rate_limits (
@@ -1776,8 +1754,8 @@ internal sealed class SqliteJobStore(
         }
 
         await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
-        // Only pending rows (status = 0) were touched, so running_count is unaffected;
-        // non_terminal_count decrements once per cancelled row, grouped by job_name.
+        // Only pending rows touched; running_count unaffected, non_terminal_count decrements
+        // once per cancelled row.
         await DecrementNonTerminalCountsAsync(conn, tx, expiredByJob, cancellationToken);
 
         foreach (var (batchId, cnt) in cancelledBatchIds)
@@ -1834,9 +1812,8 @@ internal sealed class SqliteJobStore(
         while (true)
         {
             await using var tx = conn.BeginTransaction(false);
-            // DELETE ... RETURNING captures the deleted rows' status + job_name so we can decrement
-            // non_terminal_count for any non-terminal rows removed (pending-abandon branch).
-            // Terminal deletions don't contribute to non_terminal_count in the first place.
+            // DELETE ... RETURNING captures status+job_name so non-terminal removals decrement
+            // non_terminal_count.
             await using var cmd = CreateCommand(conn, """
                                                       DELETE FROM surefire_runs WHERE rowid IN (
                                                           SELECT rowid FROM surefire_runs
@@ -2177,13 +2154,13 @@ internal sealed class SqliteJobStore(
     ///     (Microsoft.Data.Sqlite masks off extended codes via <c>&amp; 0xFF</c>), so matching
     ///     <c>BUSY</c> (5) and <c>LOCKED</c> (6) also covers the extended variants
     ///     <c>BUSY_RECOVERY</c>, <c>BUSY_SNAPSHOT</c>, <c>BUSY_TIMEOUT</c>,
-    ///     <c>LOCKED_SHAREDCACHE</c>, etc. Do not "fix" this by adding extended codes —
+    ///     <c>LOCKED_SHAREDCACHE</c>, etc. Do not "fix" this by adding extended codes;
     ///     they are already captured by the primary code match.
     /// </summary>
     public bool IsTransientException(Exception ex) =>
         ex is SqliteException sqlite && sqlite.SqliteErrorCode is 5 or 6;
 
-    private async Task<IReadOnlyList<JobRun>> ClaimRunsCoreAsync(
+    private async Task<IReadOnlyList<JobRun>> ClaimRunsAsyncCore(
         string nodeName,
         IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames,
@@ -2196,13 +2173,9 @@ internal sealed class SqliteJobStore(
         var jobNameParams = BuildInClause("@jn", jobNames, out var jobNameClause);
         var queueNameParams = BuildInClause("@qn", queueNames, out var queueNameClause);
 
-        // ROW_NUMBER PARTITION BY enforces per-constraint-bucket capacity strictly. Capacity
-        // reads come from the materialized j.running_count and q.running_count columns (no scan
-        // of surefire_runs). RETURNING includes the joined rate-limit names so the in-process
-        // aggregation that follows can apply per-limiter increments without a per-row lookup
-        // (eliminates the previous N+1). q_rl_rn check is skipped when queue shares the job's
-        // rate limiter (same bucket → already capped). SQLite serializes writers so no SKIP
-        // LOCKED is needed; transaction isolation alone is sufficient.
+        // ROW_NUMBER PARTITION BY caps per-bucket strictly. Capacity reads come from the
+        // materialized running_count columns (no scan). q_rl_rn is skipped when the queue
+        // shares the job's rate limiter. SQLite serializes writers, so no SKIP LOCKED needed.
         var claimSql = $"""
                         WITH rl_remaining AS (
                             SELECT rl.name,
@@ -2227,10 +2200,9 @@ internal sealed class SqliteJobStore(
                             FROM surefire_rate_limits rl
                         ),
                         rl_state AS (
-                            -- SQLite lacks a scalar CEIL, so emulate: trunc + (1 if fractional else 0).
-                            -- Matches the single-claim "used < max_permits" rule, which allowed one
-                            -- more claim even when remaining capacity was fractional (e.g.,
-                            -- sliding-window decay leaves 0.44 permits → still allow 1 claim).
+                            -- SQLite lacks scalar CEIL: trunc + (1 if fractional else 0).
+                            -- Matches the "used < max_permits" rule, which allows one claim
+                            -- even with fractional remaining (e.g. sliding-window decay).
                             SELECT name,
                                 CAST(remaining AS INTEGER) + IIF(remaining > CAST(remaining AS INTEGER), 1, 0) AS available
                             FROM rl_remaining
@@ -2271,11 +2243,9 @@ internal sealed class SqliteJobStore(
                         LIMIT @max_count
                         """;
 
-        // Phase 1 (within the same write-locked transaction): SELECT the eligible candidates
-        // with their job/queue/rate-limit names. SQLite forbids referencing FROM columns in
-        // RETURNING, so we capture the metadata here and then UPDATE-by-id in a second statement.
-        // The transaction is BEGIN IMMEDIATE so the read sees a consistent snapshot and writers
-        // are serialized; no other transaction can interleave between SELECT and UPDATE.
+        // Phase 1: SELECT eligible candidates. SQLite forbids FROM columns in RETURNING, so we
+        // capture metadata here and UPDATE-by-id in phase 2. BEGIN IMMEDIATE serializes writers,
+        // so no other transaction can interleave between SELECT and UPDATE.
         var claimed = new List<(string Id, string JobName, string QueueName, string? JobRl, string? QueueRl)>();
         await using (var selectCmd = CreateCommand(conn, claimSql, tx))
         {
@@ -2309,8 +2279,8 @@ internal sealed class SqliteJobStore(
             return Array.Empty<JobRun>();
         }
 
-        // Phase 2: claim the selected runs by id. Use UPDATE...WHERE id IN (?,?,...) RETURNING *
-        // so we get the full updated row back without the SQLite RETURNING-FROM restriction.
+        // Phase 2: claim by id with UPDATE...WHERE id IN (...) RETURNING * to bypass SQLite's
+        // RETURNING-FROM restriction.
         var idParams = new List<string>(claimed.Count);
         var idCmd = CreateCommand(conn, "", tx);
         for (var i = 0; i < claimed.Count; i++)
@@ -2347,9 +2317,7 @@ internal sealed class SqliteJobStore(
         var nowOffset = timeProvider.GetUtcNow();
         var statusEvents = new List<RunEvent>(claimedRuns.Count);
 
-        // Pair each claimed run with the metadata captured in phase 1; both lists are in the same
-        // order because phase 2's UPDATE...WHERE id IN (...) RETURNING * preserves no order, so we
-        // index by id from a small lookup. (Counts are bounded by max_count, typically ≤32.)
+        // Index phase-1 metadata by id since UPDATE...RETURNING preserves no order.
         var metadataById = new Dictionary<string, (string QueueName, string? JobRl, string? QueueRl)>(
             claimed.Count, StringComparer.Ordinal);
         foreach (var (id, _, queueName, jobRl, queueRl) in claimed)
@@ -2379,9 +2347,8 @@ internal sealed class SqliteJobStore(
 
         await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
 
-        // SQLite lacks UPDATE FROM (VALUES ...), so we issue one targeted UPDATE per distinct
-        // job/queue. The map sizes are bounded by the number of distinct job/queue names in this
-        // claim batch (typically 1-2 in practice), so this remains O(distinct names), not O(runs).
+        // SQLite lacks UPDATE FROM (VALUES...), so issue one UPDATE per distinct job/queue.
+        // Bounded by distinct names in the batch, not by run count.
         await using (var jobIncCmd = CreateCommand(conn,
                          "UPDATE surefire_jobs SET running_count = running_count + @cnt WHERE name = @name", tx))
         {
@@ -2420,7 +2387,7 @@ internal sealed class SqliteJobStore(
         return claimedRuns;
     }
 
-    private async Task CreateRunsCoreAsync(
+    private async Task CreateRunsAsyncCore(
         IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -2448,7 +2415,7 @@ internal sealed class SqliteJobStore(
         await tx.CommitAsync(cancellationToken);
     }
 
-    private async Task<bool> TryCreateRunCoreAsync(
+    private async Task<bool> TryCreateRunAsyncCore(
         JobRun run, int? maxActiveForJob, DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
         CancellationToken cancellationToken)
@@ -2475,9 +2442,8 @@ internal sealed class SqliteJobStore(
 
         if (maxActiveForJob is { })
         {
-            // Capacity check reads the maintained counter on the job row — no table scan. If the
-            // job row does not yet exist (late registration), treat as enabled with zero active
-            // runs (per the TryCreateRunAsync contract for unknown jobs).
+            // Capacity check reads the maintained counter (no scan). Missing job row defaults
+            // to "enabled, zero active" per the TryCreateRunAsync contract.
             await using var checkCmd = CreateCommand(conn, """
                                                            SELECT is_enabled, non_terminal_count
                                                            FROM surefire_jobs WHERE name = @n
@@ -2495,7 +2461,6 @@ internal sealed class SqliteJobStore(
                         return false;
                     }
                 }
-                // else: job not registered yet — treated as enabled with 0 non-terminal runs.
             }
         }
 
@@ -2584,8 +2549,7 @@ internal sealed class SqliteJobStore(
     private static string BuildConnectionString(string connectionString, TimeSpan? commandTimeout)
     {
         var builder = new SqliteConnectionStringBuilder(connectionString);
-        // Default to a generous busy_timeout so concurrent writers don't immediately surface
-        // SQLITE_BUSY. The user can override by passing a commandTimeout to UseSqlite(...).
+        // Default to a generous timeout so concurrent writers don't surface SQLITE_BUSY.
         builder.DefaultTimeout =
             CommandTimeouts.ToSeconds(commandTimeout, nameof(commandTimeout))
             ?? 30;
@@ -2851,10 +2815,6 @@ internal sealed class SqliteJobStore(
         await acquireCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    // Decrement materialized running_count counters for a single Running → terminal transition.
-    // Both updates happen inside the supplied transaction; the queue lookup uses COALESCE so
-    // jobs without an explicit queue target the `default` queue row when one exists (the UPDATE
-    // matches zero rows — and is a no-op — if no job on this node has referenced `default`).
     private async Task DecrementRunningCountAsync(SqliteConnection conn, SqliteTransaction tx,
         string jobName, CancellationToken cancellationToken)
     {
@@ -2878,9 +2838,6 @@ internal sealed class SqliteJobStore(
         await queueCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    // Adjust non_terminal_count on surefire_jobs. Mirrors the running_count helpers but tracks the
-    // broader "non-terminal" set (status NOT IN (2,4,5)), incremented on run create and decremented
-    // on transition INTO a terminal status or purge of a non-terminal row.
     private async Task IncrementNonTerminalCountAsync(SqliteConnection conn, SqliteTransaction tx,
         string jobName, CancellationToken cancellationToken)
     {
@@ -2941,9 +2898,6 @@ internal sealed class SqliteJobStore(
         }
     }
 
-    // Aggregate decrement for batch cancellations. Issues one job/queue UPDATE per distinct
-    // job_name in the input map; the cardinality is bounded by the number of distinct jobs
-    // touched by the cancellation (typically very small in practice).
     private async Task DecrementRunningCountsAsync(SqliteConnection conn, SqliteTransaction tx,
         IReadOnlyDictionary<string, int> jobNameToCount, CancellationToken cancellationToken)
     {

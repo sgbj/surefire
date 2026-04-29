@@ -3,10 +3,9 @@ using System.Globalization;
 namespace Surefire;
 
 /// <summary>
-///     A page of direct children of a parent run, with a cursor for the next page.
-///     Cursor is opaque — callers pass the previous response's <see cref="NextCursor" />
-///     verbatim; the store encodes it from the last returned row's <c>(CreatedAt, Id)</c>
-///     keyset.
+///     A page of direct children of a parent run, with a cursor for the next page. The cursor is
+///     opaque: callers pass the previous response's <see cref="NextCursor" /> verbatim, and the
+///     store encodes it from the last returned row's <c>(CreatedAt, Id)</c> keyset.
 /// </summary>
 public sealed class DirectChildrenPage
 {
@@ -18,9 +17,9 @@ public sealed class DirectChildrenPage
 
     /// <summary>
     ///     Encodes a <c>(createdAt, id)</c> keyset tuple into the opaque cursor format
-    ///     <c>{utcTicks}.{id}</c>. UTC ticks preserve full DateTimeOffset precision
-    ///     (100ns resolution) — using Unix ms would round-trip-lose sub-ms precision
-    ///     and cause boundary items to re-appear on subsequent pages.
+    ///     <c>{utcTicks}.{id}</c>. UTC ticks preserve full <see cref="DateTimeOffset" /> precision
+    ///     (100ns); Unix ms would lose sub-ms precision and cause boundary items to reappear on
+    ///     subsequent pages.
     /// </summary>
     public static string EncodeCursor(DateTimeOffset createdAt, string id) =>
         $"{createdAt.UtcTicks}.{id}";

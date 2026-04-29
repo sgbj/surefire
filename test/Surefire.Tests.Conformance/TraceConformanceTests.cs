@@ -81,7 +81,7 @@ public abstract class TraceConformanceTests : StoreConformanceBase
 
         Assert.Equal(10, allFetched.Count);
 
-        // Pagination preserves global ordering — concatenated pages must equal a single full fetch.
+        // Pagination preserves global ordering: concatenated pages must equal a single full fetch.
         var full = await Store.GetDirectChildrenAsync(parent.Id, take: 1000, cancellationToken: ct);
         Assert.Equal(full.Items.Select(r => r.Id), allFetched.Select(r => r.Id));
     }
@@ -93,9 +93,8 @@ public abstract class TraceConformanceTests : StoreConformanceBase
     public async Task GetDirectChildren_ExactMultipleBoundary_NextCursorIsNullOnFinalPage(
         int totalChildren, int take)
     {
-        // Regression for the NextCursor contract ("null if this was the last page"):
-        // when the remaining row count is an exact multiple of take, the final page
-        // must have NextCursor == null without requiring an extra empty fetch.
+        // NextCursor contract: when the remaining row count is an exact multiple of take, the
+        // final page must have NextCursor == null without an extra empty fetch.
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"TraceBoundary_{Guid.CreateVersion7():N}";
         await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
@@ -264,7 +263,7 @@ public abstract class TraceConformanceTests : StoreConformanceBase
             await Store.CreateRunsAsync([child], cancellationToken: ct);
         }
 
-        // Use child #4 as the focus anchor — 4 children come before it (0..3).
+        // Use child #4 as the focus anchor; 4 children come before it (0..3).
         var focus = children[4];
         var focusCursor = DirectChildrenPage.EncodeCursor(focus.CreatedAt, focus.Id);
 
@@ -278,7 +277,6 @@ public abstract class TraceConformanceTests : StoreConformanceBase
         Assert.Equal(children[1].Id, before.Items[2].Id);
         Assert.NotNull(before.NextCursor);
 
-        // Paginate further back.
         var beforeMore = await Store.GetDirectChildrenAsync(
             parent.Id, null, before.NextCursor, 3, ct);
         Assert.Single(beforeMore.Items);
@@ -326,7 +324,7 @@ public abstract class TraceConformanceTests : StoreConformanceBase
         await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
         await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
 
-        // Build a 4-level chain: root → a → b → c
+        // Build a 4-level chain: root, a, b, c.
         var root = CreateRun(jobName);
         var a = CreateRun(jobName) with { ParentRunId = root.Id, RootRunId = root.Id };
         var b = CreateRun(jobName) with { ParentRunId = a.Id, RootRunId = root.Id };
@@ -336,7 +334,7 @@ public abstract class TraceConformanceTests : StoreConformanceBase
         var chain = await Store.GetAncestorChainAsync(c.Id, ct);
 
         Assert.Equal(3, chain.Count);
-        // Root → parent order.
+        // Root-to-parent order.
         Assert.Equal(root.Id, chain[0].Id);
         Assert.Equal(a.Id, chain[1].Id);
         Assert.Equal(b.Id, chain[2].Id);

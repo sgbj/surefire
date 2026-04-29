@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { formatMs } from "@/lib/format";
+import {useEffect, useState} from "react";
+import {formatMs} from "@/lib/format";
 
 export function useLiveDuration(
   start?: string | null,
