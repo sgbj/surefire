@@ -12,7 +12,7 @@ dotnet add package Surefire.Dashboard
 
 The core package ships with an in-memory store and notifications, which work out of the box but only within a single process. State is lost when the process stops.
 
-For production, add a storage provider:
+For persistence or multi-process use, add a storage provider:
 
 ```bash
 dotnet add package Surefire.PostgreSql

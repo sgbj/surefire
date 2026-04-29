@@ -1,3 +1,1 @@
 #nullable enable
-Microsoft.Extensions.DependencyInjection.SurefireSqlServerExtensions
-static Microsoft.Extensions.DependencyInjection.SurefireSqlServerExtensions.UseSqlServer(this Surefire.SurefireOptions! options, string! connectionString, System.TimeSpan? commandTimeout = null) -> Surefire.SurefireOptions!

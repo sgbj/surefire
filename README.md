@@ -5,6 +5,8 @@
 
 Distributed job scheduling for .NET with a minimal API style.
 
+> **Preview:** Surefire is pre-1.0, so APIs and storage schemas may change.
+
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
 
