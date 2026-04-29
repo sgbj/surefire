@@ -115,7 +115,7 @@ export function JobDetailPage() {
               <Skeleton className="h-7 w-48"/>
             </div>
             <div className="flex items-center gap-2">
-              <Skeleton className="h-9 w-[5.5rem]"/>
+              <Skeleton className="h-9 w-22"/>
               <Skeleton className="h-9 w-16"/>
             </div>
           </div>
@@ -244,7 +244,7 @@ export function JobDetailPage() {
                 resetPage();
               }}
             >
-              <SelectTrigger size="sm" className="w-[140px]">
+              <SelectTrigger size="sm" className="w-35">
                 <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
@@ -263,7 +263,7 @@ export function JobDetailPage() {
                 resetPage();
               }}
             >
-              <SelectTrigger size="sm" className="w-[140px]">
+              <SelectTrigger size="sm" className="w-35">
                 <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">

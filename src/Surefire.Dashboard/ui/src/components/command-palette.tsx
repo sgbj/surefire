@@ -72,7 +72,7 @@ export function CommandPalette({
       className="bg-background/80 backdrop-blur-xl border-border/50 shadow-2xl"
     >
       <CommandInput placeholder="Search..."/>
-      <CommandList className="max-h-[340px]">
+      <CommandList className="max-h-85">
         <CommandEmpty>No results found.</CommandEmpty>
         <CommandGroup heading="Navigation">
           <CommandItem onSelect={() => go("/")}>

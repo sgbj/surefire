@@ -310,7 +310,7 @@ export function DataTable<TData, TValue>({
                 }))
               }
             >
-              <SelectTrigger size="sm" className="w-[80px]">
+              <SelectTrigger size="sm" className="w-20">
                 <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper" align="end">

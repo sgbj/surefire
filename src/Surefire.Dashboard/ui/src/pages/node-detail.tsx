@@ -182,7 +182,7 @@ export function NodeDetailPage() {
                     setPagination((prev) => ({...prev, pageIndex: 0}));
                   }}
                 >
-                  <SelectTrigger size="sm" className="w-[140px]">
+                  <SelectTrigger size="sm" className="w-35">
                     <SelectValue/>
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -201,7 +201,7 @@ export function NodeDetailPage() {
                     setPagination((prev) => ({...prev, pageIndex: 0}));
                   }}
                 >
-                  <SelectTrigger size="sm" className="w-[140px]">
+                  <SelectTrigger size="sm" className="w-35">
                     <SelectValue/>
                   </SelectTrigger>
                   <SelectContent position="popper">

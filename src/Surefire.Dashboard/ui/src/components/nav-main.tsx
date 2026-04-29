@@ -31,7 +31,7 @@ export function NavMain({
 
             return (
               <SidebarMenuItem key={item.title}
-                               className={active ? "before:absolute before:-left-1.5 before:top-1/2 before:-translate-y-1/2 before:h-5 before:w-[3px] before:bg-primary before:rounded-full" : ""}>
+                                className={active ? "before:absolute before:-left-1.5 before:top-1/2 before:-translate-y-1/2 before:h-5 before:w-0.75 before:bg-primary before:rounded-full" : ""}>
                 <SidebarMenuButton asChild isActive={active} tooltip={item.title}>
                   <Link to={item.url}>
                     <item.icon className={active ? "opacity-80" : "opacity-60"}/>

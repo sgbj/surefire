@@ -962,7 +962,7 @@ export function RunDetailPage() {
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <Skeleton className="h-7 w-56"/>
-            <Skeleton className="h-5 w-[4.5rem] rounded-full"/>
+            <Skeleton className="h-5 w-18 rounded-full"/>
           </div>
           <div className="flex gap-2 shrink-0">
             <Skeleton className="h-8 w-20"/>
@@ -1073,7 +1073,7 @@ export function RunDetailPage() {
         <DtDd label="Job">
           <Link
             to={`/jobs/${encodeURIComponent(run.jobName)}`}
-            className="text-primary hover:underline truncate max-w-[200px] inline-block"
+            className="text-primary hover:underline truncate max-w-50 inline-block"
             title={run.jobName}
           >
             {run.jobName}
@@ -1089,7 +1089,7 @@ export function RunDetailPage() {
           <DtDd label="Node">
             <Link
               to={`/nodes/${encodeURIComponent(run.nodeName)}`}
-              className="text-primary hover:underline truncate max-w-[160px] inline-block"
+              className="text-primary hover:underline truncate max-w-40 inline-block"
               title={run.nodeName}
             >
               {run.nodeName}
@@ -1113,7 +1113,7 @@ export function RunDetailPage() {
           <DtDd label="Rerun of">
             <Link
               to={`/runs/${run.rerunOfRunId}`}
-              className="text-primary hover:underline truncate max-w-[140px] inline-block"
+              className="text-primary hover:underline truncate max-w-35 inline-block"
               title={run.rerunOfRunId}
             >
               {run.rerunOfRunId}
@@ -1124,7 +1124,7 @@ export function RunDetailPage() {
           <DtDd label="Triggered by">
             <Link
               to={`/runs/${run.parentRunId}`}
-              className="text-primary hover:underline truncate max-w-[140px] inline-block"
+              className="text-primary hover:underline truncate max-w-35 inline-block"
               title={run.parentRunId}
             >
               {run.parentRunId}
@@ -1135,7 +1135,7 @@ export function RunDetailPage() {
 
       {run.arguments && (
         <div className="rounded-lg border overflow-hidden">
-          <div className="max-h-[26rem] overflow-y-auto">
+          <div className="max-h-104 overflow-y-auto">
             <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Arguments</span>
             </div>
@@ -1148,7 +1148,7 @@ export function RunDetailPage() {
 
       {run.result && outputItems.length === 0 && (
         <div className="rounded-lg border overflow-hidden">
-          <div className="max-h-[26rem] overflow-y-auto">
+          <div className="max-h-104 overflow-y-auto">
             <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Result</span>
             </div>
@@ -1161,7 +1161,7 @@ export function RunDetailPage() {
 
       {run.reason && (
         <div className="rounded-lg border border-destructive/15 overflow-hidden">
-          <div className="max-h-[26rem] overflow-y-auto">
+          <div className="max-h-104 overflow-y-auto">
             <div
               className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/10 backdrop-blur-sm">
               <span className="text-sm text-destructive/80">Reason</span>
@@ -1175,8 +1175,8 @@ export function RunDetailPage() {
 
       {failureRows.length > 0 && (
         <div className="rounded-lg border border-destructive/15 overflow-hidden">
-          <div className="max-h-[26rem] overflow-auto">
-            <table className="w-full caption-bottom text-sm min-w-[768px]">
+          <div className="max-h-104 overflow-auto">
+            <table className="w-full caption-bottom text-sm min-w-3xl">
               <TableHeader className="sticky top-0 z-10 bg-destructive/10 backdrop-blur-sm">
                 <TableRow className="hover:bg-transparent border-destructive/10">
                   <TableCell colSpan={4} className="text-destructive/80">
@@ -1224,7 +1224,7 @@ export function RunDetailPage() {
                         <TableRow className="hover:bg-transparent cursor-default">
                           <TableCell colSpan={4} className="max-w-0 w-full">
                             {failure.stackTrace ? (
-                              <pre className="text-[13px] whitespace-pre-wrap break-words font-mono">
+                              <pre className="text-[13px] whitespace-pre-wrap wrap-break-word font-mono">
                               {failure.stackTrace}
                             </pre>
                             ) : (
@@ -1248,7 +1248,7 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={traceScrollRef}
-            className="max-h-[32rem] overflow-auto"
+            className="max-h-128 overflow-auto"
             // scroll-padding-top so scrollIntoView lands focus below the sticky header.
             style={{scrollPaddingTop: "2.75rem"}}
           >
@@ -1288,7 +1288,7 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={triggeredRunsScrollRef}
-            className="max-h-[32rem] overflow-auto"
+            className="max-h-128 overflow-auto"
             style={{
               // Explicit fractions: auto would measure rows independently and misalign
               // the header against virtualized rows.
@@ -1296,7 +1296,7 @@ export function RunDetailPage() {
                 "minmax(0,2fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.25fr)",
             }}
           >
-            <div className="min-w-[768px]">
+            <div className="min-w-3xl">
               <div className="sticky top-0 z-10 bg-muted/30 backdrop-blur-sm border-b">
                 <div className="flex items-center py-2.5 px-2">
               <span className="text-sm text-muted-foreground">
@@ -1394,7 +1394,7 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={inputScrollContainerRef}
-            className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
+            className="max-h-104 overflow-y-auto font-mono text-[13px]"
           >
             <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
@@ -1431,7 +1431,7 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={outputScrollContainerRef}
-            className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
+            className="max-h-104 overflow-y-auto font-mono text-[13px]"
           >
             <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
@@ -1467,7 +1467,7 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={logScrollContainerRef}
-            className="max-h-[26rem] overflow-y-auto font-mono text-[13px]"
+            className="max-h-104 overflow-y-auto font-mono text-[13px]"
           >
             <div
               className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
@@ -1510,7 +1510,7 @@ export function RunDetailPage() {
                     key={virtualItem.index}
                     ref={logVirtualizer.measureElement}
                     data-index={virtualItem.index}
-                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-words"
+                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap wrap-break-word"
                     style={{
                       transform: `translateY(${virtualItem.start}px)`,
                     }}

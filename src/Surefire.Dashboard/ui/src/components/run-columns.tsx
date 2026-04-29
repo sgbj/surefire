@@ -30,7 +30,7 @@ export function buildRunColumns(
       cell: ({row}) => (
         <Link
           to={`/runs/${row.original.id}`}
-          className="text-sm text-primary hover:underline truncate max-w-[140px] inline-block"
+          className="text-sm text-primary hover:underline truncate max-w-35 inline-block"
           title={row.original.id}
         >
           {row.original.id}
@@ -46,7 +46,7 @@ export function buildRunColumns(
       cell: ({row}) => (
         <Link
           to={`/jobs/${encodeURIComponent(row.original.jobName)}`}
-          className="text-sm text-primary hover:underline truncate max-w-[200px] inline-block"
+          className="text-sm text-primary hover:underline truncate max-w-50 inline-block"
           title={row.original.jobName}
         >
           {row.original.jobName}
@@ -88,7 +88,7 @@ export function buildRunColumns(
         row.original.nodeName ? (
           <Link
             to={`/nodes/${encodeURIComponent(row.original.nodeName)}`}
-            className="text-sm text-primary hover:underline truncate max-w-[160px] inline-block"
+            className="text-sm text-primary hover:underline truncate max-w-40 inline-block"
             title={row.original.nodeName}
           >
             {row.original.nodeName}

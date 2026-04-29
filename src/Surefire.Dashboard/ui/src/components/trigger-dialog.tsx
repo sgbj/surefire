@@ -313,7 +313,7 @@ function JsonEditor({
   return (
     <textarea
       id={id}
-      className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono min-h-[100px] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+      className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono min-h-25 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
       placeholder='{"key": "value"}'
       value={value}
       onChange={(e) => onChange(e.target.value)}
@@ -512,7 +512,7 @@ function SchemaField({
         </FieldLabel>
         <textarea
           id={fieldId}
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono min-h-[60px] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+          className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono min-h-15 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
           placeholder={
             type === "array" ? '["item1", "item2"]' : '{"key": "value"}'
           }

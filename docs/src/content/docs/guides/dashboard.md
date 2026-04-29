@@ -14,14 +14,16 @@ The dashboard is embedded in the `Surefire.Dashboard` package, with no extra fil
 
 ## Authorization
 
-The dashboard endpoints are unauthenticated by default. In production, require authorization on the returned endpoint group. Anyone who reaches the dashboard can view job arguments, trigger jobs, cancel runs, and pause queues.
+Anyone who can reach the dashboard can view job arguments and results, trigger jobs, cancel runs, rerun completed work, and pause queues.
+
+:::caution
+If you expose the dashboard outside local development, require authorization on the returned endpoint group.
+:::
 
 ```csharp
 app.MapSurefireDashboard()
     .RequireAuthorization("AdminPolicy");
 ```
-
-`MapSurefireDashboard` returns an `IEndpointConventionBuilder`, so you can chain any endpoint convention: `RequireAuthorization`, `RequireCors`, or custom metadata.
 
 ## Home
 

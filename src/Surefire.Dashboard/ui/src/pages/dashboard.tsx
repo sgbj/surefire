@@ -103,7 +103,7 @@ export function DashboardPage() {
               <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
                 <Skeleton className="h-4 w-28"/>
               </CardHeader>
-              <CardContent className="pt-4 h-[300px]"/>
+              <CardContent className="pt-4 h-75"/>
             </Card>
             <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
               <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
@@ -117,7 +117,7 @@ export function DashboardPage() {
                   >
                     <Skeleton className="h-4 w-32"/>
                     <div className="flex items-center gap-3 shrink-0">
-                      <Skeleton className="h-5 w-[4.5rem] rounded-full"/>
+                      <Skeleton className="h-5 w-18 rounded-full"/>
                       <Skeleton className="h-3 w-14"/>
                     </div>
                   </div>
@@ -160,7 +160,7 @@ export function DashboardPage() {
                 {timeline.length > 0 ? (
                   <ChartContainer
                     config={chartConfig}
-                    className="aspect-auto h-[300px] w-full"
+                    className="aspect-auto h-75 w-full"
                   >
                     <AreaChart data={timeline} margin={{left: 0, right: 0}}>
                       <defs>

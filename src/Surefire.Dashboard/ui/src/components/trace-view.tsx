@@ -190,7 +190,7 @@ export function TraceView({
 
   return (
     // min-w forces horizontal overflow on narrow viewports so the timeline stays usable.
-    <div className="min-w-[768px] [--trace-name-col:13.75rem]">
+    <div className="min-w-3xl [--trace-name-col:13.75rem]">
       <div
         className="sticky top-0 z-10 py-2.5 border-b bg-muted/30 backdrop-blur-sm px-2"
         style={{
@@ -338,7 +338,7 @@ export function TraceView({
                   />
                 ))}
                 <div
-                  className="absolute top-1/2 -translate-y-1/2 h-[10px] rounded-sm"
+                  className="absolute top-1/2 -translate-y-1/2 h-2.5 rounded-sm"
                   style={{
                     left: `${leftPct}%`,
                     width: `${widthPct}%`,

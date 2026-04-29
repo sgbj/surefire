@@ -24,7 +24,7 @@ const columns: ColumnDef<NodeResponse>[] = [
     header: ({column}) => <SortableHeader column={column}>Name</SortableHeader>,
     cell: ({row}) => (
       <Link to={`/nodes/${encodeURIComponent(row.original.name)}`}
-            className={`font-medium text-primary hover:underline truncate max-w-[200px] inline-block ${!row.original.isActive ? 'opacity-50' : ''}`}
+            className={`font-medium text-primary hover:underline truncate max-w-50 inline-block ${!row.original.isActive ? 'opacity-50' : ''}`}
             title={row.original.name}>
         {row.original.name}
       </Link>
