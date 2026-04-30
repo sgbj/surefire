@@ -52,3 +52,5 @@ export function useStickToBottom<TScrollElement extends Element | Window>({
     virtualizer.scrollToIndex(count - 1, {align: "end"});
   }, [count, totalSize, virtualizer]);
 }
+
+

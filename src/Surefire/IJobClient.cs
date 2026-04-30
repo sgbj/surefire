@@ -174,9 +174,9 @@ public interface IJobClient
 
     /// <summary>
     ///     Waits for every child to terminate and returns their results in terminal-commit order.
-    ///     If any child failed or was cancelled, throws <see cref="AggregateException" /> at the end.
+    ///     If any child failed or was canceled, throws <see cref="AggregateException" /> at the end.
     /// </summary>
-    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were cancelled.</exception>
+    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
     [RequiresDynamicCode("Uses JSON deserialization.")]
     Task<IReadOnlyList<T>> WaitBatchAsync<T>(string batchId, CancellationToken cancellationToken = default);
@@ -197,28 +197,28 @@ public interface IJobClient
     IAsyncEnumerable<T> WaitEachAsync<T>(string batchId, CancellationToken cancellationToken = default);
 
     /// <summary>Triggers a homogeneous batch and waits for every child to complete, returning their results.</summary>
-    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were cancelled.</exception>
+    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
     [RequiresDynamicCode("Uses JSON deserialization.")]
     Task<IReadOnlyList<T>> RunBatchAsync<T>(string job, IEnumerable<object?> args, BatchRunOptions? options = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>Triggers a homogeneous batch and waits for every child to complete.</summary>
-    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were cancelled.</exception>
+    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
     [RequiresUnreferencedCode("Uses JSON serialization.")]
     [RequiresDynamicCode("Uses JSON serialization.")]
     Task RunBatchAsync(string job, IEnumerable<object?> args, BatchRunOptions? options = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>Triggers a heterogeneous batch and waits for every child to complete, returning their results.</summary>
-    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were cancelled.</exception>
+    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
     [RequiresDynamicCode("Uses JSON deserialization.")]
     Task<IReadOnlyList<T>> RunBatchAsync<T>(IEnumerable<BatchItem> items,
         CancellationToken cancellationToken = default);
 
     /// <summary>Triggers a heterogeneous batch and waits for every child to complete.</summary>
-    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were cancelled.</exception>
+    /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
     [RequiresUnreferencedCode("Uses JSON serialization.")]
     [RequiresDynamicCode("Uses JSON serialization.")]
     Task RunBatchAsync(IEnumerable<BatchItem> items, CancellationToken cancellationToken = default);

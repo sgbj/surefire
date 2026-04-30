@@ -213,13 +213,15 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var jobName = $"RecoverJob_{suffix}";
         var queueName = "default";
 
+        var window = TimeSpan.FromSeconds(1);
+
         await Store.UpsertRateLimitsAsync([
             new()
             {
                 Name = name,
                 Type = type,
                 MaxPermits = 1,
-                Window = TimeSpan.FromMilliseconds(180)
+                Window = window
             }
         ], ct);
 
@@ -238,7 +240,7 @@ public abstract class RateLimitConformanceTests : StoreConformanceBase
         var blocked = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.Null(blocked);
 
-        await Task.Delay(260, ct);
+        await Task.Delay(window + TimeSpan.FromMilliseconds(250), ct);
 
         var claimedAfterWindow = (await Store.ClaimRunsAsync("node", [jobName], [queueName], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimedAfterWindow);

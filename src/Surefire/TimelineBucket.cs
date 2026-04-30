@@ -17,8 +17,8 @@ public sealed record TimelineBucket
     /// <summary>The number of runs that succeeded in this bucket.</summary>
     public int Succeeded { get; init; }
 
-    /// <summary>The number of runs that were cancelled in this bucket.</summary>
-    public int Cancelled { get; init; }
+    /// <summary>The number of runs that were canceled in this bucket.</summary>
+    public int Canceled { get; init; }
 
     /// <summary>The number of runs that failed permanently in this bucket.</summary>
     public int Failed { get; init; }

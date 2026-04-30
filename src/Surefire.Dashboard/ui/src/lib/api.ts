@@ -34,7 +34,7 @@ export interface TimelineBucket {
   pending: number;
   running: number;
   succeeded: number;
-  cancelled: number;
+  canceled: number;
   failed: number;
 }
 
@@ -57,7 +57,7 @@ function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
       pending: bucket.pending ?? 0,
       running: bucket.running ?? 0,
       succeeded: bucket.succeeded ?? 0,
-      cancelled: bucket.cancelled ?? 0,
+      canceled: bucket.canceled ?? 0,
       failed: bucket.failed ?? 0,
     }))
     : [];
@@ -176,7 +176,7 @@ export interface JobRun {
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
-  cancelledAt?: string;
+  canceledAt?: string;
   nodeName?: string;
   attempt: number;
   traceId?: string;
@@ -262,6 +262,7 @@ export interface RunLogEntry {
   level: number;
   message: string;
   category?: string;
+  exception?: string;
 }
 
 export interface LogPage {
@@ -273,7 +274,7 @@ export const JobStatus = {
   Pending: 0,
   Running: 1,
   Succeeded: 2,
-  Cancelled: 4,
+  Canceled: 4,
   Failed: 5,
 } as const;
 export type JobStatus = (typeof JobStatus)[keyof typeof JobStatus];
@@ -282,7 +283,7 @@ export const JobStatusLabels: Record<number, string> = {
   [JobStatus.Pending]: "Pending",
   [JobStatus.Running]: "Running",
   [JobStatus.Succeeded]: "Succeeded",
-  [JobStatus.Cancelled]: "Cancelled",
+  [JobStatus.Canceled]: "Canceled",
   [JobStatus.Failed]: "Failed",
 };
 
@@ -290,7 +291,7 @@ export const JobStatusColors: Record<number, string> = {
   [JobStatus.Pending]: "bg-status-pending/15 text-status-pending",
   [JobStatus.Running]: "bg-status-running/15 text-status-running",
   [JobStatus.Succeeded]: "bg-status-succeeded/15 text-status-succeeded",
-  [JobStatus.Cancelled]: "bg-status-cancelled/15 text-status-cancelled",
+  [JobStatus.Canceled]: "bg-status-canceled/15 text-status-canceled",
   [JobStatus.Failed]: "bg-status-failed/15 text-status-failed",
 };
 

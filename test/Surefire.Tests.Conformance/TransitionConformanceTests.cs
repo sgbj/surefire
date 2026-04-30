@@ -284,12 +284,12 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
                 {
                     Id = claimed.Id,
                     JobName = claimed.JobName,
-                    Status = i < 5 ? JobStatus.Succeeded : JobStatus.Cancelled,
+                    Status = i < 5 ? JobStatus.Succeeded : JobStatus.Canceled,
                     Attempt = claimed.Attempt,
                     CreatedAt = claimed.CreatedAt,
                     NotBefore = claimed.NotBefore,
                     CompletedAt = DateTimeOffset.UtcNow,
-                    CancelledAt = i >= 5 ? DateTimeOffset.UtcNow : null
+                    CanceledAt = i >= 5 ? DateTimeOffset.UtcNow : null
                 };
 
                 var ok = await Store.TryTransitionRunAsync(Transition(attempt, JobStatus.Running));
@@ -303,7 +303,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task TryTransitionRun_Running_To_Cancelled()
+    public async Task TryTransitionRun_Running_To_Canceled()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -317,7 +317,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         claimed = claimed with
         {
-            Status = JobStatus.Cancelled, CancelledAt = DateTimeOffset.UtcNow, CompletedAt = DateTimeOffset.UtcNow
+            Status = JobStatus.Canceled, CanceledAt = DateTimeOffset.UtcNow, CompletedAt = DateTimeOffset.UtcNow
         };
         var result = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
 
@@ -325,7 +325,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Cancelled, stored.Status);
+        Assert.Equal(JobStatus.Canceled, stored.Status);
     }
 
     [Fact]
@@ -352,7 +352,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task TryTransitionRun_Pending_To_Cancelled()
+    public async Task TryTransitionRun_Pending_To_Canceled()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -363,7 +363,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         run = run with
         {
-            Status = JobStatus.Cancelled, CancelledAt = DateTimeOffset.UtcNow, CompletedAt = DateTimeOffset.UtcNow
+            Status = JobStatus.Canceled, CanceledAt = DateTimeOffset.UtcNow, CompletedAt = DateTimeOffset.UtcNow
         };
         var result = await Store.TryTransitionRunAsync(Transition(run, JobStatus.Pending), ct);
 

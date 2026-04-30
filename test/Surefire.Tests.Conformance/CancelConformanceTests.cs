@@ -20,8 +20,8 @@ public abstract class CancelConformanceTests : StoreConformanceBase
 
         var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Cancelled, stored.Status);
-        Assert.NotNull(stored.CancelledAt);
+        Assert.Equal(JobStatus.Canceled, stored.Status);
+        Assert.NotNull(stored.CanceledAt);
         Assert.NotNull(stored.CompletedAt);
     }
 
@@ -44,13 +44,13 @@ public abstract class CancelConformanceTests : StoreConformanceBase
 
         var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Cancelled, stored.Status);
-        Assert.NotNull(stored.CancelledAt);
+        Assert.Equal(JobStatus.Canceled, stored.Status);
+        Assert.NotNull(stored.CanceledAt);
         Assert.NotNull(stored.CompletedAt);
     }
 
     [Fact]
-    public async Task TryCancelRun_SetsCancelledAtAndCompletedAtToSameInstant()
+    public async Task TryCancelRun_SetsCanceledAtAndCompletedAtToSameInstant()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -65,10 +65,10 @@ public abstract class CancelConformanceTests : StoreConformanceBase
 
         var stored = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(stored);
-        Assert.Equal(JobStatus.Cancelled, stored.Status);
-        Assert.NotNull(stored.CancelledAt);
+        Assert.Equal(JobStatus.Canceled, stored.Status);
+        Assert.NotNull(stored.CanceledAt);
         Assert.NotNull(stored.CompletedAt);
-        Assert.Equal(stored.CancelledAt, stored.CompletedAt);
+        Assert.Equal(stored.CanceledAt, stored.CompletedAt);
     }
 
     [Fact]
@@ -131,21 +131,21 @@ public abstract class CancelConformanceTests : StoreConformanceBase
             completedChildId, claimed.Attempt, now, claimed.NotBefore, "node-1", 1, null, null,
             claimed.StartedAt, now), ct)).Transitioned);
 
-        var cancelledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
+        var CanceledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
 
-        // The completed child should not be cancelled; the other 2 should be.
-        Assert.Equal(2, cancelledIds.Count);
-        Assert.DoesNotContain(completedChildId, cancelledIds);
+        // The completed child should not be Canceled; the other 2 should be.
+        Assert.Equal(2, CanceledIds.Count);
+        Assert.DoesNotContain(completedChildId, CanceledIds);
 
         var storedCompleted = await Store.GetRunAsync(completedChildId, ct);
         Assert.Equal(JobStatus.Succeeded, storedCompleted!.Status);
 
-        foreach (var cancelledId in cancelledIds)
+        foreach (var CanceledId in CanceledIds)
         {
-            var stored = await Store.GetRunAsync(cancelledId, ct);
+            var stored = await Store.GetRunAsync(CanceledId, ct);
             Assert.NotNull(stored);
-            Assert.Equal(JobStatus.Cancelled, stored.Status);
-            Assert.NotNull(stored.CancelledAt);
+            Assert.Equal(JobStatus.Canceled, stored.Status);
+            Assert.NotNull(stored.CanceledAt);
         }
     }
 
@@ -159,9 +159,9 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var cancelledIds = await Store.CancelChildRunsAsync(run.Id, cancellationToken: ct);
+        var CanceledIds = await Store.CancelChildRunsAsync(run.Id, cancellationToken: ct);
 
-        Assert.Empty(cancelledIds);
+        Assert.Empty(CanceledIds);
     }
 
     [Fact]
@@ -186,8 +186,8 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         Assert.True((await Store.TryCancelRunAsync(child.Id, cancellationToken: ct)).Transitioned);
 
         // CancelChildRuns should find nothing to cancel.
-        var cancelledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
-        Assert.Empty(cancelledIds);
+        var CanceledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
+        Assert.Empty(CanceledIds);
     }
 
     [Fact]
@@ -237,13 +237,13 @@ public abstract class CancelConformanceTests : StoreConformanceBase
             await Task.WhenAll(tasks);
 
             // At most one CAS from Running->Pending succeeds. Zero is valid when all cancel
-            // threads beat the CAS threads (Running->Cancelled happens first for all of them).
+            // threads beat the CAS threads (Running->Canceled happens first for all of them).
             Assert.True(casResults.Count(r => r) <= 1);
 
             // Run must end in a valid state.
             var stored = await Store.GetRunAsync(run.Id, ct);
             Assert.NotNull(stored);
-            Assert.True(stored.Status is JobStatus.Cancelled or JobStatus.Pending);
+            Assert.True(stored.Status is JobStatus.Canceled or JobStatus.Pending);
         }
     }
 }

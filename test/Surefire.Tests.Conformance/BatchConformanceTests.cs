@@ -174,7 +174,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         {
             var stored = await Store.GetRunAsync(run.Id, ct);
             Assert.NotNull(stored);
-            Assert.Equal(JobStatus.Cancelled, stored.Status);
+            Assert.Equal(JobStatus.Canceled, stored.Status);
         }
     }
 
@@ -208,7 +208,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         await Store.CancelBatchRunsAsync(batch.Id, cancellationToken: ct);
 
         var storedPending = await Store.GetRunAsync(pendingRun.Id, ct);
-        Assert.Equal(JobStatus.Cancelled, storedPending!.Status);
+        Assert.Equal(JobStatus.Canceled, storedPending!.Status);
 
         var storedSucceeded = await Store.GetRunAsync(succeededRun.Id, ct);
         Assert.Equal(JobStatus.Succeeded, storedSucceeded!.Status);
@@ -222,7 +222,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelBatchRuns_CancelledChildren_ContributeToJobStats()
+    public async Task CancelBatchRuns_CanceledChildren_ContributeToJobStats()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchStats_{Guid.CreateVersion7():N}";
@@ -255,7 +255,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
 
         var storedPending = await Store.GetRunAsync(pendingRunId, ct);
         Assert.NotNull(storedPending);
-        Assert.Equal(JobStatus.Cancelled, storedPending.Status);
+        Assert.Equal(JobStatus.Canceled, storedPending.Status);
 
         var jobStats = await Store.GetJobStatsAsync(jobName, ct);
         Assert.Equal(2, jobStats.TotalRuns);

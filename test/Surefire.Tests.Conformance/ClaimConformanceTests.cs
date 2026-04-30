@@ -841,7 +841,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     public async Task Capacity_RestoredAfterCancelRunningRun()
     {
         // TryCancelRunAsync must decrement the running counter when the prior status was Running
-        // and leave it alone for Pending to Cancelled. Without this, cancelling a running job
+        // and leave it alone for Pending to Canceled. Without this, cancelling a running job
         // would either leak capacity (counter never decrements) or drop it twice.
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob($"CancelJob_{Guid.CreateVersion7():N}");

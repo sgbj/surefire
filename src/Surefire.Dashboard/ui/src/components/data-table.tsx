@@ -186,7 +186,7 @@ export function DataTable<TData, TValue>({
       )}
       <div className="rounded-lg border overflow-hidden">
         {header && (
-          <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+          <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
             {header}
           </div>
         )}

@@ -23,7 +23,7 @@ const chartConfig = {
   pending: {label: "Pending", color: "var(--status-pending)"},
   running: {label: "Running", color: "var(--status-running)"},
   succeeded: {label: "Succeeded", color: "var(--status-succeeded)"},
-  cancelled: {label: "Cancelled", color: "var(--status-cancelled)"},
+  canceled: {label: "Canceled", color: "var(--status-canceled)"},
   failed: {label: "Failed", color: "var(--status-failed)"},
 } satisfies ChartConfig;
 
@@ -100,13 +100,13 @@ export function DashboardPage() {
           </div>
           <div className="space-y-6">
             <Card className="pt-0 gap-0">
-              <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
+              <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/40 backdrop-blur-sm">
                 <Skeleton className="h-4 w-28"/>
               </CardHeader>
               <CardContent className="pt-4 h-75"/>
             </Card>
             <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
-              <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
+              <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/40 backdrop-blur-sm">
                 <Skeleton className="h-4 w-24"/>
               </CardHeader>
               <CardContent className="px-0">
@@ -151,7 +151,7 @@ export function DashboardPage() {
 
           <div className="space-y-6">
             <Card className="pt-0 gap-0">
-              <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
+              <CardHeader className="border-b py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/40 backdrop-blur-sm">
                 <CardTitle className="text-sm font-normal text-muted-foreground">
                   Runs over time
                 </CardTitle>
@@ -252,10 +252,10 @@ export function DashboardPage() {
                       />
                       <Area
                         type="monotone"
-                        dataKey="cancelled"
+                        dataKey="canceled"
                         stackId="1"
-                        stroke="var(--color-cancelled)"
-                        fill="url(#gradient-cancelled)"
+                        stroke="var(--color-status-canceled)"
+                        fill="url(#gradient-canceled)"
                       />
                       <Area
                         type="monotone"
@@ -275,7 +275,7 @@ export function DashboardPage() {
             </Card>
 
             <Card className="pt-0 gap-0 pb-0 bg-transparent shadow-none">
-              <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/30 backdrop-blur-sm">
+              <CardHeader className="py-2.5! gap-0! grid-rows-none! rounded-t-lg bg-muted/40 backdrop-blur-sm">
                 <CardTitle className="text-sm font-normal text-muted-foreground">
                   Recent runs
                 </CardTitle>

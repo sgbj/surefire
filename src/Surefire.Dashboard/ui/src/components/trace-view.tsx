@@ -9,7 +9,7 @@ const statusColorVar: Record<number, string> = {
   [JobStatus.Pending]: "var(--status-pending)",
   [JobStatus.Running]: "var(--status-running)",
   [JobStatus.Succeeded]: "var(--status-succeeded)",
-  [JobStatus.Cancelled]: "var(--status-cancelled)",
+  [JobStatus.Canceled]: "var(--status-canceled)",
   [JobStatus.Failed]: "var(--status-failed)",
 };
 
@@ -192,7 +192,7 @@ export function TraceView({
     // min-w forces horizontal overflow on narrow viewports so the timeline stays usable.
     <div className="min-w-3xl [--trace-name-col:13.75rem]">
       <div
-        className="sticky top-0 z-10 py-2.5 border-b bg-muted/30 backdrop-blur-sm px-2"
+        className="sticky top-0 z-10 py-2.5 border-b bg-muted/40 backdrop-blur-sm px-2"
         style={{
           display: "grid",
           gridTemplateColumns: "var(--trace-name-col) 1fr",
@@ -322,7 +322,7 @@ export function TraceView({
                 />
                 <Link
                   to={`/runs/${run.id}`}
-                  className="text-[13px] leading-none truncate hover:underline"
+                  className="text-xs leading-none truncate hover:underline"
                   title={run.jobName}
                 >
                   {run.jobName}
@@ -386,7 +386,7 @@ function SiblingPillRow({
       type="button"
       onClick={onClick}
       disabled={isLoading}
-      className="flex items-center justify-center gap-1.5 w-full border-b border-border/50 bg-muted/30 backdrop-blur-sm px-3 py-1.5 text-[13px] text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50 disabled:cursor-wait cursor-pointer transition-colors"
+      className="flex items-center justify-center gap-1.5 w-full border-b border-border/50 bg-muted/40 backdrop-blur-sm px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50 disabled:cursor-wait cursor-pointer transition-colors"
     >
       <Icon className="size-3.5 shrink-0"/>
       <span>{isLoading ? "Loading…" : "Load more"}</span>

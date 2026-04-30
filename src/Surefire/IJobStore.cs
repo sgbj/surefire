@@ -168,10 +168,10 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Atomically cancels a run by transitioning it directly to <see cref="JobStatus.Cancelled" />.
-    ///     Any non-terminal run (Pending or Running) is cancelled in a single atomic operation.
+    ///     Atomically cancels a run by transitioning it directly to <see cref="JobStatus.Canceled" />.
+    ///     Any non-terminal run (Pending or Running) is Canceled in a single atomic operation.
     ///     When <paramref name="expectedAttempt" /> is provided, the cancellation only applies if the
-    ///     run's attempt matches (executor scoping). When null, any non-terminal run is cancelled.
+    ///     run's attempt matches (executor scoping). When null, any non-terminal run is Canceled.
     ///     <para>
     ///         The operation atomically inserts status events, caller-provided events, and updates
     ///         batch counters, all in the same transaction. Returns <see cref="RunTransitionResult" />
@@ -183,7 +183,7 @@ public interface IJobStore
     /// <param name="reason">Optional termination reason to set on the run.</param>
     /// <param name="events">Optional events to append atomically with the cancellation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>A <see cref="RunTransitionResult" /> indicating whether the run was cancelled and batch completion info.</returns>
+    /// <returns>A <see cref="RunTransitionResult" /> indicating whether the run was canceled and batch completion info.</returns>
     Task<RunTransitionResult> TryCancelRunAsync(string runId,
         int? expectedAttempt = null,
         string? reason = null,
@@ -194,10 +194,10 @@ public interface IJobStore
     ///     Cancels all non-terminal runs belonging to the specified parent run.
     ///     Atomically inserts events and updates batch counters.
     /// </summary>
-    /// <param name="parentRunId">The parent run ID whose children should be cancelled.</param>
-    /// <param name="reason">Optional termination reason to set on cancelled runs.</param>
+    /// <param name="parentRunId">The parent run ID whose children should be Canceled.</param>
+    /// <param name="reason">Optional termination reason to set on Canceled runs.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The IDs of child runs that were cancelled.</returns>
+    /// <returns>The IDs of child runs that were canceled.</returns>
     Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
         string? reason = null,
         CancellationToken cancellationToken = default);
@@ -255,10 +255,10 @@ public interface IJobStore
     ///     Cancels all non-terminal runs belonging to the specified batch.
     ///     Atomically inserts events and updates batch counters.
     /// </summary>
-    /// <param name="batchId">The batch ID whose runs should be cancelled.</param>
-    /// <param name="reason">Optional termination reason to set on cancelled runs.</param>
+    /// <param name="batchId">The batch ID whose runs should be Canceled.</param>
+    /// <param name="reason">Optional termination reason to set on Canceled runs.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The IDs of runs that were cancelled.</returns>
+    /// <returns>The IDs of runs that were canceled.</returns>
     Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
         string? reason = null,
         CancellationToken cancellationToken = default);
@@ -469,11 +469,11 @@ public interface IJobStore
 
     /// <summary>
     ///     Cancels all pending runs whose <c>NotAfter</c> deadline has passed and
-    ///     returns the run IDs that were transitioned to <see cref="JobStatus.Cancelled" />.
-    ///     Atomically updates batch counters for cancelled batch children.
+    ///     returns the run IDs that were transitioned to <see cref="JobStatus.Canceled" />.
+    ///     Atomically updates batch counters for Canceled batch children.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The IDs of runs that were cancelled in this operation.</returns>
+    /// <returns>The IDs of runs that were canceled in this operation.</returns>
     Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>

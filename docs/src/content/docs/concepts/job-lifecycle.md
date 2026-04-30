@@ -12,10 +12,10 @@ A run has one of five statuses:
 | Pending | Waiting to be claimed by a node |
 | Running | Currently executing |
 | Succeeded | Finished successfully |
-| Cancelled | Cancelled by a user, during shutdown, or because it expired |
+| Canceled | Canceled by a user, during shutdown, or because it expired |
 | Failed | Failed after all retry attempts were exhausted |
 
-Succeeded, Cancelled, and Failed are terminal. The `Attempt` field on the run records which attempt produced the terminal status.
+Succeeded, Canceled, and Failed are terminal. The `Attempt` field on the run records which attempt produced the terminal status.
 
 ## Retries
 

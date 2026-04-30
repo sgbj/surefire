@@ -21,7 +21,7 @@ static Surefire.RunStatusTransition.PendingToRunning(string! runId, int expected
 static Surefire.RunStatusTransition.RunningToFailed(string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 1, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null) -> Surefire.RunStatusTransition!
 static Surefire.RunStatusTransition.RunningToPending(string! runId, int expectedAttempt, System.DateTimeOffset notBefore, string? reason = null, string? result = null, double progress = 0, System.DateTimeOffset? lastHeartbeatAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null) -> Surefire.RunStatusTransition!
 static Surefire.RunStatusTransition.RunningToSucceeded(string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 1, string? result = null, string? reason = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
-static Surefire.RunStatusTransition.ToCancelled(Surefire.JobStatus expectedStatus, string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset cancelledAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 0, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
+static Surefire.RunStatusTransition.ToCanceled(Surefire.JobStatus expectedStatus, string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset canceledAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 0, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
 Surefire.BackoffType
 Surefire.BackoffType.Exponential = 1 -> Surefire.BackoffType
 Surefire.BackoffType.Fixed = 0 -> Surefire.BackoffType
@@ -35,9 +35,9 @@ Surefire.BatchCompletionInfo.CompletedAt.get -> System.DateTimeOffset
 Surefire.BatchCompletionInfo.CompletedAt.init -> void
 Surefire.BatchCounters
 Surefire.BatchCounters.BatchCounters() -> void
-Surefire.BatchCounters.BatchCounters(int Total, int Succeeded, int Failed, int Cancelled) -> void
-Surefire.BatchCounters.Cancelled.get -> int
-Surefire.BatchCounters.Cancelled.init -> void
+Surefire.BatchCounters.BatchCounters(int Total, int Succeeded, int Failed, int Canceled) -> void
+Surefire.BatchCounters.Canceled.get -> int
+Surefire.BatchCounters.Canceled.init -> void
 Surefire.BatchCounters.Failed.get -> int
 Surefire.BatchCounters.Failed.init -> void
 Surefire.BatchCounters.Succeeded.get -> int
@@ -45,13 +45,6 @@ Surefire.BatchCounters.Succeeded.init -> void
 Surefire.BatchCounters.Total.get -> int
 Surefire.BatchCounters.Total.init -> void
 Surefire.BatchItem
-Surefire.BatchRunOptions
-Surefire.BatchRunOptions.NotAfter.get -> System.DateTimeOffset?
-Surefire.BatchRunOptions.NotAfter.init -> void
-Surefire.BatchRunOptions.NotBefore.get -> System.DateTimeOffset?
-Surefire.BatchRunOptions.NotBefore.init -> void
-Surefire.BatchRunOptions.Priority.get -> int?
-Surefire.BatchRunOptions.Priority.init -> void
 Surefire.BatchItem.Args.get -> object?
 Surefire.BatchItem.Args.init -> void
 Surefire.BatchItem.BatchItem(string! JobName, object? Args = null, Surefire.BatchRunOptions? Options = null) -> void
@@ -59,6 +52,13 @@ Surefire.BatchItem.JobName.get -> string!
 Surefire.BatchItem.JobName.init -> void
 Surefire.BatchItem.Options.get -> Surefire.BatchRunOptions?
 Surefire.BatchItem.Options.init -> void
+Surefire.BatchRunOptions
+Surefire.BatchRunOptions.NotAfter.get -> System.DateTimeOffset?
+Surefire.BatchRunOptions.NotAfter.init -> void
+Surefire.BatchRunOptions.NotBefore.get -> System.DateTimeOffset?
+Surefire.BatchRunOptions.NotBefore.init -> void
+Surefire.BatchRunOptions.Priority.get -> int?
+Surefire.BatchRunOptions.Priority.init -> void
 Surefire.DashboardStats
 Surefire.DashboardStats.ActiveRuns.get -> int
 Surefire.DashboardStats.ActiveRuns.init -> void
@@ -161,8 +161,8 @@ Surefire.INotificationProvider.PingAsync(System.Threading.CancellationToken canc
 Surefire.INotificationProvider.PublishAsync(string! channel, string? message = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.INotificationProvider.SubscribeAsync(string! channel, System.Func<string?, System.Threading.Tasks.Task!>! handler, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IAsyncDisposable!>!
 Surefire.JobBatch
-Surefire.JobBatch.Cancelled.get -> int
-Surefire.JobBatch.Cancelled.init -> void
+Surefire.JobBatch.Canceled.get -> int
+Surefire.JobBatch.Canceled.init -> void
 Surefire.JobBatch.CompletedAt.get -> System.DateTimeOffset?
 Surefire.JobBatch.CompletedAt.init -> void
 Surefire.JobBatch.CreatedAt.get -> System.DateTimeOffset
@@ -269,8 +269,8 @@ Surefire.JobRun.Attempt.get -> int
 Surefire.JobRun.Attempt.init -> void
 Surefire.JobRun.BatchId.get -> string?
 Surefire.JobRun.BatchId.init -> void
-Surefire.JobRun.CancelledAt.get -> System.DateTimeOffset?
-Surefire.JobRun.CancelledAt.init -> void
+Surefire.JobRun.CanceledAt.get -> System.DateTimeOffset?
+Surefire.JobRun.CanceledAt.init -> void
 Surefire.JobRun.CompletedAt.get -> System.DateTimeOffset?
 Surefire.JobRun.CompletedAt.init -> void
 Surefire.JobRun.CreatedAt.get -> System.DateTimeOffset
@@ -279,7 +279,7 @@ Surefire.JobRun.DeduplicationId.get -> string?
 Surefire.JobRun.DeduplicationId.init -> void
 Surefire.JobRun.Id.get -> string!
 Surefire.JobRun.Id.init -> void
-Surefire.JobRun.IsCancelled.get -> bool
+Surefire.JobRun.IsCanceled.get -> bool
 Surefire.JobRun.IsFailure.get -> bool
 Surefire.JobRun.IsSuccess.get -> bool
 Surefire.JobRun.IsTerminal.get -> bool
@@ -338,7 +338,7 @@ Surefire.JobStats.SuccessRate.init -> void
 Surefire.JobStats.TotalRuns.get -> int
 Surefire.JobStats.TotalRuns.init -> void
 Surefire.JobStatus
-Surefire.JobStatus.Cancelled = 4 -> Surefire.JobStatus
+Surefire.JobStatus.Canceled = 4 -> Surefire.JobStatus
 Surefire.JobStatus.Failed = 5 -> Surefire.JobStatus
 Surefire.JobStatus.Pending = 0 -> Surefire.JobStatus
 Surefire.JobStatus.Running = 1 -> Surefire.JobStatus
@@ -506,8 +506,8 @@ Surefire.RunOrderBy.CompletedAt = 2 -> Surefire.RunOrderBy
 Surefire.RunOrderBy.CreatedAt = 0 -> Surefire.RunOrderBy
 Surefire.RunOrderBy.StartedAt = 1 -> Surefire.RunOrderBy
 Surefire.RunStatusTransition
-Surefire.RunStatusTransition.CancelledAt.get -> System.DateTimeOffset?
-Surefire.RunStatusTransition.CancelledAt.init -> void
+Surefire.RunStatusTransition.CanceledAt.get -> System.DateTimeOffset?
+Surefire.RunStatusTransition.CanceledAt.init -> void
 Surefire.RunStatusTransition.CompletedAt.get -> System.DateTimeOffset?
 Surefire.RunStatusTransition.CompletedAt.init -> void
 Surefire.RunStatusTransition.Events.get -> System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>?
@@ -576,8 +576,8 @@ Surefire.SurefireOptions.ShutdownTimeout.set -> void
 Surefire.SurefireOptions.SurefireOptions() -> void
 Surefire.SurefireOptions.UseFilter<T>() -> Surefire.SurefireOptions!
 Surefire.TimelineBucket
-Surefire.TimelineBucket.Cancelled.get -> int
-Surefire.TimelineBucket.Cancelled.init -> void
+Surefire.TimelineBucket.Canceled.get -> int
+Surefire.TimelineBucket.Canceled.init -> void
 Surefire.TimelineBucket.Failed.get -> int
 Surefire.TimelineBucket.Failed.init -> void
 Surefire.TimelineBucket.Pending.get -> int

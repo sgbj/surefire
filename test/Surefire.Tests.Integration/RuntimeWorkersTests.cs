@@ -344,7 +344,7 @@ public sealed class RuntimeWorkersTests
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
         run = await harness.Client.WaitAsync(run.Id, cts.Token);
-        Assert.True(run.IsCancelled);
+        Assert.True(run.IsCanceled);
     }
 
     [Fact]
@@ -381,7 +381,7 @@ public sealed class RuntimeWorkersTests
 
                 return page.Items.SingleOrDefault();
             },
-            run => run.Status == JobStatus.Cancelled,
+            run => run.Status == JobStatus.Canceled,
             TimeSpan.FromSeconds(5),
             TimeSpan.FromMilliseconds(25),
             "Expected RunAsync cancellation to propagate and cancel execution.",
@@ -443,22 +443,90 @@ public sealed class RuntimeWorkersTests
         await harness.Client.CancelBatchAsync(batchId, ct);
 
         // CancelBatchAsync transitions Running children to Cancelling. The executor finalizes
-        // Cancelling to Cancelled asynchronously, so poll rather than asserting immediately.
+        // Cancelling to Canceled asynchronously, so poll rather than asserting immediately.
         await TestWait.PollUntilAsync(
             async _ =>
             {
                 var page = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 10, ct);
                 return page.Items;
             },
-            items => items.Count > 0 && items.All(r => r.Status == JobStatus.Cancelled),
+            items => items.Count > 0 && items.All(r => r.Status == JobStatus.Canceled),
             TimeSpan.FromSeconds(10),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for all batch children to reach Cancelled status.",
+            "Timed out waiting for all batch children to reach Canceled status.",
             ct);
 
         var batch = await harness.Client.GetBatchAsync(batchId, ct);
         Assert.NotNull(batch);
-        Assert.True(batch.Status == JobStatus.Cancelled || batch.Status == JobStatus.Failed);
+        Assert.True(batch.Status == JobStatus.Canceled || batch.Status == JobStatus.Failed);
+    }
+
+    [Fact]
+    public async Task CancelBatchAsync_CancelsChildDescendants()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CancelBatchGrandchild", async (CancellationToken ct) =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), ct);
+            return 1;
+        });
+
+        harness.Host.AddJob("CancelBatchParent", async (IJobClient client, CancellationToken ct) =>
+        {
+            return await client.RunAsync<int>("CancelBatchGrandchild", cancellationToken: ct);
+        });
+
+        await harness.StartAsync(ct);
+
+        var batchId = await ((JobClient)harness.Client).TriggerAllAsync(
+            "CancelBatchParent",
+            [new { x = 1 }, new { x = 2 }, new { x = 3 }],
+            ct);
+
+        var grandchildren = await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { JobName = "CancelBatchGrandchild" },
+                    0,
+                    10,
+                    ct);
+                return page.Items;
+            },
+            items => items.Count == 3,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for batch children to create descendants.",
+            ct);
+
+        await harness.Client.CancelBatchAsync(batchId, ct);
+
+        await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(new() { BatchId = batchId }, 0, 10, ct);
+                return page.Items;
+            },
+            items => items.Count == 3 && items.All(r => r.Status == JobStatus.Canceled),
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for batch children to reach Canceled status.",
+            ct);
+
+        await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunsByIdsAsync(grandchildren.Select(r => r.Id).ToArray(), ct),
+            items => items.Count == 3 && items.All(r => r.Status == JobStatus.Canceled),
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for batch child descendants to reach Canceled status.",
+            ct);
     }
 
     [Fact]
@@ -502,20 +570,24 @@ public sealed class RuntimeWorkersTests
         waitCts.CancelAfter(TimeSpan.FromSeconds(10));
 
         var ownerFinal = await harness.Client.WaitAsync(ownerRun.Id, waitCts.Token);
-        Assert.Equal(JobStatus.Cancelled, ownerFinal.Status);
+        Assert.Equal(JobStatus.Canceled, ownerFinal.Status);
 
         var ownerFailure = Assert.Single(await harness.Store.GetEventsAsync(
             ownerRun.Id,
             0,
             [RunEventType.AttemptFailure],
             cancellationToken: waitCts.Token));
+        string? ownerFailureMessage;
         using (var payload = JsonDocument.Parse(ownerFailure.Payload!))
         {
             var root = payload.RootElement;
-            Assert.Equal("run_cancelled", root.GetProperty("failureCode").GetString());
+            Assert.Equal("run_canceled", root.GetProperty("failureCode").GetString());
+            ownerFailureMessage = root.GetProperty("message").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(ownerFailureMessage));
             Assert.EndsWith("CanceledException", root.GetProperty("exceptionType").GetString());
             Assert.Contains("CanceledException", root.GetProperty("stackTrace").GetString());
         }
+        Assert.Equal(ownerFailureMessage, ownerFinal.Reason);
 
         var nestedOwner = await TestWait.PollUntilAsync(
             async _ =>
@@ -527,11 +599,12 @@ public sealed class RuntimeWorkersTests
                     ct);
                 return page.Items.SingleOrDefault();
             },
-            run => run?.Status == JobStatus.Cancelled,
+            run => run?.Status == JobStatus.Canceled,
             TimeSpan.FromSeconds(10),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for the owned run to be cancelled.",
+            "Timed out waiting for the owned run to be Canceled.",
             ct);
+        Assert.Equal("Canceled because the owning operation was canceled.", nestedOwner.Reason);
 
         var nestedChildren = await TestWait.PollUntilAsync(
             async _ =>
@@ -543,17 +616,19 @@ public sealed class RuntimeWorkersTests
                     ct);
                 return page.Items;
             },
-            items => items.Count == 3 && items.All(r => r.Status == JobStatus.Cancelled),
+            items => items.Count == 3 && items.All(r => r.Status == JobStatus.Canceled),
             TimeSpan.FromSeconds(10),
             TimeSpan.FromMilliseconds(25),
-            "Timed out waiting for nested batch children to be cancelled.",
+            "Timed out waiting for nested batch children to be Canceled.",
             ct);
+        Assert.All(nestedChildren,
+            run => Assert.Equal($"Canceled because parent run '{nestedOwner.Id}' was canceled.", run.Reason));
 
         var batchId = Assert.Single(nestedChildren.Select(r => r.BatchId).Distinct());
         Assert.NotNull(batchId);
         var batch = await harness.Client.GetBatchAsync(batchId, waitCts.Token);
         Assert.NotNull(batch);
-        Assert.Equal(JobStatus.Cancelled, batch.Status);
+        Assert.Equal(JobStatus.Canceled, batch.Status);
     }
 
     [Fact]
@@ -1857,6 +1932,254 @@ public sealed class RuntimeWorkersTests
     }
 
     [Fact]
+    public async Task OwnedStreamingPipeline_DownstreamCancellation_CancelsParentAndUpstreamProducer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+            options.MaxNodeConcurrency = 4;
+        });
+
+        harness.Host.AddJob("PipelineCancelSource", (CancellationToken ct) => ProduceSlowInfiniteRange(ct));
+        harness.Host.AddJob("PipelineCancelDouble", DoubleStream);
+        harness.Host.AddJob("PipelineCancelOwner", async (IJobClient client, CancellationToken ct) =>
+        {
+            var values = client.StreamAsync<int>("PipelineCancelSource", cancellationToken: ct);
+            var doubled = client.StreamAsync<int>("PipelineCancelDouble", new { values }, cancellationToken: ct);
+            var sum = 0;
+            await foreach (var value in doubled.WithCancellation(ct))
+            {
+                sum += value;
+            }
+
+            return sum;
+        }).WithRetry(0);
+
+        await harness.StartAsync(ct);
+
+        var parent = await harness.Client.TriggerAsync("PipelineCancelOwner", cancellationToken: ct);
+        var children = await WaitForPipelineChildrenAsync(
+            harness,
+            parent.Id,
+            "PipelineCancelSource",
+            "PipelineCancelDouble",
+            ct);
+        var source = children.Source;
+        var downstream = children.Downstream;
+
+        await harness.Client.CancelAsync(downstream.Id, ct);
+
+        var parentFinal = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunAsync(parent.Id, ct),
+            run => run?.Status == JobStatus.Canceled,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the pipeline owner to be Canceled.",
+            ct);
+        Assert.Contains(downstream.Id, parentFinal.Reason, StringComparison.Ordinal);
+
+        await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunAsync(source.Id, ct),
+            run => run?.Status == JobStatus.Canceled,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the upstream producer to be Canceled.",
+            ct);
+
+        static async IAsyncEnumerable<int> DoubleStream(IAsyncEnumerable<int> values,
+            [EnumeratorCancellation] CancellationToken ct)
+        {
+            await foreach (var value in values.WithCancellation(ct))
+            {
+                yield return value * 2;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task OwnedStreamingPipeline_DownstreamFailure_FailsParentAndCancelsUpstreamProducer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+            options.MaxNodeConcurrency = 4;
+        });
+
+        harness.Host.AddJob("PipelineFailSource", (CancellationToken ct) => ProduceSlowInfiniteRange(ct));
+        harness.Host.AddJob("PipelineFailDownstream", FailStream).WithRetry(0);
+        harness.Host.AddJob("PipelineFailOwner", async (IJobClient client, CancellationToken ct) =>
+        {
+            var values = client.StreamAsync<int>("PipelineFailSource", cancellationToken: ct);
+            var failed = client.StreamAsync<int>("PipelineFailDownstream", new { values }, cancellationToken: ct);
+            var sum = 0;
+            await foreach (var value in failed.WithCancellation(ct))
+            {
+                sum += value;
+            }
+
+            return sum;
+        }).WithRetry(0);
+
+        await harness.StartAsync(ct);
+
+        var parent = await harness.Client.TriggerAsync("PipelineFailOwner", cancellationToken: ct);
+        var children = await WaitForPipelineChildrenAsync(
+            harness,
+            parent.Id,
+            "PipelineFailSource",
+            "PipelineFailDownstream",
+            ct);
+        var source = children.Source;
+        var downstream = children.Downstream;
+
+        await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunAsync(downstream.Id, ct),
+            run => run?.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the downstream stage to fail.",
+            ct);
+
+        await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunAsync(parent.Id, ct),
+            run => run?.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the pipeline owner to fail.",
+            ct);
+
+        var sourceFinal = await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunAsync(source.Id, ct),
+            run => run?.Status == JobStatus.Canceled,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the upstream producer to be Canceled.",
+            ct);
+        Assert.Equal($"Canceled because parent run '{parent.Id}' failed.", sourceFinal.Reason);
+
+        static async IAsyncEnumerable<int> FailStream(IAsyncEnumerable<int> values,
+            [EnumeratorCancellation] CancellationToken ct)
+        {
+            await foreach (var value in values.WithCancellation(ct))
+            {
+                if (value > 0)
+                {
+                    throw new InvalidOperationException("downstream failed");
+                }
+
+                yield return value;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task OwnedFireAndForgetChildren_ParentDeadLetter_CancelsChildren()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var observedCanceledChildren = new ConcurrentBag<string>();
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMinutes(1);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+            options.RetentionPeriod = null;
+            options.MaxNodeConcurrency = 4;
+        }, services =>
+        {
+            services.AddSingleton<FaultInjectingNotificationProvider>();
+            services.AddSingleton<INotificationProvider>(sp => sp.GetRequiredService<FaultInjectingNotificationProvider>());
+        });
+
+        harness.Host.AddJob("DeadLetterOwnedSlowChild", async (JobContext context, CancellationToken ct) =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                return 1;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                observedCanceledChildren.Add(context.RunId);
+                throw;
+            }
+        });
+        harness.Host.AddJob("DeadLetterOwner", async (IJobClient client, JobContext context, CancellationToken ct) =>
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                await client.TriggerAsync("DeadLetterOwnedSlowChild", cancellationToken: ct);
+            }
+
+            await TestWait.PollUntilConditionAsync(
+                async _ =>
+                {
+                    var runs = new List<JobRun>();
+                    await foreach (var run in client.GetRunsAsync(
+                                       new() { ParentRunId = context.RunId, JobName = "DeadLetterOwnedSlowChild" },
+                                       ct))
+                    {
+                        runs.Add(run);
+                    }
+
+                    return runs.Count == 3 && runs.All(r => r.Status == JobStatus.Running);
+                },
+                TimeSpan.FromSeconds(10),
+                TimeSpan.FromMilliseconds(25),
+                "Timed out waiting for children to be running before the owner failed.",
+                ct);
+
+            throw new InvalidOperationException("owner failed after starting children");
+        }).WithRetry(0);
+
+        await harness.StartAsync(ct);
+
+        var parent = await harness.Client.TriggerAsync("DeadLetterOwner", cancellationToken: ct);
+        harness.Provider.GetRequiredService<FaultInjectingNotificationProvider>().ThrowRunTerminatedFor(parent.Id);
+
+        await TestWait.PollUntilAsync(
+            async _ => await harness.Store.GetRunAsync(parent.Id, ct),
+            run => run?.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the owner to dead-letter.",
+            ct);
+
+        var children = await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { ParentRunId = parent.Id, JobName = "DeadLetterOwnedSlowChild" },
+                    0,
+                    10,
+                    ct);
+                return page.Items;
+            },
+            runs => runs.Count == 3 && runs.All(r => r.Status == JobStatus.Canceled),
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for dead-lettered owner children to be Canceled.",
+            ct);
+
+        Assert.All(children, child =>
+        {
+            Assert.Equal(parent.Id, child.ParentRunId);
+            Assert.Equal($"Canceled because parent run '{parent.Id}' failed.", child.Reason);
+        });
+
+        await TestWait.PollUntilConditionAsync(
+            _ => Task.FromResult(observedCanceledChildren.Count == 3),
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for running children to observe cancellation.",
+            ct);
+    }
+
+    [Fact]
     public async Task StreamBindableParameter_MissingArgument_FailsFastWithoutDeclaredInput()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -1925,7 +2248,7 @@ public sealed class RuntimeWorkersTests
             options.RetentionPeriod = null;
         });
 
-        harness.Host.AddJob("SumSourceCancelledStream", async (IAsyncEnumerable<int> values, CancellationToken ct) =>
+        harness.Host.AddJob("SumSourceCanceledStream", async (IAsyncEnumerable<int> values, CancellationToken ct) =>
         {
             var sum = 0;
             await foreach (var value in values.WithCancellation(ct))
@@ -1938,9 +2261,9 @@ public sealed class RuntimeWorkersTests
 
         await harness.StartAsync(ct);
 
-        var run = await harness.Client.TriggerAsync("SumSourceCancelledStream", new
+        var run = await harness.Client.TriggerAsync("SumSourceCanceledStream", new
         {
-            values = SourceCancelledStream()
+            values = SourceCanceledStream()
         }, cancellationToken: ct);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -1950,7 +2273,7 @@ public sealed class RuntimeWorkersTests
         Assert.True(run.IsFailure);
         Assert.NotEqual(JobStatus.Succeeded, run.Status);
 
-        static async IAsyncEnumerable<int> SourceCancelledStream()
+        static async IAsyncEnumerable<int> SourceCanceledStream()
         {
             yield return 1;
             await Task.Yield();
@@ -2187,6 +2510,136 @@ public sealed class RuntimeWorkersTests
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Delay(delayMs, cancellationToken);
             yield return i;
+        }
+    }
+
+    private static async IAsyncEnumerable<int> ProduceSlowInfiniteRange(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var value = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.Delay(100, cancellationToken);
+            yield return Interlocked.Increment(ref value);
+        }
+    }
+
+    private static async Task<PipelineChildren> WaitForPipelineChildrenAsync(
+        RuntimeHarness harness,
+        string parentRunId,
+        string sourceJobName,
+        string downstreamJobName,
+        CancellationToken cancellationToken)
+    {
+        return await TestWait.PollUntilAsync(
+            async _ =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { ParentRunId = parentRunId },
+                    0,
+                    10,
+                    cancellationToken);
+                var source = page.Items.SingleOrDefault(r => r.JobName == sourceJobName);
+                var downstream = page.Items.SingleOrDefault(r => r.JobName == downstreamJobName);
+                return source is { } && downstream is { }
+                    ? new PipelineChildren(source, downstream)
+                    : null;
+            },
+            children => children is { },
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the pipeline owner to create source and downstream children.",
+            cancellationToken);
+    }
+
+    private sealed record PipelineChildren(JobRun Source, JobRun Downstream);
+
+    private sealed class FaultInjectingNotificationProvider : INotificationProvider
+    {
+        private readonly Lock _lock = new();
+        private readonly Dictionary<string, Dictionary<Guid, Func<string?, Task>>> _subscriptions = new();
+        private string? _throwRunTerminatedForRunId;
+
+        public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public void ThrowRunTerminatedFor(string runId) => _throwRunTerminatedForRunId = runId;
+
+        public Task PublishAsync(string channel, string? message = null, CancellationToken cancellationToken = default)
+        {
+            NotificationChannels.ValidateChannel(channel);
+            if (channel.EndsWith(":cancel", StringComparison.Ordinal))
+            {
+                return Task.CompletedTask;
+            }
+
+            if (_throwRunTerminatedForRunId is { } throwRunId
+                && message == throwRunId
+                && channel == NotificationChannels.RunTerminated(throwRunId))
+            {
+                throw new InvalidOperationException("Injected parent terminal notification failure.");
+            }
+
+            Func<string?, Task>[] handlers;
+            lock (_lock)
+            {
+                if (!_subscriptions.TryGetValue(channel, out var subscribers))
+                {
+                    return Task.CompletedTask;
+                }
+
+                handlers = [.. subscribers.Values];
+            }
+
+            return handlers.Length == 0
+                ? Task.CompletedTask
+                : Task.WhenAll(handlers.Select(handler => handler(message)));
+        }
+
+        public Task<IAsyncDisposable> SubscribeAsync(string channel, Func<string?, Task> handler,
+            CancellationToken cancellationToken = default)
+        {
+            NotificationChannels.ValidateChannel(channel);
+            var id = Guid.CreateVersion7();
+            lock (_lock)
+            {
+                if (!_subscriptions.TryGetValue(channel, out var subscribers))
+                {
+                    subscribers = new();
+                    _subscriptions[channel] = subscribers;
+                }
+
+                subscribers[id] = handler;
+            }
+
+            return Task.FromResult<IAsyncDisposable>(new Subscription(this, channel, id));
+        }
+
+        private void Remove(string channel, Guid id)
+        {
+            lock (_lock)
+            {
+                if (!_subscriptions.TryGetValue(channel, out var subscribers))
+                {
+                    return;
+                }
+
+                subscribers.Remove(id);
+                if (subscribers.Count == 0)
+                {
+                    _subscriptions.Remove(channel);
+                }
+            }
+        }
+
+        private sealed class Subscription(FaultInjectingNotificationProvider provider, string channel, Guid id)
+            : IAsyncDisposable
+        {
+            public ValueTask DisposeAsync()
+            {
+                provider.Remove(channel, id);
+                return ValueTask.CompletedTask;
+            }
         }
     }
 

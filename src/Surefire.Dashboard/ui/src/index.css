@@ -14,6 +14,8 @@
   "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
   monospace;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.125rem;
   --text-sm: 0.9375rem;
   --text-sm--line-height: 1.375rem;
 }
@@ -98,7 +100,7 @@
   --status-succeeded: oklch(0.52 0.14 155);
   --status-pending: oklch(0.55 0.13 85);
   --status-running: oklch(0.50 0.14 237);
-  --status-cancelled: oklch(0.50 0.04 260);
+  --status-canceled: oklch(0.50 0.04 260);
   --status-failed: var(--destructive);
   --sidebar: oklch(0.975 0.004 250);
   --sidebar-foreground: oklch(0.18 0.014 250);
@@ -137,7 +139,7 @@
   --status-succeeded: oklch(0.77 0.18 155);
   --status-pending: oklch(0.80 0.17 85);
   --status-running: oklch(0.73 0.17 240);
-  --status-cancelled: oklch(0.65 0.05 264);
+  --status-canceled: oklch(0.65 0.05 264);
   --status-failed: var(--destructive);
   --sidebar: oklch(0.11 0.014 260);
   --sidebar-foreground: oklch(0.985 0.005 250);
@@ -193,7 +195,7 @@
   --color-status-succeeded: var(--status-succeeded);
   --color-status-pending: var(--status-pending);
   --color-status-running: var(--status-running);
-  --color-status-cancelled: var(--status-cancelled);
+  --color-status-canceled: var(--status-canceled);
   --color-status-failed: var(--status-failed);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);

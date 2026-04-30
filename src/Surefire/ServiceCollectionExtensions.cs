@@ -50,6 +50,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<INotificationProvider, InMemoryNotificationProvider>();
         services.TryAddSingleton<IJobClient, JobClient>();
         services.TryAddSingleton<BatchCompletionHandler>();
+        services.TryAddSingleton<RunCancellationCoordinator>();
         // Not registered as IHostedService: lifecycle is owned by SurefireExecutorService so
         // drain is strictly ordered around active runs. Hosted-service registration would race
         // under HostOptions.ServicesStopConcurrently = true and risk lost enqueues at shutdown.

@@ -95,7 +95,7 @@ var mixed = await client.RunBatchAsync(new[]
 });
 ```
 
-`RunBatchAsync<T>` waits for every child to terminate, then returns the results in commit order. If any child failed or was cancelled, it throws `AggregateException` at the end.
+`RunBatchAsync<T>` waits for every child to terminate, then returns the results in commit order. If any child failed or was canceled, it throws `AggregateException` at the end.
 
 To consume results as each child finishes instead of waiting for the whole batch, use `StreamBatchAsync<T>`:
 

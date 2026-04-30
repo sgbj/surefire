@@ -93,11 +93,11 @@ public sealed record JobRun
     /// <summary>Gets the time the run started executing.</summary>
     public DateTimeOffset? StartedAt { get; init; }
 
-    /// <summary>Gets the time the run completed, failed, or was cancelled.</summary>
+    /// <summary>Gets the time the run completed, failed, or was canceled.</summary>
     public DateTimeOffset? CompletedAt { get; init; }
 
-    /// <summary>Gets the time the run was cancelled.</summary>
-    public DateTimeOffset? CancelledAt { get; init; }
+    /// <summary>Gets the time the run was canceled.</summary>
+    public DateTimeOffset? CanceledAt { get; init; }
 
     /// <summary>Gets the time of the last heartbeat from the node executing this run.</summary>
     public DateTimeOffset? LastHeartbeatAt { get; init; }
@@ -117,7 +117,7 @@ public sealed record JobRun
     [JsonIgnore]
     public bool IsFailure => Status == JobStatus.Failed;
 
-    /// <summary>Gets whether the run was cancelled.</summary>
+    /// <summary>Gets whether the run was canceled.</summary>
     [JsonIgnore]
-    public bool IsCancelled => Status == JobStatus.Cancelled;
+    public bool IsCanceled => Status == JobStatus.Canceled;
 }

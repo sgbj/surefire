@@ -38,7 +38,7 @@ public sealed class JobContext
     public required string JobName { get; init; }
 
     /// <summary>
-    ///     Gets the cancellation token that is triggered when the run is cancelled or the node is shutting down.
+    ///     Gets the cancellation token that is triggered when the run is Canceled or the node is shutting down.
     /// </summary>
     public required CancellationToken CancellationToken { get; init; }
 

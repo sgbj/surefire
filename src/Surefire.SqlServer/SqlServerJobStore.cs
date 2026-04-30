@@ -98,7 +98,7 @@ internal sealed class SqlServerJobStore(
                                       created_at DATETIMEOFFSET NOT NULL,
                                       started_at DATETIMEOFFSET,
                                       completed_at DATETIMEOFFSET,
-                                      cancelled_at DATETIMEOFFSET,
+                                      canceled_at DATETIMEOFFSET,
                                       node_name NVARCHAR(450),
                                       attempt INT NOT NULL DEFAULT 0,
                                       trace_id NVARCHAR(450),
@@ -186,7 +186,7 @@ internal sealed class SqlServerJobStore(
                                       total INT NOT NULL DEFAULT 0,
                                       succeeded INT NOT NULL DEFAULT 0,
                                       failed INT NOT NULL DEFAULT 0,
-                                      cancelled INT NOT NULL DEFAULT 0,
+                                      canceled INT NOT NULL DEFAULT 0,
                                       created_at DATETIMEOFFSET NOT NULL,
                                       completed_at DATETIMEOFFSET
                                   );
@@ -789,7 +789,7 @@ internal sealed class SqlServerJobStore(
                               node_name = @node_name,
                               started_at = COALESCE(@started_at, started_at),
                               completed_at = COALESCE(@completed_at, completed_at),
-                              cancelled_at = COALESCE(@cancelled_at, cancelled_at),
+                              canceled_at = COALESCE(@canceled_at, canceled_at),
                               reason = @reason,
                               result = @result,
                               progress = @progress,
@@ -831,8 +831,8 @@ internal sealed class SqlServerJobStore(
             transition.StartedAt.HasValue ? transition.StartedAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@completed_at",
             transition.CompletedAt.HasValue ? transition.CompletedAt.Value : DBNull.Value));
-        cmd.Parameters.Add(CreateParameter("@cancelled_at",
-            transition.CancelledAt.HasValue ? transition.CancelledAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@canceled_at",
+            transition.CanceledAt.HasValue ? transition.CanceledAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@reason", (object?)transition.Reason ?? DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@result", (object?)transition.Result ?? DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@progress", transition.Progress));
@@ -858,7 +858,7 @@ internal sealed class SqlServerJobStore(
 
         BatchCompletionInfo? batchCompletion = null;
         var newStatus = transition.NewStatus;
-        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Cancelled ||
+        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Canceled ||
                         newStatus == JobStatus.Failed))
         {
             await using var batchIdCmd = CreateCommand(conn);
@@ -876,8 +876,8 @@ internal sealed class SqlServerJobStore(
                                       UPDATE dbo.surefire_batches
                                       SET succeeded = succeeded + CASE WHEN @status = 2 THEN 1 ELSE 0 END,
                                           failed    = failed    + CASE WHEN @status = 5 THEN 1 ELSE 0 END,
-                                          cancelled = cancelled + CASE WHEN @status = 4 THEN 1 ELSE 0 END
-                                      OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                          Canceled = Canceled + CASE WHEN @status = 4 THEN 1 ELSE 0 END
+                                      OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
                                       WHERE id = @id AND status NOT IN (2, 4, 5)
                                       """;
                 incrCmd.Parameters.Add(CreateParameter("@id", batchId));
@@ -889,12 +889,12 @@ internal sealed class SqlServerJobStore(
                     var total = reader.GetInt32(0);
                     var succeeded = reader.GetInt32(1);
                     var failed = reader.GetInt32(2);
-                    var cancelled = reader.GetInt32(3);
+                    var Canceled = reader.GetInt32(3);
 
-                    if (succeeded + failed + cancelled >= total)
+                    if (succeeded + failed + Canceled >= total)
                     {
                         var batchStatus = failed > 0 ? JobStatus.Failed
-                            : cancelled > 0 ? JobStatus.Cancelled
+                            : Canceled > 0 ? JobStatus.Canceled
                             : JobStatus.Succeeded;
                         var completedAt = timeProvider.GetUtcNow();
 
@@ -937,7 +937,7 @@ internal sealed class SqlServerJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Capture prior status in OUTPUT (via DELETED) so the follow-up counter UPDATEs only
-        // decrement when the row was Running. Pending-to-Cancelled is a no-op for counters.
+        // decrement when the row was Running. Pending-to-Canceled is a no-op for counters.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
 
@@ -951,7 +951,7 @@ internal sealed class SqlServerJobStore(
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
-                              cancelled_at = @now,
+                              canceled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
                           OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status, INSERTED.job_name
@@ -959,7 +959,7 @@ internal sealed class SqlServerJobStore(
                           WHERE id = @id AND status NOT IN (2, 4, 5)
                               AND (@expected_attempt IS NULL OR attempt = @expected_attempt);
 
-                          -- non_terminal_count always decrements (we only cancelled non-terminal rows);
+                          -- non_terminal_count always decrements (we only Canceled non-terminal rows);
                           -- running_count decrements only when prior was Running. Single UPDATE on
                           -- surefire_jobs to avoid a second lock acquisition on the same row.
                           UPDATE dbo.surefire_jobs SET
@@ -1004,7 +1004,7 @@ internal sealed class SqlServerJobStore(
         }
 
         var allEvents = new List<RunEvent>();
-        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Cancelled, timeProvider.GetUtcNow()));
+        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Canceled, timeProvider.GetUtcNow()));
         if (events is { Count: > 0 })
         {
             allEvents.AddRange(events);
@@ -1019,8 +1019,8 @@ internal sealed class SqlServerJobStore(
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE dbo.surefire_batches
-                                  SET cancelled = cancelled + 1
-                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  SET canceled = canceled + 1
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
                                   """;
             incrCmd.Parameters.Add(CreateParameter("@id", batchId));
@@ -1031,12 +1031,12 @@ internal sealed class SqlServerJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1089,15 +1089,15 @@ internal sealed class SqlServerJobStore(
         await using var batchCmd = CreateCommand(conn);
         batchCmd.Transaction = tx;
         batchCmd.CommandText = """
-                               INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, cancelled, created_at, completed_at)
-                               VALUES (@id, @status, @total, @succeeded, @failed, @cancelled, @created_at, @completed_at)
+                               INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, canceled, created_at, completed_at)
+                               VALUES (@id, @status, @total, @succeeded, @failed, @Canceled, @created_at, @completed_at)
                                """;
         batchCmd.Parameters.Add(CreateParameter("@id", batch.Id));
         batchCmd.Parameters.Add(CreateParameter("@status", (short)batch.Status));
         batchCmd.Parameters.Add(CreateParameter("@total", batch.Total));
         batchCmd.Parameters.Add(CreateParameter("@succeeded", batch.Succeeded));
         batchCmd.Parameters.Add(CreateParameter("@failed", batch.Failed));
-        batchCmd.Parameters.Add(CreateParameter("@cancelled", batch.Cancelled));
+        batchCmd.Parameters.Add(CreateParameter("@Canceled", batch.Canceled));
         batchCmd.Parameters.Add(CreateParameter("@created_at", batch.CreatedAt));
         batchCmd.Parameters.Add(CreateParameter("@completed_at",
             batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value));
@@ -1114,7 +1114,7 @@ internal sealed class SqlServerJobStore(
             sb.Append("""
                       INSERT INTO dbo.surefire_runs (
                           id, job_name, status, arguments, result, reason, progress,
-                          created_at, started_at, completed_at, cancelled_at, node_name,
+                          created_at, started_at, completed_at, canceled_at, node_name,
                           attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                           rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                           last_heartbeat_at, batch_id
@@ -1135,7 +1135,7 @@ internal sealed class SqlServerJobStore(
                 sb.Append($"""
                            (
                                {p}id, {p}job_name, {p}status, {p}arguments, {p}result, {p}reason, {p}progress,
-                               {p}created_at, {p}started_at, {p}completed_at, {p}cancelled_at, {p}node_name,
+                               {p}created_at, {p}started_at, {p}completed_at, {p}canceled_at, {p}node_name,
                                {p}attempt, {p}trace_id, {p}span_id, {p}parent_trace_id, {p}parent_span_id, {p}parent_run_id, {p}root_run_id,
                                {p}rerun_of_run_id, {p}not_before, {p}not_after, {p}priority, {p}deduplication_id,
                                {p}last_heartbeat_at, {p}batch_id
@@ -1238,7 +1238,7 @@ internal sealed class SqlServerJobStore(
         // same transaction so capacity stays consistent for the next claimer.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          DECLARE @cancelled TABLE (
+                          DECLARE @Canceled TABLE (
                               id NVARCHAR(450) NOT NULL,
                               attempt INT NOT NULL,
                               prior_status INT NOT NULL,
@@ -1247,11 +1247,11 @@ internal sealed class SqlServerJobStore(
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
-                              cancelled_at = @now,
+                              canceled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
                           OUTPUT INSERTED.id, INSERTED.attempt, DELETED.status, INSERTED.job_name
-                              INTO @cancelled(id, attempt, prior_status, job_name)
+                              INTO @Canceled(id, attempt, prior_status, job_name)
                           WHERE batch_id = @batch_id AND status IN (0, 1);
 
                           -- Per-job aggregates in one pass: running_count decrements by rows whose
@@ -1267,7 +1267,7 @@ internal sealed class SqlServerJobStore(
                               SELECT job_name,
                                   SUM(CASE WHEN prior_status = 1 THEN 1 ELSE 0 END) AS running_cnt,
                                   COUNT(*) AS nt_cnt
-                              FROM @cancelled GROUP BY job_name
+                              FROM @Canceled GROUP BY job_name
                           ) ag ON ag.job_name = dbo.surefire_jobs.name;
 
                           UPDATE dbo.surefire_queues SET running_count =
@@ -1278,46 +1278,46 @@ internal sealed class SqlServerJobStore(
                           FROM dbo.surefire_queues
                           INNER JOIN (
                               SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
-                              FROM @cancelled c INNER JOIN dbo.surefire_jobs j ON j.name = c.job_name
+                              FROM @Canceled c INNER JOIN dbo.surefire_jobs j ON j.name = c.job_name
                               WHERE c.prior_status = 1
                               GROUP BY ISNULL(j.queue, 'default')
                           ) rq ON rq.queue_name = dbo.surefire_queues.name;
 
-                          SELECT id, attempt FROM @cancelled;
+                          SELECT id, attempt FROM @Canceled;
                           """;
         cmd.Parameters.Add(CreateParameter("@batch_id", batchId));
         cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
 
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
+                CanceledIds.Add(runId);
                 statusEvents.Add(RunStatusEvents.Create(
                     runId,
                     reader.GetInt32(1),
-                    JobStatus.Cancelled,
+                    JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        if (cancelledIds.Count > 0)
+        if (CanceledIds.Count > 0)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE dbo.surefire_batches
-                                  SET cancelled = cancelled + @cnt
-                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  SET canceled = canceled + @cnt
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
                                   """;
             incrCmd.Parameters.Add(CreateParameter("@id", batchId));
-            incrCmd.Parameters.Add(CreateParameter("@cnt", cancelledIds.Count));
+            incrCmd.Parameters.Add(CreateParameter("@cnt", CanceledIds.Count));
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
 
             if (await batchReader.ReadAsync(cancellationToken))
@@ -1325,12 +1325,12 @@ internal sealed class SqlServerJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1352,7 +1352,7 @@ internal sealed class SqlServerJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
@@ -1370,7 +1370,7 @@ internal sealed class SqlServerJobStore(
         // the rows that were Running before the cancel. Mirrors CancelBatchRunsAsync.
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          DECLARE @cancelled TABLE (
+                          DECLARE @Canceled TABLE (
                               id NVARCHAR(450) NOT NULL,
                               attempt INT NOT NULL,
                               batch_id NVARCHAR(450),
@@ -1380,11 +1380,11 @@ internal sealed class SqlServerJobStore(
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
-                              cancelled_at = @now,
+                              canceled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
                           OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status, INSERTED.job_name
-                              INTO @cancelled(id, attempt, batch_id, prior_status, job_name)
+                              INTO @Canceled(id, attempt, batch_id, prior_status, job_name)
                           WHERE parent_run_id = @parent_run_id AND status IN (0, 1);
 
                           -- Per-job aggregates in one pass: running_count decrements by rows whose
@@ -1400,7 +1400,7 @@ internal sealed class SqlServerJobStore(
                               SELECT job_name,
                                   SUM(CASE WHEN prior_status = 1 THEN 1 ELSE 0 END) AS running_cnt,
                                   COUNT(*) AS nt_cnt
-                              FROM @cancelled GROUP BY job_name
+                              FROM @Canceled GROUP BY job_name
                           ) ag ON ag.job_name = dbo.surefire_jobs.name;
 
                           UPDATE dbo.surefire_queues SET running_count =
@@ -1411,48 +1411,48 @@ internal sealed class SqlServerJobStore(
                           FROM dbo.surefire_queues
                           INNER JOIN (
                               SELECT ISNULL(j.queue, 'default') AS queue_name, COUNT(*) AS cnt
-                              FROM @cancelled c INNER JOIN dbo.surefire_jobs j ON j.name = c.job_name
+                              FROM @Canceled c INNER JOIN dbo.surefire_jobs j ON j.name = c.job_name
                               WHERE c.prior_status = 1
                               GROUP BY ISNULL(j.queue, 'default')
                           ) rq ON rq.queue_name = dbo.surefire_queues.name;
 
-                          SELECT id, attempt, batch_id FROM @cancelled;
+                          SELECT id, attempt, batch_id FROM @Canceled;
                           """;
         cmd.Parameters.Add(CreateParameter("@parent_run_id", parentRunId));
         cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
 
-        var cancelledIds = new List<string>();
-        var cancelledBatchIds = new Dictionary<string, int>();
+        var CanceledIds = new List<string>();
+        var CanceledBatchIds = new Dictionary<string, int>();
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
+                CanceledIds.Add(runId);
                 statusEvents.Add(RunStatusEvents.Create(
                     runId,
                     reader.GetInt32(1),
-                    JobStatus.Cancelled,
+                    JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        foreach (var (batchId, cnt) in cancelledBatchIds)
+        foreach (var (batchId, cnt) in CanceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE dbo.surefire_batches
-                                  SET cancelled = cancelled + @cnt
-                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  SET canceled = canceled + @cnt
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
                                   """;
             incrCmd.Parameters.Add(CreateParameter("@id", batchId));
@@ -1464,12 +1464,12 @@ internal sealed class SqlServerJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1491,7 +1491,7 @@ internal sealed class SqlServerJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
@@ -1999,22 +1999,22 @@ internal sealed class SqlServerJobStore(
         cmd.Transaction = tx;
         cmd.CommandText = """
                           DECLARE @now DATETIMEOFFSET(7) = TODATETIMEOFFSET(SYSUTCDATETIME(), 0);
-                          DECLARE @cancelled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL,
+                          DECLARE @Canceled TABLE (id NVARCHAR(450) NOT NULL, attempt INT NOT NULL,
                               batch_id NVARCHAR(450), job_name NVARCHAR(450) NOT NULL);
 
                           UPDATE dbo.surefire_runs SET
                               status = 4,
-                              cancelled_at = @now,
+                              canceled_at = @now,
                               completed_at = @now,
                               reason = @reason
                           OUTPUT inserted.id, inserted.attempt, inserted.batch_id, inserted.job_name
-                              INTO @cancelled(id, attempt, batch_id, job_name)
+                              INTO @Canceled(id, attempt, batch_id, job_name)
                           WHERE status = 0
                               AND not_after IS NOT NULL
                               AND not_after < @now;
 
                           -- Only pending rows are affected (status = 0), so running_count is untouched;
-                          -- non_terminal_count decrements once per cancelled row, grouped by job_name.
+                          -- non_terminal_count decrements once per Canceled row, grouped by job_name.
                           UPDATE dbo.surefire_jobs SET non_terminal_count =
                               CASE WHEN dbo.surefire_jobs.non_terminal_count > nj.cnt
                                    THEN dbo.surefire_jobs.non_terminal_count - nj.cnt
@@ -2022,42 +2022,42 @@ internal sealed class SqlServerJobStore(
                               END
                           FROM dbo.surefire_jobs
                           INNER JOIN (
-                              SELECT job_name, COUNT(*) AS cnt FROM @cancelled GROUP BY job_name
+                              SELECT job_name, COUNT(*) AS cnt FROM @Canceled GROUP BY job_name
                           ) nj ON nj.job_name = dbo.surefire_jobs.name;
 
-                          SELECT id, attempt, batch_id FROM @cancelled;
+                          SELECT id, attempt, batch_id FROM @Canceled;
                           """;
         cmd.Parameters.Add(CreateParameter("@reason", "Run expired past NotAfter deadline."));
 
-        var cancelledIds = new List<string>();
-        var cancelledBatchIds = new Dictionary<string, int>();
+        var CanceledIds = new List<string>();
+        var CanceledBatchIds = new Dictionary<string, int>();
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
-                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Cancelled,
+                CanceledIds.Add(runId);
+                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        foreach (var (batchId, cnt) in cancelledBatchIds)
+        foreach (var (batchId, cnt) in CanceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE dbo.surefire_batches
-                                  SET cancelled = cancelled + @cnt
-                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.cancelled
+                                  SET canceled = canceled + @cnt
+                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
                                   """;
             incrCmd.Parameters.Add(CreateParameter("@id", batchId));
@@ -2069,12 +2069,12 @@ internal sealed class SqlServerJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -2096,7 +2096,7 @@ internal sealed class SqlServerJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -2340,7 +2340,7 @@ internal sealed class SqlServerJobStore(
                                    ISNULL(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) AS pending,
                                    ISNULL(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), 0) AS running,
                                    ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS succeeded,
-                                   ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS cancelled,
+                                   ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS canceled,
                                    ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS failed
                                FROM dbo.surefire_runs
                                WHERE created_at >= @since AND created_at <= @now
@@ -2362,7 +2362,7 @@ internal sealed class SqlServerJobStore(
                 var pending = reader.GetInt32(reader.GetOrdinal("pending"));
                 var running = reader.GetInt32(reader.GetOrdinal("running"));
                 var succeeded = reader.GetInt32(reader.GetOrdinal("succeeded"));
-                var cancelled = reader.GetInt32(reader.GetOrdinal("cancelled"));
+                var Canceled = reader.GetInt32(reader.GetOrdinal("canceled"));
                 var failed = reader.GetInt32(reader.GetOrdinal("failed"));
 
                 activeRuns = pending + running;
@@ -2382,9 +2382,9 @@ internal sealed class SqlServerJobStore(
                     runsByStatus["Succeeded"] = succeeded;
                 }
 
-                if (cancelled > 0)
+                if (Canceled > 0)
                 {
-                    runsByStatus["Cancelled"] = cancelled;
+                    runsByStatus["Canceled"] = Canceled;
                 }
 
                 if (failed > 0)
@@ -2392,7 +2392,7 @@ internal sealed class SqlServerJobStore(
                     runsByStatus["Failed"] = failed;
                 }
 
-                var terminalCount = succeeded + cancelled + failed;
+                var terminalCount = succeeded + Canceled + failed;
                 successRate = terminalCount > 0 ? succeeded / (double)terminalCount : 0.0;
             }
         }
@@ -2404,7 +2404,7 @@ internal sealed class SqlServerJobStore(
                                      SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS pending,
                                      SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS running,
                                      SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
-                                     SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS cancelled,
+                                     SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS canceled,
                                      SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed
                                 FROM dbo.surefire_runs
                                 WHERE created_at >= @since AND created_at <= @now
@@ -2427,7 +2427,7 @@ internal sealed class SqlServerJobStore(
                     Pending = reader.GetInt32(1),
                     Running = reader.GetInt32(2),
                     Succeeded = reader.GetInt32(3),
-                    Cancelled = reader.GetInt32(4),
+                    Canceled = reader.GetInt32(4),
                     Failed = reader.GetInt32(5)
                 };
             }
@@ -2800,7 +2800,7 @@ internal sealed class SqlServerJobStore(
                            INNER JOIN rl_increments i ON i.rl_name = dbo.surefire_rate_limits.name;
 
                            SELECT r.id, r.job_name, r.status, r.arguments, r.result, r.reason, r.progress,
-                                  r.created_at, r.started_at, r.completed_at, r.cancelled_at, r.node_name, r.attempt,
+                                  r.created_at, r.started_at, r.completed_at, r.canceled_at, r.node_name, r.attempt,
                                   r.trace_id, r.span_id, r.parent_trace_id, r.parent_span_id, r.parent_run_id,
                                   r.root_run_id, r.rerun_of_run_id, r.not_before, r.not_after, r.priority,
                                   r.deduplication_id, r.last_heartbeat_at, r.batch_id
@@ -2862,7 +2862,7 @@ internal sealed class SqlServerJobStore(
             sb.Append("""
                       INSERT INTO dbo.surefire_runs (
                           id, job_name, status, arguments, result, reason, progress,
-                          created_at, started_at, completed_at, cancelled_at, node_name,
+                          created_at, started_at, completed_at, canceled_at, node_name,
                           attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                           rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                           last_heartbeat_at, batch_id
@@ -2883,7 +2883,7 @@ internal sealed class SqlServerJobStore(
                 sb.Append($"""
                            (
                                {p}id, {p}job_name, {p}status, {p}arguments, {p}result, {p}reason, {p}progress,
-                               {p}created_at, {p}started_at, {p}completed_at, {p}cancelled_at, {p}node_name,
+                               {p}created_at, {p}started_at, {p}completed_at, {p}canceled_at, {p}node_name,
                                {p}attempt, {p}trace_id, {p}span_id, {p}parent_trace_id, {p}parent_span_id, {p}parent_run_id, {p}root_run_id,
                                {p}rerun_of_run_id, {p}not_before, {p}not_after, {p}priority, {p}deduplication_id,
                                {p}last_heartbeat_at, {p}batch_id
@@ -2980,14 +2980,14 @@ internal sealed class SqlServerJobStore(
             cmd.CommandText = """
                               INSERT INTO dbo.surefire_runs (
                                   id, job_name, status, arguments, result, reason, progress,
-                                  created_at, started_at, completed_at, cancelled_at, node_name,
+                                  created_at, started_at, completed_at, canceled_at, node_name,
                                   attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                   rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                                   last_heartbeat_at, batch_id
                               )
                               SELECT
                                   @id, @job_name, @status, @arguments, @result, @reason, @progress,
-                                  @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
+                                  @created_at, @started_at, @completed_at, @canceled_at, @node_name,
                                   @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                   @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
                                   @last_heartbeat_at, @batch_id
@@ -3000,14 +3000,14 @@ internal sealed class SqlServerJobStore(
             cmd.CommandText = $"""
                                INSERT INTO dbo.surefire_runs (
                                    id, job_name, status, arguments, result, reason, progress,
-                                   created_at, started_at, completed_at, cancelled_at, node_name,
+                                   created_at, started_at, completed_at, canceled_at, node_name,
                                    attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                    rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                                    last_heartbeat_at, batch_id
                                )
                                SELECT
                                    @id, @job_name, @status, @arguments, @result, @reason, @progress,
-                                   @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
+                                   @created_at, @started_at, @completed_at, @canceled_at, @node_name,
                                    @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                    @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
                                    @last_heartbeat_at, @batch_id
@@ -3186,8 +3186,8 @@ internal sealed class SqlServerJobStore(
             run.StartedAt.HasValue ? run.StartedAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter($"{prefix}completed_at",
             run.CompletedAt.HasValue ? run.CompletedAt.Value : DBNull.Value));
-        cmd.Parameters.Add(CreateParameter($"{prefix}cancelled_at",
-            run.CancelledAt.HasValue ? run.CancelledAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter($"{prefix}canceled_at",
+            run.CanceledAt.HasValue ? run.CanceledAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter($"{prefix}node_name", (object?)run.NodeName ?? DBNull.Value));
         cmd.Parameters.Add(CreateParameter($"{prefix}attempt", run.Attempt));
         cmd.Parameters.Add(CreateParameter($"{prefix}trace_id", (object?)run.TraceId ?? DBNull.Value));
@@ -3228,9 +3228,9 @@ internal sealed class SqlServerJobStore(
         CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at"))
             ? null
             : reader.GetDateTimeOffset(reader.GetOrdinal("completed_at")),
-        CancelledAt = reader.IsDBNull(reader.GetOrdinal("cancelled_at"))
+        CanceledAt = reader.IsDBNull(reader.GetOrdinal("canceled_at"))
             ? null
-            : reader.GetDateTimeOffset(reader.GetOrdinal("cancelled_at")),
+            : reader.GetDateTimeOffset(reader.GetOrdinal("canceled_at")),
         NodeName = reader.IsDBNull(reader.GetOrdinal("node_name"))
             ? null
             : reader.GetString(reader.GetOrdinal("node_name")),
@@ -3274,7 +3274,7 @@ internal sealed class SqlServerJobStore(
         Total = reader.GetInt32(reader.GetOrdinal("total")),
         Succeeded = reader.GetInt32(reader.GetOrdinal("succeeded")),
         Failed = reader.GetInt32(reader.GetOrdinal("failed")),
-        Cancelled = reader.GetOrdinal("cancelled") is var cCol && !reader.IsDBNull(cCol) ? reader.GetInt32(cCol) : 0,
+        Canceled = reader.GetOrdinal("canceled") is var cCol && !reader.IsDBNull(cCol) ? reader.GetInt32(cCol) : 0,
         CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at")),
         CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at"))
             ? null

@@ -17,11 +17,15 @@ internal sealed partial class JobClient(
     IJobStore store,
     INotificationProvider notifications,
     BatchedEventWriter eventWriter,
+    RunCancellationCoordinator runCancellation,
     TimeProvider timeProvider,
     SurefireOptions options,
     ILogger<JobClient> logger) : IJobClient
 {
     private const int BatchFetchWindowSize = 64;
+    private const int CancellationTraversalPageSize = 100;
+    private const string ClientCancellationReason = "Canceled by client request.";
+    private const string OwnedOperationCancellationReason = "Canceled because the owning operation was canceled.";
     private static readonly TimeSpan BatchFetchWindowDelay = TimeSpan.FromMilliseconds(10);
 
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inputPumpTokens =
@@ -112,20 +116,25 @@ internal sealed partial class JobClient(
             throw new RunNotFoundException(runId);
         }
 
-        await CancelRunAndDescendantsAsync(runId, new HashSet<string>(StringComparer.Ordinal), cancellationToken);
+        await runCancellation.CancelRunAndDescendantsAsync(runId, ClientCancellationReason, cancellationToken);
     }
 
     public async Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default)
+        => await CancelBatchAsync(batchId, ClientCancellationReason, cancellationToken);
+
+    private async Task CancelBatchAsync(string batchId, string reason, CancellationToken cancellationToken)
     {
-        var cancelledRunIds = await store.CancelBatchRunsAsync(batchId, "Cancelled by client request.",
-            cancellationToken);
-        foreach (var runId in cancelledRunIds.Distinct(StringComparer.Ordinal))
+        var CanceledRunIds = await store.CancelBatchRunsAsync(batchId, reason, cancellationToken);
+        foreach (var runId in CanceledRunIds.Distinct(StringComparer.Ordinal))
         {
-            await PublishCancellationNotificationsAsync(runId, cancellationToken);
+            await runCancellation.PublishCancellationNotificationsAsync(runId, cancellationToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId, cancellationToken);
         }
 
-        if (cancelledRunIds.Count == 0)
+        await CancelBatchRunDescendantsAsync(batchId, reason, new HashSet<string>(StringComparer.Ordinal),
+            cancellationToken);
+
+        if (CanceledRunIds.Count == 0)
         {
             return;
         }
@@ -136,12 +145,46 @@ internal sealed partial class JobClient(
             return;
         }
 
-        var batchStatus = batch.Failed > 0 ? JobStatus.Failed : JobStatus.Cancelled;
+        var batchStatus = batch.Failed > 0 ? JobStatus.Failed : JobStatus.Canceled;
         var completedAt = timeProvider.GetUtcNow();
         if (await store.TryCompleteBatchAsync(batchId, batchStatus, completedAt, cancellationToken))
         {
             await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId,
                 cancellationToken);
+        }
+    }
+
+    private async Task CancelBatchRunDescendantsAsync(string batchId, string reason, ISet<string> visited,
+        CancellationToken cancellationToken)
+    {
+        var skip = 0;
+        while (true)
+        {
+            var page = await store.GetRunsAsync(
+                new() { BatchId = batchId },
+                skip,
+                CancellationTraversalPageSize,
+                cancellationToken);
+            if (page.Items.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var run in page.Items)
+            {
+                await runCancellation.CancelRunAndDescendantsAsync(
+                    run.Id,
+                    reason,
+                    visited,
+                    cancellationToken,
+                    cancelSelf: false);
+            }
+
+            skip += page.Items.Count;
+            if (skip >= page.TotalCount)
+            {
+                return;
+            }
         }
     }
 
@@ -565,25 +608,29 @@ internal sealed partial class JobClient(
     {
         await using var enumerator = WaitEachAsync<T>(batchId, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
-        while (true)
+        var completed = false;
+        try
         {
-            T item;
-            try
+            while (true)
             {
+                T item;
                 if (!await enumerator.MoveNextAsync())
                 {
+                    completed = true;
                     yield break;
                 }
 
                 item = enumerator.Current;
+
+                yield return item;
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        }
+        finally
+        {
+            if (!completed)
             {
                 await TryCancelOwnedBatchAsync(batchId);
-                throw;
             }
-
-            yield return item;
         }
     }
 
@@ -592,7 +639,7 @@ internal sealed partial class JobClient(
         var failures = new List<Exception>();
         await foreach (var child in WaitEachAsync(batchId, cancellationToken))
         {
-            if (child.Status is JobStatus.Failed or JobStatus.Cancelled)
+            if (child.Status is JobStatus.Failed or JobStatus.Canceled)
             {
                 failures.Add(await BuildJobRunExceptionAsync(child, cancellationToken));
             }
@@ -824,7 +871,7 @@ internal sealed partial class JobClient(
         var run = await store.GetRunAsync(runId, cancellationToken)
                   ?? throw new RunNotFoundException(runId);
 
-        if (run.Status is JobStatus.Failed or JobStatus.Cancelled)
+        if (run.Status is JobStatus.Failed or JobStatus.Canceled)
         {
             throw await BuildJobRunExceptionAsync(run, cancellationToken);
         }
@@ -1283,7 +1330,7 @@ internal sealed partial class JobClient(
                         {
                             child.CompleteNotFound();
                         }
-                        else if (snapshot.Status is JobStatus.Failed or JobStatus.Cancelled)
+                        else if (snapshot.Status is JobStatus.Failed or JobStatus.Canceled)
                         {
                             // Enrich with AttemptFailure detail when available, but fall back to
                             // a minimal exception on a store hiccup so iteration still faults cleanly.
@@ -1373,32 +1420,36 @@ internal sealed partial class JobClient(
     {
         await using var enumerator = StreamRunHydratedAsync<TItem>(runId, ownerCancellationToken)
             .GetAsyncEnumerator(ownerCancellationToken);
+        var completed = false;
 
-        while (true)
+        try
         {
-            TItem item;
-            try
+            while (true)
             {
+                TItem item;
                 if (!await enumerator.MoveNextAsync())
                 {
+                    completed = true;
                     yield break;
                 }
 
                 item = enumerator.Current;
+
+                yield return item;
             }
-            catch (OperationCanceledException) when (ownerCancellationToken.IsCancellationRequested)
+        }
+        finally
+        {
+            if (!completed)
             {
                 await TryCancelOwnedRunAsync(runId);
-                throw;
             }
-
-            yield return item;
         }
     }
 
     private async Task ThrowIfNonSuccessTerminalAsync(JobRun run, CancellationToken cancellationToken)
     {
-        if (run.Status is JobStatus.Failed or JobStatus.Cancelled)
+        if (run.Status is JobStatus.Failed or JobStatus.Canceled)
         {
             throw await BuildJobRunExceptionAsync(run, cancellationToken);
         }
@@ -1518,55 +1569,6 @@ internal sealed partial class JobClient(
         }
 
         return explicitPriority ?? job?.Priority;
-    }
-
-    private async Task CancelRunAndDescendantsAsync(string runId, ISet<string> visited,
-        CancellationToken cancellationToken)
-    {
-        if (!visited.Add(runId))
-        {
-            return;
-        }
-
-        var result = await store.TryCancelRunAsync(runId, reason: "Cancelled by client request.",
-            cancellationToken: cancellationToken);
-        if (result.Transitioned)
-        {
-            await PublishCancellationNotificationsAsync(runId, cancellationToken);
-            if (result.BatchCompletion is { } bc)
-            {
-                await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
-                    cancellationToken);
-            }
-        }
-
-        var cancelledChildIds = await store.CancelChildRunsAsync(runId, "Cancelled by client request.",
-            cancellationToken);
-        foreach (var childId in cancelledChildIds)
-        {
-            await PublishCancellationNotificationsAsync(childId, cancellationToken);
-
-            // Recurse to handle nested batch coordinators.
-            await CancelRunAndDescendantsAsync(childId, visited, cancellationToken);
-        }
-    }
-
-    private async Task PublishCancellationNotificationsAsync(string runId, CancellationToken cancellationToken)
-    {
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
-        {
-            return;
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
-        if (run.Status.IsTerminal)
-        {
-            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
     }
 
     private async Task<IReadOnlyList<RunEvent>> BuildClonedRunScopedInputEventsAsync(string sourceRunId,
@@ -1862,7 +1864,8 @@ internal sealed partial class JobClient(
         using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
-            await CancelAsync(runId, cleanupCts.Token);
+            await runCancellation.CancelRunAndDescendantsAsync(runId, OwnedOperationCancellationReason,
+                cleanupCts.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
@@ -1875,7 +1878,7 @@ internal sealed partial class JobClient(
         using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
-            await CancelBatchAsync(batchId, cleanupCts.Token);
+            await CancelBatchAsync(batchId, OwnedOperationCancellationReason, cleanupCts.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {

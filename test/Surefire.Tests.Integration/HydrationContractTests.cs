@@ -28,7 +28,7 @@ public sealed class HydrationContractTests
     private static int ThrowBoom() => throw new InvalidOperationException("boom");
 
     [Fact]
-    public async Task WaitAsync_NonGeneric_OnCancelledRun_ReturnsRunWithoutThrowing()
+    public async Task WaitAsync_NonGeneric_OnCanceledRun_ReturnsRunWithoutThrowing()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync();
@@ -45,7 +45,7 @@ public sealed class HydrationContractTests
         await harness.Client.CancelAsync(run.Id, ct);
 
         var final = await harness.Client.WaitAsync(run.Id, ct);
-        Assert.Equal(JobStatus.Cancelled, final.Status);
+        Assert.Equal(JobStatus.Canceled, final.Status);
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public sealed class HydrationContractTests
     }
 
     [Fact]
-    public async Task WaitAsyncT_OnCancelledRun_ThrowsJobRunExceptionWithCancelledStatus()
+    public async Task WaitAsyncT_OnCanceledRun_ThrowsJobRunExceptionWithCanceledStatus()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var harness = await CreateHarnessAsync();
@@ -112,7 +112,7 @@ public sealed class HydrationContractTests
         await harness.Client.CancelAsync(run.Id, ct);
 
         var ex = await Assert.ThrowsAsync<JobRunException>(() => harness.Client.WaitAsync<int>(run.Id, ct));
-        Assert.Equal(JobStatus.Cancelled, ex.Status);
+        Assert.Equal(JobStatus.Canceled, ex.Status);
     }
 
     [Fact]
@@ -472,7 +472,7 @@ public sealed class HydrationContractTests
         while (DateTimeOffset.UtcNow < deadline)
         {
             final = await harness.Client.GetRunAsync(runsInStore[0].Id, ct);
-            if (final is { Status: JobStatus.Cancelled })
+            if (final is { Status: JobStatus.Canceled })
             {
                 break;
             }
@@ -481,7 +481,7 @@ public sealed class HydrationContractTests
         }
 
         Assert.NotNull(final);
-        Assert.Equal(JobStatus.Cancelled, final.Status);
+        Assert.Equal(JobStatus.Canceled, final.Status);
     }
 
     [Fact]

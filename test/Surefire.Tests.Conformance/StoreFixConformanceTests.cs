@@ -303,7 +303,7 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         var pending1 = CreateRun(jobName) with { NotAfter = past };
         await Store.CreateRunsAsync([pending1], cancellationToken: ct);
 
-        // Running run with expired NotAfter; should NOT be cancelled.
+        // Running run with expired NotAfter; should NOT be Canceled.
         var running = CreateRun(jobName, JobStatus.Running) with
         {
             NotAfter = past,
@@ -314,15 +314,15 @@ public abstract class StoreFixConformanceTests : StoreConformanceBase
         };
         await Store.CreateRunsAsync([running], cancellationToken: ct);
 
-        // Another expired Pending run; should be cancelled.
+        // Another expired Pending run; should be Canceled.
         var pending2 = CreateRun(jobName) with
         {
             NotAfter = past
         };
         await Store.CreateRunsAsync([pending2], cancellationToken: ct);
 
-        var cancelled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
-        Assert.Equal(2, cancelled);
+        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
+        Assert.Equal(2, Canceled);
 
         var loaded = await Store.GetRunAsync(running.Id, ct);
         Assert.Equal(JobStatus.Running, loaded!.Status);

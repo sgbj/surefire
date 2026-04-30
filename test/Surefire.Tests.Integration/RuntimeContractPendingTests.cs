@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Surefire.Tests.Testing;
 using Xunit.Sdk;
@@ -8,6 +9,25 @@ namespace Surefire.Tests.Integration;
 
 public sealed class RuntimeContractPendingTests
 {
+    private static JobClient CreateClient(
+        IJobStore store,
+        INotificationProvider notifications,
+        BatchedEventWriter eventWriter,
+        TimeProvider timeProvider,
+        SurefireOptions options,
+        ILogger<JobClient> logger)
+    {
+        var activeRuns = new ActiveRunTracker();
+        return new(
+            store,
+            notifications,
+            eventWriter,
+            new(store, notifications, activeRuns),
+            timeProvider,
+            options,
+            logger);
+    }
+
     [Fact]
     public async Task TriggerAsync_DoesNotApplyJobMaxConcurrencyAtCreateTime()
     {
@@ -15,7 +35,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -50,7 +70,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -146,7 +166,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -216,7 +236,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -281,7 +301,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -315,7 +335,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -350,7 +370,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -412,7 +432,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -496,7 +516,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -582,7 +602,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -660,7 +680,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(25) },
             NullLogger<JobClient>.Instance);
 
@@ -727,7 +747,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -827,7 +847,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromMilliseconds(10) },
             NullLogger<JobClient>.Instance);
 
@@ -892,7 +912,7 @@ public sealed class RuntimeContractPendingTests
         var store = new InMemoryJobStore(TimeProvider.System);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, TimeProvider.System,
+        var client = CreateClient(store, notifications, eventWriter, TimeProvider.System,
             new() { PollingInterval = TimeSpan.FromSeconds(30) }, // intentionally large
             NullLogger<JobClient>.Instance);
 

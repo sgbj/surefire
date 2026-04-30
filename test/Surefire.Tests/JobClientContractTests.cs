@@ -8,6 +8,25 @@ namespace Surefire.Tests;
 
 public sealed class JobClientContractTests
 {
+    private static JobClient CreateClient(
+        IJobStore store,
+        INotificationProvider notifications,
+        BatchedEventWriter eventWriter,
+        TimeProvider timeProvider,
+        SurefireOptions options,
+        ILogger<JobClient> logger)
+    {
+        var activeRuns = new ActiveRunTracker();
+        return new(
+            store,
+            notifications,
+            eventWriter,
+            new(store, notifications, activeRuns),
+            timeProvider,
+            options,
+            logger);
+    }
+
     [Fact]
     public async Task TriggerAsync_UsesJobPriority_WhenRunPriorityNotProvided()
     {
@@ -17,7 +36,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "PriorityDefault_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName, Priority = 17 }], ct);
@@ -40,7 +59,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "PriorityOverride_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName, Priority = 3 }], ct);
@@ -65,7 +84,7 @@ public sealed class JobClientContractTests
         var store = new InMemoryJobStore(time);
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
-        var client = new JobClient(store, notifications, eventWriter, time, new(),
+        var client = CreateClient(store, notifications, eventWriter, time, new(),
             new CollectingLogger<JobClient>());
 
         var jobName = "BatchPerItemOptions_" + Guid.CreateVersion7().ToString("N");
@@ -99,7 +118,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "UnknownJob_" + Guid.CreateVersion7().ToString("N");
 
@@ -122,7 +141,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "ConflictType_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName }], ct);
@@ -142,7 +161,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -171,20 +190,20 @@ public sealed class JobClientContractTests
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runTask);
 
-        var cancelledRun = await TestWait.PollUntilAsync(
+        var CanceledRun = await TestWait.PollUntilAsync(
             async pollCt =>
             {
                 var runs = await store.GetRunsAsync(new() { JobName = jobName }, 0, 5, pollCt);
                 return runs.Items.SingleOrDefault();
             },
-            run => run.Status == JobStatus.Cancelled,
+            run => run.Status == JobStatus.Canceled,
             TimeSpan.FromSeconds(3),
             TimeSpan.FromMilliseconds(20),
             "Expected RunAsync cancellation to cancel the owned run.",
             ct);
 
-        Assert.NotNull(cancelledRun.CompletedAt);
-        Assert.NotNull(cancelledRun.CancelledAt);
+        Assert.NotNull(CanceledRun.CompletedAt);
+        Assert.NotNull(CanceledRun.CanceledAt);
     }
 
     [Fact]
@@ -196,7 +215,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -216,11 +235,11 @@ public sealed class JobClientContractTests
         var run = await store.GetRunAsync(runId, ct);
         Assert.NotNull(run);
         Assert.Equal(JobStatus.Pending, run.Status);
-        Assert.Null(run.CancelledAt);
+        Assert.Null(run.CanceledAt);
     }
 
     [Fact]
-    public async Task WaitAsync_RunCancelledViaBatch_CompletesWithoutPollingDelay()
+    public async Task WaitAsync_RunCanceledViaBatch_CompletesWithoutPollingDelay()
     {
         var ct = TestContext.Current.CancellationToken;
         var time = CreateTime();
@@ -228,7 +247,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -248,8 +267,8 @@ public sealed class JobClientContractTests
 
         await client.CancelBatchAsync(batch.Id, cts.Token);
 
-        var cancelled = await waitTask;
-        Assert.Equal(JobStatus.Cancelled, cancelled.Status);
+        var Canceled = await waitTask;
+        Assert.Equal(JobStatus.Canceled, Canceled.Status);
     }
 
     [Fact]
@@ -261,7 +280,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -331,7 +350,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -392,7 +411,7 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
-    public async Task ObserveRunEventsAsync_WaitsForCancelledRun()
+    public async Task ObserveRunEventsAsync_WaitsForCanceledRun()
     {
         var ct = TestContext.Current.CancellationToken;
         var time = CreateTime();
@@ -400,7 +419,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -408,7 +427,7 @@ public sealed class JobClientContractTests
             new() { PollingInterval = TimeSpan.FromMilliseconds(20) },
             logger);
 
-        var jobName = "ObserveCancelled_" + Guid.CreateVersion7().ToString("N");
+        var jobName = "ObserveCanceled_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
 
         var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
@@ -436,7 +455,7 @@ public sealed class JobClientContractTests
 
         var finalRun = await client.GetRunAsync(runId, ct);
         Assert.NotNull(finalRun);
-        Assert.Equal(JobStatus.Cancelled, finalRun.Status);
+        Assert.Equal(JobStatus.Canceled, finalRun.Status);
 
         var statusEvents =
             await store.GetEventsAsync(runId, 0, [RunEventType.Status], claimed.Attempt, cancellationToken: ct);
@@ -452,7 +471,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -477,7 +496,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -520,7 +539,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -603,7 +622,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -679,7 +698,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -764,7 +783,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -843,7 +862,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -902,7 +921,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -1006,7 +1025,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -1099,7 +1118,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -1214,7 +1233,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -1305,7 +1324,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -1362,7 +1381,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(
+        var client = CreateClient(
             store,
             notifications,
             eventWriter,
@@ -1400,7 +1419,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "RunIdsBatch_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName }], ct);
@@ -1423,7 +1442,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "RunIdsBatchGet_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName }], ct);
@@ -1446,7 +1465,7 @@ public sealed class JobClientContractTests
         var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
         await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
         var logger = new CollectingLogger<JobClient>();
-        var client = new JobClient(store, notifications, eventWriter, time, new(), logger);
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
 
         var jobName = "ArrayResult_" + Guid.CreateVersion7().ToString("N");
         await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);

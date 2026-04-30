@@ -83,7 +83,7 @@ internal sealed class PostgreSqlJobStore(
                                   created_at TIMESTAMPTZ NOT NULL,
                                   started_at TIMESTAMPTZ,
                                   completed_at TIMESTAMPTZ,
-                                  cancelled_at TIMESTAMPTZ,
+                                  canceled_at TIMESTAMPTZ,
                                   node_name TEXT,
                                   attempt INT NOT NULL DEFAULT 0,
                                   trace_id TEXT,
@@ -154,7 +154,7 @@ internal sealed class PostgreSqlJobStore(
                                   total INT NOT NULL DEFAULT 0,
                                   succeeded INT NOT NULL DEFAULT 0,
                                   failed INT NOT NULL DEFAULT 0,
-                                  cancelled INT NOT NULL DEFAULT 0,
+                                  canceled INT NOT NULL DEFAULT 0,
                                   created_at TIMESTAMPTZ NOT NULL,
                                   completed_at TIMESTAMPTZ
                               );
@@ -682,7 +682,7 @@ internal sealed class PostgreSqlJobStore(
         // one UPDATE because PG forbids two DML CTEs targeting the same row.
         var decrementRunning = transition.ExpectedStatus == JobStatus.Running;
         var decrementNonTerminal = transition.NewStatus is JobStatus.Succeeded or JobStatus.Failed
-            or JobStatus.Cancelled;
+            or JobStatus.Canceled;
 
         var sb = new StringBuilder();
         sb.Append("""
@@ -692,7 +692,7 @@ internal sealed class PostgreSqlJobStore(
                           node_name = @node_name,
                           started_at = COALESCE(@started_at, started_at),
                           completed_at = COALESCE(@completed_at, completed_at),
-                          cancelled_at = COALESCE(@cancelled_at, cancelled_at),
+                          canceled_at = COALESCE(@canceled_at, canceled_at),
                           reason = @reason,
                           result = @result,
                           progress = @progress,
@@ -751,8 +751,8 @@ internal sealed class PostgreSqlJobStore(
             transition.StartedAt.HasValue ? transition.StartedAt.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("completed_at",
             transition.CompletedAt.HasValue ? transition.CompletedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("cancelled_at",
-            transition.CancelledAt.HasValue ? transition.CancelledAt.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("canceled_at",
+            transition.CanceledAt.HasValue ? transition.CanceledAt.Value : DBNull.Value);
         cmd.Parameters.AddWithValue("reason", (object?)transition.Reason ?? DBNull.Value);
         cmd.Parameters.AddWithValue("result", (object?)transition.Result ?? DBNull.Value);
         cmd.Parameters.AddWithValue("progress", transition.Progress);
@@ -778,7 +778,7 @@ internal sealed class PostgreSqlJobStore(
 
         BatchCompletionInfo? batchCompletion = null;
         var newStatus = transition.NewStatus;
-        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Cancelled ||
+        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Canceled ||
                         newStatus == JobStatus.Failed))
         {
             await using var batchIdCmd = CreateCommand(conn);
@@ -796,9 +796,9 @@ internal sealed class PostgreSqlJobStore(
                                       UPDATE surefire_batches
                                       SET succeeded = succeeded + CASE WHEN @status = 2 THEN 1 ELSE 0 END,
                                           failed    = failed    + CASE WHEN @status = 5 THEN 1 ELSE 0 END,
-                                          cancelled = cancelled + CASE WHEN @status = 4 THEN 1 ELSE 0 END
+                                          Canceled = Canceled + CASE WHEN @status = 4 THEN 1 ELSE 0 END
                                       WHERE id = @id AND status NOT IN (2, 4, 5)
-                                      RETURNING total, succeeded, failed, cancelled
+                                      RETURNING total, succeeded, failed, canceled
                                       """;
                 incrCmd.Parameters.AddWithValue("id", batchId);
                 incrCmd.Parameters.AddWithValue("status", (int)newStatus);
@@ -809,12 +809,12 @@ internal sealed class PostgreSqlJobStore(
                     var total = reader.GetInt32(0);
                     var succeeded = reader.GetInt32(1);
                     var failed = reader.GetInt32(2);
-                    var cancelled = reader.GetInt32(3);
+                    var Canceled = reader.GetInt32(3);
 
-                    if (succeeded + failed + cancelled >= total)
+                    if (succeeded + failed + Canceled >= total)
                     {
                         var batchStatus = failed > 0 ? JobStatus.Failed
-                            : cancelled > 0 ? JobStatus.Cancelled
+                            : Canceled > 0 ? JobStatus.Canceled
                             : JobStatus.Succeeded;
                         var completedAt = timeProvider.GetUtcNow();
 
@@ -888,7 +888,7 @@ internal sealed class PostgreSqlJobStore(
                           ),
                           upd AS (
                               UPDATE surefire_runs SET
-                                  status = 4, cancelled_at = NOW(), completed_at = NOW(),
+                                  status = 4, canceled_at = NOW(), completed_at = NOW(),
                                   reason = COALESCE(@reason, surefire_runs.reason)
                               FROM prior
                               WHERE surefire_runs.id = prior.id
@@ -941,7 +941,7 @@ internal sealed class PostgreSqlJobStore(
         }
 
         var allEvents = new List<RunEvent>();
-        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Cancelled, timeProvider.GetUtcNow()));
+        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Canceled, timeProvider.GetUtcNow()));
         if (events is { Count: > 0 })
         {
             allEvents.AddRange(events);
@@ -956,10 +956,10 @@ internal sealed class PostgreSqlJobStore(
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE surefire_batches
-                                  SET cancelled = cancelled + 1
+                                  SET canceled = canceled + 1
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, cancelled
-                                  """;
+                                  RETURNING total, succeeded, failed, canceled
+                              """;
             incrCmd.Parameters.AddWithValue("id", batchId);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
 
@@ -968,12 +968,12 @@ internal sealed class PostgreSqlJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1023,15 +1023,15 @@ internal sealed class PostgreSqlJobStore(
         await using var batchCmd = CreateCommand(conn);
         batchCmd.Transaction = tx;
         batchCmd.CommandText = """
-                               INSERT INTO surefire_batches (id, status, total, succeeded, failed, cancelled, created_at, completed_at)
-                               VALUES (@id, @status, @total, @succeeded, @failed, @cancelled, @created_at, @completed_at)
+                               INSERT INTO surefire_batches (id, status, total, succeeded, failed, canceled, created_at, completed_at)
+                               VALUES (@id, @status, @total, @succeeded, @failed, @Canceled, @created_at, @completed_at)
                                """;
         batchCmd.Parameters.AddWithValue("id", batch.Id);
         batchCmd.Parameters.AddWithValue("status", (short)batch.Status);
         batchCmd.Parameters.AddWithValue("total", batch.Total);
         batchCmd.Parameters.AddWithValue("succeeded", batch.Succeeded);
         batchCmd.Parameters.AddWithValue("failed", batch.Failed);
-        batchCmd.Parameters.AddWithValue("cancelled", batch.Cancelled);
+        batchCmd.Parameters.AddWithValue("Canceled", batch.Canceled);
         batchCmd.Parameters.AddWithValue("created_at", batch.CreatedAt);
         batchCmd.Parameters.AddWithValue("completed_at",
             batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value);
@@ -1097,7 +1097,7 @@ internal sealed class PostgreSqlJobStore(
                           upd AS (
                               UPDATE surefire_runs SET
                                   status = 4,
-                                  cancelled_at = NOW(),
+                                  canceled_at = NOW(),
                                   completed_at = NOW(),
                                   reason = COALESCE(@reason, surefire_runs.reason)
                               FROM prior
@@ -1110,7 +1110,7 @@ internal sealed class PostgreSqlJobStore(
                               WHERE u.prior_status = 1
                               GROUP BY COALESCE(j.queue, 'default')
                           ),
-                          -- Per-job aggregates: non_terminal_count decrements by total cancelled
+                          -- Per-job aggregates: non_terminal_count decrements by total Canceled
                           -- count regardless of prior status, running_count decrements only for
                           -- rows whose prior status was Running. Merged into a single UPDATE
                           -- against surefire_jobs per the Postgres "one row per statement" rule.
@@ -1137,36 +1137,36 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.AddWithValue("batch_id", batchId);
         cmd.Parameters.AddWithValue("reason", (object?)reason ?? DBNull.Value);
 
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
+                CanceledIds.Add(runId);
                 statusEvents.Add(RunStatusEvents.Create(
                     runId,
                     reader.GetInt32(1),
-                    JobStatus.Cancelled,
+                    JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        if (cancelledIds.Count > 0)
+        if (CanceledIds.Count > 0)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE surefire_batches
-                                  SET cancelled = cancelled + @cnt
+                                  SET canceled = canceled + @cnt
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, cancelled
-                                  """;
+                                  RETURNING total, succeeded, failed, canceled
+                              """;
             incrCmd.Parameters.AddWithValue("id", batchId);
-            incrCmd.Parameters.AddWithValue("cnt", cancelledIds.Count);
+            incrCmd.Parameters.AddWithValue("cnt", CanceledIds.Count);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
 
             if (await batchReader.ReadAsync(cancellationToken))
@@ -1174,12 +1174,12 @@ internal sealed class PostgreSqlJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1201,7 +1201,7 @@ internal sealed class PostgreSqlJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
@@ -1210,6 +1210,49 @@ internal sealed class PostgreSqlJobStore(
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        // Pre-lock config rows in canonical order (jobs, then queues) before locking child
+        // run rows. Claims lock jobs first and runs later; doing the inverse here can deadlock
+        // when retry cleanup races a worker claiming a pending child.
+        await using (var lockJobCmd = CreateCommand(conn))
+        {
+            lockJobCmd.Transaction = tx;
+            lockJobCmd.CommandText = """
+                                     WITH affected_jobs AS (
+                                         SELECT DISTINCT job_name
+                                         FROM surefire_runs
+                                         WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
+                                     )
+                                     SELECT j.name
+                                     FROM surefire_jobs j
+                                     JOIN affected_jobs aj ON aj.job_name = j.name
+                                     ORDER BY j.name
+                                     FOR UPDATE OF j
+                                     """;
+            lockJobCmd.Parameters.AddWithValue("parent_run_id", parentRunId);
+            await lockJobCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var lockQueueCmd = CreateCommand(conn))
+        {
+            lockQueueCmd.Transaction = tx;
+            lockQueueCmd.CommandText = """
+                                       WITH affected_queues AS (
+                                           SELECT DISTINCT COALESCE(j.queue, 'default') AS queue_name
+                                           FROM surefire_runs r
+                                           JOIN surefire_jobs j ON j.name = r.job_name
+                                           WHERE r.parent_run_id = @parent_run_id AND r.status IN (0, 1)
+                                       )
+                                       SELECT q.name
+                                       FROM surefire_queues q
+                                       JOIN affected_queues aq ON aq.queue_name = q.name
+                                       ORDER BY q.name
+                                       FOR UPDATE OF q
+                                       """;
+            lockQueueCmd.Parameters.AddWithValue("parent_run_id", parentRunId);
+            await lockQueueCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Capture prior status under U-lock so running_count only decrements for rows that
@@ -1219,12 +1262,13 @@ internal sealed class PostgreSqlJobStore(
                               SELECT id, status, attempt, batch_id, job_name
                               FROM surefire_runs
                               WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
+                              ORDER BY job_name, id
                               FOR UPDATE
                           ),
                           upd AS (
                               UPDATE surefire_runs SET
                                   status = 4,
-                                  cancelled_at = NOW(),
+                                  canceled_at = NOW(),
                                   completed_at = NOW(),
                                   reason = COALESCE(@reason, surefire_runs.reason)
                               FROM prior
@@ -1238,7 +1282,7 @@ internal sealed class PostgreSqlJobStore(
                               WHERE u.prior_status = 1
                               GROUP BY COALESCE(j.queue, 'default')
                           ),
-                          -- Per-job aggregates: non_terminal_count decrements by total cancelled
+                          -- Per-job aggregates: non_terminal_count decrements by total Canceled
                           -- count, running_count decrements only for Running priors. Merged into
                           -- one UPDATE per the Postgres "one row per statement" rule.
                           nt_by_job AS (
@@ -1264,40 +1308,40 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.AddWithValue("parent_run_id", parentRunId);
         cmd.Parameters.AddWithValue("reason", (object?)reason ?? DBNull.Value);
 
-        var cancelledIds = new List<string>();
-        var cancelledBatchIds = new Dictionary<string, int>();
+        var CanceledIds = new List<string>();
+        var CanceledBatchIds = new Dictionary<string, int>();
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
+                CanceledIds.Add(runId);
                 statusEvents.Add(RunStatusEvents.Create(
                     runId,
                     reader.GetInt32(1),
-                    JobStatus.Cancelled,
+                    JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        foreach (var (batchId, cnt) in cancelledBatchIds)
+        foreach (var (batchId, cnt) in CanceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE surefire_batches
-                                  SET cancelled = cancelled + @cnt
+                                  SET canceled = canceled + @cnt
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, cancelled
-                                  """;
+                                  RETURNING total, succeeded, failed, canceled
+                              """;
             incrCmd.Parameters.AddWithValue("id", batchId);
             incrCmd.Parameters.AddWithValue("cnt", cnt);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
@@ -1307,12 +1351,12 @@ internal sealed class PostgreSqlJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1334,7 +1378,7 @@ internal sealed class PostgreSqlJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
@@ -1752,12 +1796,12 @@ internal sealed class PostgreSqlJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Only pending rows are touched, so running_count is unaffected; non_terminal_count
-        // decrements once per cancelled row, grouped by job_name.
+        // decrements once per Canceled row, grouped by job_name.
         cmd.CommandText = """
                           WITH upd AS (
                               UPDATE surefire_runs SET
                                   status = 4,
-                                  cancelled_at = NOW(),
+                                  canceled_at = NOW(),
                                   completed_at = NOW(),
                                   reason = @reason
                               WHERE status = 0
@@ -1777,37 +1821,37 @@ internal sealed class PostgreSqlJobStore(
                           """;
         cmd.Parameters.AddWithValue("reason", "Run expired past NotAfter deadline.");
 
-        var cancelledIds = new List<string>();
-        var cancelledBatchIds = new Dictionary<string, int>();
+        var CanceledIds = new List<string>();
+        var CanceledBatchIds = new Dictionary<string, int>();
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
-                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Cancelled,
+                CanceledIds.Add(runId);
+                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        foreach (var (batchId, cnt) in cancelledBatchIds)
+        foreach (var (batchId, cnt) in CanceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
                                   UPDATE surefire_batches
-                                  SET cancelled = cancelled + @cnt
+                                  SET canceled = canceled + @cnt
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, cancelled
-                                  """;
+                                  RETURNING total, succeeded, failed, canceled
+                              """;
             incrCmd.Parameters.AddWithValue("id", batchId);
             incrCmd.Parameters.AddWithValue("cnt", cnt);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
@@ -1817,12 +1861,12 @@ internal sealed class PostgreSqlJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1844,7 +1888,7 @@ internal sealed class PostgreSqlJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1952,7 +1996,7 @@ internal sealed class PostgreSqlJobStore(
                                    COUNT(*) FILTER (WHERE status = 0) AS pending,
                                    COUNT(*) FILTER (WHERE status = 1) AS running,
                                    COUNT(*) FILTER (WHERE status = 2) AS succeeded,
-                                   COUNT(*) FILTER (WHERE status = 4) AS cancelled,
+                                   COUNT(*) FILTER (WHERE status = 4) AS canceled,
                                    COUNT(*) FILTER (WHERE status = 5) AS failed
                                FROM surefire_runs
                                WHERE created_at >= @since AND created_at <= @now
@@ -1961,7 +2005,7 @@ internal sealed class PostgreSqlJobStore(
         statsCmd.Parameters.AddWithValue("since", sinceTime);
 
         int totalJobs = 0, totalRuns = 0, nodeCount = 0;
-        int pending = 0, running = 0, completed = 0, cancelled = 0, deadLetter = 0;
+        int pending = 0, running = 0, completed = 0, Canceled = 0, deadLetter = 0;
         await using (var reader = await statsCmd.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
@@ -1972,7 +2016,7 @@ internal sealed class PostgreSqlJobStore(
                 pending = (int)reader.GetInt64(3);
                 running = (int)reader.GetInt64(4);
                 completed = (int)reader.GetInt64(5);
-                cancelled = (int)reader.GetInt64(6);
+                Canceled = (int)reader.GetInt64(6);
                 deadLetter = (int)reader.GetInt64(7);
             }
         }
@@ -1994,9 +2038,9 @@ internal sealed class PostgreSqlJobStore(
             runsByStatus["Succeeded"] = completed;
         }
 
-        if (cancelled > 0)
+        if (Canceled > 0)
         {
-            runsByStatus["Cancelled"] = cancelled;
+            runsByStatus["Canceled"] = Canceled;
         }
 
         if (deadLetter > 0)
@@ -2004,7 +2048,7 @@ internal sealed class PostgreSqlJobStore(
             runsByStatus["Failed"] = deadLetter;
         }
 
-        var terminalCount = completed + cancelled + deadLetter;
+        var terminalCount = completed + Canceled + deadLetter;
         var successRate = terminalCount > 0 ? completed / (double)terminalCount : 0.0;
 
         await using var bucketCmd = CreateCommand(conn);
@@ -2014,7 +2058,7 @@ internal sealed class PostgreSqlJobStore(
                                          CASE
                                             WHEN status = 1 THEN COALESCE(started_at, created_at)
                                             WHEN status = 2 THEN COALESCE(completed_at, started_at, created_at)
-                                            WHEN status = 4 THEN COALESCE(cancelled_at, completed_at, created_at)
+                                            WHEN status = 4 THEN COALESCE(canceled_at, completed_at, created_at)
                                             WHEN status = 5 THEN COALESCE(completed_at, started_at, created_at)
                                             ELSE created_at
                                          END AS bucket_time,
@@ -2026,7 +2070,7 @@ internal sealed class PostgreSqlJobStore(
                                      COUNT(*) FILTER (WHERE status = 0) AS pending,
                                      COUNT(*) FILTER (WHERE status = 1) AS running,
                                      COUNT(*) FILTER (WHERE status = 2) AS succeeded,
-                                     COUNT(*) FILTER (WHERE status = 4) AS cancelled,
+                                     COUNT(*) FILTER (WHERE status = 4) AS canceled,
                                      COUNT(*) FILTER (WHERE status = 5) AS failed
                                 FROM bucketed_runs
                                 WHERE bucket_time >= @since AND bucket_time <= @now
@@ -2049,7 +2093,7 @@ internal sealed class PostgreSqlJobStore(
                     Pending = (int)reader.GetInt64(1),
                     Running = (int)reader.GetInt64(2),
                     Succeeded = (int)reader.GetInt64(3),
-                    Cancelled = (int)reader.GetInt64(4),
+                    Canceled = (int)reader.GetInt64(4),
                     Failed = (int)reader.GetInt64(5)
                 };
             }
@@ -2437,7 +2481,7 @@ internal sealed class PostgreSqlJobStore(
                               RETURNING 1
                           )
                           SELECT id, job_name, status, arguments, result, reason, progress,
-                              created_at, started_at, completed_at, cancelled_at, node_name, attempt,
+                              created_at, started_at, completed_at, canceled_at, node_name, attempt,
                               trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id,
                               root_run_id, rerun_of_run_id, not_before, not_after, priority,
                               deduplication_id, last_heartbeat_at, batch_id
@@ -2529,7 +2573,7 @@ internal sealed class PostgreSqlJobStore(
         var createdAts = new DateTimeOffset[n];
         var startedAts = new DateTimeOffset?[n];
         var completedAts = new DateTimeOffset?[n];
-        var cancelledAts = new DateTimeOffset?[n];
+        var CanceledAts = new DateTimeOffset?[n];
         var nodeNames = new string?[n];
         var attempts = new int[n];
         var traceIds = new string?[n];
@@ -2559,7 +2603,7 @@ internal sealed class PostgreSqlJobStore(
             createdAts[i] = r.CreatedAt;
             startedAts[i] = r.StartedAt;
             completedAts[i] = r.CompletedAt;
-            cancelledAts[i] = r.CancelledAt;
+            CanceledAts[i] = r.CanceledAt;
             nodeNames[i] = r.NodeName;
             attempts[i] = r.Attempt;
             traceIds[i] = r.TraceId;
@@ -2583,27 +2627,27 @@ internal sealed class PostgreSqlJobStore(
         cmd.CommandText = """
                           INSERT INTO surefire_runs (
                               id, job_name, status, arguments, result, reason, progress,
-                              created_at, started_at, completed_at, cancelled_at, node_name,
+                              created_at, started_at, completed_at, canceled_at, node_name,
                               attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                               rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                               last_heartbeat_at, batch_id
                           )
                           SELECT
                               input.id, input.job_name, input.status, input.arguments, input.result, input.reason, input.progress,
-                              input.created_at, input.started_at, input.completed_at, input.cancelled_at, input.node_name,
+                              input.created_at, input.started_at, input.completed_at, input.canceled_at, input.node_name,
                               input.attempt, input.trace_id, input.span_id, input.parent_trace_id, input.parent_span_id,
                               input.parent_run_id, input.root_run_id, input.rerun_of_run_id, input.not_before, input.not_after,
                               input.priority, input.deduplication_id, input.last_heartbeat_at,
                               input.batch_id
                           FROM UNNEST(
                               @ids, @job_names, @statuses, @arguments, @results, @reasons, @progresses,
-                              @created_ats, @started_ats, @completed_ats, @cancelled_ats, @node_names,
+                              @created_ats, @started_ats, @completed_ats, @canceled_ats, @node_names,
                               @attempts, @trace_ids, @span_ids, @parent_trace_ids, @parent_span_ids, @parent_run_ids, @root_run_ids,
                               @rerun_of_run_ids, @not_befores, @not_afters, @priorities, @deduplication_ids,
                               @last_heartbeat_ats, @batch_ids
                           ) AS input(
                               id, job_name, status, arguments, result, reason, progress,
-                              created_at, started_at, completed_at, cancelled_at, node_name,
+                              created_at, started_at, completed_at, canceled_at, node_name,
                               attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                               rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                               last_heartbeat_at, batch_id
@@ -2620,7 +2664,7 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.AddWithValue("created_ats", createdAts);
         cmd.Parameters.AddWithValue("started_ats", startedAts);
         cmd.Parameters.AddWithValue("completed_ats", completedAts);
-        cmd.Parameters.AddWithValue("cancelled_ats", cancelledAts);
+        cmd.Parameters.AddWithValue("canceled_ats", CanceledAts);
         cmd.Parameters.AddWithValue("node_names", nodeNames);
         cmd.Parameters.AddWithValue("attempts", attempts);
         cmd.Parameters.AddWithValue("trace_ids", traceIds);
@@ -2718,13 +2762,13 @@ internal sealed class PostgreSqlJobStore(
             cmd.CommandText = """
                               INSERT INTO surefire_runs (
                                   id, job_name, status, arguments, result, reason, progress,
-                                  created_at, started_at, completed_at, cancelled_at, node_name,
+                                  created_at, started_at, completed_at, canceled_at, node_name,
                                   attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                   rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                                   last_heartbeat_at, batch_id
                               ) VALUES (
                                   @id, @job_name, @status, @arguments, @result, @reason, @progress,
-                                  @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
+                                  @created_at, @started_at, @completed_at, @canceled_at, @node_name,
                                   @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                   @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
                                   @last_heartbeat_at, @batch_id
@@ -2738,14 +2782,14 @@ internal sealed class PostgreSqlJobStore(
             cmd.CommandText = $"""
                                INSERT INTO surefire_runs (
                                    id, job_name, status, arguments, result, reason, progress,
-                                   created_at, started_at, completed_at, cancelled_at, node_name,
+                                   created_at, started_at, completed_at, canceled_at, node_name,
                                    attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                    rerun_of_run_id, not_before, not_after, priority, deduplication_id,
                                    last_heartbeat_at, batch_id
                                )
                                SELECT
                                    @id, @job_name, @status, @arguments, @result, @reason, @progress,
-                                   @created_at, @started_at, @completed_at, @cancelled_at, @node_name,
+                                   @created_at, @started_at, @completed_at, @canceled_at, @node_name,
                                    @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
                                    @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
                                    @last_heartbeat_at, @batch_id
@@ -2917,8 +2961,8 @@ internal sealed class PostgreSqlJobStore(
         cmd.Parameters.AddWithValue($"{prefix}started_at", run.StartedAt.HasValue ? run.StartedAt.Value : DBNull.Value);
         cmd.Parameters.AddWithValue($"{prefix}completed_at",
             run.CompletedAt.HasValue ? run.CompletedAt.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue($"{prefix}cancelled_at",
-            run.CancelledAt.HasValue ? run.CancelledAt.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue($"{prefix}canceled_at",
+            run.CanceledAt.HasValue ? run.CanceledAt.Value : DBNull.Value);
         cmd.Parameters.AddWithValue($"{prefix}node_name", (object?)run.NodeName ?? DBNull.Value);
         cmd.Parameters.AddWithValue($"{prefix}attempt", run.Attempt);
         cmd.Parameters.AddWithValue($"{prefix}trace_id", (object?)run.TraceId ?? DBNull.Value);
@@ -2957,9 +3001,9 @@ internal sealed class PostgreSqlJobStore(
             CompletedAt = reader.IsDBNull(ord.CompletedAt)
                 ? null
                 : reader.GetFieldValue<DateTimeOffset>(ord.CompletedAt),
-            CancelledAt = reader.IsDBNull(ord.CancelledAt)
+            CanceledAt = reader.IsDBNull(ord.CanceledAt)
                 ? null
-                : reader.GetFieldValue<DateTimeOffset>(ord.CancelledAt),
+                : reader.GetFieldValue<DateTimeOffset>(ord.CanceledAt),
             NodeName = reader.IsDBNull(ord.NodeName) ? null : reader.GetString(ord.NodeName),
             TraceId = reader.IsDBNull(ord.TraceId) ? null : reader.GetString(ord.TraceId),
             SpanId = reader.IsDBNull(ord.SpanId) ? null : reader.GetString(ord.SpanId),
@@ -2987,7 +3031,7 @@ internal sealed class PostgreSqlJobStore(
             Total = reader.GetInt32(ord.Total),
             Succeeded = reader.GetInt32(ord.Succeeded),
             Failed = reader.GetInt32(ord.Failed),
-            Cancelled = reader.IsDBNull(ord.Cancelled) ? 0 : reader.GetInt32(ord.Cancelled),
+            Canceled = reader.IsDBNull(ord.Canceled) ? 0 : reader.GetInt32(ord.Canceled),
             CreatedAt = reader.GetFieldValue<DateTimeOffset>(ord.CreatedAt),
             CompletedAt = reader.IsDBNull(ord.CompletedAt)
                 ? null
@@ -3104,7 +3148,7 @@ internal sealed class PostgreSqlJobStore(
         int Reason,
         int StartedAt,
         int CompletedAt,
-        int CancelledAt,
+        int CanceledAt,
         int NodeName,
         int TraceId,
         int SpanId,
@@ -3123,7 +3167,7 @@ internal sealed class PostgreSqlJobStore(
             r.GetOrdinal("progress"), r.GetOrdinal("created_at"), r.GetOrdinal("attempt"),
             r.GetOrdinal("not_before"), r.GetOrdinal("priority"),
             r.GetOrdinal("arguments"), r.GetOrdinal("result"), r.GetOrdinal("reason"),
-            r.GetOrdinal("started_at"), r.GetOrdinal("completed_at"), r.GetOrdinal("cancelled_at"),
+            r.GetOrdinal("started_at"), r.GetOrdinal("completed_at"), r.GetOrdinal("canceled_at"),
             r.GetOrdinal("node_name"), r.GetOrdinal("trace_id"), r.GetOrdinal("span_id"),
             r.GetOrdinal("parent_trace_id"), r.GetOrdinal("parent_span_id"),
             r.GetOrdinal("parent_run_id"), r.GetOrdinal("root_run_id"),
@@ -3138,13 +3182,13 @@ internal sealed class PostgreSqlJobStore(
         int Total,
         int Succeeded,
         int Failed,
-        int Cancelled,
+        int Canceled,
         int CreatedAt,
         int CompletedAt)
     {
         public static BatchOrdinals From(NpgsqlDataReader r) => new(
             r.GetOrdinal("id"), r.GetOrdinal("status"), r.GetOrdinal("total"),
-            r.GetOrdinal("succeeded"), r.GetOrdinal("failed"), r.GetOrdinal("cancelled"),
+            r.GetOrdinal("succeeded"), r.GetOrdinal("failed"), r.GetOrdinal("canceled"),
             r.GetOrdinal("created_at"), r.GetOrdinal("completed_at"));
     }
 

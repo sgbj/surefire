@@ -14,8 +14,8 @@ public enum JobStatus
     /// <summary>The run succeeded.</summary>
     Succeeded = 2,
 
-    /// <summary>The run was cancelled.</summary>
-    Cancelled = 4,
+    /// <summary>The run was canceled.</summary>
+    Canceled = 4,
 
     /// <summary>The run exhausted all retries and failed permanently.</summary>
     Failed = 5
@@ -29,8 +29,8 @@ public static class JobStatusExtensions
     extension(JobStatus status)
     {
         /// <summary>
-        ///     Gets whether the status represents a terminal state (Succeeded, Cancelled, or Failed).
+        ///     Gets whether the status represents a terminal state (Succeeded, Canceled, or Failed).
         /// </summary>
-        public bool IsTerminal => status is JobStatus.Succeeded or JobStatus.Cancelled or JobStatus.Failed;
+        public bool IsTerminal => status is JobStatus.Succeeded or JobStatus.Canceled or JobStatus.Failed;
     }
 }

@@ -142,6 +142,188 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task OwnedFireAndForgetChildren_ParentDeadLetter_CancelsChildren()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var parentJobName = $"DeadLetterOwner_{Guid.CreateVersion7():N}";
+        var childJobName = $"DeadLetterOwnedChild_{Guid.CreateVersion7():N}";
+
+        await using var harness = await CreateHarnessAsync(options =>
+            {
+                options.AutoMigrate = false;
+                options.PollingInterval = TimeSpan.FromMinutes(1);
+                options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+                options.RetentionPeriod = null;
+                options.MaxNodeConcurrency = 4;
+            },
+            (host, _) =>
+            {
+                host.AddJob(childJobName, async (CancellationToken ct) =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                    return 1;
+                });
+
+                host.AddJob(parentJobName, async (IJobClient client, JobContext context, CancellationToken ct) =>
+                {
+                    for (var i = 0; i < 3; i++)
+                    {
+                        await client.TriggerAsync(childJobName, cancellationToken: ct);
+                    }
+
+                    await TestWait.PollUntilConditionAsync(
+                        async _ =>
+                        {
+                            var page = await Store.GetRunsAsync(
+                                new() { ParentRunId = context.RunId, JobName = childJobName },
+                                0,
+                                10,
+                                ct);
+
+                            return page.Items.Count == 3 && page.Items.All(r => r.Status == JobStatus.Running);
+                        },
+                        TimeSpan.FromSeconds(10),
+                        TimeSpan.FromMilliseconds(25),
+                        "Timed out waiting for children to be running before the owner failed.",
+                        ct);
+
+                    throw new InvalidOperationException("owner failed after starting children");
+                }).WithRetry(0);
+            });
+
+        await harness.StartAsync(ct);
+
+        var parent = await harness.Client.TriggerAsync(parentJobName, cancellationToken: ct);
+
+        await TestWait.PollUntilAsync(
+            () => harness.Store.GetRunAsync(parent.Id, ct),
+            run => run?.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for the owner to dead-letter.",
+            ct);
+
+        var children = await TestWait.PollUntilAsync(
+            async () =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { ParentRunId = parent.Id, JobName = childJobName },
+                    0,
+                    10,
+                    ct);
+
+                return page.Items;
+            },
+            runs => runs.Count == 3 && runs.All(r => r.Status == JobStatus.Canceled),
+            TimeSpan.FromSeconds(10),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for dead-lettered owner children to be Canceled.",
+            ct);
+
+        Assert.All(children, child =>
+        {
+            Assert.Equal(parent.Id, child.ParentRunId);
+            Assert.Equal($"Canceled because parent run '{parent.Id}' failed.", child.Reason);
+        });
+    }
+
+    [Fact]
+    public async Task StaleRunningRun_ExhaustedRetryPolicy_CancelsOwnedChildren()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var parentJobName = $"StaleDeadLetterOwner_{Guid.CreateVersion7():N}";
+        var childJobName = $"StaleDeadLetterOwnedChild_{Guid.CreateVersion7():N}";
+
+        await using var harness = await CreateHarnessAsync(options =>
+            {
+                options.AutoMigrate = false;
+                options.PollingInterval = TimeSpan.FromMilliseconds(20);
+                options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
+                options.InactiveThreshold = TimeSpan.FromSeconds(1);
+                options.RetentionPeriod = null;
+            },
+            (host, _) =>
+            {
+                host.AddJob(parentJobName, () => 1).WithRetry(0);
+                host.AddJob(childJobName, async (CancellationToken ct) =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                    return 1;
+                });
+            });
+
+        await harness.StartAsync(ct);
+
+        var staleAt = DateTimeOffset.UtcNow.AddSeconds(-10);
+        var now = DateTimeOffset.UtcNow;
+        var parent = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = parentJobName,
+            Status = JobStatus.Running,
+            CreatedAt = staleAt,
+            NotBefore = staleAt,
+            StartedAt = staleAt,
+            LastHeartbeatAt = staleAt,
+            NodeName = "dead-node",
+            Attempt = 1,
+            Progress = 0
+        };
+
+        var children = Enumerable.Range(0, 3)
+            .Select(_ => new JobRun
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = childJobName,
+                Status = JobStatus.Running,
+                CreatedAt = now,
+                NotBefore = now,
+                StartedAt = now,
+                LastHeartbeatAt = now,
+                NodeName = "child-node",
+                Attempt = 1,
+                Progress = 0,
+                ParentRunId = parent.Id,
+                RootRunId = parent.Id
+            })
+            .ToArray();
+
+        await harness.Store.CreateRunsAsync([parent, .. children], cancellationToken: ct);
+
+        await TestWait.AwaitRunAsync(
+            harness.Store,
+            harness.Notifications,
+            parent.Id,
+            run => run.Status == JobStatus.Failed,
+            TimeSpan.FromSeconds(8),
+            "Timed out waiting for stale owner to dead-letter.",
+            ct);
+
+        var storedChildren = await TestWait.PollUntilAsync(
+            async () =>
+            {
+                var page = await harness.Store.GetRunsAsync(
+                    new() { ParentRunId = parent.Id, JobName = childJobName },
+                    0,
+                    10,
+                    ct);
+
+                return page.Items;
+            },
+            runs => runs.Count == 3 && runs.All(r => r.Status == JobStatus.Canceled),
+            TimeSpan.FromSeconds(8),
+            TimeSpan.FromMilliseconds(25),
+            "Timed out waiting for stale owner children to be Canceled.",
+            ct);
+
+        Assert.All(storedChildren, child =>
+        {
+            Assert.Equal(parent.Id, child.ParentRunId);
+            Assert.Equal($"Canceled because parent run '{parent.Id}' failed.", child.Reason);
+        });
+    }
+
+    [Fact]
     public async Task ContinuousJob_DoesNotCreateExtraRuns_WhenManualBacklogAlreadySatisfiesMax()
     {
         var ct = TestContext.Current.CancellationToken;

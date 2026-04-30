@@ -14,16 +14,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import {Button} from "@/components/ui/button";
 import {Skeleton} from "@/components/ui/skeleton";
-import {TableBody, TableCell, TableHead, TableHeader, TableRow,} from "@/components/ui/table";
 import {StatusBadge} from "@/components/status-badge";
 import {Progress} from "@/components/ui/progress";
 import {formatDate, formatDuration, formatLogTime} from "@/lib/format";
 import {useLiveDuration} from "@/hooks/use-live-duration";
 import {useStickToBottom} from "@/hooks/use-stick-to-bottom";
 import {Alert, AlertDescription} from "@/components/ui/alert";
-import {Ban, CircleAlert, RotateCcw} from "lucide-react";
+import {Ban, ChevronDown, CircleAlert, RotateCcw} from "lucide-react";
 import {DtDd} from "@/components/dt-dd";
-import {Fragment, useCallback, useEffect, useMemo, useRef, useState,} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState,} from "react";
 import {toast} from "sonner";
 import {type TraceItem, TraceView} from "@/components/trace-view";
 import {useVirtualizer} from "@tanstack/react-virtual";
@@ -442,17 +441,6 @@ export function RunDetailPage() {
     [sortedAttemptFailures],
   );
 
-  const isDeadLetter = run?.status === JobStatus.Failed;
-
-  useEffect(() => {
-    if (isDeadLetter && failureRows.length > 0) {
-      setExpandedFailureRow(failureRows[failureRows.length - 1].key);
-      return;
-    }
-
-    setExpandedFailureRow(null);
-  }, [isDeadLetter, failureRows, runKey]);
-
   const setCurrentLogFilter = (value: number | null) => {
     setLogFilterByRun((prev) => ({...prev, [runKey]: value}));
   };
@@ -502,17 +490,17 @@ export function RunDetailPage() {
   useStickToBottom({
     scrollElement: logScrollContainerRef.current,
     virtualizer: logVirtualizer,
-    count: filteredLogs.length
+    count: filteredLogs.length,
   });
   useStickToBottom({
     scrollElement: inputScrollContainerRef.current,
     virtualizer: inputVirtualizer,
-    count: inputItems.length
+    count: inputItems.length,
   });
   useStickToBottom({
     scrollElement: outputScrollContainerRef.current,
     virtualizer: outputVirtualizer,
-    count: outputItems.length
+    count: outputItems.length,
   });
 
   const cancel = useMutation({
@@ -520,7 +508,7 @@ export function RunDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({queryKey: ["run", id]});
       queryClient.invalidateQueries({queryKey: ["run-trace", id]});
-      toast.success("Run cancelled");
+      toast.success("Run Canceled");
     },
     onError: () => toast.error("Failed to cancel run"),
   });
@@ -1018,7 +1006,7 @@ export function RunDetailPage() {
               </AlertDialogContent>
             </AlertDialog>
           )}
-          {!isActive && !run.jobName.startsWith("_") && (
+          {!isActive && (
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button variant="outline" size="sm" className="cursor-pointer">
@@ -1100,14 +1088,28 @@ export function RunDetailPage() {
         {run.notBefore && run.notBefore !== run.createdAt && (
           <DtDd label="Not before">{formatDate(run.notBefore)}</DtDd>
         )}
+        {run.notAfter && (
+          <DtDd label="Not after">{formatDate(run.notAfter)}</DtDd>
+        )}
+        <DtDd label="Priority">{run.priority}</DtDd>
+        {run.deduplicationId && (
+          <DtDd label="Deduplication ID">
+            <span
+              className="truncate max-w-50 inline-block"
+              title={run.deduplicationId}
+            >
+              {run.deduplicationId}
+            </span>
+          </DtDd>
+        )}
         {run.startedAt && (
           <DtDd label="Started">{formatDate(run.startedAt)}</DtDd>
         )}
         {run.completedAt && (
           <DtDd label="Completed">{formatDate(run.completedAt)}</DtDd>
         )}
-        {run.cancelledAt && (
-          <DtDd label="Cancelled">{formatDate(run.cancelledAt)}</DtDd>
+        {run.canceledAt && (
+          <DtDd label="Canceled">{formatDate(run.canceledAt)}</DtDd>
         )}
         {run.rerunOfRunId && (
           <DtDd label="Rerun of">
@@ -1133,113 +1135,75 @@ export function RunDetailPage() {
         )}
       </dl>
 
-      {run.arguments && (
-        <div className="rounded-lg border overflow-hidden">
-          <div className="max-h-104 overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Arguments</span>
-            </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {formatJsonDisplay(run.arguments)}
-            </pre>
-          </div>
-        </div>
-      )}
-
-      {run.result && outputItems.length === 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div className="max-h-104 overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Result</span>
-            </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {formatJsonDisplay(run.result)}
-            </pre>
-          </div>
-        </div>
-      )}
-
-      {run.reason && (
-        <div className="rounded-lg border border-destructive/15 overflow-hidden">
-          <div className="max-h-104 overflow-y-auto">
+      {(run.reason || failureRows.length > 0) && (
+        <div className="rounded-lg border border-destructive/25 overflow-hidden">
+          <div className="max-h-128 overflow-auto">
             <div
-              className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/10 bg-destructive/10 backdrop-blur-sm">
-              <span className="text-sm text-destructive/80">Reason</span>
+              className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/25 bg-destructive/10 backdrop-blur-sm">
+              <span className="text-sm text-status-failed">
+                Errors{failureRows.length > 0 && ` (${failureRows.length})`}
+              </span>
             </div>
-            <pre className="text-[13px] p-2 whitespace-pre-wrap break-all font-mono">
-              {run.reason}
-            </pre>
-          </div>
-        </div>
-      )}
-
-      {failureRows.length > 0 && (
-        <div className="rounded-lg border border-destructive/15 overflow-hidden">
-          <div className="max-h-104 overflow-auto">
-            <table className="w-full caption-bottom text-sm min-w-3xl">
-              <TableHeader className="sticky top-0 z-10 bg-destructive/10 backdrop-blur-sm">
-                <TableRow className="hover:bg-transparent border-destructive/10">
-                  <TableCell colSpan={4} className="text-destructive/80">
-                    Errors ({failureRows.length})
-                  </TableCell>
-                </TableRow>
-                <TableRow className="hover:bg-transparent border-destructive/10">
-                  <TableHead>Attempt</TableHead>
-                  <TableHead>Occurred</TableHead>
-                  <TableHead>Exception</TableHead>
-                  <TableHead>Message</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {failureRows.map(({failure, key}) => {
-                  const isExpanded = expandedFailureRow === key;
-                  return (
-                    <Fragment key={key}>
-                      <TableRow
-                        className={`cursor-pointer ${
-                          isExpanded ? "bg-muted/20" : ""
-                        }`}
-                        onClick={() =>
+            {run.reason && (
+              <div
+                className={`px-3 py-2.5 text-sm whitespace-pre-wrap break-words${
+                  failureRows.length > 0 ? " border-b" : ""
+                }`}>
+                {run.reason}
+              </div>
+            )}
+            {failureRows.map(({failure, key}, index) => {
+              const isExpanded = expandedFailureRow === key;
+              const hasStackTrace = Boolean(failure.stackTrace);
+              const headline = [failure.exceptionType, failure.message]
+                .filter(Boolean)
+                .join(": ");
+              return (
+                <div key={key} className={index < failureRows.length - 1 ? "border-b" : ""}>
+                  <button
+                    type="button"
+                    onClick={
+                      hasStackTrace
+                        ? () =>
                           setExpandedFailureRow((prev) =>
                             prev === key ? null : key,
                           )
-                        }
-                      >
-                        <TableCell className="tabular-nums">
-                          #{failure.attempt}
-                        </TableCell>
-                        <TableCell className="tabular-nums">
-                          {failure.occurredAt
-                            ? formatDate(failure.occurredAt)
-                            : ""}
-                        </TableCell>
-                        <TableCell className="whitespace-normal break-all">
-                          {failure.exceptionType ?? ""}
-                        </TableCell>
-                        <TableCell className="whitespace-normal break-all">
-                          {failure.message ?? ""}
-                        </TableCell>
-                      </TableRow>
-                      {isExpanded && (
-                        <TableRow className="hover:bg-transparent cursor-default">
-                          <TableCell colSpan={4} className="max-w-0 w-full">
-                            {failure.stackTrace ? (
-                              <pre className="text-[13px] whitespace-pre-wrap wrap-break-word font-mono">
-                              {failure.stackTrace}
-                            </pre>
-                            ) : (
-                              <div className="text-sm">
-                                No stack trace recorded.
-                              </div>
-                            )}
-                          </TableCell>
-                        </TableRow>
+                        : undefined
+                    }
+                    disabled={!hasStackTrace}
+                    className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors ${
+                      hasStackTrace ? "hover:bg-muted/40 cursor-pointer" : "cursor-default"
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs text-muted-foreground tabular-nums">
+                        Attempt {failure.attempt}
+                        {failure.occurredAt ? ` · ${formatDate(failure.occurredAt)}` : ""}
+                      </div>
+                      {headline && (
+                        <div
+                          className="text-sm mt-1 whitespace-pre-wrap break-words">
+                          {headline}
+                        </div>
                       )}
-                    </Fragment>
-                  );
-                })}
-              </TableBody>
-            </table>
+                    </div>
+                    {hasStackTrace && (
+                      <ChevronDown
+                        className={`size-4 mt-1 text-muted-foreground shrink-0 transition-transform ${
+                          isExpanded ? "rotate-180" : ""
+                        }`}
+                      />
+                    )}
+                  </button>
+                  {isExpanded && failure.stackTrace && (
+                    <pre
+                      className="text-xs p-3 whitespace-pre-wrap wrap-break-word font-mono text-muted-foreground">
+                      {failure.stackTrace}
+                    </pre>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1297,7 +1261,7 @@ export function RunDetailPage() {
             }}
           >
             <div className="min-w-3xl">
-              <div className="sticky top-0 z-10 bg-muted/30 backdrop-blur-sm border-b">
+              <div className="sticky top-0 z-10 bg-muted/40 backdrop-blur-sm border-b">
                 <div className="flex items-center py-2.5 px-2">
               <span className="text-sm text-muted-foreground">
                 Triggered runs ({sortedStepRuns.length} /{" "}
@@ -1390,38 +1354,66 @@ export function RunDetailPage() {
         </div>
       )}
 
+      {run.arguments && (
+        <div className="rounded-lg border overflow-hidden">
+          <div className="max-h-128 overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Arguments</span>
+            </div>
+            <pre className="text-xs p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.arguments)}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {run.result && outputItems.length === 0 && (
+        <div className="rounded-lg border overflow-hidden">
+          <div className="max-h-128 overflow-y-auto">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+              <span className="text-sm text-muted-foreground">Result</span>
+            </div>
+            <pre className="text-xs p-2 whitespace-pre-wrap break-all font-mono">
+              {formatJsonDisplay(run.result)}
+            </pre>
+          </div>
+        </div>
+      )}
+
       {inputItems.length > 0 && (
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={inputScrollContainerRef}
-            className="max-h-104 overflow-y-auto font-mono text-[13px]"
+            className="max-h-128 overflow-y-auto font-mono text-xs"
           >
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 {inputHeader}
               </span>
             </div>
-            <div
-              className="relative px-2"
-              style={{height: `${inputVirtualizer.getTotalSize()}px`}}
-            >
-              {inputVirtualizer.getVirtualItems().map((virtualItem) => {
-                const item = inputItems[virtualItem.index];
-                return (
-                  <div
-                    key={virtualItem.index}
-                    ref={inputVirtualizer.measureElement}
-                    data-index={virtualItem.index}
-                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
-                    style={{
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                  >
-                    <span className="text-muted-foreground">{item.param}:</span>{" "}
-                    {JSON.stringify(item.value)}
-                  </div>
-                );
-              })}
+            <div className="py-2">
+              <div
+                className="relative"
+                style={{height: `${inputVirtualizer.getTotalSize()}px`}}
+              >
+                {inputVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const item = inputItems[virtualItem.index];
+                  return (
+                    <div
+                      key={virtualItem.index}
+                      ref={inputVirtualizer.measureElement}
+                      data-index={virtualItem.index}
+                      className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
+                      style={{
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      <span className="text-muted-foreground">{item.param}:</span>{" "}
+                      {JSON.stringify(item.value)}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -1431,33 +1423,35 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={outputScrollContainerRef}
-            className="max-h-104 overflow-y-auto font-mono text-[13px]"
+            className="max-h-128 overflow-y-auto font-mono text-xs"
           >
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Output stream ({outputItems.length} items)
               </span>
             </div>
-            <div
-              className="relative px-2"
-              style={{height: `${outputVirtualizer.getTotalSize()}px`}}
-            >
-              {outputVirtualizer.getVirtualItems().map((virtualItem) => {
-                const item = outputItems[virtualItem.index];
-                return (
-                  <div
-                    key={virtualItem.index}
-                    ref={outputVirtualizer.measureElement}
-                    data-index={virtualItem.index}
-                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
-                    style={{
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                  >
-                    {JSON.stringify(item)}
-                  </div>
-                );
-              })}
+            <div className="py-2">
+              <div
+                className="relative"
+                style={{height: `${outputVirtualizer.getTotalSize()}px`}}
+              >
+                {outputVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const item = outputItems[virtualItem.index];
+                  return (
+                    <div
+                      key={virtualItem.index}
+                      ref={outputVirtualizer.measureElement}
+                      data-index={virtualItem.index}
+                      className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
+                      style={{
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      {JSON.stringify(item)}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -1467,10 +1461,10 @@ export function RunDetailPage() {
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={logScrollContainerRef}
-            className="max-h-104 overflow-y-auto font-mono text-[13px]"
+            className="max-h-128 overflow-y-auto font-mono text-xs"
           >
             <div
-              className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/30 backdrop-blur-sm">
+              className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Logs (
                 {logFilter !== null
@@ -1499,32 +1493,40 @@ export function RunDetailPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div
-              className="relative px-2"
-              style={{height: `${logVirtualizer.getTotalSize()}px`}}
-            >
-              {logVirtualizer.getVirtualItems().map((virtualItem) => {
-                const log = filteredLogs[virtualItem.index];
-                return (
-                  <div
-                    key={virtualItem.index}
-                    ref={logVirtualizer.measureElement}
-                    data-index={virtualItem.index}
-                    className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap wrap-break-word"
-                    style={{
-                      transform: `translateY(${virtualItem.start}px)`,
-                    }}
-                  >
-                    <span className="text-muted-foreground tabular-nums">
-                      {formatLogTime(log.timestamp)}
-                    </span>{" "}
-                    <span className={logLevelColor(log.level)}>
-                      [{LogLevelLabels[log.level] ?? "?"}]
-                    </span>{" "}
-                    <span>{log.message}</span>
-                  </div>
-                );
-              })}
+            <div className="py-2">
+              <div
+                className="relative"
+                style={{height: `${logVirtualizer.getTotalSize()}px`}}
+              >
+                {logVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const log = filteredLogs[virtualItem.index];
+                  return (
+                    <div
+                      key={virtualItem.index}
+                      ref={logVirtualizer.measureElement}
+                      data-index={virtualItem.index}
+                      className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap wrap-break-word"
+                      style={{
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
+                      <span className="text-muted-foreground tabular-nums">
+                        {formatLogTime(log.timestamp)}
+                      </span>{" "}
+                      <span className={logLevelColor(log.level)}>
+                        [{LogLevelLabels[log.level] ?? "?"}]
+                      </span>{" "}
+                      <span>{log.message}</span>
+                      {log.exception && (
+                        <pre
+                          className="mt-1 whitespace-pre-wrap wrap-break-word">
+                          {log.exception}
+                        </pre>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>

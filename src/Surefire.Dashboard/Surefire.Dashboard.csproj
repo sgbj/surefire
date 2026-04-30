@@ -5,7 +5,8 @@
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
         <DashboardUiDir>$(MSBuildProjectDirectory)/ui</DashboardUiDir>
         <DashboardUiOutputDir>$(BaseIntermediateOutputPath)dashboard-ui</DashboardUiOutputDir>
-        <DashboardUiStampFile>$(DashboardUiOutputDir)/.buildstamp</DashboardUiStampFile>
+        <DashboardUiOutputDirFullPath>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(DashboardUiOutputDir)'))</DashboardUiOutputDirFullPath>
+        <DashboardUiStampFile>$(DashboardUiOutputDirFullPath)\.buildstamp</DashboardUiStampFile>
     </PropertyGroup>
     <ItemGroup>
         <FrameworkReference Include="Microsoft.AspNetCore.App"/>
@@ -28,18 +29,19 @@
     <Target Name="BuildDashboardUi"
             BeforeTargets="_CalculateEmbeddedFilesManifestInputs;PrepareResourceNames"
             Inputs="@(DashboardUiBuildInput)"
-            Outputs="$(DashboardUiOutputDir)/index.html;$(DashboardUiStampFile)"
+            Outputs="$(DashboardUiOutputDirFullPath)\index.html;$(DashboardUiStampFile)"
             Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipDashboardUiBuild)' != 'true'">
         <Exec WorkingDirectory="$(DashboardUiDir)"
               Command="npm ci --no-audit --no-fund"
               Condition="!Exists('$(DashboardUiDir)/node_modules')"/>
+        <MakeDir Directories="$(DashboardUiOutputDirFullPath)"/>
         <Exec WorkingDirectory="$(DashboardUiDir)"
-              Command="npm run build:embed"/>
+              Command="npm run build -- --outDir &quot;$(DashboardUiOutputDirFullPath)&quot; --emptyOutDir"/>
         <Touch Files="$(DashboardUiStampFile)" AlwaysCreate="true"/>
-        <Error Condition="!Exists('$(DashboardUiOutputDir)/index.html')"
-               Text="Dashboard UI build output missing: $(DashboardUiOutputDir)/index.html"/>
+        <Error Condition="!Exists('$(DashboardUiOutputDirFullPath)\index.html')"
+               Text="Dashboard UI build output missing: $(DashboardUiOutputDirFullPath)\index.html"/>
         <ItemGroup>
-            <DashboardUiAsset Include="$(DashboardUiOutputDir)/**/*"/>
+            <DashboardUiAsset Include="$(DashboardUiOutputDirFullPath)/**/*"/>
             <DashboardUiAsset Remove="@(DashboardUiAsset)"
                               Condition="!$([System.IO.File]::Exists('%(DashboardUiAsset.FullPath)'))"/>
             <EmbeddedResource Include="@(DashboardUiAsset)">

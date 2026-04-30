@@ -333,12 +333,12 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var pending = CreateRun(jobName);
         var completed = CreateRun(jobName, JobStatus.Succeeded) with { CompletedAt = DateTimeOffset.UtcNow };
-        var cancelled = CreateRun(jobName, JobStatus.Cancelled) with
+        var Canceled = CreateRun(jobName, JobStatus.Canceled) with
         {
-            CompletedAt = DateTimeOffset.UtcNow, CancelledAt = DateTimeOffset.UtcNow
+            CompletedAt = DateTimeOffset.UtcNow, CanceledAt = DateTimeOffset.UtcNow
         };
 
-        await Store.CreateRunsAsync([pending, completed, cancelled], cancellationToken: ct);
+        await Store.CreateRunsAsync([pending, completed, Canceled], cancellationToken: ct);
 
         var pendingResults = await Store.GetRunsAsync(new()
         {

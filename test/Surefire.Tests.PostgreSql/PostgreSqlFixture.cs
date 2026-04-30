@@ -16,6 +16,8 @@ public sealed class PostgreSqlFixture : IAsyncLifetime, IStoreTestFixture
     private NpgsqlDataSource? _dataSource;
     private PostgreSqlJobStore? _store;
 
+    internal NpgsqlDataSource DataSource => _dataSource!;
+
     public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();

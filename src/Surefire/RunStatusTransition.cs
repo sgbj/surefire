@@ -41,9 +41,9 @@ public sealed class RunStatusTransition
     public DateTimeOffset? CompletedAt { get; init; }
 
     /// <summary>
-    ///     Gets or sets the cancelled-at timestamp to apply. Null preserves existing value.
+    ///     Gets or sets the canceled-at timestamp to apply. Null preserves existing value.
     /// </summary>
-    public DateTimeOffset? CancelledAt { get; init; }
+    public DateTimeOffset? CanceledAt { get; init; }
 
     /// <summary>
     ///     Gets or sets the termination reason (non-exception causes only).
@@ -165,10 +165,10 @@ public sealed class RunStatusTransition
     };
 
     /// <summary>
-    ///     Creates a transition to Cancelled from Pending or Running.
+    ///     Creates a transition to Canceled from Pending or Running.
     /// </summary>
-    public static RunStatusTransition ToCancelled(JobStatus expectedStatus, string runId,
-        int expectedAttempt, DateTimeOffset completedAt, DateTimeOffset cancelledAt,
+    public static RunStatusTransition ToCanceled(JobStatus expectedStatus, string runId,
+        int expectedAttempt, DateTimeOffset completedAt, DateTimeOffset canceledAt,
         DateTimeOffset notBefore, string? nodeName = null, double progress = 0,
         string? reason = null, string? result = null, DateTimeOffset? startedAt = null,
         DateTimeOffset? lastHeartbeatAt = null) => new()
@@ -176,9 +176,9 @@ public sealed class RunStatusTransition
         RunId = runId,
         ExpectedStatus = expectedStatus,
         ExpectedAttempt = expectedAttempt,
-        NewStatus = JobStatus.Cancelled,
+        NewStatus = JobStatus.Canceled,
         CompletedAt = completedAt,
-        CancelledAt = cancelledAt,
+        CanceledAt = canceledAt,
         NotBefore = notBefore,
         NodeName = nodeName,
         Progress = progress,
@@ -197,8 +197,8 @@ public sealed class RunStatusTransition
         (JobStatus.Running, JobStatus.Pending) => true,
         (JobStatus.Running, JobStatus.Succeeded) => CompletedAt.HasValue,
         (JobStatus.Running, JobStatus.Failed) => CompletedAt.HasValue,
-        (JobStatus.Pending, JobStatus.Cancelled) => CompletedAt.HasValue && CancelledAt.HasValue,
-        (JobStatus.Running, JobStatus.Cancelled) => CompletedAt.HasValue && CancelledAt.HasValue,
+        (JobStatus.Pending, JobStatus.Canceled) => CompletedAt.HasValue && CanceledAt.HasValue,
+        (JobStatus.Running, JobStatus.Canceled) => CompletedAt.HasValue && CanceledAt.HasValue,
         _ => false
     };
 }

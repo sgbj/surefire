@@ -16,13 +16,13 @@ public abstract class StatsConformanceTests : StoreConformanceBase
             CreateRun(jobName),
             CreateRun(jobName, JobStatus.Running),
             CreateRun(jobName, JobStatus.Succeeded),
-            CreateRun(jobName, JobStatus.Cancelled),
+            CreateRun(jobName, JobStatus.Canceled),
             CreateRun(jobName, JobStatus.Failed)
         };
 
         for (var i = 0; i < runs.Length; i++)
         {
-            runs[i] = runs[i].Status is JobStatus.Succeeded or JobStatus.Cancelled or JobStatus.Failed
+            runs[i] = runs[i].Status is JobStatus.Succeeded or JobStatus.Canceled or JobStatus.Failed
                 ? runs[i] with { CreatedAt = now, NotBefore = now, StartedAt = now, CompletedAt = now }
                 : runs[i] with { CreatedAt = now, NotBefore = now };
         }
@@ -39,8 +39,8 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         Assert.Equal(1, stats.RunsByStatus["Running"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Succeeded"));
         Assert.Equal(1, stats.RunsByStatus["Succeeded"]);
-        Assert.True(stats.RunsByStatus.ContainsKey("Cancelled"));
-        Assert.Equal(1, stats.RunsByStatus["Cancelled"]);
+        Assert.True(stats.RunsByStatus.ContainsKey("Canceled"));
+        Assert.Equal(1, stats.RunsByStatus["Canceled"]);
         Assert.True(stats.RunsByStatus.ContainsKey("Failed"));
         Assert.Equal(1, stats.RunsByStatus["Failed"]);
         Assert.True(stats.TotalJobs >= 1);
@@ -50,7 +50,7 @@ public abstract class StatsConformanceTests : StoreConformanceBase
         Assert.Equal(1, stats.Timeline.Sum(b => b.Pending));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Running));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Succeeded));
-        Assert.Equal(1, stats.Timeline.Sum(b => b.Cancelled));
+        Assert.Equal(1, stats.Timeline.Sum(b => b.Canceled));
         Assert.Equal(1, stats.Timeline.Sum(b => b.Failed));
     }
 

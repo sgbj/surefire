@@ -373,7 +373,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 NodeName = transition.NodeName,
                 StartedAt = transition.StartedAt ?? stored.StartedAt,
                 CompletedAt = transition.CompletedAt ?? stored.CompletedAt,
-                CancelledAt = transition.CancelledAt ?? stored.CancelledAt,
+                CanceledAt = transition.CanceledAt ?? stored.CanceledAt,
                 Reason = transition.Reason,
                 Result = transition.Result,
                 Progress = transition.Progress,
@@ -423,26 +423,26 @@ internal sealed class InMemoryJobStore : IJobStore
             }
 
             var oldStatus = stored.Status;
-            var cancelledAt = _timeProvider.GetUtcNow();
-            var cancelled = stored with
+            var CanceledAt = _timeProvider.GetUtcNow();
+            var Canceled = stored with
             {
-                Status = JobStatus.Cancelled,
-                CancelledAt = cancelledAt,
-                CompletedAt = cancelledAt,
+                Status = JobStatus.Canceled,
+                CanceledAt = CanceledAt,
+                CompletedAt = CanceledAt,
                 Reason = reason
             };
-            _runs[runId] = cancelled;
+            _runs[runId] = Canceled;
 
-            UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
-            AppendStatusEventCore(cancelled.Id, cancelled.Attempt, cancelled.Status);
+            UpdateIndexes(Canceled, oldStatus, JobStatus.Canceled);
+            AppendStatusEventCore(Canceled.Id, Canceled.Attempt, Canceled.Status);
             AppendEventsCore(events);
 
-            if (cancelled.DeduplicationId is { })
+            if (Canceled.DeduplicationId is { })
             {
-                _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
+                _dedupIndex.Remove((Canceled.JobName, Canceled.DeduplicationId));
             }
 
-            var batchCompletion = IncrementBatchCounter(cancelled.BatchId, JobStatus.Cancelled, cancelledAt);
+            var batchCompletion = IncrementBatchCounter(Canceled.BatchId, JobStatus.Canceled, CanceledAt);
 
             return Task.FromResult(new RunTransitionResult(true, batchCompletion));
         }
@@ -452,7 +452,7 @@ internal sealed class InMemoryJobStore : IJobStore
         string? reason = null,
         CancellationToken cancellationToken = default)
     {
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
         var now = _timeProvider.GetUtcNow();
 
         lock (_gate)
@@ -465,30 +465,30 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
 
                 var oldStatus = run.Status;
-                var cancelled = run with
+                var Canceled = run with
                 {
-                    Status = JobStatus.Cancelled,
-                    CancelledAt = now,
+                    Status = JobStatus.Canceled,
+                    CanceledAt = now,
                     CompletedAt = now,
                     Reason = reason
                 };
-                _runs[run.Id] = cancelled;
+                _runs[run.Id] = Canceled;
 
-                UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
-                AppendStatusEventCore(cancelled.Id, cancelled.Attempt, cancelled.Status);
+                UpdateIndexes(Canceled, oldStatus, JobStatus.Canceled);
+                AppendStatusEventCore(Canceled.Id, Canceled.Attempt, Canceled.Status);
 
-                if (cancelled.DeduplicationId is { })
+                if (Canceled.DeduplicationId is { })
                 {
-                    _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
+                    _dedupIndex.Remove((Canceled.JobName, Canceled.DeduplicationId));
                 }
 
-                IncrementBatchCounter(cancelled.BatchId, JobStatus.Cancelled, now);
+                IncrementBatchCounter(Canceled.BatchId, JobStatus.Canceled, now);
 
-                cancelledIds.Add(run.Id);
+                CanceledIds.Add(run.Id);
             }
         }
 
-        return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
+        return Task.FromResult<IReadOnlyList<string>>(CanceledIds);
     }
 
     public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
@@ -1003,7 +1003,7 @@ internal sealed class InMemoryJobStore : IJobStore
     public Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default)
     {
         var now = _timeProvider.GetUtcNow();
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
 
         lock (_gate)
         {
@@ -1020,28 +1020,28 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
 
                 var oldStatus = run.Status;
-                var cancelled = run with
+                var Canceled = run with
                 {
-                    Status = JobStatus.Cancelled,
-                    CancelledAt = now,
+                    Status = JobStatus.Canceled,
+                    CanceledAt = now,
                     CompletedAt = now,
                     Reason = "Run expired past NotAfter deadline."
                 };
-                _runs[run.Id] = cancelled;
+                _runs[run.Id] = Canceled;
 
-                if (cancelled.DeduplicationId is { })
+                if (Canceled.DeduplicationId is { })
                 {
-                    _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
+                    _dedupIndex.Remove((Canceled.JobName, Canceled.DeduplicationId));
                 }
 
-                UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
-                AppendStatusEventCore(cancelled.Id, cancelled.Attempt, cancelled.Status);
-                IncrementBatchCounter(cancelled.BatchId, JobStatus.Cancelled, now);
-                cancelledIds.Add(run.Id);
+                UpdateIndexes(Canceled, oldStatus, JobStatus.Canceled);
+                AppendStatusEventCore(Canceled.Id, Canceled.Attempt, Canceled.Status);
+                IncrementBatchCounter(Canceled.BatchId, JobStatus.Canceled, now);
+                CanceledIds.Add(run.Id);
             }
         }
 
-        return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
+        return Task.FromResult<IReadOnlyList<string>>(CanceledIds);
     }
 
     public Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1173,7 +1173,7 @@ internal sealed class InMemoryJobStore : IJobStore
         var bucketPending = new int[bucketCount];
         var bucketRunning = new int[bucketCount];
         var bucketSucceeded = new int[bucketCount];
-        var bucketCancelled = new int[bucketCount];
+        var bucketCanceled = new int[bucketCount];
         var bucketFailed = new int[bucketCount];
 
         var statusCounts = new Dictionary<string, int>();
@@ -1226,8 +1226,8 @@ internal sealed class InMemoryJobStore : IJobStore
                             case JobStatus.Succeeded:
                                 bucketSucceeded[bucketIndex]++;
                                 break;
-                            case JobStatus.Cancelled:
-                                bucketCancelled[bucketIndex]++;
+                            case JobStatus.Canceled:
+                                bucketCanceled[bucketIndex]++;
                                 break;
                             case JobStatus.Failed:
                                 bucketFailed[bucketIndex]++;
@@ -1250,7 +1250,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 Pending = bucketPending[i],
                 Running = bucketRunning[i],
                 Succeeded = bucketSucceeded[i],
-                Cancelled = bucketCancelled[i],
+                Canceled = bucketCanceled[i],
                 Failed = bucketFailed[i]
             });
             bucketStart += bucketSpan;
@@ -1398,7 +1398,7 @@ internal sealed class InMemoryJobStore : IJobStore
         string? reason = null,
         CancellationToken cancellationToken = default)
     {
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
         var now = _timeProvider.GetUtcNow();
 
         lock (_gate)
@@ -1411,30 +1411,30 @@ internal sealed class InMemoryJobStore : IJobStore
                 }
 
                 var oldStatus = run.Status;
-                var cancelled = run with
+                var Canceled = run with
                 {
-                    Status = JobStatus.Cancelled,
-                    CancelledAt = now,
+                    Status = JobStatus.Canceled,
+                    CanceledAt = now,
                     CompletedAt = now,
                     Reason = reason
                 };
-                _runs[run.Id] = cancelled;
+                _runs[run.Id] = Canceled;
 
-                UpdateIndexes(cancelled, oldStatus, JobStatus.Cancelled);
-                AppendStatusEventCore(cancelled.Id, cancelled.Attempt, cancelled.Status);
+                UpdateIndexes(Canceled, oldStatus, JobStatus.Canceled);
+                AppendStatusEventCore(Canceled.Id, Canceled.Attempt, Canceled.Status);
 
-                if (cancelled.DeduplicationId is { })
+                if (Canceled.DeduplicationId is { })
                 {
-                    _dedupIndex.Remove((cancelled.JobName, cancelled.DeduplicationId));
+                    _dedupIndex.Remove((Canceled.JobName, Canceled.DeduplicationId));
                 }
 
-                IncrementBatchCounter(batchId, JobStatus.Cancelled, now);
+                IncrementBatchCounter(batchId, JobStatus.Canceled, now);
 
-                cancelledIds.Add(run.Id);
+                CanceledIds.Add(run.Id);
             }
         }
 
-        return Task.FromResult<IReadOnlyList<string>>(cancelledIds);
+        return Task.FromResult<IReadOnlyList<string>>(CanceledIds);
     }
 
     public Task<IReadOnlyList<string>> GetExternallyStoppedRunIdsAsync(
@@ -1485,7 +1485,7 @@ internal sealed class InMemoryJobStore : IJobStore
     {
         JobStatus.Running => run.StartedAt ?? run.CreatedAt,
         JobStatus.Succeeded => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
-        JobStatus.Cancelled => run.CancelledAt ?? run.CompletedAt ?? run.CreatedAt,
+        JobStatus.Canceled => run.CanceledAt ?? run.CompletedAt ?? run.CreatedAt,
         JobStatus.Failed => run.CompletedAt ?? run.StartedAt ?? run.CreatedAt,
         _ => run.CreatedAt
     };
@@ -1893,15 +1893,15 @@ internal sealed class InMemoryJobStore : IJobStore
         {
             JobStatus.Succeeded => batch with { Succeeded = batch.Succeeded + 1 },
             JobStatus.Failed => batch with { Failed = batch.Failed + 1 },
-            JobStatus.Cancelled => batch with { Cancelled = batch.Cancelled + 1 },
+            JobStatus.Canceled => batch with { Canceled = batch.Canceled + 1 },
             _ => batch
         };
 
         BatchCompletionInfo? batchCompletion = null;
-        if (batch.Succeeded + batch.Failed + batch.Cancelled >= batch.Total)
+        if (batch.Succeeded + batch.Failed + batch.Canceled >= batch.Total)
         {
             var batchStatus = batch.Failed > 0 ? JobStatus.Failed
-                : batch.Cancelled > 0 ? JobStatus.Cancelled
+                : batch.Canceled > 0 ? JobStatus.Canceled
                 : JobStatus.Succeeded;
             batch = batch with { Status = batchStatus, CompletedAt = completedAt };
             batchCompletion = new(batchId, batchStatus, completedAt);

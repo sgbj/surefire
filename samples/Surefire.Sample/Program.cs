@@ -58,7 +58,7 @@ app.AddJob("DataImport", async (JobContext context, ILogger<Program> logger, Can
     .WithTags("progress", "max-concurrency")
     .WithMaxConcurrency(2);
 
-app.AddJob("Flaky", () =>
+app.AddJob("Flaky", (ILogger<Program> logger) =>
     {
         if (Random.Shared.Next(4) != 0)
         {
@@ -161,6 +161,17 @@ app.AddJob("Batch", async (IJobClient client, ILogger<Program> logger, Cancellat
         return results.Sum(r => (long)r.Sum);
     })
     .WithTags("batch");
+
+app.AddJob("BatchWithTimeout", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+    {
+        using var timeout = new CancellationTokenSource();
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+
+        logger.LogInformation("Running Batch with a 10 second cancellation token");
+        return await client.RunAsync<long>("Batch", cancellationToken: timeout.Token);
+    })
+    .WithDescription("Calls the Batch job with a custom cancellation token")
+    .WithTags("batch", "cancellation");
 
 app.AddJob("StreamBatch", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {

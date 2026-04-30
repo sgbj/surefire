@@ -52,7 +52,7 @@ app.AddJob("Cleanup", async () => { /* ... */ })
 
 ## Continuous jobs
 
-A continuous job restarts after each run, regardless of whether it succeeded, failed, or was cancelled. Useful for queue consumers, stream processors, and background pollers that should always be running.
+A continuous job restarts after each run, regardless of whether it succeeded, failed, or was canceled. Useful for queue consumers, stream processors, and background pollers that should always be running.
 
 ```csharp
 app.AddJob("QueueConsumer", async (CancellationToken ct) =>
@@ -81,6 +81,6 @@ Surefire seeds enabled continuous jobs up to their configured `MaxConcurrency` o
 | Job completes | Restarts |
 | Job fails, retries remaining | Normal retry behavior |
 | Job fails, retries exhausted | Restarts after a cooldown delay |
-| Job cancelled | Restarts (unless job is disabled) |
+| Job canceled | Restarts (unless job is disabled) |
 | Job disabled via dashboard | No restart |
 | Job re-enabled via dashboard | Restarts |

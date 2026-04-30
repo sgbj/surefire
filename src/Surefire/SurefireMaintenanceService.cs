@@ -13,6 +13,7 @@ internal sealed partial class SurefireMaintenanceService(
     SurefireInstrumentation instrumentation,
     LoopHealthTracker loopHealth,
     BatchCompletionHandler batchCompletionHandler,
+    RunCancellationCoordinator runCancellation,
     Backoff backoff,
     ILogger<SurefireMaintenanceService> logger) : BackgroundService
 {
@@ -109,8 +110,8 @@ internal sealed partial class SurefireMaintenanceService(
                 cancellationToken);
         }
 
-        var cancelledExpiredRunIds = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
-        await PublishExpiredCancellationNotificationsAsync(cancelledExpiredRunIds, cancellationToken);
+        var CanceledExpiredRunIds = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
+        await PublishExpiredCancellationNotificationsAsync(CanceledExpiredRunIds, cancellationToken);
 
         await RecoverStuckBatchesAsync(cancellationToken);
     }
@@ -135,7 +136,7 @@ internal sealed partial class SurefireMaintenanceService(
                         timeProvider.GetUtcNow(),
                         "maintenance",
                         "expired_cancellation",
-                        "Cancelled: run expired past its NotAfter deadline."),
+                        "Canceled: run expired past its NotAfter deadline."),
                     cancellationToken);
             }
 
@@ -227,6 +228,11 @@ internal sealed partial class SurefireMaintenanceService(
                             "Run became stale and exhausted retry policy."),
                         cancellationToken);
 
+                    await runCancellation.CancelDescendantsAsync(
+                        run.Id,
+                        cancellationToken,
+                        $"Canceled because parent run '{run.Id}' failed.");
+
                     await notifications.PublishAsync(NotificationChannels.RunTerminated(run.Id), run.Id,
                         cancellationToken);
                     await notifications.PublishAsync(NotificationChannels.RunAvailable, run.Id, cancellationToken);
@@ -271,6 +277,11 @@ internal sealed partial class SurefireMaintenanceService(
                 {
                     continue;
                 }
+
+                await runCancellation.CancelDescendantsAsync(
+                    run.Id,
+                    cancellationToken,
+                    $"Canceled because parent run '{run.Id}' attempt {run.Attempt} failed before retry.");
 
                 await notifications.PublishAsync(NotificationChannels.RunEvent(run.Id), run.Id, cancellationToken);
                 await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);

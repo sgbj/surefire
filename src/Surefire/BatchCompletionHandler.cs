@@ -18,14 +18,14 @@ internal sealed partial class BatchCompletionHandler(
             return;
         }
 
-        if (batch.Succeeded + batch.Failed + batch.Cancelled < batch.Total)
+        if (batch.Succeeded + batch.Failed + batch.Canceled < batch.Total)
         {
             return;
         }
 
         var completedAt = timeProvider.GetUtcNow();
         var batchStatus = batch.Failed > 0 ? JobStatus.Failed
-            : batch.Cancelled > 0 ? JobStatus.Cancelled
+            : batch.Canceled > 0 ? JobStatus.Canceled
             : JobStatus.Succeeded;
 
         if (!await store.TryCompleteBatchAsync(batchId, batchStatus, completedAt, cancellationToken))

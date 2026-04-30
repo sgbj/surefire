@@ -88,8 +88,8 @@ public sealed class RunResponse
     /// <summary>When the run reached a terminal status, or null if it is still active.</summary>
     public DateTimeOffset? CompletedAt { get; init; }
 
-    /// <summary>When the run was cancelled, or null if it was not cancelled.</summary>
-    public DateTimeOffset? CancelledAt { get; init; }
+    /// <summary>When the run was canceled, or null if it was not canceled.</summary>
+    public DateTimeOffset? CanceledAt { get; init; }
 
     /// <summary>Name of the node currently or most recently executing this run.</summary>
     public string? NodeName { get; init; }
@@ -121,7 +121,7 @@ public sealed class RunResponse
     /// <summary>Earliest time the run is eligible to be claimed.</summary>
     public DateTimeOffset NotBefore { get; init; }
 
-    /// <summary>Deadline after which a still-pending run is automatically cancelled.</summary>
+    /// <summary>Deadline after which a still-pending run is automatically canceled.</summary>
     public DateTimeOffset? NotAfter { get; init; }
 
     /// <summary>Run priority. Higher values are claimed first.</summary>
@@ -148,7 +148,7 @@ public sealed class RunResponse
         CreatedAt = run.CreatedAt,
         StartedAt = run.StartedAt,
         CompletedAt = run.CompletedAt,
-        CancelledAt = run.CancelledAt,
+        CanceledAt = run.CanceledAt,
         NodeName = run.NodeName,
         Attempt = run.Attempt,
         TraceId = run.TraceId,
@@ -283,8 +283,8 @@ public sealed class TimelineBucketResponse
     /// <summary>Successfully completed runs in this bucket.</summary>
     public int Succeeded { get; init; }
 
-    /// <summary>Cancelled runs in this bucket.</summary>
-    public int Cancelled { get; init; }
+    /// <summary>Canceled runs in this bucket.</summary>
+    public int Canceled { get; init; }
 
     /// <summary>Failed runs in this bucket.</summary>
     public int Failed { get; init; }
@@ -296,7 +296,7 @@ public sealed class TimelineBucketResponse
         Pending = bucket.Pending,
         Running = bucket.Running,
         Succeeded = bucket.Succeeded,
-        Cancelled = bucket.Cancelled,
+        Canceled = bucket.Canceled,
         Failed = bucket.Failed
     };
 }
@@ -492,7 +492,7 @@ public sealed class TriggerJobRequest
     /// <summary>Earliest time the run is eligible to be claimed.</summary>
     public DateTimeOffset? NotBefore { get; set; }
 
-    /// <summary>Deadline after which a still-pending run is automatically cancelled.</summary>
+    /// <summary>Deadline after which a still-pending run is automatically canceled.</summary>
     public DateTimeOffset? NotAfter { get; set; }
 
     /// <summary>Run priority. Higher values are claimed first.</summary>

@@ -60,7 +60,7 @@ export function Layout() {
       />
       <SidebarInset className="min-w-0">
         <header
-          className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 backdrop-blur-sm px-4 md:hidden">
+          className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b bg-background/85 backdrop-blur-sm px-4 md:hidden">
           <SidebarTrigger/>
           <Link to="/" className="flex items-center gap-2">
             <img

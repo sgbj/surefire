@@ -44,7 +44,7 @@ builder.Services.AddSurefire();
 | `surefire.runs.claimed` | Counter | | `surefire.job.name` | Runs claimed by workers |
 | `surefire.runs.completed` | Counter | | `surefire.job.name` | Runs completed successfully |
 | `surefire.runs.failed` | Counter | | `surefire.job.name`, `surefire.dead_letter.reason` | Runs that reached the Failed terminal state. Reason is one of `retries_exhausted`, `no_handler_registered`, `shutdown_interrupted`, `stale_recovery` |
-| `surefire.runs.cancelled` | Counter | | `surefire.job.name` | Runs cancelled |
+| `surefire.runs.canceled` | Counter | | `surefire.job.name` | Runs canceled |
 | `surefire.runs.duration.ms` | Histogram | `ms` | `surefire.job.name` | Time from claim to terminal transition |
 | `surefire.scheduler.lag.ms` | Histogram | `ms` | `surefire.job.name` | Time between a run's `NotBefore` and when it was actually claimed. Growing values mean the cluster is undersized |
 | `surefire.store.operation.ms` | Histogram | `ms` | `surefire.store.operation` | Store operation duration |
@@ -63,6 +63,6 @@ The activity source creates `surefire.run.execute` spans with these tags:
 | `surefire.run.job` | The job name |
 | `surefire.run.attempt` | Attempt number |
 | `surefire.run.parent` | Parent run ID (if any) |
-| `surefire.job.timeout` | `true` when the attempt was cancelled by `WithTimeout` |
+| `surefire.job.timeout` | `true` when the attempt was canceled by `WithTimeout` |
 
 Failed runs set the span status to `Error` with the exception message.

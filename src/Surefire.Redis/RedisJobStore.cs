@@ -106,7 +106,7 @@ internal sealed partial class RedisJobStore(
 
                                                                   local function timeline_field(status)
                                                                       if status == 2 then return 'completed' end
-                                                                      if status == 4 then return 'cancelled' end
+                                                                      if status == 4 then return 'canceled' end
                                                                       if status == 5 then return 'failed' end
                                                                       return nil
                                                                   end
@@ -1053,7 +1053,7 @@ internal sealed partial class RedisJobStore(
                                                     r.nodeName = ARGV[5] ~= '' and ARGV[5] or nil
                                                     r.startedAt = ARGV[6] ~= '' and tonumber(ARGV[6]) or r.startedAt
                                                     r.completedAt = ARGV[7] ~= '' and tonumber(ARGV[7]) or r.completedAt
-                                                    r.cancelledAt = ARGV[8] ~= '' and tonumber(ARGV[8]) or r.cancelledAt
+                                                    r.canceledAt = ARGV[8] ~= '' and tonumber(ARGV[8]) or r.canceledAt
                                                     r.reason =ARGV[9] ~= '' and ARGV[9] or nil
                                                     r.result = ARGV[10] ~= '' and ARGV[10] or nil
                                                     r.progress = tonumber(ARGV[11])
@@ -1132,7 +1132,7 @@ internal sealed partial class RedisJobStore(
                                                         if ca then
                                                             redis.call('ZADD', '{surefire}:runs:completed', tonumber(ca), id)
                                                             local minute = math.floor(tonumber(ca) / 60000)
-                                                            local field = new_status == 2 and 'completed' or (new_status == 4 and 'cancelled' or 'failed')
+                                                            local field = new_status == 2 and 'completed' or (new_status == 4 and 'canceled' or 'failed')
                                                             redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), field, 1)
                                                             redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                                                         end
@@ -1190,14 +1190,14 @@ internal sealed partial class RedisJobStore(
                                                                 elseif new_status == 5 then
                                                                     b.failed = (b.failed or 0) + 1
                                                                 elseif new_status == 4 then
-                                                                    b.cancelled = (b.cancelled or 0) + 1
+                                                                    b.canceled = (b.canceled or 0) + 1
                                                                 end
-                                                                local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.cancelled or 0)
+                                                                local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
                                                                 if total_done >= b.total then
                                                                     local batch_status
                                                                     if (b.failed or 0) > 0 then
                                                                         batch_status = 5
-                                                                    elseif (b.cancelled or 0) > 0 then
+                                                                    elseif (b.canceled or 0) > 0 then
                                                                         batch_status = 4
                                                                     else
                                                                         batch_status = 2
@@ -1238,7 +1238,7 @@ internal sealed partial class RedisJobStore(
                 transition.NodeName ?? "",
                 transition.StartedAt?.ToUnixTimeMilliseconds().ToString() ?? "",
                 transition.CompletedAt?.ToUnixTimeMilliseconds().ToString() ?? "",
-                transition.CancelledAt?.ToUnixTimeMilliseconds().ToString() ?? "",
+                transition.CanceledAt?.ToUnixTimeMilliseconds().ToString() ?? "",
                 transition.Reason ?? "",
                 transition.Result ?? "",
                 transition.Progress.ToString(),
@@ -1311,7 +1311,7 @@ internal sealed partial class RedisJobStore(
 
                               local old_status = r.status
                               r.status = 4
-                              r.cancelledAt = now_ms
+                              r.canceledAt = now_ms
                               r.completedAt = now_ms
                               if err then r.reason =err end
                               redis.call('SET', key, cjson.encode(r))
@@ -1350,7 +1350,7 @@ internal sealed partial class RedisJobStore(
                               redis.call('HINCRBY', '{surefire}:job_stats:' .. r.jobName, 'terminal_runs', 1)
                               redis.call('ZADD', '{surefire}:runs:completed', now_ms, id)
                               local minute = math.floor(now_ms / 60000)
-                              redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'cancelled', 1)
+                              redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'canceled', 1)
                               redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                               redis.call('ZREM', '{surefire}:expiring', id)
 
@@ -1373,12 +1373,12 @@ internal sealed partial class RedisJobStore(
                                   if batch_data then
                                       local b = cjson.decode(batch_data)
                                       if b.status ~= 2 and b.status ~= 4 and b.status ~= 5 then
-                                          b.cancelled = (b.cancelled or 0) + 1
-                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.cancelled or 0)
+                                          b.canceled = (b.canceled or 0) + 1
+                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
                                           if total_done >= b.total then
                                               local batch_status
                                               if (b.failed or 0) > 0 then batch_status = 5
-                                              elseif (b.cancelled or 0) > 0 then batch_status = 4
+                                              elseif (b.canceled or 0) > 0 then batch_status = 4
                                               else batch_status = 2 end
                                               b.status = batch_status
                                               b.completedAt = now_ms
@@ -1879,7 +1879,7 @@ internal sealed partial class RedisJobStore(
                                   redis.call('ZADD', '{surefire}:events:batch:' .. batch_id, id, id_str)
                               end
                               local run_ids = redis.call('ZRANGE', batch_runs_key, 0, -1)
-                              local cancelled = {}
+                              local canceled = {}
                               local cancel_count = 0
                               for _, run_id in ipairs(run_ids) do
                                   local key = '{surefire}:run:' .. run_id
@@ -1889,7 +1889,7 @@ internal sealed partial class RedisJobStore(
                                       if r.status == 0 or r.status == 1 then
                                           local old_status = r.status
                                           r.status = 4
-                                          r.cancelledAt = now_ms
+                                          r.canceledAt = now_ms
                                           r.completedAt = now_ms
                                           if err then r.reason =err end
                                           redis.call('SET', key, cjson.encode(r))
@@ -1926,10 +1926,10 @@ internal sealed partial class RedisJobStore(
                                               redis.call('DEL', '{surefire}:dedup:' .. r.jobName .. ':' .. r.deduplicationId)
                                           end
                                           local minute = math.floor(now_ms / 60000)
-                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'cancelled', 1)
+                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'canceled', 1)
                                           redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                                           append_status_event(r)
-                                          cancelled[#cancelled + 1] = run_id
+                                          canceled[#canceled + 1] = run_id
                                           cancel_count = cancel_count + 1
                                       end
                                   end
@@ -1941,12 +1941,12 @@ internal sealed partial class RedisJobStore(
                                   if batch_data then
                                       local b = cjson.decode(batch_data)
                                       if b.status ~= 2 and b.status ~= 4 and b.status ~= 5 then
-                                          b.cancelled = (b.cancelled or 0) + cancel_count
-                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.cancelled or 0)
+                                          b.canceled = (b.canceled or 0) + cancel_count
+                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
                                           if total_done >= b.total then
                                               local batch_status
                                               if (b.failed or 0) > 0 then batch_status = 5
-                                              elseif (b.cancelled or 0) > 0 then batch_status = 4
+                                              elseif (b.canceled or 0) > 0 then batch_status = 4
                                               else batch_status = 2 end
                                               b.status = batch_status
                                               b.completedAt = now_ms
@@ -1959,8 +1959,8 @@ internal sealed partial class RedisJobStore(
                                       end
                                   end
                               end
-                              if #cancelled == 0 then return nil end
-                              return cjson.encode(cancelled)
+                              if #canceled == 0 then return nil end
+                              return cjson.encode(canceled)
                               """;
 
         var result = await EvaluateScriptAsync(script,
@@ -2000,7 +2000,7 @@ internal sealed partial class RedisJobStore(
                                   end
                               end
                               local child_members = redis.call('ZRANGE', children_key, 0, -1)
-                              local cancelled = {}
+                              local canceled = {}
                               local batch_counts = {}
                               for _, child_member in ipairs(child_members) do
                                   local run_id = string.sub(child_member, child_member_ts_width + 1)
@@ -2011,7 +2011,7 @@ internal sealed partial class RedisJobStore(
                                       if r.status == 0 or r.status == 1 then
                                           local old_status = r.status
                                           r.status = 4
-                                          r.cancelledAt = now_ms
+                                          r.canceledAt = now_ms
                                           r.completedAt = now_ms
                                           if err then r.reason =err end
                                           redis.call('SET', key, cjson.encode(r))
@@ -2048,10 +2048,10 @@ internal sealed partial class RedisJobStore(
                                               redis.call('DEL', '{surefire}:dedup:' .. r.jobName .. ':' .. r.deduplicationId)
                                           end
                                           local minute = math.floor(now_ms / 60000)
-                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'cancelled', 1)
+                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'canceled', 1)
                                           redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                                           append_status_event(r)
-                                          cancelled[#cancelled + 1] = run_id
+                                          canceled[#canceled + 1] = run_id
                                           if r.batchId and r.batchId ~= cjson.null and r.batchId ~= '' then
                                               batch_counts[r.batchId] = (batch_counts[r.batchId] or 0) + 1
                                           end
@@ -2065,12 +2065,12 @@ internal sealed partial class RedisJobStore(
                                   if batch_data then
                                       local b = cjson.decode(batch_data)
                                       if b.status ~= 2 and b.status ~= 4 and b.status ~= 5 then
-                                          b.cancelled = (b.cancelled or 0) + cnt
-                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.cancelled or 0)
+                                          b.canceled = (b.canceled or 0) + cnt
+                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
                                           if total_done >= b.total then
                                               local batch_status
                                               if (b.failed or 0) > 0 then batch_status = 5
-                                              elseif (b.cancelled or 0) > 0 then batch_status = 4
+                                              elseif (b.canceled or 0) > 0 then batch_status = 4
                                               else batch_status = 2 end
                                               b.status = batch_status
                                               b.completedAt = now_ms
@@ -2083,8 +2083,8 @@ internal sealed partial class RedisJobStore(
                                       end
                                   end
                               end
-                              if #cancelled == 0 then return nil end
-                              return cjson.encode(cancelled)
+                              if #canceled == 0 then return nil end
+                              return cjson.encode(canceled)
                               """;
 
         var result = await EvaluateScriptAsync(script,
@@ -2562,7 +2562,7 @@ internal sealed partial class RedisJobStore(
                               end
                               local offset = tonumber(ARGV[1])
                               local expired = redis.call('ZRANGEBYSCORE', '{surefire}:expiring', '-inf', now_ms, 'LIMIT', offset, 500)
-                              local cancelled_ids = {}
+                              local canceled_ids = {}
                               local cleaned = 0
                               local skipped = 0
 
@@ -2579,7 +2579,7 @@ internal sealed partial class RedisJobStore(
                                           cleaned = cleaned + 1
                                       elseif r.status == 0 then
                                           r.status = 4
-                                          r.cancelledAt = now_ms
+                                          r.canceledAt = now_ms
                                           r.completedAt = now_ms
                                           r.reason = ARGV[2]
                                           redis.call('SET', key, cjson.encode(r))
@@ -2608,7 +2608,7 @@ internal sealed partial class RedisJobStore(
                                           redis.call('HINCRBY', '{surefire}:job_stats:' .. r.jobName, 'terminal_runs', 1)
                                           redis.call('ZADD', '{surefire}:runs:completed', now_ms, run_id)
                                           local minute = math.floor(now_ms / 60000)
-                                           redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'cancelled', 1)
+                                           redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'canceled', 1)
                                            redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                                            redis.call('ZREM', '{surefire}:expiring', run_id)
                                            append_status_event(r)
@@ -2620,12 +2620,12 @@ internal sealed partial class RedisJobStore(
                                                if batch_data then
                                                    local b = cjson.decode(batch_data)
                                                    if b.status ~= 2 and b.status ~= 4 and b.status ~= 5 then
-                                                       b.cancelled = (b.cancelled or 0) + 1
-                                                       local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.cancelled or 0)
+                                                       b.canceled = (b.canceled or 0) + 1
+                                                       local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
                                                        if total_done >= b.total then
                                                            local batch_status
                                                            if (b.failed or 0) > 0 then batch_status = 5
-                                                           elseif (b.cancelled or 0) > 0 then batch_status = 4
+                                                           elseif (b.canceled or 0) > 0 then batch_status = 4
                                                            else batch_status = 2 end
                                                            b.status = batch_status
                                                            b.completedAt = now_ms
@@ -2639,7 +2639,7 @@ internal sealed partial class RedisJobStore(
                                                end
                                            end
 
-                                           cancelled_ids[#cancelled_ids + 1] = run_id
+                                           canceled_ids[#canceled_ids + 1] = run_id
                                        elseif r.status == 1 then
                                            skipped = skipped + 1
                                        end
@@ -2651,13 +2651,13 @@ internal sealed partial class RedisJobStore(
                               -- into string[]. Emit [] for the empty case explicitly; the non-empty
                               -- case runs through cjson so strings are escaped correctly.
                               local ids_json = '[]'
-                              if #cancelled_ids > 0 then
-                                  ids_json = cjson.encode(cancelled_ids)
+                              if #canceled_ids > 0 then
+                                  ids_json = cjson.encode(canceled_ids)
                               end
-                              return '{"cancelled":' .. ids_json .. ',"cleaned":' .. cleaned .. ',"skipped":' .. skipped .. '}'
+                              return '{"canceled":' .. ids_json .. ',"cleaned":' .. cleaned .. ',"skipped":' .. skipped .. '}'
                               """;
 
-        var totalCancelled = new List<string>();
+        var totalCanceled = new List<string>();
         var offset = 0;
         while (true)
         {
@@ -2667,9 +2667,9 @@ internal sealed partial class RedisJobStore(
                            SurefireJsonContext.Default.CancelExpiredRunsPayload)
                        ?? throw new InvalidOperationException("Cancel-expired payload was null.");
 
-            totalCancelled.AddRange(page.Cancelled);
+            totalCanceled.AddRange(page.Canceled);
 
-            if (page.Cancelled.Length == 0 && page.Cleaned == 0 && page.Skipped == 0)
+            if (page.Canceled.Length == 0 && page.Cleaned == 0 && page.Skipped == 0)
             {
                 break;
             }
@@ -2679,7 +2679,7 @@ internal sealed partial class RedisJobStore(
             offset += page.Skipped;
         }
 
-        return totalCancelled;
+        return totalCanceled;
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -2749,7 +2749,7 @@ internal sealed partial class RedisJobStore(
 
                                            local field = nil
                                            if status == 2 then field = 'completed' end
-                                           if status == 4 then field = 'cancelled' end
+                                           if status == 4 then field = 'canceled' end
                                            if status == 5 then field = 'failed' end
                                            if not field then return end
 
@@ -3089,7 +3089,7 @@ internal sealed partial class RedisJobStore(
                 Pending = (int)await countTasks[JobStatus.Pending],
                 Running = (int)await countTasks[JobStatus.Running],
                 Succeeded = (int)await countTasks[JobStatus.Succeeded],
-                Cancelled = (int)await countTasks[JobStatus.Cancelled],
+                Canceled = (int)await countTasks[JobStatus.Canceled],
                 Failed = (int)await countTasks[JobStatus.Failed]
             });
             bucketStart = bucketEnd;
@@ -3824,7 +3824,7 @@ internal sealed partial class RedisJobStore(
                                                     if (run.status == 2 or run.status == 4 or run.status == 5)
                                                         and run.completedAt and run.completedAt ~= cjson.null then
                                                         local minute = math.floor(tonumber(run.completedAt) / 60000)
-                                                        local field = run.status == 2 and 'completed' or (run.status == 4 and 'cancelled' or 'failed')
+                                                        local field = run.status == 2 and 'completed' or (run.status == 4 and 'canceled' or 'failed')
                                                         redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), field, 1)
                                                         redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
                                                     end

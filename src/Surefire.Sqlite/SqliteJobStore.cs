@@ -126,7 +126,7 @@ internal sealed class SqliteJobStore(
                                                          created_at TEXT NOT NULL,
                                                          started_at TEXT,
                                                          completed_at TEXT,
-                                                         cancelled_at TEXT,
+                                                         canceled_at TEXT,
                                                          node_name TEXT,
                                                          attempt INTEGER NOT NULL DEFAULT 0,
                                                          trace_id TEXT,
@@ -149,7 +149,7 @@ internal sealed class SqliteJobStore(
                                                          total INTEGER NOT NULL DEFAULT 0,
                                                          succeeded INTEGER NOT NULL DEFAULT 0,
                                                          failed INTEGER NOT NULL DEFAULT 0,
-                                                         cancelled INTEGER NOT NULL DEFAULT 0,
+                                                         canceled INTEGER NOT NULL DEFAULT 0,
                                                          created_at TEXT NOT NULL,
                                                          completed_at TEXT
                                                      );
@@ -692,7 +692,7 @@ internal sealed class SqliteJobStore(
                                                   UPDATE surefire_runs
                                                   SET status = @s, reason = @e, result = @r, progress = @p,
                                                       completed_at = COALESCE(@coa, completed_at),
-                                                      cancelled_at = COALESCE(@caa, cancelled_at),
+                                                      canceled_at = COALESCE(@caa, canceled_at),
                                                       started_at = COALESCE(@sa, started_at),
                                                       node_name = @nn,
                                                       last_heartbeat_at = COALESCE(@lh, last_heartbeat_at),
@@ -707,7 +707,7 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@r", (object?)transition.Result ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@p", transition.Progress);
         cmd.Parameters.AddWithValue("@coa", FormatNullableTimestamp(transition.CompletedAt));
-        cmd.Parameters.AddWithValue("@caa", FormatNullableTimestamp(transition.CancelledAt));
+        cmd.Parameters.AddWithValue("@caa", FormatNullableTimestamp(transition.CanceledAt));
         cmd.Parameters.AddWithValue("@sa", FormatNullableTimestamp(transition.StartedAt));
         cmd.Parameters.AddWithValue("@nn", (object?)transition.NodeName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@lh", FormatNullableTimestamp(transition.LastHeartbeatAt));
@@ -732,7 +732,7 @@ internal sealed class SqliteJobStore(
 
         // Any transition INTO a terminal status decrements non_terminal_count.
         if (updated && transition.NewStatus is JobStatus.Succeeded or JobStatus.Failed
-                or JobStatus.Cancelled)
+                or JobStatus.Canceled)
         {
             await DecrementNonTerminalCountAsync(conn, tx, affectedJobName!, cancellationToken);
         }
@@ -756,7 +756,7 @@ internal sealed class SqliteJobStore(
 
         BatchCompletionInfo? batchCompletion = null;
         var newStatus = transition.NewStatus;
-        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Cancelled ||
+        if (updated && (newStatus == JobStatus.Succeeded || newStatus == JobStatus.Canceled ||
                         newStatus == JobStatus.Failed))
         {
             await using var batchIdCmd = CreateCommand(conn, """
@@ -772,9 +772,9 @@ internal sealed class SqliteJobStore(
                                                               UPDATE surefire_batches
                                                               SET succeeded = succeeded + CASE WHEN @s = 2 THEN 1 ELSE 0 END,
                                                                   failed    = failed    + CASE WHEN @s = 5 THEN 1 ELSE 0 END,
-                                                                  cancelled = cancelled + CASE WHEN @s = 4 THEN 1 ELSE 0 END
+                                                                  Canceled = Canceled + CASE WHEN @s = 4 THEN 1 ELSE 0 END
                                                               WHERE id = @id AND status NOT IN (2, 4, 5)
-                                                              RETURNING total, succeeded, failed, cancelled
+                                                              RETURNING total, succeeded, failed, canceled
                                                               """, tx);
                 incrCmd.Parameters.AddWithValue("@id", batchId);
                 incrCmd.Parameters.AddWithValue("@s", (int)newStatus);
@@ -785,12 +785,12 @@ internal sealed class SqliteJobStore(
                     var total = reader.GetInt32(0);
                     var succeeded = reader.GetInt32(1);
                     var failed = reader.GetInt32(2);
-                    var cancelled = reader.GetInt32(3);
+                    var Canceled = reader.GetInt32(3);
 
-                    if (succeeded + failed + cancelled >= total)
+                    if (succeeded + failed + Canceled >= total)
                     {
                         var batchStatus = failed > 0 ? JobStatus.Failed
-                            : cancelled > 0 ? JobStatus.Cancelled
+                            : Canceled > 0 ? JobStatus.Canceled
                             : JobStatus.Succeeded;
                         var completedAt = timeProvider.GetUtcNow();
 
@@ -860,7 +860,7 @@ internal sealed class SqliteJobStore(
 
         await using var cmd = CreateCommand(conn, """
                                                   UPDATE surefire_runs
-                                                  SET status = 4, cancelled_at = @now, completed_at = @now,
+                                                  SET status = 4, canceled_at = @now, completed_at = @now,
                                                       reason = COALESCE(@reason, reason)
                                                   WHERE id = @id AND status NOT IN (2, 4, 5)
                                                       AND (@expected_attempt IS NULL OR attempt = @expected_attempt)
@@ -884,7 +884,7 @@ internal sealed class SqliteJobStore(
         }
 
         var allEvents = new List<RunEvent>();
-        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Cancelled, timeProvider.GetUtcNow()));
+        allEvents.Add(RunStatusEvents.Create(runId, attempt.Value, JobStatus.Canceled, timeProvider.GetUtcNow()));
         if (events is { Count: > 0 })
         {
             allEvents.AddRange(events);
@@ -897,9 +897,9 @@ internal sealed class SqliteJobStore(
         {
             await using var incrCmd = CreateCommand(conn, """
                                                           UPDATE surefire_batches
-                                                          SET cancelled = cancelled + 1
+                                                          SET canceled = canceled + 1
                                                           WHERE id = @id AND status NOT IN (2, 4, 5)
-                                                          RETURNING total, succeeded, failed, cancelled
+                                                          RETURNING total, succeeded, failed, canceled
                                                           """, tx);
             incrCmd.Parameters.AddWithValue("@id", batchId);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
@@ -909,12 +909,12 @@ internal sealed class SqliteJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -966,8 +966,8 @@ internal sealed class SqliteJobStore(
         await using var tx = conn.BeginTransaction(false);
 
         await using (var cmd = CreateCommand(conn, """
-                                                   INSERT INTO surefire_batches (id, status, total, succeeded, failed, cancelled, created_at, completed_at)
-                                                   VALUES (@id, @st, @tot, @suc, @fai, @can, @ca, @coa)
+                                                    INSERT INTO surefire_batches (id, status, total, succeeded, failed, canceled, created_at, completed_at)
+                                                    VALUES (@id, @st, @tot, @suc, @fai, @can, @ca, @coa)
                                                    """, tx))
         {
             cmd.Parameters.AddWithValue("@id", batch.Id);
@@ -975,7 +975,7 @@ internal sealed class SqliteJobStore(
             cmd.Parameters.AddWithValue("@tot", batch.Total);
             cmd.Parameters.AddWithValue("@suc", batch.Succeeded);
             cmd.Parameters.AddWithValue("@fai", batch.Failed);
-            cmd.Parameters.AddWithValue("@can", batch.Cancelled);
+            cmd.Parameters.AddWithValue("@can", batch.Canceled);
             cmd.Parameters.AddWithValue("@ca", FormatTimestamp(batch.CreatedAt));
             cmd.Parameters.AddWithValue("@coa", FormatNullableTimestamp(batch.CompletedAt));
             await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -1001,7 +1001,7 @@ internal sealed class SqliteJobStore(
     {
         await using var conn = await CreateConnectionAsync(cancellationToken);
         await using var cmd = CreateCommand(conn, """
-                                                  SELECT id, status, total, succeeded, failed, cancelled, created_at, completed_at
+                                                  SELECT id, status, total, succeeded, failed, canceled, created_at, completed_at
                                                   FROM surefire_batches WHERE id = @id
                                                   """);
         cmd.Parameters.AddWithValue("@id", batchId);
@@ -1018,7 +1018,7 @@ internal sealed class SqliteJobStore(
             Total = reader.GetInt32(2),
             Succeeded = reader.GetInt32(3),
             Failed = reader.GetInt32(4),
-            Cancelled = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            Canceled = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
             CreatedAt = ParseTimestamp(reader.GetString(6)),
             CompletedAt = reader.IsDBNull(7) ? null : ParseTimestamp(reader.GetString(7))
         };
@@ -1073,12 +1073,12 @@ internal sealed class SqliteJobStore(
             }
         }
 
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
         var statusEvents = new List<RunEvent>();
         await using (var cmd = CreateCommand(conn, """
                                                    UPDATE surefire_runs
                                                    SET status = 4,
-                                                       cancelled_at = @now,
+                                                       canceled_at = @now,
                                                        completed_at = @now,
                                                        reason = COALESCE(@reason, reason)
                                                    WHERE batch_id = @batch_id AND status IN (0, 1)
@@ -1092,11 +1092,11 @@ internal sealed class SqliteJobStore(
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
+                CanceledIds.Add(runId);
                 statusEvents.Add(RunStatusEvents.Create(
                     runId,
                     reader.GetInt32(1),
-                    JobStatus.Cancelled,
+                    JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
             }
         }
@@ -1105,16 +1105,16 @@ internal sealed class SqliteJobStore(
         await DecrementRunningCountsAsync(conn, tx, priorRunning, cancellationToken);
         await DecrementNonTerminalCountsAsync(conn, tx, priorNonTerminal, cancellationToken);
 
-        if (cancelledIds.Count > 0)
+        if (CanceledIds.Count > 0)
         {
             await using var incrCmd = CreateCommand(conn, """
                                                           UPDATE surefire_batches
-                                                          SET cancelled = cancelled + @cnt
+                                                          SET canceled = canceled + @cnt
                                                           WHERE id = @id AND status NOT IN (2, 4, 5)
-                                                          RETURNING total, succeeded, failed, cancelled
+                                                          RETURNING total, succeeded, failed, canceled
                                                           """, tx);
             incrCmd.Parameters.AddWithValue("@id", batchId);
-            incrCmd.Parameters.AddWithValue("@cnt", cancelledIds.Count);
+            incrCmd.Parameters.AddWithValue("@cnt", CanceledIds.Count);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
 
             if (await batchReader.ReadAsync(cancellationToken))
@@ -1122,12 +1122,12 @@ internal sealed class SqliteJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1147,7 +1147,7 @@ internal sealed class SqliteJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task<IReadOnlyList<string>> CancelChildRunsAsync(
@@ -1181,13 +1181,13 @@ internal sealed class SqliteJobStore(
             }
         }
 
-        var cancelledIds = new List<string>();
-        var cancelledBatchIds = new Dictionary<string, int>();
+        var CanceledIds = new List<string>();
+        var CanceledBatchIds = new Dictionary<string, int>();
         var statusEvents = new List<RunEvent>();
         await using (var cmd = CreateCommand(conn, """
                                                    UPDATE surefire_runs
                                                    SET status = 4,
-                                                       cancelled_at = @now,
+                                                       canceled_at = @now,
                                                        completed_at = @now,
                                                        reason = COALESCE(@reason, reason)
                                                    WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
@@ -1201,16 +1201,16 @@ internal sealed class SqliteJobStore(
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
+                CanceledIds.Add(runId);
                 statusEvents.Add(RunStatusEvents.Create(
                     runId,
                     reader.GetInt32(1),
-                    JobStatus.Cancelled,
+                    JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
             }
         }
@@ -1219,13 +1219,13 @@ internal sealed class SqliteJobStore(
         await DecrementRunningCountsAsync(conn, tx, priorRunning, cancellationToken);
         await DecrementNonTerminalCountsAsync(conn, tx, priorNonTerminal, cancellationToken);
 
-        foreach (var (batchId, cnt) in cancelledBatchIds)
+        foreach (var (batchId, cnt) in CanceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn, """
                                                           UPDATE surefire_batches
-                                                          SET cancelled = cancelled + @cnt
+                                                          SET canceled = canceled + @cnt
                                                           WHERE id = @id AND status NOT IN (2, 4, 5)
-                                                          RETURNING total, succeeded, failed, cancelled
+                                                          RETURNING total, succeeded, failed, canceled
                                                           """, tx);
             incrCmd.Parameters.AddWithValue("@id", batchId);
             incrCmd.Parameters.AddWithValue("@cnt", cnt);
@@ -1236,12 +1236,12 @@ internal sealed class SqliteJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1261,7 +1261,7 @@ internal sealed class SqliteJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
@@ -1716,15 +1716,15 @@ internal sealed class SqliteJobStore(
         var now = FormatTimestamp(timeProvider.GetUtcNow());
         await using var tx = conn.BeginTransaction();
 
-        var cancelledIds = new List<string>();
+        var CanceledIds = new List<string>();
         var statusEvents = new List<RunEvent>();
 
-        var cancelledBatchIds = new Dictionary<string, int>();
+        var CanceledBatchIds = new Dictionary<string, int>();
         var expiredByJob = new Dictionary<string, int>(StringComparer.Ordinal);
         await using (var updateCmd = CreateCommand(conn, """
                                                          UPDATE surefire_runs
                                                          SET status = 4,
-                                                             cancelled_at = @now,
+                                                             canceled_at = @now,
                                                              completed_at = @now,
                                                              reason = @reason
                                                          WHERE status = 0
@@ -1739,13 +1739,13 @@ internal sealed class SqliteJobStore(
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                cancelledIds.Add(runId);
-                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Cancelled,
+                CanceledIds.Add(runId);
+                statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    cancelledBatchIds[bId] = cancelledBatchIds.GetValueOrDefault(bId) + 1;
+                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
 
                 var jn = reader.GetString(3);
@@ -1755,16 +1755,16 @@ internal sealed class SqliteJobStore(
 
         await InsertEventsAsync(conn, statusEvents, cancellationToken, tx);
         // Only pending rows touched; running_count unaffected, non_terminal_count decrements
-        // once per cancelled row.
+        // once per Canceled row.
         await DecrementNonTerminalCountsAsync(conn, tx, expiredByJob, cancellationToken);
 
-        foreach (var (batchId, cnt) in cancelledBatchIds)
+        foreach (var (batchId, cnt) in CanceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn, """
                                                           UPDATE surefire_batches
-                                                          SET cancelled = cancelled + @cnt
+                                                          SET canceled = canceled + @cnt
                                                           WHERE id = @id AND status NOT IN (2, 4, 5)
-                                                          RETURNING total, succeeded, failed, cancelled
+                                                          RETURNING total, succeeded, failed, canceled
                                                           """, tx);
             incrCmd.Parameters.AddWithValue("@id", batchId);
             incrCmd.Parameters.AddWithValue("@cnt", cnt);
@@ -1775,12 +1775,12 @@ internal sealed class SqliteJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var cancelled = batchReader.GetInt32(3);
+                var Canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + cancelled >= total)
+                if (succeeded + failed + Canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : cancelled > 0 ? JobStatus.Cancelled
+                        : Canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1800,7 +1800,7 @@ internal sealed class SqliteJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return cancelledIds;
+        return CanceledIds;
     }
 
     public async Task PurgeAsync(
@@ -1935,11 +1935,11 @@ internal sealed class SqliteJobStore(
             var pending = Convert.ToInt32(reader.GetValue(3));
             var running = Convert.ToInt32(reader.GetValue(4));
             var completed = Convert.ToInt32(reader.GetValue(5));
-            var cancelled = Convert.ToInt32(reader.GetValue(6));
+            var Canceled = Convert.ToInt32(reader.GetValue(6));
             var deadLetter = Convert.ToInt32(reader.GetValue(7));
 
             activeRuns = pending + running;
-            var terminalCount = completed + cancelled + deadLetter;
+            var terminalCount = completed + Canceled + deadLetter;
             successRate = terminalCount > 0 ? completed / (double)terminalCount : 0.0;
 
             if (pending > 0)
@@ -1957,9 +1957,9 @@ internal sealed class SqliteJobStore(
                 runsByStatus["Succeeded"] = completed;
             }
 
-            if (cancelled > 0)
+            if (Canceled > 0)
             {
-                runsByStatus["Cancelled"] = cancelled;
+                runsByStatus["Canceled"] = Canceled;
             }
 
             if (deadLetter > 0)
@@ -1971,7 +1971,7 @@ internal sealed class SqliteJobStore(
         var bucketSeconds = bucketMinutes * 60;
         var bucketSize = TimeSpan.FromMinutes(bucketMinutes);
         var bucketData =
-            new Dictionary<int, (int Pending, int Running, int Succeeded, int Cancelled, int Failed)>();
+            new Dictionary<int, (int Pending, int Running, int Succeeded, int Canceled, int Failed)>();
 
         await using (var timelineCmd = CreateCommand(conn, """
                                                            SELECT
@@ -2001,15 +2001,15 @@ internal sealed class SqliteJobStore(
                 bucketData[idx] = status switch
                 {
                     JobStatus.Pending => (entry.Pending + cnt, entry.Running, entry.Succeeded,
-                        entry.Cancelled, entry.Failed),
+                        entry.Canceled, entry.Failed),
                     JobStatus.Running => (entry.Pending, entry.Running + cnt, entry.Succeeded,
-                        entry.Cancelled, entry.Failed),
+                        entry.Canceled, entry.Failed),
                     JobStatus.Succeeded => (entry.Pending, entry.Running, entry.Succeeded + cnt,
-                        entry.Cancelled, entry.Failed),
-                    JobStatus.Cancelled => (entry.Pending, entry.Running, entry.Succeeded,
-                        entry.Cancelled + cnt, entry.Failed),
+                        entry.Canceled, entry.Failed),
+                    JobStatus.Canceled => (entry.Pending, entry.Running, entry.Succeeded,
+                        entry.Canceled + cnt, entry.Failed),
                     JobStatus.Failed => (entry.Pending, entry.Running, entry.Succeeded,
-                        entry.Cancelled, entry.Failed + cnt),
+                        entry.Canceled, entry.Failed + cnt),
                     _ => entry
                 };
             }
@@ -2029,7 +2029,7 @@ internal sealed class SqliteJobStore(
                 Pending = entry.Pending,
                 Running = entry.Running,
                 Succeeded = entry.Succeeded,
-                Cancelled = entry.Cancelled,
+                Canceled = entry.Canceled,
                 Failed = entry.Failed
             });
             bucketStart += bucketSize;
@@ -2075,8 +2075,8 @@ internal sealed class SqliteJobStore(
         var total = Convert.ToInt32(reader.GetValue(0));
         var succeeded = Convert.ToInt32(reader.GetValue(1));
         var failed = Convert.ToInt32(reader.GetValue(2));
-        var cancelledCount = Convert.ToInt32(reader.GetValue(5));
-        var terminalCount = succeeded + failed + cancelledCount;
+        var CanceledCount = Convert.ToInt32(reader.GetValue(5));
+        var terminalCount = succeeded + failed + CanceledCount;
 
         return new()
         {
@@ -2599,7 +2599,7 @@ internal sealed class SqliteJobStore(
         await using var cmd = CreateCommand(conn, """
                                                   INSERT INTO surefire_runs (
                                                       id, job_name, status, arguments, result, reason, progress,
-                                                      created_at, started_at, completed_at, cancelled_at, node_name,
+                                                      created_at, started_at, completed_at, canceled_at, node_name,
                                                       attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
                                                       rerun_of_run_id, not_before, not_after, priority,
                                                       deduplication_id, last_heartbeat_at, batch_id
@@ -2621,7 +2621,7 @@ internal sealed class SqliteJobStore(
         cmd.Parameters.AddWithValue("@ca", FormatTimestamp(run.CreatedAt));
         cmd.Parameters.AddWithValue("@sa", FormatNullableTimestamp(run.StartedAt));
         cmd.Parameters.AddWithValue("@coa", FormatNullableTimestamp(run.CompletedAt));
-        cmd.Parameters.AddWithValue("@caa", FormatNullableTimestamp(run.CancelledAt));
+        cmd.Parameters.AddWithValue("@caa", FormatNullableTimestamp(run.CanceledAt));
         cmd.Parameters.AddWithValue("@nn", (object?)run.NodeName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@at", run.Attempt);
         cmd.Parameters.AddWithValue("@ti", (object?)run.TraceId ?? DBNull.Value);
@@ -2715,7 +2715,7 @@ internal sealed class SqliteJobStore(
             CreatedAt = ParseTimestamp(reader.GetString(reader.GetOrdinal("created_at"))),
             StartedAt = GetNullableTimestamp(reader, "started_at"),
             CompletedAt = GetNullableTimestamp(reader, "completed_at"),
-            CancelledAt = GetNullableTimestamp(reader, "cancelled_at"),
+            CanceledAt = GetNullableTimestamp(reader, "canceled_at"),
             NodeName = GetNullableString(reader, "node_name"),
             Attempt = reader.GetInt32(reader.GetOrdinal("attempt")),
             TraceId = GetNullableString(reader, "trace_id"),

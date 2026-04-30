@@ -95,12 +95,12 @@ internal sealed record BatchCompletionPayload
 
 /// <summary>
 ///     Wire record for the paged result of Redis's cancel-expired-runs Lua script: the ids it
-///     cancelled this page, the count of orphan pending entries it cleaned up, and the count of
+///     Canceled this page, the count of orphan pending entries it cleaned up, and the count of
 ///     entries skipped because they'd already been handled by another node.
 /// </summary>
 internal sealed record CancelExpiredRunsPayload
 {
-    public string[] Cancelled { get; init; } = [];
+    public string[] Canceled { get; init; } = [];
     public int Cleaned { get; init; }
     public int Skipped { get; init; }
 }

@@ -54,14 +54,14 @@ public abstract class StoreConformanceBase : IAsyncLifetime
                     run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result, run.StartedAt,
                     run.LastHeartbeatAt),
 
-            (JobStatus.Pending, JobStatus.Cancelled) when run.CompletedAt.HasValue && run.CancelledAt.HasValue
-                => RunStatusTransition.ToCancelled(JobStatus.Pending, run.Id, run.Attempt, run.CompletedAt.Value,
-                    run.CancelledAt.Value, run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result,
+            (JobStatus.Pending, JobStatus.Canceled) when run.CompletedAt.HasValue && run.CanceledAt.HasValue
+                => RunStatusTransition.ToCanceled(JobStatus.Pending, run.Id, run.Attempt, run.CompletedAt.Value,
+                    run.CanceledAt.Value, run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result,
                     run.StartedAt, run.LastHeartbeatAt),
 
-            (JobStatus.Running, JobStatus.Cancelled) when run.CompletedAt.HasValue && run.CancelledAt.HasValue
-                => RunStatusTransition.ToCancelled(JobStatus.Running, run.Id, run.Attempt, run.CompletedAt.Value,
-                    run.CancelledAt.Value, run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result,
+            (JobStatus.Running, JobStatus.Canceled) when run.CompletedAt.HasValue && run.CanceledAt.HasValue
+                => RunStatusTransition.ToCanceled(JobStatus.Running, run.Id, run.Attempt, run.CompletedAt.Value,
+                    run.CanceledAt.Value, run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result,
                     run.StartedAt, run.LastHeartbeatAt),
 
             _ => throw new InvalidOperationException(
@@ -77,7 +77,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
         NodeName = run.NodeName,
         StartedAt = run.StartedAt,
         CompletedAt = run.CompletedAt,
-        CancelledAt = run.CancelledAt,
+        CanceledAt = run.CanceledAt,
         Reason = run.Reason,
         Result = run.Result,
         Progress = run.Progress,

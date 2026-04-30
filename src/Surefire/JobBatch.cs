@@ -23,10 +23,10 @@ public sealed record JobBatch
     /// <summary>Gets the number of failed runs so far.</summary>
     public int Failed { get; init; }
 
-    /// <summary>Gets the number of cancelled runs so far.</summary>
-    public int Cancelled { get; init; }
+    /// <summary>Gets the number of canceled runs so far.</summary>
+    public int Canceled { get; init; }
 
-    /// <summary>Gets when the batch completed, failed, or was cancelled. Null while still in progress.</summary>
+    /// <summary>Gets when the batch completed, failed, or was canceled. Null while still in progress.</summary>
     public DateTimeOffset? CompletedAt { get; init; }
 
     /// <summary>Gets whether the batch has reached a terminal status.</summary>

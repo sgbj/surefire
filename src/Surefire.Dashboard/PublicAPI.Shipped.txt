@@ -139,8 +139,8 @@ Surefire.Dashboard.RunResponse.Attempt.get -> int
 Surefire.Dashboard.RunResponse.Attempt.init -> void
 Surefire.Dashboard.RunResponse.BatchId.get -> string?
 Surefire.Dashboard.RunResponse.BatchId.init -> void
-Surefire.Dashboard.RunResponse.CancelledAt.get -> System.DateTimeOffset?
-Surefire.Dashboard.RunResponse.CancelledAt.init -> void
+Surefire.Dashboard.RunResponse.CanceledAt.get -> System.DateTimeOffset?
+Surefire.Dashboard.RunResponse.CanceledAt.init -> void
 Surefire.Dashboard.RunResponse.CompletedAt.get -> System.DateTimeOffset?
 Surefire.Dashboard.RunResponse.CompletedAt.init -> void
 Surefire.Dashboard.RunResponse.CreatedAt.get -> System.DateTimeOffset
@@ -211,8 +211,8 @@ Surefire.Dashboard.SiblingsCursorResponse.Before.get -> string?
 Surefire.Dashboard.SiblingsCursorResponse.Before.init -> void
 Surefire.Dashboard.SiblingsCursorResponse.SiblingsCursorResponse() -> void
 Surefire.Dashboard.TimelineBucketResponse
-Surefire.Dashboard.TimelineBucketResponse.Cancelled.get -> int
-Surefire.Dashboard.TimelineBucketResponse.Cancelled.init -> void
+Surefire.Dashboard.TimelineBucketResponse.Canceled.get -> int
+Surefire.Dashboard.TimelineBucketResponse.Canceled.init -> void
 Surefire.Dashboard.TimelineBucketResponse.Failed.get -> int
 Surefire.Dashboard.TimelineBucketResponse.Failed.init -> void
 Surefire.Dashboard.TimelineBucketResponse.Pending.get -> int

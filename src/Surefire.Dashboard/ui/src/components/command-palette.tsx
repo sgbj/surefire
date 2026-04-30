@@ -69,7 +69,7 @@ export function CommandPalette({
       onOpenChange={setOpen}
       title="Command palette"
       description="Navigate or search"
-      className="bg-background/80 backdrop-blur-xl border-border/50 shadow-2xl"
+      className="bg-background/85 backdrop-blur-xl border-border/50 shadow-2xl"
     >
       <CommandInput placeholder="Search..."/>
       <CommandList className="max-h-85">

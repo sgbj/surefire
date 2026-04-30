@@ -20,8 +20,8 @@ internal sealed class SurefireInstrumentation : IDisposable
             description: "Runs that reached the Succeeded terminal state.");
         RunsFailed = _meter.CreateCounter<long>("surefire.runs.failed",
             description: "Runs that reached the Failed terminal state, tagged by dead-letter reason.");
-        RunsCancelled = _meter.CreateCounter<long>("surefire.runs.cancelled",
-            description: "Runs that reached the Cancelled terminal state.");
+        RunsCanceled = _meter.CreateCounter<long>("surefire.runs.canceled",
+            description: "Runs that reached the Canceled terminal state.");
         RunDurationMs = _meter.CreateHistogram<double>("surefire.runs.duration.ms",
             "ms",
             "Time from run start (claim) to terminal transition.");
@@ -50,7 +50,7 @@ internal sealed class SurefireInstrumentation : IDisposable
 
     public Counter<long> RunsFailed { get; }
 
-    public Counter<long> RunsCancelled { get; }
+    public Counter<long> RunsCanceled { get; }
 
     public Histogram<double> RunDurationMs { get; }
 
@@ -109,13 +109,13 @@ internal sealed class SurefireInstrumentation : IDisposable
         }
     }
 
-    public void RecordRunCancelled(string jobName, DateTimeOffset? startedAt, DateTimeOffset cancelledAt)
+    public void RecordRunCanceled(string jobName, DateTimeOffset? startedAt, DateTimeOffset CanceledAt)
     {
         var tags = new TagList { { "surefire.job.name", jobName } };
-        RunsCancelled.Add(1, tags);
+        RunsCanceled.Add(1, tags);
         if (startedAt is { } started)
         {
-            RunDurationMs.Record((cancelledAt - started).TotalMilliseconds, tags);
+            RunDurationMs.Record((CanceledAt - started).TotalMilliseconds, tags);
         }
     }
 
