@@ -163,12 +163,12 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelBatchRuns_CancelsAllPendingRuns()
+    public async Task CancelBatchSubtree_CancelsAllPendingRuns()
     {
         var ct = TestContext.Current.CancellationToken;
         var (batch, runs) = await CreateBatchWithRunsAsync(5, ct);
 
-        await Store.CancelBatchRunsAsync(batch.Id, cancellationToken: ct);
+        await Store.CancelBatchSubtreeAsync(batch.Id, cancellationToken: ct);
 
         foreach (var run in runs)
         {
@@ -179,7 +179,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelBatchRuns_DoesNotCancelAlreadyTerminalRuns()
+    public async Task CancelBatchSubtree_DoesNotCancelAlreadyTerminalRuns()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchJob_{Guid.CreateVersion7():N}";
@@ -205,7 +205,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
         };
         await Store.TryTransitionRunAsync(Transition(succeededRun, JobStatus.Running), ct);
 
-        await Store.CancelBatchRunsAsync(batch.Id, cancellationToken: ct);
+        await Store.CancelBatchSubtreeAsync(batch.Id, cancellationToken: ct);
 
         var storedPending = await Store.GetRunAsync(pendingRun.Id, ct);
         Assert.Equal(JobStatus.Canceled, storedPending!.Status);
@@ -215,14 +215,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelBatchRuns_NonExistentBatch_NoError()
-    {
-        var ct = TestContext.Current.CancellationToken;
-        await Store.CancelBatchRunsAsync(Guid.CreateVersion7().ToString("N"), cancellationToken: ct);
-    }
-
-    [Fact]
-    public async Task CancelBatchRuns_CanceledChildren_ContributeToJobStats()
+    public async Task CancelBatchSubtree_CanceledChildren_ContributeToJobStats()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"BatchStats_{Guid.CreateVersion7():N}";
@@ -251,7 +244,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
                 claimed.StartedAt,
                 claimed.LastHeartbeatAt), ct)).Transitioned);
 
-        await Store.CancelBatchRunsAsync(batch.Id, cancellationToken: ct);
+        await Store.CancelBatchSubtreeAsync(batch.Id, cancellationToken: ct);
 
         var storedPending = await Store.GetRunAsync(pendingRunId, ct);
         Assert.NotNull(storedPending);

@@ -2,7 +2,7 @@
 Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions
 static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSql(this Surefire.SurefireOptions! options, System.Func<System.IServiceProvider!, Npgsql.NpgsqlDataSource!>! dataSourceFactory, System.TimeSpan? commandTimeout = null) -> Surefire.SurefireOptions!
 static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSql(this Surefire.SurefireOptions! options, System.TimeSpan? commandTimeout = null) -> Surefire.SurefireOptions!
-static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSqlNotifications(this Surefire.SurefireOptions! options) -> Surefire.SurefireOptions!
 static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSqlNotifications(this Surefire.SurefireOptions! options, System.Func<System.IServiceProvider!, Npgsql.NpgsqlDataSource!>! dataSourceFactory) -> Surefire.SurefireOptions!
+static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSqlNotifications(this Surefire.SurefireOptions! options) -> Surefire.SurefireOptions!
 static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSqlStore(this Surefire.SurefireOptions! options, System.Func<System.IServiceProvider!, Npgsql.NpgsqlDataSource!>! dataSourceFactory, System.TimeSpan? commandTimeout = null) -> Surefire.SurefireOptions!
 static Microsoft.Extensions.DependencyInjection.SurefirePostgreSqlExtensions.UsePostgreSqlStore(this Surefire.SurefireOptions! options, System.TimeSpan? commandTimeout = null) -> Surefire.SurefireOptions!

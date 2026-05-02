@@ -132,6 +132,10 @@ Surefire.Dashboard.RunIdResponse
 Surefire.Dashboard.RunIdResponse.RunId.get -> string!
 Surefire.Dashboard.RunIdResponse.RunId.init -> void
 Surefire.Dashboard.RunIdResponse.RunIdResponse(string! RunId) -> void
+Surefire.Dashboard.RunLookupRequest
+Surefire.Dashboard.RunLookupRequest.Ids.get -> System.Collections.Generic.IReadOnlyList<string!>!
+Surefire.Dashboard.RunLookupRequest.Ids.init -> void
+Surefire.Dashboard.RunLookupRequest.RunLookupRequest() -> void
 Surefire.Dashboard.RunResponse
 Surefire.Dashboard.RunResponse.Arguments.get -> string?
 Surefire.Dashboard.RunResponse.Arguments.init -> void

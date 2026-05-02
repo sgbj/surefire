@@ -13,5 +13,6 @@
         <PackageReference Include="Aspire.Npgsql"/>
         <PackageReference Include="Aspire.StackExchange.Redis"/>
         <PackageReference Include="Aspire.Microsoft.Data.SqlClient"/>
+        <PackageReference Include="CommunityToolkit.Aspire.Microsoft.Data.Sqlite"/>
     </ItemGroup>
 </Project>

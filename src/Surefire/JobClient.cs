@@ -23,7 +23,6 @@ internal sealed partial class JobClient(
     ILogger<JobClient> logger) : IJobClient
 {
     private const int BatchFetchWindowSize = 64;
-    private const int CancellationTraversalPageSize = 100;
     private const string ClientCancellationReason = "Canceled by client request.";
     private const string OwnedOperationCancellationReason = "Canceled because the owning operation was canceled.";
     private static readonly TimeSpan BatchFetchWindowDelay = TimeSpan.FromMilliseconds(10);
@@ -110,81 +109,21 @@ internal sealed partial class JobClient(
 
     public async Task CancelAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
+        var result = await runCancellation.CancelRunAndDescendantsAsync(runId, ClientCancellationReason,
+            cancellationToken);
+        if (!result.Found)
         {
             throw new RunNotFoundException(runId);
         }
-
-        await runCancellation.CancelRunAndDescendantsAsync(runId, ClientCancellationReason, cancellationToken);
     }
 
     public async Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default)
-        => await CancelBatchAsync(batchId, ClientCancellationReason, cancellationToken);
-
-    private async Task CancelBatchAsync(string batchId, string reason, CancellationToken cancellationToken)
     {
-        var CanceledRunIds = await store.CancelBatchRunsAsync(batchId, reason, cancellationToken);
-        foreach (var runId in CanceledRunIds.Distinct(StringComparer.Ordinal))
-        {
-            await runCancellation.PublishCancellationNotificationsAsync(runId, cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId, cancellationToken);
-        }
-
-        await CancelBatchRunDescendantsAsync(batchId, reason, new HashSet<string>(StringComparer.Ordinal),
+        var result = await runCancellation.CancelBatchSubtreeAsync(batchId, ClientCancellationReason,
             cancellationToken);
-
-        if (CanceledRunIds.Count == 0)
+        if (!result.Found)
         {
-            return;
-        }
-
-        var batch = await store.GetBatchAsync(batchId, cancellationToken);
-        if (batch is null)
-        {
-            return;
-        }
-
-        var batchStatus = batch.Failed > 0 ? JobStatus.Failed : JobStatus.Canceled;
-        var completedAt = timeProvider.GetUtcNow();
-        if (await store.TryCompleteBatchAsync(batchId, batchStatus, completedAt, cancellationToken))
-        {
-            await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId,
-                cancellationToken);
-        }
-    }
-
-    private async Task CancelBatchRunDescendantsAsync(string batchId, string reason, ISet<string> visited,
-        CancellationToken cancellationToken)
-    {
-        var skip = 0;
-        while (true)
-        {
-            var page = await store.GetRunsAsync(
-                new() { BatchId = batchId },
-                skip,
-                CancellationTraversalPageSize,
-                cancellationToken);
-            if (page.Items.Count == 0)
-            {
-                return;
-            }
-
-            foreach (var run in page.Items)
-            {
-                await runCancellation.CancelRunAndDescendantsAsync(
-                    run.Id,
-                    reason,
-                    visited,
-                    cancellationToken,
-                    cancelSelf: false);
-            }
-
-            skip += page.Items.Count;
-            if (skip >= page.TotalCount)
-            {
-                return;
-            }
+            throw new BatchNotFoundException(batchId);
         }
     }
 
@@ -291,7 +230,7 @@ internal sealed partial class JobClient(
             var batch = await store.GetBatchAsync(batchId, cancellationToken);
             if (batch is null)
             {
-                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
+                throw new BatchNotFoundException(batchId);
             }
 
             while (true)
@@ -415,7 +354,7 @@ internal sealed partial class JobClient(
             var batch = await store.GetBatchAsync(batchId, cancellationToken);
             if (batch is null)
             {
-                throw new InvalidOperationException($"Batch '{batchId}' was not found.");
+                throw new BatchNotFoundException(batchId);
             }
 
             if (batch.Status.IsTerminal)
@@ -599,6 +538,11 @@ internal sealed partial class JobClient(
         {
             yield return item;
         }
+    }
+
+    private async Task CancelBatchAsync(string batchId, string reason, CancellationToken cancellationToken)
+    {
+        await runCancellation.CancelBatchSubtreeAsync(batchId, reason, cancellationToken);
     }
 
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
@@ -1859,13 +1803,14 @@ internal sealed partial class JobClient(
             cancellationToken);
     }
 
+    // Fresh CTS bounded by ShutdownTimeout: a caller's already-canceled token must not
+    // short-circuit cleanup, but cleanup must not block host shutdown indefinitely either.
     private async Task TryCancelOwnedRunAsync(string runId)
     {
-        using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
+        using var cts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
-            await runCancellation.CancelRunAndDescendantsAsync(runId, OwnedOperationCancellationReason,
-                cleanupCts.Token);
+            await runCancellation.CancelRunAndDescendantsAsync(runId, OwnedOperationCancellationReason, cts.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
@@ -1875,23 +1820,23 @@ internal sealed partial class JobClient(
 
     private async Task TryCancelOwnedBatchAsync(string batchId)
     {
-        using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
+        using var cts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
-            await CancelBatchAsync(batchId, OwnedOperationCancellationReason, cleanupCts.Token);
+            await CancelBatchAsync(batchId, OwnedOperationCancellationReason, cts.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
-            Log.FailedToPropagateCancellation(logger, ex, batchId);
+            Log.FailedToPropagateBatchCancellation(logger, ex, batchId);
         }
     }
 
     private async Task TryCancelRunBestEffortAsync(string runId)
     {
-        using var cleanupCts = new CancellationTokenSource(options.ShutdownTimeout);
+        using var cts = new CancellationTokenSource(options.ShutdownTimeout);
         try
         {
-            await CancelAsync(runId, cleanupCts.Token);
+            await runCancellation.CancelRunAndDescendantsAsync(runId, ClientCancellationReason, cts.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
@@ -2031,6 +1976,11 @@ internal sealed partial class JobClient(
         [LoggerMessage(EventId = 1004, Level = LogLevel.Warning,
             Message = "Failed to propagate cancellation for run '{RunId}'.")]
         public static partial void FailedToPropagateCancellation(ILogger logger, Exception exception, string runId);
+
+        [LoggerMessage(EventId = 1015, Level = LogLevel.Warning,
+            Message = "Failed to propagate cancellation for batch '{BatchId}'.")]
+        public static partial void FailedToPropagateBatchCancellation(ILogger logger, Exception exception,
+            string batchId);
 
         [LoggerMessage(EventId = 1005, Level = LogLevel.Warning,
             Message =

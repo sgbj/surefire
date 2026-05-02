@@ -10,13 +10,13 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class SurefireSqlServerExtensions
 {
     /// <summary>
-    ///     Configures Surefire to use SQL Server for job storage.
+    ///     Configures Surefire to use SQL Server for job storage. Requires
+    ///     <c>READ_COMMITTED_SNAPSHOT</c> to be enabled on the target database.
     /// </summary>
     /// <param name="options">The Surefire options.</param>
     /// <param name="connectionString">The SQL Server connection string.</param>
     /// <param name="commandTimeout">
-    ///     Optional timeout applied to each command. Defaults to <see cref="Microsoft.Data.SqlClient.SqlCommand" />'s
-    ///     own default (30 seconds) when null.
+    ///     Optional timeout applied to each command. Defaults to SqlClient's default (30 seconds).
     /// </param>
     public static SurefireOptions UseSqlServer(this SurefireOptions options, string connectionString,
         TimeSpan? commandTimeout = null)

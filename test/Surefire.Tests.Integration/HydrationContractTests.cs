@@ -622,8 +622,9 @@ public sealed class HydrationContractTests
             string? reason = null, IReadOnlyList<RunEvent>? events = null, CancellationToken ct = default) =>
             inner.TryCancelRunAsync(runId, expectedAttempt, reason, events, ct);
 
-        public Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId, string? reason = null,
-            CancellationToken ct = default) => inner.CancelChildRunsAsync(parentRunId, reason, ct);
+        public Task<SubtreeCancellation> CancelRunSubtreeAsync(string rootRunId, string? reason = null,
+            bool includeRoot = true, CancellationToken ct = default) =>
+            inner.CancelRunSubtreeAsync(rootRunId, reason, includeRoot, ct);
 
         public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
             IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken ct = default) =>
@@ -639,8 +640,8 @@ public sealed class HydrationContractTests
         public Task<bool> TryCompleteBatchAsync(string batchId, JobStatus status, DateTimeOffset completedAt,
             CancellationToken ct = default) => inner.TryCompleteBatchAsync(batchId, status, completedAt, ct);
 
-        public Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId, string? reason = null,
-            CancellationToken ct = default) => inner.CancelBatchRunsAsync(batchId, reason, ct);
+        public Task<SubtreeCancellation> CancelBatchSubtreeAsync(string batchId, string? reason = null,
+            CancellationToken ct = default) => inner.CancelBatchSubtreeAsync(batchId, reason, ct);
 
         public Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken ct = default) =>
             inner.AppendEventsAsync(events, ct);
@@ -683,7 +684,7 @@ public sealed class HydrationContractTests
         public Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
             CancellationToken ct = default) => inner.UpsertRateLimitsAsync(rateLimits, ct);
 
-        public Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken ct = default) =>
+        public Task<SubtreeCancellation> CancelExpiredRunsWithIdsAsync(CancellationToken ct = default) =>
             inner.CancelExpiredRunsWithIdsAsync(ct);
 
         public Task PurgeAsync(DateTimeOffset threshold, CancellationToken ct = default) =>

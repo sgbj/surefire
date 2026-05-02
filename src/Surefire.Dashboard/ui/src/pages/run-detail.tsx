@@ -45,6 +45,8 @@ const CHILD_RUN_PAGE_SIZE = 500;
 // Tree-aware: ancestors + sibling window + direct children. Children paginate on demand.
 const TRACE_SIBLING_WINDOW = 200;
 const TRACE_CHILDREN_TAKE = 200;
+const RUN_LOOKUP_CHUNK_SIZE = 500;
+const RUN_FRESHNESS_INTERVAL_MS = 2000;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -130,6 +132,66 @@ function dedupeRuns(runs: JobRun[]): JobRun[] {
   }
 
   return result;
+}
+
+function isRunActive(run: JobRun): boolean {
+  return run.status === JobStatus.Pending || run.status === JobStatus.Running;
+}
+
+function chunkIds(ids: string[], size: number): string[][] {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    chunks.push(ids.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function normalizeRunIds(ids: readonly string[]): string[] {
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+}
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function replaceRunIdsIfChanged(previous: string[], next: readonly string[]) {
+  const normalized = normalizeRunIds(next);
+  return sameStringArray(previous, normalized) ? previous : normalized;
+}
+
+const RUN_SNAPSHOT_KEYS = [
+  "id",
+  "jobName",
+  "status",
+  "arguments",
+  "result",
+  "reason",
+  "progress",
+  "createdAt",
+  "startedAt",
+  "completedAt",
+  "canceledAt",
+  "nodeName",
+  "attempt",
+  "traceId",
+  "spanId",
+  "parentRunId",
+  "rootRunId",
+  "rerunOfRunId",
+  "notBefore",
+  "notAfter",
+  "priority",
+  "queuePriority",
+  "deduplicationId",
+  "lastHeartbeatAt",
+  "batchTotal",
+  "batchCompleted",
+  "batchFailed",
+  "depth",
+] as const satisfies readonly (keyof JobRun)[];
+
+function sameRunSnapshot(a: JobRun, b: JobRun): boolean {
+  return RUN_SNAPSHOT_KEYS.every((key) => Object.is(a[key], b[key]));
 }
 
 export function RunDetailPage() {
@@ -264,9 +326,55 @@ export function RunDetailPage() {
   const [attemptFailuresByRun, setAttemptFailuresByRun] = useState<
     Record<string, AttemptFailureItem[]>
   >({});
+  const [latestRunsById, setLatestRunsById] = useState<Record<string, JobRun>>(
+    {},
+  );
+  const [visibleTraceRunIds, setVisibleTraceRunIds] = useState<string[]>([]);
+  const [visibleTriggeredRunIds, setVisibleTriggeredRunIds] = useState<
+    string[]
+  >([]);
   const [expandedFailureRow, setExpandedFailureRow] = useState<string | null>(
     null,
   );
+
+  const mergeLatestRuns = useCallback((runs: readonly JobRun[]) => {
+    if (runs.length === 0) return;
+    setLatestRunsById((prev) => {
+      const next = {...prev};
+      let changed = false;
+      for (const run of runs) {
+        const existing = prev[run.id];
+        const merged =
+          existing?.depth != null && run.depth == null
+            ? {...run, depth: existing.depth}
+            : run;
+        if (existing && sameRunSnapshot(existing, merged)) {
+          continue;
+        }
+
+        next[run.id] = merged;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
+  const resolveRun = useCallback(
+    (run: JobRun): JobRun => {
+      const latest = latestRunsById[run.id];
+      if (!latest) return run;
+      return run.depth != null && latest.depth !== run.depth
+        ? {...latest, depth: run.depth}
+        : latest;
+    },
+    [latestRunsById],
+  );
+
+  useEffect(() => {
+    setLatestRunsById({});
+    setVisibleTraceRunIds([]);
+    setVisibleTriggeredRunIds([]);
+  }, [id]);
 
   // DFS-flatten the tree. Focus children merge fresh-polled traceData.children with
   // the fully-paginated childrenByNode[focusId]; other expanded nodes use only the latter.
@@ -738,6 +846,116 @@ export function RunDetailPage() {
     });
   }, [childRunsData]);
 
+  useEffect(() => {
+    if (run) {
+      mergeLatestRuns([run]);
+    }
+  }, [run, mergeLatestRuns]);
+
+  useEffect(() => {
+    if (!traceData) return;
+    mergeLatestRuns([
+      ...traceData.ancestors,
+      traceData.focus,
+      ...traceData.siblingsBefore,
+      ...traceData.siblingsAfter,
+      ...traceData.children,
+    ]);
+  }, [traceData, mergeLatestRuns]);
+
+  useEffect(() => {
+    const runs = (childRunsData?.pages ?? []).flatMap((page) => page.items);
+    mergeLatestRuns(runs);
+  }, [childRunsData, mergeLatestRuns]);
+
+  const displayedTraceItems = useMemo(
+    () =>
+      traceItems.map((item) => {
+        const latest = resolveRun(item);
+        return {kind: "run" as const, ...latest};
+      }),
+    [traceItems, resolveRun],
+  );
+
+  const displayedStepRuns = useMemo(
+    () => sortedStepRuns.map(resolveRun),
+    [sortedStepRuns, resolveRun],
+  );
+
+  const onVisibleTraceRunIdsChange = useCallback((runIds: string[]) => {
+    setVisibleTraceRunIds((prev) => replaceRunIdsIfChanged(prev, runIds));
+  }, []);
+
+  const onVisibleTriggeredRunIdsChange = useCallback((runIds: string[]) => {
+    setVisibleTriggeredRunIds((prev) => replaceRunIdsIfChanged(prev, runIds));
+  }, []);
+
+  const activeVisibleRunIds = useMemo(() => {
+    const loadedRuns = new Map<string, JobRun>();
+    const addRun = (item: JobRun | undefined) => {
+      if (item) loadedRuns.set(item.id, item);
+    };
+    const visibleIds = new Set([
+      ...visibleTraceRunIds,
+      ...visibleTriggeredRunIds,
+    ]);
+
+    addRun(run);
+    if (traceData) {
+      for (const item of traceData.ancestors) addRun(item);
+      addRun(traceData.focus);
+      for (const item of traceData.siblingsBefore) addRun(item);
+      for (const item of traceData.siblingsAfter) addRun(item);
+      for (const item of traceData.children) addRun(item);
+    }
+    for (const item of traceItems) addRun(item);
+    for (const item of extraSiblingsBefore) addRun(item);
+    for (const item of extraSiblingsAfter) addRun(item);
+    for (const items of Object.values(childrenByNode)) {
+      for (const item of items) addRun(item);
+    }
+    for (const item of sortedStepRuns) addRun(item);
+
+    return [...visibleIds]
+      .map((runId) => loadedRuns.get(runId))
+      .filter((item): item is JobRun => Boolean(item))
+      .map(resolveRun)
+      .filter(isRunActive)
+      .map((item) => item.id)
+      .sort((a, b) => a.localeCompare(b));
+  }, [
+    run,
+    traceData,
+    traceItems,
+    extraSiblingsBefore,
+    extraSiblingsAfter,
+    childrenByNode,
+    sortedStepRuns,
+    visibleTraceRunIds,
+    visibleTriggeredRunIds,
+    resolveRun,
+  ]);
+
+  const {data: refreshedActiveRuns} = useQuery({
+    queryKey: ["runs", "lookup", activeVisibleRunIds],
+    queryFn: async () => {
+      const chunks = chunkIds(activeVisibleRunIds, RUN_LOOKUP_CHUNK_SIZE);
+      const pages = await Promise.all(
+        chunks.map((chunk) => api.getRunsByIds(chunk)),
+      );
+      return pages.flat();
+    },
+    enabled: activeVisibleRunIds.length > 0,
+    refetchInterval:
+      activeVisibleRunIds.length > 0 ? RUN_FRESHNESS_INTERVAL_MS : false,
+  });
+
+  useEffect(() => {
+    if (refreshedActiveRuns) {
+      mergeLatestRuns(refreshedActiveRuns);
+    }
+  }, [refreshedActiveRuns, mergeLatestRuns]);
+
   // Trace view scroll container
   const traceScrollRef = useRef<HTMLDivElement>(null);
 
@@ -745,15 +963,35 @@ export function RunDetailPage() {
   const TRIGRUN_ROW_HEIGHT = 40;
   const triggeredRunsScrollRef = useRef<HTMLDivElement>(null);
   const triggeredRunsVirtualizer = useVirtualizer({
-    count: sortedStepRuns.length,
+    count: displayedStepRuns.length,
     getScrollElement: () => triggeredRunsScrollRef.current,
     estimateSize: () => TRIGRUN_ROW_HEIGHT,
     overscan: 20,
+    onChange: (instance) => {
+      onVisibleTriggeredRunIdsChange(
+        instance
+          .getVirtualItems()
+          .map((item) => displayedStepRuns[item.index]?.id)
+          .filter((runId): runId is string => Boolean(runId)),
+      );
+    },
   });
+  useEffect(() => {
+    onVisibleTriggeredRunIdsChange(
+      triggeredRunsVirtualizer
+        .getVirtualItems()
+        .map((item) => displayedStepRuns[item.index]?.id)
+        .filter((runId): runId is string => Boolean(runId)),
+    );
+  }, [
+    displayedStepRuns,
+    onVisibleTriggeredRunIdsChange,
+    triggeredRunsVirtualizer,
+  ]);
   useStickToBottom({
     scrollElement: triggeredRunsScrollRef.current,
     virtualizer: triggeredRunsVirtualizer,
-    count: sortedStepRuns.length,
+    count: displayedStepRuns.length,
   });
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
@@ -1137,78 +1375,86 @@ export function RunDetailPage() {
 
       {(run.reason || failureRows.length > 0) && (
         <div className="rounded-lg border border-destructive/25 overflow-hidden">
-          <div className="max-h-128 overflow-auto">
-            <div
-              className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/25 bg-destructive/10 backdrop-blur-sm">
-              <span className="text-sm text-status-failed">
-                Errors{failureRows.length > 0 && ` (${failureRows.length})`}
-              </span>
-            </div>
-            {run.reason && (
+          <div
+            className="max-h-128 overflow-auto"
+            style={{
+              ["--errors-cols" as string]:
+                "minmax(0,5rem) minmax(0,16rem) minmax(0,1fr) auto",
+            }}
+          >
+            <div className="min-w-3xl">
               <div
-                className={`px-3 py-2.5 text-sm whitespace-pre-wrap break-words${
-                  failureRows.length > 0 ? " border-b" : ""
-                }`}>
-                {run.reason}
+                className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/25 bg-destructive/10 backdrop-blur-sm">
+                <span className="text-sm text-status-failed">
+                  Errors{failureRows.length > 0 && ` (${failureRows.length})`}
+                </span>
               </div>
-            )}
-            {failureRows.map(({failure, key}, index) => {
-              const isExpanded = expandedFailureRow === key;
-              const hasStackTrace = Boolean(failure.stackTrace);
-              const headline = [failure.exceptionType, failure.message]
-                .filter(Boolean)
-                .join(": ");
-              return (
-                <div key={key} className={index < failureRows.length - 1 ? "border-b" : ""}>
-                  <button
-                    type="button"
-                    onClick={
-                      hasStackTrace
-                        ? () =>
-                          setExpandedFailureRow((prev) =>
-                            prev === key ? null : key,
-                          )
-                        : undefined
-                    }
-                    disabled={!hasStackTrace}
-                    className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors ${
-                      hasStackTrace ? "hover:bg-muted/40 cursor-pointer" : "cursor-default"
-                    }`}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs text-muted-foreground tabular-nums">
-                        Attempt {failure.attempt}
-                        {failure.occurredAt ? ` · ${formatDate(failure.occurredAt)}` : ""}
-                      </div>
-                      {headline && (
-                        <div
-                          className="text-sm mt-1 whitespace-pre-wrap break-words">
-                          {headline}
-                        </div>
-                      )}
-                    </div>
-                    {hasStackTrace && (
-                      <ChevronDown
-                        className={`size-4 mt-1 text-muted-foreground shrink-0 transition-transform ${
-                          isExpanded ? "rotate-180" : ""
-                        }`}
-                      />
-                    )}
-                  </button>
-                  {isExpanded && failure.stackTrace && (
-                    <pre
-                      className="text-xs p-3 whitespace-pre-wrap wrap-break-word font-mono text-muted-foreground">
-                      {failure.stackTrace}
-                    </pre>
-                  )}
+              {run.reason && (
+                <div
+                  className={`px-3 py-2.5 text-sm whitespace-pre-wrap break-words${
+                    failureRows.length > 0 ? " border-b" : ""
+                  }`}>
+                  {run.reason}
                 </div>
-              );
-            })}
+              )}
+              {failureRows.map(({failure, key}, index) => {
+                const isExpanded = expandedFailureRow === key;
+                const hasStackTrace = Boolean(failure.stackTrace);
+                const headline = [failure.exceptionType, failure.message]
+                  .filter(Boolean)
+                  .join(": ");
+                return (
+                  <div key={key} className={index < failureRows.length - 1 ? "border-b" : ""}>
+                    <button
+                      type="button"
+                      onClick={
+                        hasStackTrace
+                          ? () =>
+                            setExpandedFailureRow((prev) =>
+                              prev === key ? null : key,
+                            )
+                          : undefined
+                      }
+                      disabled={!hasStackTrace}
+                      className={`w-full grid items-start text-left text-sm transition-colors ${
+                        hasStackTrace ? "hover:bg-muted/40 cursor-pointer" : "cursor-default"
+                      }`}
+                      style={{gridTemplateColumns: "var(--errors-cols)"}}
+                    >
+                      <div className="px-2 pl-4 py-2.5 text-muted-foreground tabular-nums truncate">
+                        #{failure.attempt}
+                      </div>
+                      <div className="px-2 py-2.5 text-muted-foreground tabular-nums truncate">
+                        {failure.occurredAt ? formatDate(failure.occurredAt) : ""}
+                      </div>
+                      <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap break-words">
+                        {headline}
+                      </div>
+                      <div className="px-2 pr-3 py-2.5">
+                        {hasStackTrace && (
+                          <ChevronDown
+                            className={`size-4 text-muted-foreground transition-transform ${
+                              isExpanded ? "rotate-180" : ""
+                            }`}
+                          />
+                        )}
+                      </div>
+                    </button>
+                    {isExpanded && failure.stackTrace && (
+                      <pre
+                        className="text-xs px-3 py-3 whitespace-pre-wrap wrap-break-word font-mono text-muted-foreground border-t border-border/50">
+                        {failure.stackTrace}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
 
-      {traceItems.length > 1 && (
+      {displayedTraceItems.length > 1 && (
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={traceScrollRef}
@@ -1217,7 +1463,7 @@ export function RunDetailPage() {
             style={{scrollPaddingTop: "2.75rem"}}
           >
             <TraceView
-              items={traceItems}
+              items={displayedTraceItems}
               currentRunId={id!}
               ancestorIds={ancestorIds}
               expandedNodes={expandedNodes}
@@ -1226,6 +1472,7 @@ export function RunDetailPage() {
               onToggle={toggleNode}
               scrollContainerRef={traceScrollRef}
               header={<span>Trace</span>}
+              onVisibleRunIdsChange={onVisibleTraceRunIdsChange}
               loadEarlierSiblings={
                 canLoadMoreSiblingsBefore
                   ? {
@@ -1248,7 +1495,7 @@ export function RunDetailPage() {
         </div>
       )}
 
-      {sortedStepRuns.length > 0 && (
+      {displayedStepRuns.length > 0 && (
         <div className="rounded-lg border overflow-hidden">
           <div
             ref={triggeredRunsScrollRef}
@@ -1261,11 +1508,11 @@ export function RunDetailPage() {
             }}
           >
             <div className="min-w-3xl">
-              <div className="sticky top-0 z-10 bg-muted/40 backdrop-blur-sm border-b">
+              <div className="sticky top-0 z-10 bg-muted/50 backdrop-blur-sm border-b">
                 <div className="flex items-center py-2.5 px-2">
               <span className="text-sm text-muted-foreground">
-                Triggered runs ({sortedStepRuns.length} /{" "}
-                {childTotalCount || sortedStepRuns.length})
+                 Triggered runs ({displayedStepRuns.length} /{" "}
+                 {childTotalCount || displayedStepRuns.length})
               </span>
                 </div>
                 <div
@@ -1282,10 +1529,12 @@ export function RunDetailPage() {
               </div>
               <div
                 className="relative"
-                style={{height: `${triggeredRunsVirtualizer.getTotalSize()}px`}}
+                style={{
+                  height: `${triggeredRunsVirtualizer.getTotalSize()}px`,
+                }}
               >
                 {triggeredRunsVirtualizer.getVirtualItems().map((virtualItem) => {
-                  const r = sortedStepRuns[virtualItem.index];
+                  const r = displayedStepRuns[virtualItem.index];
                   return (
                     <div
                       key={r.id}
@@ -1357,7 +1606,7 @@ export function RunDetailPage() {
       {run.arguments && (
         <div className="rounded-lg border overflow-hidden">
           <div className="max-h-128 overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Arguments</span>
             </div>
             <pre className="text-xs p-2 whitespace-pre-wrap break-all font-mono">
@@ -1370,7 +1619,7 @@ export function RunDetailPage() {
       {run.result && outputItems.length === 0 && (
         <div className="rounded-lg border overflow-hidden">
           <div className="max-h-128 overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground">Result</span>
             </div>
             <pre className="text-xs p-2 whitespace-pre-wrap break-all font-mono">
@@ -1386,7 +1635,7 @@ export function RunDetailPage() {
             ref={inputScrollContainerRef}
             className="max-h-128 overflow-y-auto font-mono text-xs"
           >
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 {inputHeader}
               </span>
@@ -1425,7 +1674,7 @@ export function RunDetailPage() {
             ref={outputScrollContainerRef}
             className="max-h-128 overflow-y-auto font-mono text-xs"
           >
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Output stream ({outputItems.length} items)
               </span>
@@ -1464,7 +1713,7 @@ export function RunDetailPage() {
             className="max-h-128 overflow-y-auto font-mono text-xs"
           >
             <div
-              className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/40 backdrop-blur-sm">
+              className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
               <span className="text-sm text-muted-foreground font-sans">
                 Logs (
                 {logFilter !== null
@@ -1519,7 +1768,7 @@ export function RunDetailPage() {
                       <span>{log.message}</span>
                       {log.exception && (
                         <pre
-                          className="mt-1 whitespace-pre-wrap wrap-break-word">
+                          className="mt-1 whitespace-pre-wrap wrap-break-word text-muted-foreground">
                           {log.exception}
                         </pre>
                       )}

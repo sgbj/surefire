@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using Npgsql;
+using StackExchange.Redis;
 using Surefire;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -9,9 +11,34 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracing => tracing.AddSource(SurefireDiagnostics.ActivitySourceName))
     .WithMetrics(metrics => metrics.AddMeter(SurefireDiagnostics.MeterName));
 
-builder.AddNpgsqlDataSource("surefire");
-//builder.AddSqlServerClient("surefire");
-//builder.AddRedisClient("surefire");
+var storeProvider = builder.Configuration["Surefire:Store"]!;
+var notificationsProvider = builder.Configuration["Surefire:Notifications"];
+
+switch (storeProvider)
+{
+    case "postgres":
+        builder.AddKeyedNpgsqlDataSource("store");
+        break;
+    case "sqlserver":
+        builder.AddKeyedSqlServerClient("store");
+        break;
+    case "redis":
+        builder.AddKeyedRedisClient("store");
+        break;
+    case "sqlite":
+        builder.AddKeyedSqliteConnection("store");
+        break;
+}
+
+switch (notificationsProvider)
+{
+    case "postgres":
+        builder.AddKeyedNpgsqlDataSource("notifications");
+        break;
+    case "redis":
+        builder.AddKeyedRedisClient("notifications");
+        break;
+}
 
 builder.Services.AddSurefire(options =>
 {
@@ -21,10 +48,31 @@ builder.Services.AddSurefire(options =>
     options.AddFixedWindowLimiter("Fibonacci", 10, TimeSpan.FromSeconds(10));
     options.UseFilter<StopwatchJobFilter>();
 
-    options.UsePostgreSql();
-    //options.UseSqlServer(builder.Configuration.GetConnectionString("surefire")!);
-    //options.UseRedis();
-    //options.UseSqlite("Data Source=surefire.db");
+    switch (storeProvider)
+    {
+        case "postgres":
+            options.UsePostgreSql(sp => sp.GetRequiredKeyedService<NpgsqlDataSource>("store"));
+            break;
+        case "sqlserver":
+            options.UseSqlServer(builder.Configuration.GetConnectionString("store")!);
+            break;
+        case "redis":
+            options.UseRedis(sp => sp.GetRequiredKeyedService<IConnectionMultiplexer>("store"));
+            break;
+        case "sqlite":
+            options.UseSqlite(builder.Configuration.GetConnectionString("store")!);
+            break;
+    }
+
+    switch (notificationsProvider)
+    {
+        case "postgres":
+            options.UsePostgreSqlNotifications(sp => sp.GetRequiredKeyedService<NpgsqlDataSource>("notifications"));
+            break;
+        case "redis":
+            options.UseRedisNotifications(sp => sp.GetRequiredKeyedService<IConnectionMultiplexer>("notifications"));
+            break;
+    }
 });
 
 var app = builder.Build();
@@ -161,17 +209,6 @@ app.AddJob("Batch", async (IJobClient client, ILogger<Program> logger, Cancellat
         return results.Sum(r => (long)r.Sum);
     })
     .WithTags("batch");
-
-app.AddJob("BatchWithTimeout", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
-    {
-        using var timeout = new CancellationTokenSource();
-        timeout.CancelAfter(TimeSpan.FromSeconds(10));
-
-        logger.LogInformation("Running Batch with a 10 second cancellation token");
-        return await client.RunAsync<long>("Batch", cancellationToken: timeout.Token);
-    })
-    .WithDescription("Calls the Batch job with a custom cancellation token")
-    .WithTags("batch", "cancellation");
 
 app.AddJob("StreamBatch", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
     {

@@ -12,7 +12,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var run = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1) };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
+        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Count;
 
         Assert.Equal(1, Canceled);
 
@@ -41,7 +41,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         await Store.CreateRunsAsync([expiredPending, expiredPending2, notExpired], cancellationToken: ct);
 
-        var CanceledIds = await Store.CancelExpiredRunsWithIdsAsync(ct);
+        var CanceledIds = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Select(r => r.RunId).ToList();
 
         Assert.Equal(2, CanceledIds.Count);
         Assert.Contains(expiredPending.Id, CanceledIds);
@@ -86,7 +86,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
+        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Count;
         Assert.Equal(0, Canceled);
 
         var loaded = await Store.GetRunAsync(run.Id, ct);
@@ -184,7 +184,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         };
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var count = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
+        var count = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Count;
         Assert.Equal(1, count);
 
         var after = await Store.GetRunAsync(run.Id, ct);
@@ -214,7 +214,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var run4 = CreateRun(jobName) with { NotAfter = DateTimeOffset.UtcNow.AddHours(1) };
         await Store.CreateRunsAsync([run4], cancellationToken: ct);
 
-        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
+        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Count;
 
         Assert.Equal(3, Canceled);
 
@@ -234,7 +234,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         // ClaimRunsAsync skips expired runs, so the expired pending run won't be claimed;
         // assert it is Canceled instead.
-        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Count;
+        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Count;
         Assert.Equal(1, Canceled);
 
         var loaded = await Store.GetRunAsync(run.Id, ct);
@@ -396,7 +396,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
             [expiringRun with { BatchId = batch.Id }, normalRun with { BatchId = batch.Id }],
             cancellationToken: ct);
 
-        var CanceledIds = await Store.CancelExpiredRunsWithIdsAsync(ct);
+        var CanceledIds = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Select(r => r.RunId).ToList();
 
         Assert.Contains(expiringRun.Id, CanceledIds);
 
@@ -706,5 +706,44 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
 
         var fresh = CreateRun(jobName);
         Assert.True(await Store.TryCreateRunAsync(fresh, 1, cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task CancelExpiredRuns_MixedStatuses_CancelsOnlyEligible()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"MixedExpire_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var past = now.AddMinutes(-10);
+
+        var pending1 = CreateRun(jobName) with { NotAfter = past };
+        await Store.CreateRunsAsync([pending1], cancellationToken: ct);
+
+        // Running run with expired NotAfter; should NOT be Canceled.
+        var running = CreateRun(jobName, JobStatus.Running) with
+        {
+            NotAfter = past,
+            NodeName = "node1",
+            Attempt = 1,
+            StartedAt = now,
+            LastHeartbeatAt = now
+        };
+        await Store.CreateRunsAsync([running], cancellationToken: ct);
+
+        // Another expired Pending run; should be Canceled.
+        var pending2 = CreateRun(jobName) with
+        {
+            NotAfter = past
+        };
+        await Store.CreateRunsAsync([pending2], cancellationToken: ct);
+
+        var Canceled = (await Store.CancelExpiredRunsWithIdsAsync(ct)).Runs.Count;
+        Assert.Equal(2, Canceled);
+
+        var loaded = await Store.GetRunAsync(running.Id, ct);
+        Assert.Equal(JobStatus.Running, loaded!.Status);
     }
 }

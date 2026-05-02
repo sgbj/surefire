@@ -52,10 +52,11 @@ internal abstract class ThrowingJobStore : IJobStore
         string? reason = null, IReadOnlyList<RunEvent>? events = null, CancellationToken cancellationToken = default) =>
         throw new NotImplementedException();
 
-    public virtual Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId, string? reason = null,
-        CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    public virtual Task<SubtreeCancellation> CancelRunSubtreeAsync(string rootRunId, string? reason = null,
+        bool includeRoot = true, CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException();
 
-    public virtual Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId, string? reason = null,
+    public virtual Task<SubtreeCancellation> CancelBatchSubtreeAsync(string batchId, string? reason = null,
         CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
@@ -113,7 +114,7 @@ internal abstract class ThrowingJobStore : IJobStore
     public virtual Task UpsertRateLimitsAsync(IReadOnlyList<RateLimitDefinition> rateLimits,
         CancellationToken ct = default) => throw new NotImplementedException();
 
-    public virtual Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+    public virtual Task<SubtreeCancellation> CancelExpiredRunsWithIdsAsync(
         CancellationToken cancellationToken = default) => throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(

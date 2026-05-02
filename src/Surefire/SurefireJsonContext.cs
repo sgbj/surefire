@@ -34,6 +34,7 @@ namespace Surefire;
 [JsonSerializable(typeof(List<UpsertRateLimitPayload>))]
 [JsonSerializable(typeof(BatchCompletionPayload))]
 [JsonSerializable(typeof(CancelExpiredRunsPayload))]
+[JsonSerializable(typeof(SubtreeCancellationPayload))]
 internal sealed partial class SurefireJsonContext : JsonSerializerContext;
 
 /// <summary>
@@ -94,13 +95,36 @@ internal sealed record BatchCompletionPayload
 }
 
 /// <summary>
-///     Wire record for the paged result of Redis's cancel-expired-runs Lua script: the ids it
-///     Canceled this page, the count of orphan pending entries it cleaned up, and the count of
-///     entries skipped because they'd already been handled by another node.
+///     Wire record for the paged result of Redis's cancel-expired-runs Lua script: the runs it
+///     Canceled this page (with their batch ids), any batches that completed as a side effect,
+///     the count of orphan pending entries it cleaned up, and the count of entries skipped
+///     because they'd already been handled by another node. Arrays are nullable because Lua's
+///     cjson drops empty tables.
 /// </summary>
 internal sealed record CancelExpiredRunsPayload
 {
-    public string[] Canceled { get; init; } = [];
+    public CanceledRunPayload[]? Runs { get; init; }
+    public BatchCompletionPayload[]? CompletedBatches { get; init; }
     public int Cleaned { get; init; }
     public int Skipped { get; init; }
+}
+
+/// <summary>
+///     Wire record for the result of Redis's cancel-subtree Lua script: the runs that
+///     transitioned to Canceled (with their batch ids) and any batches that completed.
+///     Fields are nullable so an omitted array (Lua's cjson drops empty tables) round-trips
+///     to an empty C# collection.
+/// </summary>
+internal sealed record SubtreeCancellationPayload
+{
+    public bool Found { get; init; } = true;
+    public CanceledRunPayload[]? Runs { get; init; }
+    public BatchCompletionPayload[]? CompletedBatches { get; init; }
+}
+
+/// <summary>Per-run entry inside <see cref="SubtreeCancellationPayload" />.</summary>
+internal sealed record CanceledRunPayload
+{
+    public string RunId { get; init; } = string.Empty;
+    public string? BatchId { get; init; }
 }

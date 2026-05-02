@@ -37,6 +37,70 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
+    public async Task RunsLookupEndpoint_ReturnsFreshRunsById()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(ct: ct);
+
+        var store = app.Services.GetRequiredService<IJobStore>();
+        var now = DateTimeOffset.UtcNow;
+        const string jobName = "tests-runs-lookup";
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default" }], ct);
+
+        var running = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = jobName,
+            Status = JobStatus.Running,
+            CreatedAt = now,
+            NotBefore = now,
+            StartedAt = now,
+            NodeName = "node-1",
+            Attempt = 1,
+            Progress = 0.5
+        };
+        var succeeded = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = jobName,
+            Status = JobStatus.Succeeded,
+            CreatedAt = now.AddMilliseconds(1),
+            NotBefore = now.AddMilliseconds(1),
+            StartedAt = now.AddMilliseconds(1),
+            CompletedAt = now.AddMilliseconds(2),
+            Attempt = 1,
+            Progress = 1
+        };
+
+        await store.CreateRunsAsync([running, succeeded], cancellationToken: ct);
+
+        var transition = RunStatusTransition.RunningToSucceeded(
+            running.Id,
+            running.Attempt,
+            now.AddSeconds(1),
+            running.NotBefore,
+            running.NodeName,
+            1,
+            "{}",
+            null,
+            running.StartedAt,
+            now.AddSeconds(1));
+        Assert.True((await store.TryTransitionRunAsync(transition, ct)).Transitioned);
+
+        using var client = app.GetTestClient();
+        var response = await client.PostAsJsonAsync("/surefire/api/runs/lookup",
+            new { ids = new[] { succeeded.Id, "", running.Id, running.Id, Guid.CreateVersion7().ToString("N") } },
+            ct);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var runs = await response.Content.ReadFromJsonAsync<List<RunResponse>>(ct);
+        Assert.NotNull(runs);
+        Assert.Equal([succeeded.Id, running.Id], runs.Select(r => r.Id));
+        Assert.All(runs, r => Assert.Equal(JobStatus.Succeeded, r.Status));
+        Assert.All(runs, r => Assert.NotNull(r.CompletedAt));
+    }
+
+    [Fact]
     public async Task JobsEndpoint_ReturnsRegisteredJob()
     {
         var ct = TestContext.Current.CancellationToken;

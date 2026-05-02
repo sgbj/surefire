@@ -377,6 +377,12 @@ export const api = {
     return fetchApi<PagedResult<JobRun>>(`/runs${qs ? `?${qs}` : ""}`);
   },
   getRun: (id: string) => fetchApi<JobRun>(`/runs/${encodeURIComponent(id)}`),
+  getRunsByIds: (ids: string[]) =>
+    fetchApi<JobRun[]>("/runs/lookup", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ids}),
+    }),
   cancelRun: (id: string) =>
     fetchApi<void>(`/runs/${encodeURIComponent(id)}/cancel`, {
       method: "POST",

@@ -191,15 +191,35 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Cancels all non-terminal runs belonging to the specified parent run.
-    ///     Atomically inserts events and updates batch counters.
+    ///     Atomically cancels <paramref name="rootRunId" /> (when <paramref name="includeRoot" /> is true)
+    ///     and every non-terminal descendant reachable through <c>ParentRunId</c>, in a single round trip.
+    ///     <para>
+    ///         All bookkeeping happens in the same transaction or atomic script: status events are
+    ///         appended for each cancelled run, per-job <c>NonTerminalCount</c> and <c>RunningCount</c>
+    ///         decrement by the affected counts, per-queue <c>RunningCount</c> decrements by the
+    ///         affected counts, and any batch whose remaining non-terminal runs are cancelled is
+    ///         transitioned to a terminal status atomically.
+    ///     </para>
+    ///     <para>
+    ///         Idempotent. Already-terminal runs are skipped (not re-transitioned, not in result).
+    ///         <c>ParentRunId</c> is set when a run is created and never updated, so the descendant
+    ///         graph is acyclic by construction and the walk does not need cycle tracking.
+    ///     </para>
     /// </summary>
-    /// <param name="parentRunId">The parent run ID whose children should be Canceled.</param>
-    /// <param name="reason">Optional termination reason to set on Canceled runs.</param>
+    /// <param name="rootRunId">The root run whose subtree should be cancelled.</param>
+    /// <param name="reason">Optional termination reason to set on cancelled runs.</param>
+    /// <param name="includeRoot">
+    ///     When true, the root run is also cancelled if non-terminal. When false, only descendants
+    ///     are cancelled (used when the root has already been cancelled by a different code path).
+    /// </param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The IDs of child runs that were canceled.</returns>
-    Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
+    /// <returns>
+    ///     The runs that transitioned to <see cref="JobStatus.Canceled" /> and any batches that
+    ///     completed as a side effect.
+    /// </returns>
+    Task<SubtreeCancellation> CancelRunSubtreeAsync(string rootRunId,
         string? reason = null,
+        bool includeRoot = true,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -252,14 +272,24 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Cancels all non-terminal runs belonging to the specified batch.
-    ///     Atomically inserts events and updates batch counters.
+    ///     Atomically cancels every non-terminal run belonging to the specified batch and every
+    ///     non-terminal descendant of those runs reachable through <c>ParentRunId</c>, in a single
+    ///     round trip.
+    ///     <para>
+    ///         Behaves like <see cref="CancelRunSubtreeAsync" /> seeded with all runs in the batch:
+    ///         status events are appended, per-job and per-queue counters are decremented atomically,
+    ///         and the batch itself is transitioned to a terminal status when all its remaining
+    ///         non-terminal runs are cancelled.
+    ///     </para>
     /// </summary>
-    /// <param name="batchId">The batch ID whose runs should be Canceled.</param>
-    /// <param name="reason">Optional termination reason to set on Canceled runs.</param>
+    /// <param name="batchId">The batch whose runs should be cancelled.</param>
+    /// <param name="reason">Optional termination reason to set on cancelled runs.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The IDs of runs that were canceled.</returns>
-    Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+    /// <returns>
+    ///     The runs that transitioned to <see cref="JobStatus.Canceled" /> and any batches that
+    ///     completed as a side effect.
+    /// </returns>
+    Task<SubtreeCancellation> CancelBatchSubtreeAsync(string batchId,
         string? reason = null,
         CancellationToken cancellationToken = default);
 
@@ -468,13 +498,17 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Cancels all pending runs whose <c>NotAfter</c> deadline has passed and
-    ///     returns the run IDs that were transitioned to <see cref="JobStatus.Canceled" />.
-    ///     Atomically updates batch counters for Canceled batch children.
+    ///     Cancels all pending runs whose <c>NotAfter</c> deadline has passed.
+    ///     Atomically updates batch counters and transitions any batch whose remaining non-terminal
+    ///     runs are cancelled by this sweep.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The IDs of runs that were canceled in this operation.</returns>
-    Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default);
+    /// <returns>
+    ///     The runs that transitioned to <see cref="JobStatus.Canceled" /> and any batches that
+    ///     reached a terminal status as a side effect. <see cref="SubtreeCancellation.Found" /> is
+    ///     always <c>true</c> for sweeps; the field is meaningful only on entity-addressed cancels.
+    /// </returns>
+    Task<SubtreeCancellation> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Purges all data older than the specified threshold: terminal runs (by <c>CompletedAt</c>)

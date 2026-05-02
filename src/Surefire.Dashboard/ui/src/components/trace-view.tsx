@@ -1,4 +1,11 @@
-import {type RefObject, useEffect, useMemo, useRef, useState,} from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {Link} from "react-router";
 import {useVirtualizer} from "@tanstack/react-virtual";
 import {ChevronDown, ChevronRight, ChevronUp} from "lucide-react";
@@ -39,19 +46,20 @@ const ROW_HEIGHT = TRACE_ROW_HEIGHT;
 export type TraceItem = { kind: "run" } & JobRun;
 
 export function TraceView({
-                            items,
-                            currentRunId,
-                            ancestorIds,
-                            expandedNodes,
-                            knownEmptyNodes,
-                            loadingNodes,
-                            onToggle,
-                            scrollContainerRef,
-                            header,
-                            loadEarlierSiblings,
-                            loadMoreLaterSiblings,
-                            extraSiblingsBeforeCount = 0,
-                          }: {
+  items,
+  currentRunId,
+  ancestorIds,
+  expandedNodes,
+  knownEmptyNodes,
+  loadingNodes,
+  onToggle,
+  scrollContainerRef,
+  header,
+  loadEarlierSiblings,
+  loadMoreLaterSiblings,
+  extraSiblingsBeforeCount = 0,
+  onVisibleRunIdsChange,
+}: {
   items: TraceItem[];
   currentRunId: string;
   ancestorIds: Set<string>;
@@ -75,6 +83,7 @@ export function TraceView({
    * the newly-loaded rows are visible.
    */
   extraSiblingsBeforeCount?: number;
+  onVisibleRunIdsChange?: (runIds: string[]) => void;
 }) {
   const hasActiveRuns = useMemo(
     () =>
@@ -115,13 +124,36 @@ export function TraceView({
     };
   }, [items, nowMs]);
 
+  const reportVisibleRunIds = useCallback(
+    (indices: number[]) => {
+      if (!onVisibleRunIdsChange) return;
+      onVisibleRunIdsChange(
+        indices
+          .map((index) => items[index]?.id)
+          .filter((id): id is string => Boolean(id)),
+      );
+    },
+    [items, onVisibleRunIdsChange],
+  );
+
   // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
   const rowVirtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 20,
+    onChange: (instance) => {
+      reportVisibleRunIds(
+        instance.getVirtualItems().map((item) => item.index),
+      );
+    },
   });
+
+  useEffect(() => {
+    reportVisibleRunIds(
+      rowVirtualizer.getVirtualItems().map((item) => item.index),
+    );
+  }, [items, reportVisibleRunIds, rowVirtualizer]);
 
   const focusIdx = useMemo(
     () => items.findIndex((item) => item.id === currentRunId),
@@ -192,7 +224,7 @@ export function TraceView({
     // min-w forces horizontal overflow on narrow viewports so the timeline stays usable.
     <div className="min-w-3xl [--trace-name-col:13.75rem]">
       <div
-        className="sticky top-0 z-10 py-2.5 border-b bg-muted/40 backdrop-blur-sm px-2"
+        className="sticky top-0 z-10 py-2.5 border-b bg-muted/50 backdrop-blur-sm px-2"
         style={{
           display: "grid",
           gridTemplateColumns: "var(--trace-name-col) 1fr",
@@ -386,7 +418,7 @@ function SiblingPillRow({
       type="button"
       onClick={onClick}
       disabled={isLoading}
-      className="flex items-center justify-center gap-1.5 w-full border-b border-border/50 bg-muted/40 backdrop-blur-sm px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50 disabled:cursor-wait cursor-pointer transition-colors"
+      className="flex items-center justify-center gap-1.5 w-full border-b border-border/50 bg-muted/50 backdrop-blur-sm px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50 disabled:cursor-wait cursor-pointer transition-colors"
     >
       <Icon className="size-3.5 shrink-0"/>
       <span>{isLoading ? "Loading…" : "Load more"}</span>

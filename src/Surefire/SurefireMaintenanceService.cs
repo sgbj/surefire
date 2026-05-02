@@ -110,22 +110,23 @@ internal sealed partial class SurefireMaintenanceService(
                 cancellationToken);
         }
 
-        var CanceledExpiredRunIds = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
-        await PublishExpiredCancellationNotificationsAsync(CanceledExpiredRunIds, cancellationToken);
+        var expired = await store.CancelExpiredRunsWithIdsAsync(cancellationToken);
+        await PublishExpiredCancellationNotificationsAsync(expired, cancellationToken);
 
         await RecoverStuckBatchesAsync(cancellationToken);
     }
 
-    private async Task PublishExpiredCancellationNotificationsAsync(IReadOnlyList<string> runIds,
+    private async Task PublishExpiredCancellationNotificationsAsync(SubtreeCancellation expired,
         CancellationToken cancellationToken)
     {
-        if (runIds.Count == 0)
+        if (expired.Runs.Count == 0 && expired.CompletedBatches.Count == 0)
         {
             return;
         }
 
-        foreach (var runId in runIds)
+        foreach (var entry in expired.Runs)
         {
+            var runId = entry.RunId;
             var run = await store.GetRunAsync(runId, cancellationToken);
             if (run is { })
             {
@@ -144,11 +145,17 @@ internal sealed partial class SurefireMaintenanceService(
             await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
             await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
 
-            if (run?.BatchId is { } batchId)
+            if (entry.BatchId is { } batchId)
             {
                 await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId,
                     cancellationToken);
             }
+        }
+
+        foreach (var batch in expired.CompletedBatches)
+        {
+            await notifications.PublishAsync(NotificationChannels.BatchTerminated(batch.BatchId), batch.BatchId,
+                cancellationToken);
         }
     }
 

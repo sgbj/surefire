@@ -22,6 +22,7 @@ public static class DashboardEndpoints
 {
     private const int DefaultRunsPageSize = 50;
     private const int MaxRunsPageSize = 500;
+    private const int MaxRunsLookupIds = 500;
     private const int DefaultChildrenPageSize = 100;
     private const int MaxChildrenPageSize = 500;
     private const int DefaultSiblingWindow = 50;
@@ -201,6 +202,33 @@ public static class DashboardEndpoints
             });
         });
 
+        api.MapPost("/runs/lookup",
+            async Task<Results<Ok<IReadOnlyList<RunResponse>>, ProblemHttpResult>> (RunLookupRequest request,
+                IJobStore store, CancellationToken ct) =>
+            {
+                var ids = request.Ids
+                    .Select(id => id.Trim())
+                    .Where(id => id.Length > 0)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                if (ids.Count > MaxRunsLookupIds)
+                {
+                    return TypedResults.Problem(
+                        statusCode: StatusCodes.Status400BadRequest,
+                        title: "Too many run IDs",
+                        detail: $"A maximum of {MaxRunsLookupIds} run IDs can be refreshed at once.");
+                }
+
+                if (ids.Count == 0)
+                {
+                    return TypedResults.Ok<IReadOnlyList<RunResponse>>([]);
+                }
+
+                var runs = await store.GetRunsByIdsAsync(ids, ct);
+                return TypedResults.Ok<IReadOnlyList<RunResponse>>(runs.Select(r => RunResponse.From(r)).ToList());
+            });
+
         api.MapGet("/runs/{id}",
             async Task<Results<Ok<RunResponse>, ProblemHttpResult>> (string id, IJobStore store,
                 CancellationToken ct) =>
@@ -350,10 +378,6 @@ public static class DashboardEndpoints
                 catch (RunNotFoundException ex)
                 {
                     return NotFoundProblem(ex.Message);
-                }
-                catch (RunConflictException ex)
-                {
-                    return ConflictProblem(ex.Message);
                 }
             });
 

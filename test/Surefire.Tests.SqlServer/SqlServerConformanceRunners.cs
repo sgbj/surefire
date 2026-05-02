@@ -62,10 +62,6 @@ public sealed class SqlServerSchemaTests(SqlServerFixture fixture)
     : FixtureBackedSchemaConformanceTests<SqlServerFixture>(fixture);
 
 [Collection("SqlServer")]
-public sealed class SqlServerStoreFixTests(SqlServerFixture fixture)
-    : FixtureBackedStoreFixConformanceTests<SqlServerFixture>(fixture);
-
-[Collection("SqlServer")]
 public sealed class SqlServerQueueStatsParityTests(SqlServerFixture fixture)
     : FixtureBackedQueueStatsParityConformanceTests<SqlServerFixture>(fixture);
 
@@ -76,3 +72,7 @@ public sealed class SqlServerRuntimeReliabilityTests(SqlServerFixture fixture)
 [Collection("SqlServer")]
 public sealed class SqlServerTraceTests(SqlServerFixture fixture)
     : FixtureBackedTraceConformanceTests<SqlServerFixture>(fixture);
+
+[Collection("SqlServer")]
+public sealed class SqlServerContentionTests(SqlServerFixture fixture)
+    : FixtureBackedContentionConformanceTests<SqlServerFixture>(fixture);

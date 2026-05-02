@@ -880,4 +880,80 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         Assert.NotNull(afterRelease);
         Assert.Equal(run4.Id, afterRelease.Id);
     }
+
+    [Fact]
+    public async Task UnknownJobRun_StaysPendingUntilJobRegistered()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"LateReg_{Guid.CreateVersion7():N}";
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+
+        var run = CreateRun(jobName);
+        var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
+        Assert.True(created);
+
+        var beforeRegistration = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
+        Assert.Null(beforeRegistration);
+
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var afterRegistration = (await Store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
+        Assert.NotNull(afterRegistration);
+        Assert.Equal(run.Id, afterRegistration.Id);
+    }
+
+    [Fact]
+    public async Task UpsertJobAsync_ChangingQueue_RunStillClaimable()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"QueueMove_{Guid.CreateVersion7():N}";
+        var job = CreateJob(jobName);
+        job.Queue = "low";
+        await Store.UpsertJobsAsync([job], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "low", Priority = 1 }], ct);
+        await Store.UpsertQueuesAsync([new() { Name = "high", Priority = 10 }], ct);
+
+        var run = CreateRun(jobName);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        job.Queue = "high";
+        await Store.UpsertJobsAsync([job], ct);
+
+        // The pending run should still be claimable when the node registers for both queues.
+        var claimed = (await Store.ClaimRunsAsync("node1", [jobName], ["low", "high"], 1, ct)).FirstOrDefault();
+        Assert.NotNull(claimed);
+    }
+
+    [Fact]
+    public async Task Claim_Concurrent_QueueMaxConcurrency_DifferentJobs_Respected()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var queueName = $"conc-q-{Guid.CreateVersion7():N}";
+        await Store.UpsertQueuesAsync([new() { Name = queueName, MaxConcurrency = 2 }], ct);
+
+        var jobNames = new List<string>();
+        for (var i = 0; i < 10; i++)
+        {
+            var jobName = $"QConc_{i}_{Guid.CreateVersion7():N}";
+            var job = CreateJob(jobName);
+            job.Queue = queueName;
+            await Store.UpsertJobsAsync([job], ct);
+            jobNames.Add(jobName);
+
+            var run = CreateRun(jobName);
+            await Store.CreateRunsAsync([run], cancellationToken: ct);
+        }
+
+        // Claim concurrently from 10 threads; only 2 should succeed due to queue max_concurrency=2.
+        var results = new System.Collections.Concurrent.ConcurrentBag<JobRun?>();
+        var tasks = Enumerable.Range(0, 10).Select(t => Task.Run(async () =>
+        {
+            var claimed = (await Store.ClaimRunsAsync($"node-{t}", jobNames, [queueName], 1)).FirstOrDefault();
+            results.Add(claimed);
+        }));
+        await Task.WhenAll(tasks);
+
+        var claimedCount = results.Count(r => r is { });
+        Assert.Equal(2, claimedCount);
+    }
 }

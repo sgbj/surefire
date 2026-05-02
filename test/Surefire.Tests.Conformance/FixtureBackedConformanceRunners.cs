@@ -93,13 +93,6 @@ public abstract class FixtureBackedSchemaConformanceTests<TFixture>(TFixture fix
     public override ValueTask DisposeAsync() => new(((IStoreTestFixture)fixture!).CleanAsync());
 }
 
-public abstract class FixtureBackedStoreFixConformanceTests<TFixture>(TFixture fixture)
-    : StoreFixConformanceTests
-{
-    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)fixture!).CreateStoreAsync();
-    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)fixture!).CleanAsync());
-}
-
 public abstract class FixtureBackedQueueStatsParityConformanceTests<TFixture>(TFixture fixture)
     : QueueStatsParityConformanceTests
 {
@@ -115,6 +108,13 @@ public abstract class FixtureBackedRuntimeReliabilityConformanceTests<TFixture>(
 }
 
 public abstract class FixtureBackedTraceConformanceTests<TFixture>(TFixture fixture) : TraceConformanceTests
+{
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)fixture!).CleanAsync());
+}
+
+public abstract class FixtureBackedContentionConformanceTests<TFixture>(TFixture fixture)
+    : ContentionConformanceTests
 {
     internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)fixture!).CreateStoreAsync();
     public override ValueTask DisposeAsync() => new(((IStoreTestFixture)fixture!).CleanAsync());

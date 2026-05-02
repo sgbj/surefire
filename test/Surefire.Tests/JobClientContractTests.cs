@@ -488,6 +488,64 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
+    public async Task ObserveBatchEventsAsync_MissingBatch_ThrowsBatchNotFoundException()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var logger = new CollectingLogger<JobClient>();
+        var client = CreateClient(
+            store,
+            notifications,
+            eventWriter,
+            time,
+            new() { PollingInterval = TimeSpan.FromMilliseconds(20) },
+            logger);
+
+        await Assert.ThrowsAsync<BatchNotFoundException>(async () =>
+        {
+            await foreach (var _ in client.ObserveBatchEventsAsync(Guid.CreateVersion7().ToString("N"), 0, ct))
+            {
+            }
+        });
+    }
+
+    [Fact]
+    public async Task CancelAsync_MissingRun_ThrowsRunNotFoundException()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var logger = new CollectingLogger<JobClient>();
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
+
+        var ex = await Assert.ThrowsAsync<RunNotFoundException>(() =>
+            client.CancelAsync(Guid.CreateVersion7().ToString("N"), ct));
+        Assert.NotNull(ex.RunId);
+    }
+
+    [Fact]
+    public async Task CancelBatchAsync_MissingBatch_ThrowsBatchNotFoundException()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var logger = new CollectingLogger<JobClient>();
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
+
+        var batchId = Guid.CreateVersion7().ToString("N");
+        var ex = await Assert.ThrowsAsync<BatchNotFoundException>(() =>
+            client.CancelBatchAsync(batchId, ct));
+        Assert.Equal(batchId, ex.BatchId);
+    }
+
+    [Fact]
     public async Task CancelAsync_TerminalRun_IsIdempotentNoOp()
     {
         var ct = TestContext.Current.CancellationToken;

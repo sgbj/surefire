@@ -168,6 +168,13 @@ public sealed class RunResponse
     };
 }
 
+/// <summary>Request body for bulk refreshing run rows by ID.</summary>
+public sealed class RunLookupRequest
+{
+    /// <summary>Run IDs to fetch. Duplicates and blank values are ignored.</summary>
+    public IReadOnlyList<string> Ids { get; init; } = [];
+}
+
 /// <summary>
 ///     Focused trace response: ancestor chain (root to immediate parent), the run itself,
 ///     a window of siblings around it, and the first page of direct children. Enough

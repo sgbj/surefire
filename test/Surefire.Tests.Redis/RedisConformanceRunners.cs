@@ -62,10 +62,6 @@ public sealed class RedisSchemaTests(RedisFixture fixture)
     : FixtureBackedSchemaConformanceTests<RedisFixture>(fixture);
 
 [Collection("Redis")]
-public sealed class RedisStoreFixTests(RedisFixture fixture)
-    : FixtureBackedStoreFixConformanceTests<RedisFixture>(fixture);
-
-[Collection("Redis")]
 public sealed class RedisQueueStatsParityTests(RedisFixture fixture)
     : FixtureBackedQueueStatsParityConformanceTests<RedisFixture>(fixture);
 
@@ -76,3 +72,7 @@ public sealed class RedisRuntimeReliabilityTests(RedisFixture fixture)
 [Collection("Redis")]
 public sealed class RedisTraceTests(RedisFixture fixture)
     : FixtureBackedTraceConformanceTests<RedisFixture>(fixture);
+
+[Collection("Redis")]
+public sealed class RedisContentionTests(RedisFixture fixture)
+    : FixtureBackedContentionConformanceTests<RedisFixture>(fixture);

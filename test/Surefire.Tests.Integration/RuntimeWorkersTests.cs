@@ -478,10 +478,11 @@ public sealed class RuntimeWorkersTests
             return 1;
         });
 
-        harness.Host.AddJob("CancelBatchParent", async (IJobClient client, CancellationToken ct) =>
-        {
-            return await client.RunAsync<int>("CancelBatchGrandchild", cancellationToken: ct);
-        });
+        harness.Host.AddJob("CancelBatchParent",
+            async (IJobClient client, CancellationToken ct) =>
+            {
+                return await client.RunAsync<int>("CancelBatchGrandchild", cancellationToken: ct);
+            });
 
         await harness.StartAsync(ct);
 
@@ -587,6 +588,7 @@ public sealed class RuntimeWorkersTests
             Assert.EndsWith("CanceledException", root.GetProperty("exceptionType").GetString());
             Assert.Contains("CanceledException", root.GetProperty("stackTrace").GetString());
         }
+
         Assert.Equal(ownerFailureMessage, ownerFinal.Reason);
 
         var nestedOwner = await TestWait.PollUntilAsync(
@@ -622,7 +624,7 @@ public sealed class RuntimeWorkersTests
             "Timed out waiting for nested batch children to be Canceled.",
             ct);
         Assert.All(nestedChildren,
-            run => Assert.Equal($"Canceled because parent run '{nestedOwner.Id}' was canceled.", run.Reason));
+            run => Assert.Equal("Canceled because the owning operation was canceled.", run.Reason));
 
         var batchId = Assert.Single(nestedChildren.Select(r => r.BatchId).Distinct());
         Assert.NotNull(batchId);
@@ -2092,7 +2094,8 @@ public sealed class RuntimeWorkersTests
         }, services =>
         {
             services.AddSingleton<FaultInjectingNotificationProvider>();
-            services.AddSingleton<INotificationProvider>(sp => sp.GetRequiredService<FaultInjectingNotificationProvider>());
+            services.AddSingleton<INotificationProvider>(sp =>
+                sp.GetRequiredService<FaultInjectingNotificationProvider>());
         });
 
         harness.Host.AddJob("DeadLetterOwnedSlowChild", async (JobContext context, CancellationToken ct) =>
@@ -2553,6 +2556,24 @@ public sealed class RuntimeWorkersTests
             cancellationToken);
     }
 
+    private static Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
+        Action<IServiceCollection>? configureServices = null)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSurefire(configure);
+        configureServices?.Invoke(services);
+
+        var provider = services.BuildServiceProvider();
+        var host = new TestHost(provider);
+        var client = provider.GetRequiredService<IJobClient>();
+        var store = provider.GetRequiredService<IJobStore>();
+        var notifications = provider.GetRequiredService<INotificationProvider>();
+        var hostedServices = provider.GetServices<IHostedService>().ToArray();
+
+        return Task.FromResult(new RuntimeHarness(provider, host, store, notifications, client, hostedServices));
+    }
+
     private sealed record PipelineChildren(JobRun Source, JobRun Downstream);
 
     private sealed class FaultInjectingNotificationProvider : INotificationProvider
@@ -2562,8 +2583,6 @@ public sealed class RuntimeWorkersTests
         private string? _throwRunTerminatedForRunId;
 
         public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public void ThrowRunTerminatedFor(string runId) => _throwRunTerminatedForRunId = runId;
 
         public Task PublishAsync(string channel, string? message = null, CancellationToken cancellationToken = default)
         {
@@ -2615,6 +2634,8 @@ public sealed class RuntimeWorkersTests
             return Task.FromResult<IAsyncDisposable>(new Subscription(this, channel, id));
         }
 
+        public void ThrowRunTerminatedFor(string runId) => _throwRunTerminatedForRunId = runId;
+
         private void Remove(string channel, Guid id)
         {
             lock (_lock)
@@ -2641,24 +2662,6 @@ public sealed class RuntimeWorkersTests
                 return ValueTask.CompletedTask;
             }
         }
-    }
-
-    private static Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
-        Action<IServiceCollection>? configureServices = null)
-    {
-        var services = new ServiceCollection();
-        services.AddLogging();
-        services.AddSurefire(configure);
-        configureServices?.Invoke(services);
-
-        var provider = services.BuildServiceProvider();
-        var host = new TestHost(provider);
-        var client = provider.GetRequiredService<IJobClient>();
-        var store = provider.GetRequiredService<IJobStore>();
-        var notifications = provider.GetRequiredService<INotificationProvider>();
-        var hostedServices = provider.GetServices<IHostedService>().ToArray();
-
-        return Task.FromResult(new RuntimeHarness(provider, host, store, notifications, client, hostedServices));
     }
 
     private sealed class TraceSink

@@ -29,6 +29,8 @@ public sealed class SqlServerFixture : IAsyncLifetime, IStoreTestFixture
             createCmd.CommandText = $"""
                                      IF DB_ID(N'{dbName}') IS NULL
                                          CREATE DATABASE [{dbName}];
+                                     ALTER DATABASE [{dbName}] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
+                                     ALTER DATABASE [{dbName}] SET ALLOW_SNAPSHOT_ISOLATION ON;
                                      """;
             await createCmd.ExecuteNonQueryAsync();
         }

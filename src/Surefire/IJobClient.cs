@@ -59,11 +59,12 @@ public interface IJobClient
     /// <summary>Returns the batch with the specified ID, or <c>null</c> if not found.</summary>
     Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default);
 
-    /// <summary>Cancels a run and all of its descendants.</summary>
+    /// <summary>Cancels a run and all of its descendants. No-ops silently when the run is already terminal.</summary>
     /// <exception cref="RunNotFoundException">Thrown when the run does not exist.</exception>
     Task CancelAsync(string runId, CancellationToken cancellationToken = default);
 
-    /// <summary>Cancels every non-terminal run in a batch and marks the batch terminal.</summary>
+    /// <summary>Cancels every non-terminal run in a batch and marks the batch terminal. No-ops silently when the batch is already terminal.</summary>
+    /// <exception cref="BatchNotFoundException">Thrown when the batch does not exist.</exception>
     Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default);
 
     /// <summary>Creates a new run that re-executes <paramref name="runId" /> with the same arguments and input streams.</summary>
@@ -96,6 +97,7 @@ public interface IJobClient
     /// <param name="batchId">The batch identifier.</param>
     /// <param name="sinceEventId">Exclusive lower bound on event IDs. Use <c>0</c> to start from the beginning.</param>
     /// <param name="cancellationToken">A token to cancel streaming. Cancellation does not affect the batch itself.</param>
+    /// <exception cref="BatchNotFoundException">Thrown when the batch does not exist.</exception>
     IAsyncEnumerable<RunEvent> ObserveBatchEventsAsync(string batchId, long sinceEventId = 0,
         CancellationToken cancellationToken = default);
 

@@ -5,135 +5,67 @@ internal sealed class RunCancellationCoordinator(
     INotificationProvider notifications,
     ActiveRunTracker activeRuns)
 {
-    private const int CancellationTraversalPageSize = 100;
-
-    public async Task CancelRunAndDescendantsAsync(
+    public async Task<SubtreeCancellation> CancelRunAndDescendantsAsync(
         string runId,
         string reason,
         CancellationToken cancellationToken,
         bool cancelSelf = true)
     {
-        await CancelRunAndDescendantsAsync(
-            runId,
-            reason,
-            new HashSet<string>(StringComparer.Ordinal),
-            cancellationToken,
-            cancelSelf);
+        var result = await store.CancelRunSubtreeAsync(runId, reason, includeRoot: cancelSelf,
+            cancellationToken);
+        await PublishSubtreeCancellationAsync(result, cancellationToken);
+        return result;
     }
 
-    public async Task CancelRunAndDescendantsAsync(
-        string runId,
-        string reason,
-        ISet<string> visited,
-        CancellationToken cancellationToken,
-        bool cancelSelf = true)
-    {
-        if (!visited.Add(runId))
-        {
-            return;
-        }
-
-        if (cancelSelf)
-        {
-            var result = await store.TryCancelRunAsync(runId, reason: reason, cancellationToken: cancellationToken);
-            if (result.Transitioned)
-            {
-                await PublishCancellationNotificationsAsync(runId, cancellationToken);
-                if (result.BatchCompletion is { } bc)
-                {
-                    await notifications.PublishAsync(NotificationChannels.BatchTerminated(bc.BatchId), bc.BatchId,
-                        cancellationToken);
-                }
-            }
-        }
-
-        await CancelDirectChildrenAndDescendantsAsync(runId, visited, cancellationToken);
-    }
-
-    public async Task CancelDescendantsAsync(
+    public Task<SubtreeCancellation> CancelDescendantsAsync(
         string parentRunId,
-        CancellationToken cancellationToken,
-        string? fixedReason = null)
-    {
-        await CancelDescendantsAsync(
-            parentRunId,
-            new HashSet<string>(StringComparer.Ordinal),
-            cancellationToken,
-            fixedReason);
-    }
-
-    public async Task PublishCancellationNotificationsAsync(string runId, CancellationToken cancellationToken)
-    {
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
-        {
-            return;
-        }
-
-        activeRuns.TryRequestCancel(runId);
-        await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
-        if (run.Status.IsTerminal)
-        {
-            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
-            await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
-        }
-
-        await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
-        if (run.BatchId is { } batchId)
-        {
-            await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId, cancellationToken);
-            var batch = await store.GetBatchAsync(batchId, cancellationToken);
-            if (batch?.Status.IsTerminal is true)
-            {
-                await notifications.PublishAsync(NotificationChannels.BatchTerminated(batchId), batchId,
-                    cancellationToken);
-            }
-        }
-    }
-
-    private async Task CancelDescendantsAsync(
-        string parentRunId,
-        ISet<string> visited,
-        CancellationToken cancellationToken,
-        string? fixedReason = null)
-    {
-        if (!visited.Add(parentRunId))
-        {
-            return;
-        }
-
-        await CancelDirectChildrenAndDescendantsAsync(parentRunId, visited, cancellationToken, fixedReason);
-    }
-
-    private async Task CancelDirectChildrenAndDescendantsAsync(
-        string parentRunId,
-        ISet<string> visited,
         CancellationToken cancellationToken,
         string? fixedReason = null)
     {
         var reason = fixedReason ?? $"Canceled because parent run '{parentRunId}' was canceled.";
-        var canceledChildIds = await store.CancelChildRunsAsync(parentRunId, reason, cancellationToken);
-        foreach (var childId in canceledChildIds.Distinct(StringComparer.Ordinal))
+        return CancelRunAndDescendantsAsync(parentRunId, reason, cancellationToken, cancelSelf: false);
+    }
+
+    public async Task<SubtreeCancellation> CancelBatchSubtreeAsync(
+        string batchId,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var result = await store.CancelBatchSubtreeAsync(batchId, reason, cancellationToken);
+        await PublishSubtreeCancellationAsync(result, cancellationToken);
+        return result;
+    }
+
+    private async Task PublishSubtreeCancellationAsync(SubtreeCancellation result,
+        CancellationToken cancellationToken)
+    {
+        if (result.Runs.Count == 0 && result.CompletedBatches.Count == 0)
         {
-            await PublishCancellationNotificationsAsync(childId, cancellationToken);
+            return;
         }
 
-        string? cursor = null;
-        do
+        foreach (var (runId, _) in result.Runs)
         {
-            var page = await store.GetDirectChildrenAsync(
-                parentRunId,
-                afterCursor: cursor,
-                take: CancellationTraversalPageSize,
-                cancellationToken: cancellationToken);
+            activeRuns.TryRequestCancel(runId);
+        }
 
-            foreach (var child in page.Items)
+        foreach (var entry in result.Runs)
+        {
+            var runId = entry.RunId;
+            await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunTerminated(runId), runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunAvailable, runId, cancellationToken);
+            await notifications.PublishAsync(NotificationChannels.RunEvent(runId), runId, cancellationToken);
+            if (entry.BatchId is { } batchId)
             {
-                await CancelDescendantsAsync(child.Id, visited, cancellationToken, fixedReason);
+                await notifications.PublishAsync(NotificationChannels.RunEvent(batchId), runId, cancellationToken);
             }
-
-            cursor = page.NextCursor;
         }
-        while (cursor is { });
+
+        foreach (var batch in result.CompletedBatches)
+        {
+            await notifications.PublishAsync(NotificationChannels.BatchTerminated(batch.BatchId), batch.BatchId,
+                cancellationToken);
+        }
     }
 }

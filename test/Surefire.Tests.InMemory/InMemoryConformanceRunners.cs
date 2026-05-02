@@ -44,9 +44,6 @@ public sealed class InMemoryStatsTests(InMemoryFixture fixture)
 public sealed class InMemorySchemaTests(InMemoryFixture fixture)
     : FixtureBackedSchemaConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
-public sealed class InMemoryStoreFixTests(InMemoryFixture fixture)
-    : FixtureBackedStoreFixConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
-
 public sealed class InMemoryQueueStatsParityTests(InMemoryFixture fixture)
     : FixtureBackedQueueStatsParityConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
 
@@ -55,3 +52,6 @@ public sealed class InMemoryRuntimeReliabilityTests(InMemoryFixture fixture)
 
 public sealed class InMemoryTraceTests(InMemoryFixture fixture)
     : FixtureBackedTraceConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
+
+public sealed class InMemoryContentionTests(InMemoryFixture fixture)
+    : FixtureBackedContentionConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;

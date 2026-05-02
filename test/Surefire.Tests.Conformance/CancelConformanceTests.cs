@@ -102,7 +102,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelChildRuns_CancelsAllNonTerminalChildren()
+    public async Task CancelRunSubtree_DescendantsOnly_CancelsAllNonTerminalChildren()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -131,18 +131,24 @@ public abstract class CancelConformanceTests : StoreConformanceBase
             completedChildId, claimed.Attempt, now, claimed.NotBefore, "node-1", 1, null, null,
             claimed.StartedAt, now), ct)).Transitioned);
 
-        var CanceledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
+        var result = await Store.CancelRunSubtreeAsync(parent.Id, includeRoot: false, cancellationToken: ct);
+        var canceledIds = result.Runs.Select(r => r.RunId).ToList();
 
         // The completed child should not be Canceled; the other 2 should be.
-        Assert.Equal(2, CanceledIds.Count);
-        Assert.DoesNotContain(completedChildId, CanceledIds);
+        // Parent must be untouched (includeRoot: false).
+        Assert.Equal(2, canceledIds.Count);
+        Assert.DoesNotContain(completedChildId, canceledIds);
+        Assert.DoesNotContain(parent.Id, canceledIds);
 
         var storedCompleted = await Store.GetRunAsync(completedChildId, ct);
         Assert.Equal(JobStatus.Succeeded, storedCompleted!.Status);
 
-        foreach (var CanceledId in CanceledIds)
+        var storedParent = await Store.GetRunAsync(parent.Id, ct);
+        Assert.Equal(JobStatus.Running, storedParent!.Status);
+
+        foreach (var canceledId in canceledIds)
         {
-            var stored = await Store.GetRunAsync(CanceledId, ct);
+            var stored = await Store.GetRunAsync(canceledId, ct);
             Assert.NotNull(stored);
             Assert.Equal(JobStatus.Canceled, stored.Status);
             Assert.NotNull(stored.CanceledAt);
@@ -150,7 +156,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task CancelChildRuns_NoChildren_ReturnsEmpty()
+    public async Task CancelRunSubtree_DescendantsOnly_NoChildren_ReturnsEmpty()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -159,13 +165,13 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         var run = CreateRun(job.Name);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
-        var CanceledIds = await Store.CancelChildRunsAsync(run.Id, cancellationToken: ct);
+        var result = await Store.CancelRunSubtreeAsync(run.Id, includeRoot: false, cancellationToken: ct);
 
-        Assert.Empty(CanceledIds);
+        Assert.Empty(result.Runs);
     }
 
     [Fact]
-    public async Task CancelChildRuns_AllTerminal_ReturnsEmpty()
+    public async Task CancelRunSubtree_DescendantsOnly_AllTerminal_ReturnsEmpty()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -185,9 +191,115 @@ public abstract class CancelConformanceTests : StoreConformanceBase
 
         Assert.True((await Store.TryCancelRunAsync(child.Id, cancellationToken: ct)).Transitioned);
 
-        // CancelChildRuns should find nothing to cancel.
-        var CanceledIds = await Store.CancelChildRunsAsync(parent.Id, cancellationToken: ct);
-        Assert.Empty(CanceledIds);
+        // Subtree walk must find nothing else to cancel.
+        var result = await Store.CancelRunSubtreeAsync(parent.Id, includeRoot: false, cancellationToken: ct);
+        Assert.Empty(result.Runs);
+    }
+
+    [Fact]
+    public async Task CancelRunSubtree_IncludesRoot_CancelsRootAndDescendants()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var job = CreateJob();
+        await Store.UpsertJobsAsync([job], ct);
+
+        var root = CreateRun(job.Name);
+        var child = CreateRun(job.Name) with { ParentRunId = root.Id };
+        var grandchild = CreateRun(job.Name) with { ParentRunId = child.Id };
+
+        await Store.CreateRunsAsync([root, child, grandchild], cancellationToken: ct);
+
+        var result = await Store.CancelRunSubtreeAsync(root.Id, cancellationToken: ct);
+        var canceledIds = result.Runs.Select(r => r.RunId).ToHashSet();
+
+        Assert.Equal(3, canceledIds.Count);
+        Assert.Contains(root.Id, canceledIds);
+        Assert.Contains(child.Id, canceledIds);
+        Assert.Contains(grandchild.Id, canceledIds);
+
+        foreach (var id in canceledIds)
+        {
+            var stored = await Store.GetRunAsync(id, ct);
+            Assert.NotNull(stored);
+            Assert.Equal(JobStatus.Canceled, stored.Status);
+        }
+    }
+
+    [Fact]
+    public async Task CancelRunSubtree_DeepChain_CancelsAllLevelsInOneCall()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var job = CreateJob();
+        await Store.UpsertJobsAsync([job], ct);
+
+        // Build a 5-level chain: r0 -> r1 -> r2 -> r3 -> r4.
+        var runs = new List<JobRun>();
+        string? parentId = null;
+        for (var i = 0; i < 5; i++)
+        {
+            var r = parentId is null
+                ? CreateRun(job.Name)
+                : CreateRun(job.Name) with { ParentRunId = parentId };
+            runs.Add(r);
+            parentId = r.Id;
+        }
+
+        await Store.CreateRunsAsync(runs, cancellationToken: ct);
+
+        var result = await Store.CancelRunSubtreeAsync(runs[0].Id, includeRoot: false, cancellationToken: ct);
+        var canceledIds = result.Runs.Select(r => r.RunId).ToHashSet();
+
+        // Every descendant (4 of them) cancels, root left alone.
+        Assert.Equal(4, canceledIds.Count);
+        Assert.DoesNotContain(runs[0].Id, canceledIds);
+        for (var i = 1; i < runs.Count; i++)
+        {
+            Assert.Contains(runs[i].Id, canceledIds);
+        }
+    }
+
+    [Fact]
+    public async Task CancelRunSubtree_NonExistentRun_ReturnsNotFound()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = await Store.CancelRunSubtreeAsync(
+            Guid.CreateVersion7().ToString("N"), cancellationToken: ct);
+
+        Assert.False(result.Found);
+        Assert.Empty(result.Runs);
+        Assert.Empty(result.CompletedBatches);
+    }
+
+    [Fact]
+    public async Task CancelRunSubtree_AlreadyTerminalRoot_ReturnsFoundEmpty()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var job = CreateJob();
+        await Store.UpsertJobsAsync([job], ct);
+
+        var run = CreateRun(job.Name);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+        Assert.True((await Store.TryCancelRunAsync(run.Id, cancellationToken: ct)).Transitioned);
+
+        // Root exists but is already terminal and has no descendants — Found=true, Runs empty.
+        var result = await Store.CancelRunSubtreeAsync(run.Id, cancellationToken: ct);
+
+        Assert.True(result.Found);
+        Assert.Empty(result.Runs);
+    }
+
+    [Fact]
+    public async Task CancelBatchSubtree_NonExistentBatch_ReturnsNotFound()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = await Store.CancelBatchSubtreeAsync(
+            Guid.CreateVersion7().ToString("N"), cancellationToken: ct);
+
+        Assert.False(result.Found);
+        Assert.Empty(result.Runs);
+        Assert.Empty(result.CompletedBatches);
     }
 
     [Fact]

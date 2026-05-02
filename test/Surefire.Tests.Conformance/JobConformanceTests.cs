@@ -328,4 +328,39 @@ public abstract class JobConformanceTests : StoreConformanceBase
 
         Assert.Contains(results, j => j.Name == $"CaseTag_{suffix}");
     }
+
+    [Fact]
+    public async Task GetJobsAsync_LiteralPercentInFilter_DoesNotMatchAll()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.CreateVersion7().ToString("N");
+        var job1Name = $"upload_photos_{suffix}";
+        var job2Name = $"upload%special_{suffix}";
+
+        await Store.UpsertJobsAsync([CreateJob(job1Name)], ct);
+        await Store.UpsertJobsAsync([CreateJob(job2Name)], ct);
+
+        var results = await Store.GetJobsAsync(new() { Name = $"%special_{suffix}" }, ct);
+
+        Assert.Single(results);
+        Assert.Equal(job2Name, results[0].Name);
+    }
+
+    [Fact]
+    public async Task GetJobsAsync_LiteralUnderscoreInFilter()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var suffix = Guid.CreateVersion7().ToString("N");
+        var job1Name = $"job_a_{suffix}";
+        var job2Name = $"jobXa_{suffix}";
+
+        await Store.UpsertJobsAsync([CreateJob(job1Name)], ct);
+        await Store.UpsertJobsAsync([CreateJob(job2Name)], ct);
+
+        // Literal "_a_" must not treat _ as a single-char wildcard.
+        var results = await Store.GetJobsAsync(new() { Name = $"_a_{suffix}" }, ct);
+
+        Assert.Single(results);
+        Assert.Equal(job1Name, results[0].Name);
+    }
 }

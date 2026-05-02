@@ -62,10 +62,6 @@ public sealed class PostgreSqlSchemaTests(PostgreSqlFixture fixture)
     : FixtureBackedSchemaConformanceTests<PostgreSqlFixture>(fixture);
 
 [Collection("PostgreSql")]
-public sealed class PostgreSqlStoreFixTests(PostgreSqlFixture fixture)
-    : FixtureBackedStoreFixConformanceTests<PostgreSqlFixture>(fixture);
-
-[Collection("PostgreSql")]
 public sealed class PostgreSqlQueueStatsParityTests(PostgreSqlFixture fixture)
     : FixtureBackedQueueStatsParityConformanceTests<PostgreSqlFixture>(fixture);
 
@@ -76,3 +72,7 @@ public sealed class PostgreSqlRuntimeReliabilityTests(PostgreSqlFixture fixture)
 [Collection("PostgreSql")]
 public sealed class PostgreSqlTraceTests(PostgreSqlFixture fixture)
     : FixtureBackedTraceConformanceTests<PostgreSqlFixture>(fixture);
+
+[Collection("PostgreSql")]
+public sealed class PostgreSqlContentionTests(PostgreSqlFixture fixture)
+    : FixtureBackedContentionConformanceTests<PostgreSqlFixture>(fixture);

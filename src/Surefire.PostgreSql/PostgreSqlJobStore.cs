@@ -14,6 +14,14 @@ internal sealed class PostgreSqlJobStore(
 {
     private static readonly TimeSpan MigrationLockRetryDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan MigrationLockWaitTimeout = TimeSpan.FromSeconds(30);
+
+    // Namespace salt for tree-scoped pg_advisory_xact_lock keys. Used as the `seed` argument
+    // to hashtextextended so the resulting bigint lock key cannot collide with other
+    // advisory-lock users on the same connection. Single-arg pg_advisory_xact_lock(bigint)
+    // accepts the full 64-bit hash, avoiding int4-range overflow on the cast. Tree key =
+    // root-of-the-cancellation-domain (RootRunId or seed id) so cancel-of-tree and
+    // create-under-tree always pick the same lock.
+    private const long TreeAdvisoryLockSalt = 0x5F1E_7E3E_5F1E_7E3E;
     private OrdinalCache<BatchOrdinals>? _batchOrdinals;
     private OrdinalCache<EventOrdinals>? _eventOrdinals;
     private OrdinalCache<NodeOrdinals>? _nodeOrdinals;
@@ -955,11 +963,11 @@ internal sealed class PostgreSqlJobStore(
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
-                                  UPDATE surefire_batches
-                                  SET canceled = canceled + 1
-                                  WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, canceled
-                              """;
+                                      UPDATE surefire_batches
+                                      SET canceled = canceled + 1
+                                      WHERE id = @id AND status NOT IN (2, 4, 5)
+                                      RETURNING total, succeeded, failed, canceled
+                                  """;
             incrCmd.Parameters.AddWithValue("id", batchId);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
 
@@ -1020,6 +1028,9 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
+        // Tree advisories prepend to the batch INSERT so they fire before any work that could
+        // race with a concurrent CancelSubtreeAsync of the parent tree. CreateRunsCore will
+        // re-acquire the same keys (advisory_xact_lock is reentrant — sub-microsecond no-op).
         await using var batchCmd = CreateCommand(conn);
         batchCmd.Transaction = tx;
         batchCmd.CommandText = """
@@ -1035,6 +1046,7 @@ internal sealed class PostgreSqlJobStore(
         batchCmd.Parameters.AddWithValue("created_at", batch.CreatedAt);
         batchCmd.Parameters.AddWithValue("completed_at",
             batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value);
+        PrependTreeAdvisoryLocks(batchCmd, runs.Select(r => r.RootRunId));
         await batchCmd.ExecuteNonQueryAsync(cancellationToken);
 
         await CreateRunsCoreInTransactionAsync(conn, tx, runs, cancellationToken);
@@ -1079,260 +1091,223 @@ internal sealed class PostgreSqlJobStore(
         return await reader.ReadAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<string>> CancelBatchRunsAsync(string batchId,
+    public Task<SubtreeCancellation> CancelRunSubtreeAsync(string rootRunId,
+        string? reason = null,
+        bool includeRoot = true,
+        CancellationToken cancellationToken = default)
+        => CancelSubtreeAsyncCore(SubtreeSeed.Run, rootRunId, reason, includeRoot, cancellationToken);
+
+    public Task<SubtreeCancellation> CancelBatchSubtreeAsync(string batchId,
         string? reason = null,
         CancellationToken cancellationToken = default)
+        => CancelSubtreeAsyncCore(SubtreeSeed.Batch, batchId, reason, includeRoot: true, cancellationToken);
+
+    private enum SubtreeSeed
     {
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        cmd.CommandText = """
-                          WITH prior AS (
-                              SELECT id, status, attempt, job_name
-                              FROM surefire_runs
-                              WHERE batch_id = @batch_id AND status IN (0, 1)
-                              FOR UPDATE
-                          ),
-                          upd AS (
-                              UPDATE surefire_runs SET
-                                  status = 4,
-                                  canceled_at = NOW(),
-                                  completed_at = NOW(),
-                                  reason = COALESCE(@reason, surefire_runs.reason)
-                              FROM prior
-                              WHERE surefire_runs.id = prior.id
-                              RETURNING surefire_runs.id, prior.attempt, prior.status AS prior_status, prior.job_name
-                          ),
-                          running_queues AS (
-                              SELECT COALESCE(j.queue, 'default') AS queue_name, COUNT(*)::int AS cnt
-                              FROM upd u JOIN surefire_jobs j ON j.name = u.job_name
-                              WHERE u.prior_status = 1
-                              GROUP BY COALESCE(j.queue, 'default')
-                          ),
-                          -- Per-job aggregates: non_terminal_count decrements by total Canceled
-                          -- count regardless of prior status, running_count decrements only for
-                          -- rows whose prior status was Running. Merged into a single UPDATE
-                          -- against surefire_jobs per the Postgres "one row per statement" rule.
-                          nt_by_job AS (
-                              SELECT job_name,
-                                  COUNT(*)::int AS nt_cnt,
-                                  COUNT(*) FILTER (WHERE prior_status = 1)::int AS running_cnt
-                              FROM upd GROUP BY job_name
-                          ),
-                          job_dec AS (
-                              UPDATE surefire_jobs SET
-                                  non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.nt_cnt),
-                                  running_count = GREATEST(0, surefire_jobs.running_count - nt.running_cnt)
-                              FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
-                              RETURNING 1
-                          ),
-                          queue_dec AS (
-                              UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - rq.cnt)
-                              FROM running_queues rq WHERE surefire_queues.name = rq.queue_name
-                              RETURNING 1
-                          )
-                          SELECT id, attempt FROM upd
-                          """;
-        cmd.Parameters.AddWithValue("batch_id", batchId);
-        cmd.Parameters.AddWithValue("reason", (object?)reason ?? DBNull.Value);
-
-        var CanceledIds = new List<string>();
-        var statusEvents = new List<RunEvent>();
-        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var runId = reader.GetString(0);
-                CanceledIds.Add(runId);
-                statusEvents.Add(RunStatusEvents.Create(
-                    runId,
-                    reader.GetInt32(1),
-                    JobStatus.Canceled,
-                    timeProvider.GetUtcNow()));
-            }
-        }
-
-        await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
-
-        if (CanceledIds.Count > 0)
-        {
-            await using var incrCmd = CreateCommand(conn);
-            incrCmd.Transaction = tx;
-            incrCmd.CommandText = """
-                                  UPDATE surefire_batches
-                                  SET canceled = canceled + @cnt
-                                  WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, canceled
-                              """;
-            incrCmd.Parameters.AddWithValue("id", batchId);
-            incrCmd.Parameters.AddWithValue("cnt", CanceledIds.Count);
-            await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
-
-            if (await batchReader.ReadAsync(cancellationToken))
-            {
-                var total = batchReader.GetInt32(0);
-                var succeeded = batchReader.GetInt32(1);
-                var failed = batchReader.GetInt32(2);
-                var Canceled = batchReader.GetInt32(3);
-
-                if (succeeded + failed + Canceled >= total)
-                {
-                    var batchStatus = failed > 0 ? JobStatus.Failed
-                        : Canceled > 0 ? JobStatus.Canceled
-                        : JobStatus.Succeeded;
-                    var completedAt = timeProvider.GetUtcNow();
-
-                    await batchReader.CloseAsync();
-
-                    await using var completeCmd = CreateCommand(conn);
-                    completeCmd.Transaction = tx;
-                    completeCmd.CommandText = """
-                                              UPDATE surefire_batches
-                                              SET status = @status, completed_at = @completed_at
-                                              WHERE id = @id AND status NOT IN (2, 4, 5)
-                                              """;
-                    completeCmd.Parameters.AddWithValue("id", batchId);
-                    completeCmd.Parameters.AddWithValue("status", (short)batchStatus);
-                    completeCmd.Parameters.AddWithValue("completed_at", completedAt);
-                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
-                }
-            }
-        }
-
-        await tx.CommitAsync(cancellationToken);
-        return CanceledIds;
+        Run,
+        Batch
     }
 
-    public async Task<IReadOnlyList<string>> CancelChildRunsAsync(string parentRunId,
-        string? reason = null,
-        CancellationToken cancellationToken = default)
+    // Per-tree advisory lock (taken via the leading SELECT in lockJobCmd) serialises this
+    // cancel with concurrent run creation under the same tree; combined with the canonical
+    // pre-lock pass it makes the subtree snapshot stable from job pre-lock through to the
+    // main UPDATE's job_dec / queue_dec CTEs. Without the advisory a child spawned in the
+    // gap could land in a job not pre-locked, racing TryTransitionRunAsync's FOR UPDATE OF j
+    // and producing 40P01 deadlocks; with it, the only contender for new children of this
+    // tree is the cancel itself, and it holds the advisory.
+    //
+    // JobClient guarantees every run in a batch shares a single RootRunId (top-level batches:
+    // RootRunId = batchId; nested batches: RootRunId = enclosing run's RootRunId), so LIMIT 1
+    // is sufficient: any row from the batch resolves the canonical tree key.
+    private async Task<SubtreeCancellation> CancelSubtreeAsyncCore(SubtreeSeed seed, string seedId,
+        string? reason, bool includeRoot, CancellationToken cancellationToken)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
-        // Pre-lock config rows in canonical order (jobs, then queues) before locking child
-        // run rows. Claims lock jobs first and runs later; doing the inverse here can deadlock
-        // when retry cleanup races a worker claiming a pending child.
+        var recursiveSeed = seed switch
+        {
+            SubtreeSeed.Run => "SELECT id FROM surefire_runs WHERE id = @seed",
+            SubtreeSeed.Batch => "SELECT id FROM surefire_runs WHERE batch_id = @seed",
+            _ => throw new ArgumentOutOfRangeException(nameof(seed))
+        };
+        var effectiveIncludeRoot = seed != SubtreeSeed.Run || includeRoot;
+
+        // Per-tree advisory lock: serialises this cancel with concurrent run creation under
+        // the same tree, so the subtree snapshot is stable from pre-lock through main UPDATE.
+        // Tree key = the seed run's RootRunId (falling back to its own id when it is itself a
+        // root) for run-seeded cancels, or the batch's children's RootRunId for batch cancels.
+        // Fallbacks to seedId when the lookup returns null keep the call total. The inline
+        // subquery means this rides along on the same round-trip as the job pre-lock.
+        var advisoryKeySql = seed switch
+        {
+            SubtreeSeed.Run =>
+                "COALESCE((SELECT COALESCE(root_run_id, id) FROM surefire_runs WHERE id = @seed), @seed)",
+            SubtreeSeed.Batch =>
+                "COALESCE((SELECT COALESCE(root_run_id, id) FROM surefire_runs WHERE batch_id = @seed LIMIT 1), @seed)",
+            _ => throw new ArgumentOutOfRangeException(nameof(seed))
+        };
+
         await using (var lockJobCmd = CreateCommand(conn))
         {
             lockJobCmd.Transaction = tx;
-            lockJobCmd.CommandText = """
-                                     WITH affected_jobs AS (
-                                         SELECT DISTINCT job_name
-                                         FROM surefire_runs
-                                         WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
-                                     )
-                                     SELECT j.name
-                                     FROM surefire_jobs j
-                                     JOIN affected_jobs aj ON aj.job_name = j.name
-                                     ORDER BY j.name
-                                     FOR UPDATE OF j
-                                     """;
-            lockJobCmd.Parameters.AddWithValue("parent_run_id", parentRunId);
+            lockJobCmd.CommandText = $"""
+                                      SELECT pg_advisory_xact_lock(hashtextextended({advisoryKeySql}, {TreeAdvisoryLockSalt}));
+                                      WITH RECURSIVE subtree AS (
+                                          {recursiveSeed}
+                                          UNION ALL
+                                          SELECT r.id FROM surefire_runs r
+                                              JOIN subtree s ON r.parent_run_id = s.id
+                                      ),
+                                      affected_jobs AS (
+                                          SELECT DISTINCT r.job_name
+                                          FROM surefire_runs r
+                                          JOIN subtree s ON s.id = r.id
+                                          WHERE r.status IN (0, 1) AND (@include_root OR r.id <> @seed)
+                                      )
+                                      SELECT j.name
+                                      FROM surefire_jobs j
+                                      JOIN affected_jobs aj ON aj.job_name = j.name
+                                      ORDER BY j.name
+                                      FOR UPDATE OF j
+                                      """;
+            lockJobCmd.Parameters.AddWithValue("seed", seedId);
+            lockJobCmd.Parameters.AddWithValue("include_root", effectiveIncludeRoot);
             await lockJobCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using (var lockQueueCmd = CreateCommand(conn))
         {
             lockQueueCmd.Transaction = tx;
-            lockQueueCmd.CommandText = """
-                                       WITH affected_queues AS (
-                                           SELECT DISTINCT COALESCE(j.queue, 'default') AS queue_name
-                                           FROM surefire_runs r
-                                           JOIN surefire_jobs j ON j.name = r.job_name
-                                           WHERE r.parent_run_id = @parent_run_id AND r.status IN (0, 1)
-                                       )
-                                       SELECT q.name
-                                       FROM surefire_queues q
-                                       JOIN affected_queues aq ON aq.queue_name = q.name
-                                       ORDER BY q.name
-                                       FOR UPDATE OF q
-                                       """;
-            lockQueueCmd.Parameters.AddWithValue("parent_run_id", parentRunId);
+            lockQueueCmd.CommandText = $"""
+                                        WITH RECURSIVE subtree AS (
+                                            {recursiveSeed}
+                                            UNION ALL
+                                            SELECT r.id FROM surefire_runs r
+                                                JOIN subtree s ON r.parent_run_id = s.id
+                                        ),
+                                        affected_queues AS (
+                                            SELECT DISTINCT COALESCE(j.queue, 'default') AS queue_name
+                                            FROM surefire_runs r
+                                            JOIN subtree s ON s.id = r.id
+                                            JOIN surefire_jobs j ON j.name = r.job_name
+                                            WHERE r.status IN (0, 1) AND (@include_root OR r.id <> @seed)
+                                        )
+                                        SELECT q.name
+                                        FROM surefire_queues q
+                                        JOIN affected_queues aq ON aq.queue_name = q.name
+                                        ORDER BY q.name
+                                        FOR UPDATE OF q
+                                        """;
+            lockQueueCmd.Parameters.AddWithValue("seed", seedId);
+            lockQueueCmd.Parameters.AddWithValue("include_root", effectiveIncludeRoot);
             await lockQueueCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-        // Capture prior status under U-lock so running_count only decrements for rows that
-        // were Running; aggregate per job/queue into single UPDATEs in the same statement.
-        cmd.CommandText = """
-                          WITH prior AS (
-                              SELECT id, status, attempt, batch_id, job_name
-                              FROM surefire_runs
-                              WHERE parent_run_id = @parent_run_id AND status IN (0, 1)
-                              ORDER BY job_name, id
-                              FOR UPDATE
-                          ),
-                          upd AS (
-                              UPDATE surefire_runs SET
-                                  status = 4,
-                                  canceled_at = NOW(),
-                                  completed_at = NOW(),
-                                  reason = COALESCE(@reason, surefire_runs.reason)
-                              FROM prior
-                              WHERE surefire_runs.id = prior.id
-                              RETURNING surefire_runs.id, prior.attempt, surefire_runs.batch_id,
-                                        prior.status AS prior_status, prior.job_name
-                          ),
-                          running_queues AS (
-                              SELECT COALESCE(j.queue, 'default') AS queue_name, COUNT(*)::int AS cnt
-                              FROM upd u JOIN surefire_jobs j ON j.name = u.job_name
-                              WHERE u.prior_status = 1
-                              GROUP BY COALESCE(j.queue, 'default')
-                          ),
-                          -- Per-job aggregates: non_terminal_count decrements by total Canceled
-                          -- count, running_count decrements only for Running priors. Merged into
-                          -- one UPDATE per the Postgres "one row per statement" rule.
-                          nt_by_job AS (
-                              SELECT job_name,
-                                  COUNT(*)::int AS nt_cnt,
-                                  COUNT(*) FILTER (WHERE prior_status = 1)::int AS running_cnt
-                              FROM upd GROUP BY job_name
-                          ),
-                          job_dec AS (
-                              UPDATE surefire_jobs SET
-                                  non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.nt_cnt),
-                                  running_count = GREATEST(0, surefire_jobs.running_count - nt.running_cnt)
-                              FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
-                              RETURNING 1
-                          ),
-                          queue_dec AS (
-                              UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - rq.cnt)
-                              FROM running_queues rq WHERE surefire_queues.name = rq.queue_name
-                              RETURNING 1
-                          )
-                          SELECT id, attempt, batch_id FROM upd
-                          """;
-        cmd.Parameters.AddWithValue("parent_run_id", parentRunId);
+        cmd.CommandText = $"""
+                           WITH RECURSIVE subtree AS (
+                               {recursiveSeed}
+                               UNION ALL
+                               SELECT r.id FROM surefire_runs r
+                                   JOIN subtree s ON r.parent_run_id = s.id
+                           ),
+                           prior AS (
+                               SELECT surefire_runs.id, surefire_runs.status, surefire_runs.attempt,
+                                      surefire_runs.batch_id, surefire_runs.job_name
+                               FROM surefire_runs
+                               JOIN subtree s ON s.id = surefire_runs.id
+                               WHERE surefire_runs.status IN (0, 1)
+                                 AND (@include_root OR surefire_runs.id <> @seed)
+                               ORDER BY surefire_runs.job_name, surefire_runs.id
+                               FOR UPDATE OF surefire_runs
+                           ),
+                           upd AS (
+                               UPDATE surefire_runs SET
+                                   status = 4,
+                                   canceled_at = NOW(),
+                                   completed_at = NOW(),
+                                   reason = COALESCE(@reason, surefire_runs.reason)
+                               FROM prior
+                               WHERE surefire_runs.id = prior.id
+                               RETURNING surefire_runs.id, prior.attempt, surefire_runs.batch_id,
+                                         prior.status AS prior_status, prior.job_name
+                           ),
+                           running_queues AS (
+                               SELECT COALESCE(j.queue, 'default') AS queue_name, COUNT(*)::int AS cnt
+                               FROM upd u JOIN surefire_jobs j ON j.name = u.job_name
+                               WHERE u.prior_status = 1
+                               GROUP BY COALESCE(j.queue, 'default')
+                           ),
+                           nt_by_job AS (
+                               SELECT job_name,
+                                   COUNT(*)::int AS nt_cnt,
+                                   COUNT(*) FILTER (WHERE prior_status = 1)::int AS running_cnt
+                               FROM upd GROUP BY job_name
+                           ),
+                           job_dec AS (
+                               UPDATE surefire_jobs SET
+                                   non_terminal_count = GREATEST(0, surefire_jobs.non_terminal_count - nt.nt_cnt),
+                                   running_count = GREATEST(0, surefire_jobs.running_count - nt.running_cnt)
+                               FROM nt_by_job nt WHERE surefire_jobs.name = nt.job_name
+                               RETURNING 1
+                           ),
+                           queue_dec AS (
+                               UPDATE surefire_queues SET running_count = GREATEST(0, surefire_queues.running_count - rq.cnt)
+                               FROM running_queues rq WHERE surefire_queues.name = rq.queue_name
+                               RETURNING 1
+                           )
+                           SELECT id, attempt, batch_id FROM upd
+                           """;
+        cmd.Parameters.AddWithValue("seed", seedId);
+        cmd.Parameters.AddWithValue("include_root", effectiveIncludeRoot);
         cmd.Parameters.AddWithValue("reason", (object?)reason ?? DBNull.Value);
 
-        var CanceledIds = new List<string>();
-        var CanceledBatchIds = new Dictionary<string, int>();
+        var canceledRuns = new List<CanceledRun>();
+        var batchCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                CanceledIds.Add(runId);
-                statusEvents.Add(RunStatusEvents.Create(
-                    runId,
-                    reader.GetInt32(1),
-                    JobStatus.Canceled,
+                var attempt = reader.GetInt32(1);
+                var batchId = reader.IsDBNull(2) ? null : reader.GetString(2);
+                canceledRuns.Add(new(runId, batchId));
+                statusEvents.Add(RunStatusEvents.Create(runId, attempt, JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
-                var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
-                if (bId is { })
+                if (batchId is { })
                 {
-                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
+                    batchCounts[batchId] = batchCounts.GetValueOrDefault(batchId) + 1;
                 }
             }
         }
 
+        if (canceledRuns.Count == 0)
+        {
+            // Authoritative existence check happens here, after the lock pass, so a concurrent
+            // purge between connection open and lock acquisition cannot make us misreport
+            // NotFound as Empty. The cancel statement returning zero rows means either the seed
+            // was purged or it had nothing cancellable; this query distinguishes the two.
+            await using var existsCmd = CreateCommand(conn);
+            existsCmd.Transaction = tx;
+            existsCmd.CommandText = seed switch
+            {
+                SubtreeSeed.Run => "SELECT 1 FROM surefire_runs WHERE id = @seed",
+                SubtreeSeed.Batch => "SELECT 1 FROM surefire_batches WHERE id = @seed",
+                _ => throw new ArgumentOutOfRangeException(nameof(seed))
+            };
+            existsCmd.Parameters.AddWithValue("seed", seedId);
+            var seedExists = await existsCmd.ExecuteScalarAsync(cancellationToken) is not null;
+            await tx.CommitAsync(cancellationToken);
+            return seedExists ? SubtreeCancellation.Empty : SubtreeCancellation.NotFound;
+        }
+
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        foreach (var (batchId, cnt) in CanceledBatchIds)
+        var completedBatches = new List<BatchCompletionInfo>();
+        foreach (var (batchId, cnt) in batchCounts)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
@@ -1341,7 +1316,7 @@ internal sealed class PostgreSqlJobStore(
                                   SET canceled = canceled + @cnt
                                   WHERE id = @id AND status NOT IN (2, 4, 5)
                                   RETURNING total, succeeded, failed, canceled
-                              """;
+                                  """;
             incrCmd.Parameters.AddWithValue("id", batchId);
             incrCmd.Parameters.AddWithValue("cnt", cnt);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
@@ -1351,12 +1326,12 @@ internal sealed class PostgreSqlJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var Canceled = batchReader.GetInt32(3);
+                var canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + Canceled >= total)
+                if (succeeded + failed + canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : Canceled > 0 ? JobStatus.Canceled
+                        : canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1372,13 +1347,16 @@ internal sealed class PostgreSqlJobStore(
                     completeCmd.Parameters.AddWithValue("id", batchId);
                     completeCmd.Parameters.AddWithValue("status", (short)batchStatus);
                     completeCmd.Parameters.AddWithValue("completed_at", completedAt);
-                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+                    if (await completeCmd.ExecuteNonQueryAsync(cancellationToken) > 0)
+                    {
+                        completedBatches.Add(new(batchId, batchStatus, completedAt));
+                    }
                 }
             }
         }
 
         await tx.CommitAsync(cancellationToken);
-        return CanceledIds;
+        return new(canceledRuns, completedBatches);
     }
 
     public async Task<IReadOnlyList<string>> GetCompletableBatchIdsAsync(CancellationToken cancellationToken = default)
@@ -1788,11 +1766,30 @@ internal sealed class PostgreSqlJobStore(
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<string>> CancelExpiredRunsWithIdsAsync(
+    public async Task<SubtreeCancellation> CancelExpiredRunsWithIdsAsync(
         CancellationToken cancellationToken = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        // Pre-lock the jobs whose expired pending runs we're about to cancel, in canonical
+        // (alphabetical) order. Without this the main UPDATE would acquire jobs after runs,
+        // which inverts the order claims and cancel cascades use and risks a deadlock cycle.
+        await using (var lockJobCmd = CreateCommand(conn))
+        {
+            lockJobCmd.Transaction = tx;
+            lockJobCmd.CommandText = """
+                                     SELECT j.name FROM surefire_jobs j
+                                     WHERE j.name IN (
+                                         SELECT DISTINCT job_name FROM surefire_runs
+                                         WHERE status = 0 AND not_after IS NOT NULL AND not_after < NOW()
+                                     )
+                                     ORDER BY j.name
+                                     FOR UPDATE OF j
+                                     """;
+            await lockJobCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         // Only pending rows are touched, so running_count is unaffected; non_terminal_count
@@ -1821,37 +1818,38 @@ internal sealed class PostgreSqlJobStore(
                           """;
         cmd.Parameters.AddWithValue("reason", "Run expired past NotAfter deadline.");
 
-        var CanceledIds = new List<string>();
-        var CanceledBatchIds = new Dictionary<string, int>();
+        var canceledRuns = new List<CanceledRun>();
+        var canceledBatchIds = new Dictionary<string, int>(StringComparer.Ordinal);
         var statusEvents = new List<RunEvent>();
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var runId = reader.GetString(0);
-                CanceledIds.Add(runId);
+                var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
+                canceledRuns.Add(new(runId, bId));
                 statusEvents.Add(RunStatusEvents.Create(runId, reader.GetInt32(1), JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
-                var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 if (bId is { })
                 {
-                    CanceledBatchIds[bId] = CanceledBatchIds.GetValueOrDefault(bId) + 1;
+                    canceledBatchIds[bId] = canceledBatchIds.GetValueOrDefault(bId) + 1;
                 }
             }
         }
 
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
-        foreach (var (batchId, cnt) in CanceledBatchIds)
+        var completedBatches = new List<BatchCompletionInfo>();
+        foreach (var (batchId, cnt) in canceledBatchIds)
         {
             await using var incrCmd = CreateCommand(conn);
             incrCmd.Transaction = tx;
             incrCmd.CommandText = """
-                                  UPDATE surefire_batches
-                                  SET canceled = canceled + @cnt
-                                  WHERE id = @id AND status NOT IN (2, 4, 5)
-                                  RETURNING total, succeeded, failed, canceled
-                              """;
+                                      UPDATE surefire_batches
+                                      SET canceled = canceled + @cnt
+                                      WHERE id = @id AND status NOT IN (2, 4, 5)
+                                      RETURNING total, succeeded, failed, canceled
+                                  """;
             incrCmd.Parameters.AddWithValue("id", batchId);
             incrCmd.Parameters.AddWithValue("cnt", cnt);
             await using var batchReader = await incrCmd.ExecuteReaderAsync(cancellationToken);
@@ -1861,12 +1859,12 @@ internal sealed class PostgreSqlJobStore(
                 var total = batchReader.GetInt32(0);
                 var succeeded = batchReader.GetInt32(1);
                 var failed = batchReader.GetInt32(2);
-                var Canceled = batchReader.GetInt32(3);
+                var canceled = batchReader.GetInt32(3);
 
-                if (succeeded + failed + Canceled >= total)
+                if (succeeded + failed + canceled >= total)
                 {
                     var batchStatus = failed > 0 ? JobStatus.Failed
-                        : Canceled > 0 ? JobStatus.Canceled
+                        : canceled > 0 ? JobStatus.Canceled
                         : JobStatus.Succeeded;
                     var completedAt = timeProvider.GetUtcNow();
 
@@ -1882,13 +1880,18 @@ internal sealed class PostgreSqlJobStore(
                     completeCmd.Parameters.AddWithValue("id", batchId);
                     completeCmd.Parameters.AddWithValue("status", (short)batchStatus);
                     completeCmd.Parameters.AddWithValue("completed_at", completedAt);
-                    await completeCmd.ExecuteNonQueryAsync(cancellationToken);
+                    if (await completeCmd.ExecuteNonQueryAsync(cancellationToken) > 0)
+                    {
+                        completedBatches.Add(new(batchId, batchStatus, completedAt));
+                    }
                 }
             }
         }
 
         await tx.CommitAsync(cancellationToken);
-        return CanceledIds;
+        return canceledRuns.Count == 0 && completedBatches.Count == 0
+            ? SubtreeCancellation.Empty
+            : new(canceledRuns, completedBatches);
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1897,9 +1900,32 @@ internal sealed class PostgreSqlJobStore(
 
         while (true)
         {
+            // Each iteration runs in its own transaction so the per-batch lock set is bounded
+            // and surfaced as a single round-trip commit. Pre-lock the jobs whose non-terminal
+            // runs we're about to delete in canonical (alphabetical) order so this path follows
+            // the same jobs-then-runs sequence as claim and the cancel cascade.
+            await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+            await using (var lockJobCmd = CreateCommand(conn))
+            {
+                lockJobCmd.Transaction = tx;
+                lockJobCmd.CommandText = """
+                                         SELECT j.name FROM surefire_jobs j
+                                         WHERE j.name IN (
+                                             SELECT DISTINCT job_name FROM surefire_runs
+                                             WHERE status = 0 AND not_before < @threshold
+                                         )
+                                         ORDER BY j.name
+                                         FOR UPDATE OF j
+                                         """;
+                lockJobCmd.Parameters.AddWithValue("threshold", threshold);
+                await lockJobCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             // DELETE + counter adjustment in one statement via CTEs so the counter stays
             // consistent with surefire_runs. Only non-terminal deletions decrement.
             await using var runCmd = CreateCommand(conn);
+            runCmd.Transaction = tx;
             runCmd.CommandText = """
                                  WITH deleted AS (
                                      DELETE FROM surefire_runs WHERE id IN (
@@ -1932,6 +1958,7 @@ internal sealed class PostgreSqlJobStore(
                                  """;
             runCmd.Parameters.AddWithValue("threshold", threshold);
             var deletedCount = Convert.ToInt32(await runCmd.ExecuteScalarAsync(cancellationToken));
+            await tx.CommitAsync(cancellationToken);
             if (deletedCount == 0)
             {
                 break;
@@ -2241,6 +2268,40 @@ internal sealed class PostgreSqlJobStore(
         return cmd;
     }
 
+    // Folds tree advisory lock acquisitions into an existing command's SQL. Locks are taken
+    // before the command's body via leading SELECT statements separated by ';' (Npgsql sends
+    // multi-statement command text in a single round-trip, so the advisory cost is purely the
+    // sub-microsecond hash-table operation on the server). Acquired in alphabetical key order
+    // so concurrent callers serialise consistently and never produce a deadlock cycle on the
+    // advisory itself.
+    private static void PrependTreeAdvisoryLocks(NpgsqlCommand cmd, IEnumerable<string?> treeKeys)
+    {
+        var ordered = treeKeys.OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToList();
+        if (ordered.Count == 0)
+        {
+            return;
+        }
+
+        var sb = new StringBuilder();
+        var startIndex = cmd.Parameters.Count;
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var paramName = $"__tree_lock_{startIndex + i}";
+            sb.Append("SELECT pg_advisory_xact_lock(hashtextextended(@")
+                .Append(paramName)
+                .Append(", ")
+                .Append(TreeAdvisoryLockSalt)
+                .Append("));\n");
+            cmd.Parameters.AddWithValue(paramName, ordered[i]);
+        }
+
+        sb.Append(cmd.CommandText);
+        cmd.CommandText = sb.ToString();
+    }
+
     private async Task ReleaseMigrationLockAsync(NpgsqlConnection connection)
     {
         await using var cmd = CreateCommand(connection);
@@ -2546,19 +2607,29 @@ internal sealed class PostgreSqlJobStore(
 
         // Pre-lock jobs rows whose counters this statement mutates, in name order, before the
         // INSERT. ORDER BY ensures concurrent batch creators serialize against claim/transition
-        // paths instead of deadlocking.
+        // paths instead of deadlocking. Per-tree advisories ride the same round-trip and
+        // serialise this insert against a concurrent CancelSubtreeAsync of any tree these new
+        // runs join. Top-level runs (RootRunId is null) take no advisory and pay nothing.
         var lockNames = runs
             .Where(r => !r.Status.IsTerminal)
             .Select(r => r.JobName)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        if (lockNames.Length > 0)
+        var rootKeys = runs.Select(r => r.RootRunId).OfType<string>()
+            .Distinct(StringComparer.Ordinal).ToArray();
+        if (lockNames.Length > 0 || rootKeys.Length > 0)
         {
             await using var lockCmd = CreateCommand(conn);
             lockCmd.Transaction = tx;
-            lockCmd.CommandText =
-                "SELECT 1 FROM surefire_jobs WHERE name = ANY(@names) ORDER BY name FOR UPDATE";
-            lockCmd.Parameters.AddWithValue("names", lockNames);
+            lockCmd.CommandText = lockNames.Length > 0
+                ? "SELECT 1 FROM surefire_jobs WHERE name = ANY(@names) ORDER BY name FOR UPDATE"
+                : "SELECT 1";
+            if (lockNames.Length > 0)
+            {
+                lockCmd.Parameters.AddWithValue("names", lockNames);
+            }
+
+            PrependTreeAdvisoryLocks(lockCmd, rootKeys);
             await lockCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -2723,12 +2794,16 @@ internal sealed class PostgreSqlJobStore(
         cmd.Transaction = tx;
 
         // Canonical jobs-first lock so the counter UPDATE never upgrades a lock against a
-        // concurrent claim/transition. Missing job row (late registration) is a no-op.
+        // concurrent claim/transition. Missing job row (late registration) is a no-op. The
+        // tree advisory (only when this run is part of a tree) prepends to the same SQL so
+        // the round-trip count is unchanged; it serialises this insert against a concurrent
+        // CancelSubtreeAsync of the same tree.
         await using (var lockCmd = CreateCommand(conn))
         {
             lockCmd.Transaction = tx;
             lockCmd.CommandText = "SELECT 1 FROM surefire_jobs WHERE name = @name FOR UPDATE";
             lockCmd.Parameters.AddWithValue("name", run.JobName);
+            PrependTreeAdvisoryLocks(lockCmd, [run.RootRunId]);
             await lockCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 

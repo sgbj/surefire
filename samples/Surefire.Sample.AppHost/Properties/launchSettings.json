@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
-    "https": {
+    "postgres": {
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
@@ -11,21 +11,140 @@
         "DOTNET_ENVIRONMENT": "Development",
         "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
         "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
-        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196"
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "postgres"
       }
     },
-    "http": {
+    "sqlserver": {
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
-      "applicationUrl": "http://localhost:15171",
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "DOTNET_ENVIRONMENT": "Development",
-        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:19193",
-        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "http://localhost:18057",
-        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "http://localhost:20120",
-        "ASPIRE_ALLOW_UNSECURED_TRANSPORT": "true"
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "sqlserver"
+      }
+    },
+    "redis": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "redis"
+      }
+    },
+    "sqlite": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "sqlite"
+      }
+    },
+    "postgres+redis": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "postgres",
+        "Surefire__Notifications": "redis"
+      }
+    },
+    "sqlserver+postgres": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "sqlserver",
+        "Surefire__Notifications": "postgres"
+      }
+    },
+    "sqlserver+redis": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "sqlserver",
+        "Surefire__Notifications": "redis"
+      }
+    },
+    "sqlite+postgres": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "sqlite",
+        "Surefire__Notifications": "postgres"
+      }
+    },
+    "sqlite+redis": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "sqlite",
+        "Surefire__Notifications": "redis"
+      }
+    },
+    "redis+postgres": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:17152;http://localhost:15171",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21090",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23002",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22196",
+        "Surefire__Store": "redis",
+        "Surefire__Notifications": "postgres"
       }
     }
   }

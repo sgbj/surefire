@@ -62,10 +62,6 @@ public sealed class SqliteSchemaTests(SqliteFixture fixture)
     : FixtureBackedSchemaConformanceTests<SqliteFixture>(fixture);
 
 [Collection("Sqlite")]
-public sealed class SqliteStoreFixTests(SqliteFixture fixture)
-    : FixtureBackedStoreFixConformanceTests<SqliteFixture>(fixture);
-
-[Collection("Sqlite")]
 public sealed class SqliteQueueStatsParityTests(SqliteFixture fixture)
     : FixtureBackedQueueStatsParityConformanceTests<SqliteFixture>(fixture);
 
@@ -76,3 +72,7 @@ public sealed class SqliteRuntimeReliabilityTests(SqliteFixture fixture)
 [Collection("Sqlite")]
 public sealed class SqliteTraceTests(SqliteFixture fixture)
     : FixtureBackedTraceConformanceTests<SqliteFixture>(fixture);
+
+[Collection("Sqlite")]
+public sealed class SqliteContentionTests(SqliteFixture fixture)
+    : FixtureBackedContentionConformanceTests<SqliteFixture>(fixture);

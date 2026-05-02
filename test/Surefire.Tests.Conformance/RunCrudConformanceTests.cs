@@ -1204,4 +1204,84 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
             laterFireAt.ToUnixTimeMilliseconds(),
             job!.LastCronFireAt!.Value.ToUnixTimeMilliseconds());
     }
+
+    [Fact]
+    public async Task TryCreateRunAsync_AllowsRunForNonExistentJob()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"NoExist_{Guid.CreateVersion7():N}";
+        var run = CreateRun(jobName);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+
+        var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
+
+        Assert.True(created);
+    }
+
+    [Fact]
+    public async Task TryCreateRunAsync_PersistsRunPriority()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"PriorityDefault_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([new() { Name = jobName, Priority = 42 }], ct);
+
+        var run = CreateRun(jobName) with { Priority = 9 };
+
+        var created = await Store.TryCreateRunAsync(run, cancellationToken: ct);
+
+        Assert.True(created);
+        var stored = await Store.GetRunAsync(run.Id, ct);
+        Assert.NotNull(stored);
+        Assert.Equal(9, stored.Priority);
+    }
+
+    [Fact]
+    public async Task TryCreateRunAsync_UnknownJob_PersistsRunPriority()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"PriorityRequested_{Guid.CreateVersion7():N}";
+        var run = CreateRun(jobName) with { Priority = 7 };
+
+        var created = await Store.TryCreateRunAsync(run, cancellationToken: ct);
+
+        Assert.True(created);
+        var stored = await Store.GetRunAsync(run.Id, ct);
+        Assert.NotNull(stored);
+        Assert.Equal(7, stored.Priority);
+    }
+
+    [Fact]
+    public async Task CreateRunsAsync_PersistsRunPriorityPerRun()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"BatchPriorityDefault_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([new() { Name = jobName, Priority = 13 }], ct);
+
+        var runA = CreateRun(jobName) with { Priority = 3 };
+        var runB = CreateRun(jobName) with { Priority = 11 };
+
+        await Store.CreateRunsAsync([runA, runB], cancellationToken: ct);
+
+        var storedA = await Store.GetRunAsync(runA.Id, ct);
+        var storedB = await Store.GetRunAsync(runB.Id, ct);
+        Assert.NotNull(storedA);
+        Assert.NotNull(storedB);
+        Assert.Equal(3, storedA.Priority);
+        Assert.Equal(11, storedB.Priority);
+    }
+
+    [Fact]
+    public async Task TryCreateRunAsync_RejectsRunForDisabledJob()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Disabled_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+        await Store.SetJobEnabledAsync(jobName, false, ct);
+        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
+
+        var run = CreateRun(jobName);
+        var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
+
+        Assert.False(created);
+    }
 }

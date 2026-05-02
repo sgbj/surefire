@@ -20,10 +20,10 @@ public static class ConformanceRunnerParity
         ("PurgeTests", typeof(PurgeConformanceTests)),
         ("StatsTests", typeof(StatsConformanceTests)),
         ("SchemaTests", typeof(SchemaConformanceTests)),
-        ("StoreFixTests", typeof(StoreFixConformanceTests)),
         ("QueueStatsParityTests", typeof(QueueStatsParityConformanceTests)),
         ("RuntimeReliabilityTests", typeof(RuntimeReliabilityConformanceTests)),
-        ("TraceTests", typeof(TraceConformanceTests))
+        ("TraceTests", typeof(TraceConformanceTests)),
+        ("ContentionTests", typeof(ContentionConformanceTests))
     ];
 
     public static void AssertProviderCoverage(Assembly providerTestAssembly, string providerPrefix)

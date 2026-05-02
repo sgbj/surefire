@@ -603,4 +603,38 @@ public abstract class EventConformanceTests : StoreConformanceBase
         });
         Assert.Equal([childB.Id, childA.Id], resumed.Select(e => e.RunId).ToArray());
     }
+
+    [Fact]
+    public async Task GetEvents_SinceId_WorksWithManyEvents()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"ManyEvents_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var run = CreateRun(jobName);
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        for (var batch = 0; batch < 4; batch++)
+        {
+            var events = Enumerable.Range(batch * 50, 50)
+                .Select(i => new RunEvent
+                {
+                    RunId = run.Id,
+                    EventType = RunEventType.Log,
+                    Payload = $"event-{i}",
+                    CreatedAt = DateTimeOffset.UtcNow
+                })
+                .ToList();
+            await Store.AppendEventsAsync(events, ct);
+        }
+
+        var all = await Store.GetEventsAsync(run.Id, cancellationToken: ct);
+        Assert.Equal(200, all.Count);
+
+        var earlyCursor = all[9].Id;
+        var afterCursor = await Store.GetEventsAsync(run.Id, earlyCursor, cancellationToken: ct);
+
+        Assert.Equal(190, afterCursor.Count);
+        Assert.True(afterCursor.All(e => e.Id > earlyCursor));
+    }
 }
