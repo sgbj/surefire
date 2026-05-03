@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <Description>Embedded web dashboard for monitoring Surefire jobs</Description>
+        <Description>Embedded web dashboard for monitoring Surefire jobs.</Description>
         <PackageTags>$(PackageTags);dashboard;monitoring;observability</PackageTags>
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
         <DashboardUiDir>$(MSBuildProjectDirectory)/ui</DashboardUiDir>

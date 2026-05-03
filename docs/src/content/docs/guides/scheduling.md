@@ -55,12 +55,12 @@ app.AddJob("Cleanup", async () => { /* ... */ })
 A continuous job restarts after each run, regardless of whether it succeeded, failed, or was canceled. Useful for queue consumers, stream processors, and background pollers that should always be running.
 
 ```csharp
-app.AddJob("QueueConsumer", async (CancellationToken ct) =>
+app.AddJob("WatchFeed", async (CancellationToken ct) =>
 {
-    while (!ct.IsCancellationRequested)
+    using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+    while (await timer.WaitForNextTickAsync(ct))
     {
-        var msg = await queue.DequeueAsync(ct);
-        await ProcessAsync(msg, ct);
+        // process feed
     }
 })
 .Continuous();
@@ -69,7 +69,7 @@ app.AddJob("QueueConsumer", async (CancellationToken ct) =>
 Continuous jobs default to `MaxConcurrency` of 1, meaning only one instance runs across the cluster. Override it to run parallel workers:
 
 ```csharp
-app.AddJob("QueueConsumer", async (CancellationToken ct) => { /* ... */ })
+app.AddJob("WatchFeed", async (CancellationToken ct) => { /* ... */ })
     .Continuous()
     .WithMaxConcurrency(3);
 ```

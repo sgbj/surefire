@@ -75,7 +75,7 @@ app.AddJob("Cleanup", async () => { /* ... */ })
 Hook into job lifecycle events per job or globally.
 
 ```csharp
-app.AddJob("Order", async (int orderId) => { /* ... */ })
+app.AddJob("ProcessOrder", async (int orderId) => { /* ... */ })
     .WithRetry(3)
     .OnSuccess((JobContext ctx, ILogger<Program> logger) =>
     {

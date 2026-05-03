@@ -66,9 +66,9 @@ app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
 If a job returns `IAsyncEnumerable<T>`, consume its output as a stream:
 
 ```csharp
-await foreach (var line in client.StreamAsync<string>("FetchLines"))
+await foreach (var item in client.StreamAsync<Order>("StreamOrders"))
 {
-    Console.WriteLine(line);
+    // process item
 }
 ```
 
@@ -80,7 +80,7 @@ A batch fans out a single job over many inputs, or runs a mix of jobs together. 
 
 ```csharp
 // One job, many inputs
-var results = await client.RunBatchAsync<Result>("RenderInvoice", new[]
+var results = await client.RunBatchAsync<Result>("ProcessOrder", new[]
 {
     new { orderId = 101 },
     new { orderId = 102 },
@@ -90,7 +90,7 @@ var results = await client.RunBatchAsync<Result>("RenderInvoice", new[]
 // Different jobs in one batch
 var mixed = await client.RunBatchAsync(new[]
 {
-    new BatchItem("RenderInvoice", new { orderId = 101 }),
+    new BatchItem("ProcessOrder", new { orderId = 101 }),
     new BatchItem("EmailReceipt", new { orderId = 101 })
 });
 ```
@@ -100,9 +100,9 @@ var mixed = await client.RunBatchAsync(new[]
 To consume results as each child finishes instead of waiting for the whole batch, use `StreamBatchAsync<T>`:
 
 ```csharp
-await foreach (var result in client.StreamBatchAsync<Result>("RenderInvoice", inputs))
+await foreach (var item in client.StreamBatchAsync<Result>("ProcessOrder", inputs))
 {
-    Console.WriteLine($"Got {result}");
+    // process item
 }
 ```
 
@@ -120,21 +120,21 @@ var run = await client.WaitAsync(runId);
 var sum = await client.WaitAsync<int>(runId);
 
 // Stream output items from an existing run
-await foreach (var item in client.WaitStreamAsync<string>(runId))
+await foreach (var item in client.WaitStreamAsync<Order>(runId))
 {
-    Console.WriteLine(item);
+    // process item
 }
 
 // Yield each child of a batch as it terminates
 await foreach (var child in client.WaitEachAsync(batchId))
 {
-    Console.WriteLine($"{child.Id}: {child.Status}");
+    // process child
 }
 
 // Stream raw events for a run (Output, Progress, Log, status events, etc.)
 await foreach (var @event in client.ObserveRunEventsAsync(runId))
 {
-    Console.WriteLine($"{@event.EventType} #{@event.Id}");
+    // process event
 }
 ```
 
@@ -201,6 +201,6 @@ await foreach (var item in client.GetRunsAsync(new RunFilter
     Status = JobStatus.Running
 }))
 {
-    Console.WriteLine($"{item.Id} {item.Status}");
+    // process item
 }
 ```
