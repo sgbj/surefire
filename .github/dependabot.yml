@@ -4,15 +4,30 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      nuget:
+        patterns: ["*"]
+
   - package-ecosystem: "npm"
     directory: "/src/Surefire.Dashboard/ui"
     schedule:
       interval: "weekly"
+    groups:
+      ui:
+        patterns: ["*"]
+
   - package-ecosystem: "npm"
     directory: "/docs"
     schedule:
       interval: "weekly"
+    groups:
+      docs:
+        patterns: ["*"]
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]

@@ -21,7 +21,7 @@ app.MapSurefireDashboard();
 app.Run();
 ```
 
-![Surefire dashboard](docs/src/assets/dashboard.png)
+![Surefire dashboard](https://raw.githubusercontent.com/sgbj/surefire/main/docs/src/assets/dashboard.png)
 
 ## Features
 
