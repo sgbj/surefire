@@ -60,7 +60,7 @@ public abstract class ContentionConformanceTests : StoreConformanceBase
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { failures.Add(ex); }
             }
-        }, linked.Token)).ToArray();
+        })).ToArray();
 
         var claimers = Enumerable.Range(0, 4).Select(i => Task.Run(async () =>
         {
@@ -90,7 +90,7 @@ public abstract class ContentionConformanceTests : StoreConformanceBase
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { failures.Add(ex); }
             }
-        }, linked.Token)).ToArray();
+        })).ToArray();
 
         await Task.Delay(TimeSpan.FromSeconds(5), ct);
         await stop.CancelAsync();
