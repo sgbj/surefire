@@ -8,8 +8,7 @@ namespace Surefire.Tests.Redis;
 
 public sealed class RedisFixture : IAsyncLifetime, IStoreTestFixture
 {
-    private readonly RedisContainer _container = new RedisBuilder()
-        .WithImage("redis:7-alpine")
+    private readonly RedisContainer _container = new RedisBuilder("redis:7-alpine")
         .Build();
 
     private ConnectionMultiplexer? _adminConnection;

@@ -200,7 +200,7 @@ export function DashboardPage() {
                           return (
                             <text
                               x={x}
-                              y={y + 12}
+                              y={Number(y) + 12}
                               textAnchor={anchor}
                               className="fill-muted-foreground text-xs"
                             >

@@ -29,7 +29,7 @@ public sealed class RedisNotificationProviderTests
         // channel. Otherwise dashboard SSE, executor RunCancel, and JobClient.WaitAsync would
         // interfere on the same run id.
         var ct = TestContext.Current.CancellationToken;
-        await using var container = new RedisBuilder().WithImage("redis:7-alpine").Build();
+        await using var container = new RedisBuilder("redis:7-alpine").Build();
         await container.StartAsync(ct);
 
         await using var connection = await ConnectionMultiplexer.ConnectAsync(container.GetConnectionString());

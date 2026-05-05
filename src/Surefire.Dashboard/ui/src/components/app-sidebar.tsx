@@ -1,4 +1,4 @@
-import {BookOpen, Github, House, Layers, Monitor, Moon, Play, Search, Server, Sun, Workflow} from "lucide-react"
+import {BookOpen, CodeXml, House, Layers, Monitor, Moon, Play, Search, Server, Sun, Workflow} from "lucide-react"
 import {Link} from "react-router"
 
 import {NavMain} from "@/components/nav-main"
@@ -98,7 +98,7 @@ export function AppSidebar({theme, onCycleTheme, onOpenSearch, ...props}: AppSid
           <TooltipTrigger asChild>
             <Button variant="ghost" size="icon" className="size-8" asChild>
               <a href="https://github.com/sgbj/surefire" target="_blank" rel="noopener noreferrer">
-                <Github className="size-4 opacity-60"/>
+                <CodeXml className="size-4 opacity-60"/>
                 <span className="sr-only">GitHub</span>
               </a>
             </Button>

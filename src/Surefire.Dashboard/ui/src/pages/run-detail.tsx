@@ -567,6 +567,7 @@ export function RunDetailPage() {
 
   // Virtualized log viewer
   const logScrollContainerRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
   const logVirtualizer = useVirtualizer({
     count: filteredLogs.length,
     getScrollElement: () => logScrollContainerRef.current,
