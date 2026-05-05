@@ -59,6 +59,8 @@ public abstract class ContentionConformanceTests : StoreConformanceBase
                 }
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { failures.Add(ex); }
+
+                await Task.Yield();
             }
         })).ToArray();
 

@@ -18,7 +18,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 options.AutoMigrate = false;
                 options.PollingInterval = TimeSpan.FromMilliseconds(20);
                 options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
-                options.InactiveThreshold = TimeSpan.FromMilliseconds(250);
+                options.InactiveThreshold = TimeSpan.FromSeconds(10);
                 options.RetentionPeriod = null;
                 options.MaxNodeConcurrency = 10;
             },
@@ -405,7 +405,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 options.AutoMigrate = false;
                 options.PollingInterval = TimeSpan.FromMilliseconds(20);
                 options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
-                options.InactiveThreshold = TimeSpan.FromMilliseconds(250);
+                options.InactiveThreshold = TimeSpan.FromSeconds(10);
                 options.RetentionPeriod = null;
             },
             (host, _) =>
@@ -415,7 +415,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                     jobStarted.TrySetResult();
                     await Task.Delay(Timeout.InfiniteTimeSpan, ct);
                     return 1;
-                }).WithTimeout(TimeSpan.FromSeconds(5));
+                }).WithTimeout(TimeSpan.FromMilliseconds(250));
             });
 
         await harness.StartAsync(ct);
@@ -455,7 +455,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 options.AutoMigrate = false;
                 options.PollingInterval = TimeSpan.FromMilliseconds(20);
                 options.HeartbeatInterval = TimeSpan.FromMilliseconds(40);
-                options.InactiveThreshold = TimeSpan.FromMilliseconds(250);
+                options.InactiveThreshold = TimeSpan.FromSeconds(10);
                 options.RetentionPeriod = null;
             },
             (host, _) =>
@@ -469,7 +469,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                         }
 
                         return 42;
-                    }).WithTimeout(TimeSpan.FromSeconds(5))
+                    }).WithTimeout(TimeSpan.FromMilliseconds(250))
                     .WithRetry(policy =>
                     {
                         policy.MaxRetries = 1;
