@@ -166,6 +166,14 @@ authorization.
 
 See the full documentation at [batary.dev/surefire](https://batary.dev/surefire).
 
+## Contributing
+
+Issues and PRs are welcome! To get started with the sample app, clone the repo and run:
+
+```bash
+aspire run
+```
+
 ## License
 
 MIT
