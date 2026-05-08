@@ -1,5 +1,7 @@
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.Net.ServerSentEvents;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -452,83 +454,24 @@ public static class DashboardEndpoints
                 });
             });
 
-        api.MapGet("/runs/{id}/stream", async Task<Results<ProblemHttpResult, EmptyHttpResult>> (string id,
-            long? sinceEventId, HttpResponse response, IJobClient client, CancellationToken ct) =>
-        {
-            var run = await client.GetRunAsync(id, ct);
-            if (run is null)
+        api.MapGet("/runs/{id}/stream",
+            async Task<Results<ProblemHttpResult, ServerSentEventsResult<string>>> (string id, long? sinceEventId,
+                HttpContext httpContext, IJobClient client, TimeProvider timeProvider, CancellationToken ct) =>
             {
-                return NotFoundProblem($"Run '{id}' was not found.");
-            }
-
-            response.ContentType = "text/event-stream";
-            response.Headers.CacheControl = "no-cache";
-
-            long lastSeenId = 0;
-            if (long.TryParse(response.HttpContext.Request.Headers["Last-Event-ID"], out var resumeId))
-            {
-                lastSeenId = resumeId;
-            }
-            else if (sinceEventId is > 0)
-            {
-                lastSeenId = sinceEventId.Value;
-            }
-
-            try
-            {
-                using var writeLock = new SemaphoreSlim(1, 1);
-                using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var lastWriteTimestamp = Stopwatch.GetTimestamp();
-
-                var keepaliveTask = RunKeepaliveLoopAsync(
-                    response,
-                    writeLock,
-                    () => Stopwatch.GetElapsedTime(Volatile.Read(ref lastWriteTimestamp)),
-                    keepaliveCts.Token);
-
-                try
+                var run = await client.GetRunAsync(id, ct);
+                if (run is null)
                 {
-                    await foreach (var evt in client.ObserveRunEventsAsync(id, lastSeenId, ct))
-                    {
-                        await WriteSseFrameAsync(
-                            response,
-                            writeLock,
-                            frameToken => WriteEventAsync(response, evt, frameToken),
-                            () => Volatile.Write(ref lastWriteTimestamp, Stopwatch.GetTimestamp()),
-                            ct);
-                        lastSeenId = evt.Id;
-                    }
-
-                    // Emit the SSE "done" frame so the UI can close its EventSource cleanly.
-                    await WriteSseFrameAsync(
-                        response,
-                        writeLock,
-                        frameToken => response.WriteAsync("event: done\ndata: {}\n\n", frameToken),
-                        () => Volatile.Write(ref lastWriteTimestamp, Stopwatch.GetTimestamp()),
-                        CancellationToken.None);
-                    return TypedResults.Empty;
+                    return NotFoundProblem($"Run '{id}' was not found.");
                 }
-                finally
-                {
-                    keepaliveCts.Cancel();
-                    try
-                    {
-                        await keepaliveTask;
-                    }
-                    catch (OperationCanceledException)
-                    {
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (IOException)
-            {
-            } // Client disconnected mid-write
 
-            return TypedResults.Empty;
-        });
+                var resumeFrom = long.TryParse(httpContext.Request.Headers["Last-Event-ID"], out var resumeId)
+                    ? resumeId
+                    : sinceEventId is > 0
+                        ? sinceEventId.Value
+                        : 0;
+
+                return TypedResults.ServerSentEvents(StreamRunEventsAsync(client, id, resumeFrom, timeProvider, ct));
+            });
 
         api.MapGet("/queues",
             async (IJobStore store, SurefireOptions surefireOpts, TimeProvider timeProvider, CancellationToken ct) =>
@@ -681,79 +624,60 @@ public static class DashboardEndpoints
         return group;
     }
 
-    private static async Task WriteEventAsync(HttpResponse response, RunEvent evt, CancellationToken ct)
+    private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
+
+    private static async IAsyncEnumerable<SseItem<string>> StreamRunEventsAsync(IJobClient client, string runId,
+        long sinceEventId, TimeProvider timeProvider, [EnumeratorCancellation] CancellationToken ct)
     {
-        var sseEventType = evt.EventType switch
-        {
-            RunEventType.Status => "status",
-            RunEventType.Progress => "progress",
-            RunEventType.Output => "output",
-            RunEventType.OutputComplete => "outputComplete",
-            RunEventType.Input => "input",
-            RunEventType.InputComplete => "inputComplete",
-            RunEventType.InputDeclared => "inputDeclared",
-            RunEventType.AttemptFailure => "attemptFailure",
-            _ => null // Log events use default "message" (no event: prefix)
-        };
+        await using var enumerator = client.ObserveRunEventsAsync(runId, sinceEventId, ct).GetAsyncEnumerator(ct);
 
-        // SSE protocol: \r\n, \r, and \n are all line terminators; each data line needs "data: " prefix.
-        // Normalize \r\n and bare \r to \n before splitting.
-        var payload = evt.Payload.Contains('\r')
-            ? evt.Payload.Replace("\r\n", "\n").Replace('\r', '\n')
-            : evt.Payload;
-        var dataLines = payload.Contains('\n')
-            ? string.Join('\n', payload.Split('\n').Select(line => $"data: {line}"))
-            : $"data: {payload}";
+        Task<bool>? pendingMoveNext = null;
+        while (true)
+        {
+            pendingMoveNext ??= enumerator.MoveNextAsync().AsTask();
 
-        if (sseEventType is { })
-        {
-            await response.WriteAsync($"id: {evt.Id}\nevent: {sseEventType}\n{dataLines}\n\n", ct);
-        }
-        else
-        {
-            await response.WriteAsync($"id: {evt.Id}\n{dataLines}\n\n", ct);
-        }
-    }
-
-    private static async Task WriteSseFrameAsync(HttpResponse response, SemaphoreSlim writeLock,
-        Func<CancellationToken, Task> writer, Action onWritten, CancellationToken ct)
-    {
-        await writeLock.WaitAsync(ct);
-        try
-        {
-            await writer(ct);
-            await response.Body.FlushAsync(ct);
-            onWritten();
-        }
-        finally
-        {
-            writeLock.Release();
-        }
-    }
-
-    private static async Task RunKeepaliveLoopAsync(HttpResponse response, SemaphoreSlim writeLock,
-        Func<TimeSpan> getIdleDuration, CancellationToken ct)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
-        while (await timer.WaitForNextTickAsync(ct))
-        {
-            if (getIdleDuration() < TimeSpan.FromSeconds(15))
+            if (!pendingMoveNext.IsCompleted)
             {
-                continue;
+                using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var keepaliveDelay = Task.Delay(KeepAliveInterval, timeProvider, keepaliveCts.Token);
+                var winner = await Task.WhenAny(pendingMoveNext, keepaliveDelay).ConfigureAwait(false);
+                keepaliveCts.Cancel();
+
+                if (winner != pendingMoveNext)
+                {
+                    yield return new SseItem<string>(string.Empty, "keepalive");
+                    continue;
+                }
             }
 
-            await writeLock.WaitAsync(ct);
-            try
+            if (!await pendingMoveNext)
             {
-                await response.WriteAsync(": keepalive\n\n", ct);
-                await response.Body.FlushAsync(ct);
+                break;
             }
-            finally
+
+            var evt = enumerator.Current;
+            pendingMoveNext = null;
+            yield return new SseItem<string>(evt.Payload, MapEventType(evt.EventType))
             {
-                writeLock.Release();
-            }
+                EventId = evt.Id.ToString(CultureInfo.InvariantCulture)
+            };
         }
+
+        yield return new SseItem<string>("{}", "done");
     }
+
+    private static string? MapEventType(RunEventType type) => type switch
+    {
+        RunEventType.Status => "status",
+        RunEventType.Progress => "progress",
+        RunEventType.Output => "output",
+        RunEventType.OutputComplete => "outputComplete",
+        RunEventType.Input => "input",
+        RunEventType.InputComplete => "inputComplete",
+        RunEventType.InputDeclared => "inputDeclared",
+        RunEventType.AttemptFailure => "attemptFailure",
+        _ => null
+    };
 
     private static ProblemHttpResult NotFoundProblem(string detail) =>
         TypedResults.Problem(
