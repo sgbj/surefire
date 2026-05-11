@@ -25,10 +25,6 @@ public static class DashboardEndpoints
     private const int DefaultRunsPageSize = 50;
     private const int MaxRunsPageSize = 500;
     private const int MaxRunsLookupIds = 500;
-    private const int DefaultChildrenPageSize = 100;
-    private const int MaxChildrenPageSize = 500;
-    private const int DefaultSiblingWindow = 50;
-    private const int MaxSiblingWindow = 200;
 
     /// <summary>
     ///     Maps the Surefire dashboard endpoints under <paramref name="prefix" />. Mounts:
@@ -49,6 +45,7 @@ public static class DashboardEndpoints
     /// </summary>
     /// <param name="endpoints">The route builder to mount onto.</param>
     /// <param name="prefix">URL prefix the dashboard is served under. Must begin with <c>/</c>. Defaults to <c>/surefire</c>.</param>
+    /// <param name="configure">Optional callback to override <see cref="SurefireDashboardOptions" /> defaults.</param>
     /// <returns>A convention builder over the entire dashboard route group.</returns>
     /// <remarks>
     ///     Resolves <see cref="Surefire.IJobStore" />, <see cref="Surefire.IJobClient" />,
@@ -59,8 +56,12 @@ public static class DashboardEndpoints
     [RequiresUnreferencedCode("Minimal API endpoint mapping reflects over delegate parameters.")]
     [RequiresDynamicCode("Minimal API endpoint mapping reflects over delegate parameters.")]
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
-        string prefix = "/surefire")
+        string prefix = "/surefire",
+        Action<SurefireDashboardOptions>? configure = null)
     {
+        var options = new SurefireDashboardOptions();
+        configure?.Invoke(options);
+
         var group = endpoints.MapGroup(prefix);
         var api = group.MapGroup("api");
 
@@ -241,9 +242,9 @@ public static class DashboardEndpoints
                     : TypedResults.Ok(RunResponse.From(run));
             });
 
-        api.MapGet("/runs/{id}/trace",
-            async Task<Results<Ok<RunTraceResponse>, ProblemHttpResult>> (string id, int? siblingWindow,
-                int? childrenTake, IJobStore store, CancellationToken ct) =>
+        api.MapGet("/runs/{id}/tree",
+            async Task<Results<Ok<RunTreeResponse>, ProblemHttpResult>> (string id, IJobStore store,
+                CancellationToken ct) =>
             {
                 var focus = await store.GetRunAsync(id, ct);
                 if (focus is null)
@@ -251,123 +252,7 @@ public static class DashboardEndpoints
                     return NotFoundProblem($"Run '{id}' was not found.");
                 }
 
-                var window = Math.Clamp(siblingWindow ?? DefaultSiblingWindow, 1, MaxSiblingWindow);
-                var childTake = Math.Clamp(childrenTake ?? DefaultChildrenPageSize, 1, MaxChildrenPageSize);
-
-                var ancestors = await store.GetAncestorChainAsync(id, ct);
-                var ancestorResponses = ancestors
-                    .Select((ancestor, index) => RunResponse.From(ancestor, index))
-                    .ToList();
-
-                var focusDepth = ancestorResponses.Count;
-                var focusResponse = RunResponse.From(focus, focusDepth);
-
-                var siblingsBefore = new List<RunResponse>();
-                var siblingsAfter = new List<RunResponse>();
-                string? siblingsAfterCursor = null;
-                string? siblingsBeforeCursor = null;
-
-                if (focus.ParentRunId is { } parentId)
-                {
-                    var siblingDepth = focusDepth;
-                    var focusCursor = DirectChildrenPage.EncodeCursor(focus.CreatedAt, focus.Id);
-
-                    var afterPage = await store.GetDirectChildrenAsync(parentId,
-                        focusCursor,
-                        take: window,
-                        cancellationToken: ct);
-                    siblingsAfter.AddRange(afterPage.Items.Select(r => RunResponse.From(r, siblingDepth)));
-                    siblingsAfterCursor = afterPage.NextCursor;
-
-                    // Reverse keyset DESC by (createdAt, id); reverse client-side for display.
-                    // NextCursor points to the oldest row, used to paginate further back.
-                    var beforePage = await store.GetDirectChildrenAsync(parentId,
-                        beforeCursor: focusCursor,
-                        take: window,
-                        cancellationToken: ct);
-                    siblingsBefore = beforePage.Items
-                        .Reverse()
-                        .Select(r => RunResponse.From(r, siblingDepth))
-                        .ToList();
-                    siblingsBeforeCursor = beforePage.NextCursor;
-                }
-                // Batch focus (no ParentRunId): siblings stay empty. Batch children share a
-                // CreatedAt, so a keyset split around the focus isn't possible; the dedicated
-                // batch page handles browsing batch children at scale.
-
-                var childrenPage = await store.GetDirectChildrenAsync(id, take: childTake, cancellationToken: ct);
-                var childResponses = childrenPage.Items
-                    .Select(c => RunResponse.From(c, focusDepth + 1))
-                    .ToList();
-
-                var siblingsCursor =
-                    siblingsAfterCursor is { } || siblingsBeforeCursor is { }
-                        ? new SiblingsCursorResponse
-                        {
-                            After = siblingsAfterCursor,
-                            Before = siblingsBeforeCursor
-                        }
-                        : null;
-
-                return TypedResults.Ok(new RunTraceResponse
-                {
-                    Ancestors = ancestorResponses,
-                    Focus = focusResponse,
-                    SiblingsBefore = siblingsBefore,
-                    SiblingsAfter = siblingsAfter,
-                    SiblingsCursor = siblingsCursor,
-                    Children = childResponses,
-                    ChildrenCursor = childrenPage.NextCursor
-                });
-            });
-
-        // Direct-children pagination. afterCursor / beforeCursor are mutually exclusive.
-        // Items return in store-natural order (ASC for afterCursor, DESC for beforeCursor);
-        // backward callers reverse client-side.
-        api.MapGet("/runs/{id}/children",
-            async Task<Results<Ok<RunChildrenResponse>, ProblemHttpResult>> (string id, string? afterCursor,
-                string? beforeCursor, int? take, IJobStore store, CancellationToken ct) =>
-            {
-                var run = await store.GetRunAsync(id, ct);
-                if (run is null)
-                {
-                    return NotFoundProblem($"Run '{id}' was not found.");
-                }
-
-                if (!string.IsNullOrEmpty(afterCursor) && !string.IsNullOrEmpty(beforeCursor))
-                {
-                    return TypedResults.Problem(
-                        statusCode: StatusCodes.Status400BadRequest,
-                        title: "Invalid pagination cursors",
-                        detail: "afterCursor and beforeCursor are mutually exclusive.");
-                }
-
-                var resolvedTake = Math.Clamp(take ?? DefaultChildrenPageSize, 1, MaxChildrenPageSize);
-
-                DirectChildrenPage page;
-                try
-                {
-                    page = await store.GetDirectChildrenAsync(id,
-                        afterCursor,
-                        beforeCursor,
-                        resolvedTake,
-                        ct);
-                }
-                catch (FormatException ex)
-                {
-                    // Surface a 400 rather than 500 since user-facing URLs can be mutated.
-                    // Don't silently restart at page 0; that hides bugs and can livelock clients.
-                    return TypedResults.Problem(
-                        statusCode: StatusCodes.Status400BadRequest,
-                        title: "Invalid pagination cursor",
-                        detail: ex.Message);
-                }
-
-                return TypedResults.Ok(new RunChildrenResponse
-                {
-                    Items = page.Items.Select(r => RunResponse.From(r)).ToList(),
-                    NextCursor = page.NextCursor
-                });
+                return TypedResults.Ok(await BuildRunTreeAsync(store, focus, options.MaxTreeRuns, ct));
             });
         api.MapPost("/runs/{id}/cancel",
             async Task<Results<NoContent, ProblemHttpResult>> (string id, IJobClient client, CancellationToken ct) =>
@@ -629,41 +514,58 @@ public static class DashboardEndpoints
     private static async IAsyncEnumerable<SseItem<string>> StreamRunEventsAsync(IJobClient client, string runId,
         long sinceEventId, TimeProvider timeProvider, [EnumeratorCancellation] CancellationToken ct)
     {
-        await using var enumerator = client.ObserveRunEventsAsync(runId, sinceEventId, ct).GetAsyncEnumerator(ct);
+        using var enumeratorCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        await using var enumerator = client
+            .ObserveRunEventsAsync(runId, sinceEventId, enumeratorCts.Token)
+            .GetAsyncEnumerator(enumeratorCts.Token);
 
         Task<bool>? pendingMoveNext = null;
-        while (true)
+        try
         {
-            pendingMoveNext ??= enumerator.MoveNextAsync().AsTask();
-
-            if (!pendingMoveNext.IsCompleted)
+            while (true)
             {
-                using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var keepaliveDelay = Task.Delay(KeepAliveInterval, timeProvider, keepaliveCts.Token);
-                var winner = await Task.WhenAny(pendingMoveNext, keepaliveDelay).ConfigureAwait(false);
-                keepaliveCts.Cancel();
+                pendingMoveNext ??= enumerator.MoveNextAsync().AsTask();
 
-                if (winner != pendingMoveNext)
+                if (!pendingMoveNext.IsCompleted)
                 {
-                    yield return new SseItem<string>(string.Empty, "keepalive");
-                    continue;
+                    using var keepaliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var keepaliveDelay = Task.Delay(KeepAliveInterval, timeProvider, keepaliveCts.Token);
+                    var winner = await Task.WhenAny(pendingMoveNext, keepaliveDelay).ConfigureAwait(false);
+                    keepaliveCts.Cancel();
+
+                    if (winner != pendingMoveNext)
+                    {
+                        yield return new SseItem<string>(string.Empty, "keepalive");
+                        continue;
+                    }
                 }
+
+                if (!await pendingMoveNext)
+                {
+                    break;
+                }
+
+                var evt = enumerator.Current;
+                pendingMoveNext = null;
+                yield return new SseItem<string>(evt.Payload, MapEventType(evt.EventType))
+                {
+                    EventId = evt.Id.ToString(CultureInfo.InvariantCulture)
+                };
             }
 
-            if (!await pendingMoveNext)
-            {
-                break;
-            }
-
-            var evt = enumerator.Current;
-            pendingMoveNext = null;
-            yield return new SseItem<string>(evt.Payload, MapEventType(evt.EventType))
-            {
-                EventId = evt.Id.ToString(CultureInfo.InvariantCulture)
-            };
+            yield return new SseItem<string>("{}", "done");
         }
-
-        yield return new SseItem<string>("{}", "done");
+        finally
+        {
+            // Observe any still-in-flight MoveNextAsync before disposal. Otherwise an unobserved
+            // pending op would race the compiler-generated DisposeAsync and surface as
+            // NotSupportedException, swallowing the real teardown cause.
+            if (pendingMoveNext is { } pending)
+            {
+                enumeratorCts.Cancel();
+                try { await pending; } catch { }
+            }
+        }
     }
 
     private static string? MapEventType(RunEventType type) => type switch
@@ -678,6 +580,167 @@ public static class DashboardEndpoints
         RunEventType.AttemptFailure => "attemptFailure",
         _ => null
     };
+
+    /// <summary>
+    ///     Builds the run-tree response for <paramref name="focus" />. Always includes the focus
+    ///     and its full ancestor chain so depth resolves correctly even when truncation drops
+    ///     other descendants. BFS down from the lineage through the descendants page drops
+    ///     orphans (rows whose parent chain isn't visible) instead of rendering them at the
+    ///     wrong depth on the client. Exposed as internal so tests can exercise truncation at
+    ///     small caps; the endpoint reads its cap from <see cref="SurefireDashboardOptions" />.
+    /// </summary>
+    internal static async Task<RunTreeResponse> BuildRunTreeAsync(IJobStore store, JobRun focus, int maxRuns,
+        CancellationToken cancellationToken)
+    {
+        // Root runs have RootRunId = null and are identified by their own id.
+        var rootId = focus.RootRunId ?? focus.Id;
+
+        var ancestors = await store.GetAncestorChainAsync(focus.Id, cancellationToken);
+
+        // Ascending so truncation surfaces rows nearest the root (parents come before children),
+        // which gives a useful subtree under the cap. With descending, the page is dominated by
+        // deep leaves whose parents aren't visible and would render at the wrong depth.
+        var descendantsPage = await store.GetRunsAsync(
+            new RunFilter
+            {
+                RootRunId = rootId,
+                OrderBy = RunOrderBy.CreatedAt,
+                Direction = RunOrderDirection.Ascending
+            },
+            skip: 0,
+            take: maxRuns,
+            cancellationToken);
+
+        // Bucket descendants by parent id for O(N) BFS lookups. Empty string keys the
+        // ParentRunId = null group (top-level batch children share a null parent).
+        var childrenByParent = new Dictionary<string, List<JobRun>>(StringComparer.Ordinal);
+        foreach (var descendant in descendantsPage.Items)
+        {
+            var parentKey = descendant.ParentRunId ?? string.Empty;
+            if (!childrenByParent.TryGetValue(parentKey, out var list))
+            {
+                childrenByParent[parentKey] = list = [];
+            }
+
+            list.Add(descendant);
+        }
+
+        var runs = new List<JobRun>(ancestors.Count + descendantsPage.Items.Count + 1);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var queue = new Queue<JobRun>();
+
+        // Seed BFS with focus's lineage so depth resolves and the user always sees the run
+        // they navigated to, even when truncation drops it from the descendants page.
+        foreach (var ancestor in ancestors)
+        {
+            if (seen.Add(ancestor.Id))
+            {
+                runs.Add(ancestor);
+                queue.Enqueue(ancestor);
+            }
+        }
+
+        if (seen.Add(focus.Id))
+        {
+            runs.Add(focus);
+            queue.Enqueue(focus);
+        }
+
+        // Also seed from focus's parent-group so batch-root cases (focus.ParentRunId is null,
+        // rootId is a conceptual batch with no run row) still surface the other batch children.
+        var siblingsKey = focus.ParentRunId ?? string.Empty;
+        if (childrenByParent.TryGetValue(siblingsKey, out var focusSiblings))
+        {
+            foreach (var sibling in focusSiblings)
+            {
+                if (seen.Add(sibling.Id))
+                {
+                    runs.Add(sibling);
+                    queue.Enqueue(sibling);
+                }
+            }
+        }
+
+        // BFS from the lineage through the descendants page. Anything unreachable (truncated
+        // branches where the parent chain isn't visible) gets dropped.
+        while (queue.Count > 0)
+        {
+            var node = queue.Dequeue();
+            if (childrenByParent.TryGetValue(node.Id, out var children))
+            {
+                foreach (var child in children)
+                {
+                    if (seen.Add(child.Id))
+                    {
+                        runs.Add(child);
+                        queue.Enqueue(child);
+                    }
+                }
+            }
+        }
+
+        var hasRootRow = focus.Id == rootId
+            || (ancestors.Count > 0 && ancestors[0].Id == rootId);
+        var totalCount = (hasRootRow ? 1 : 0) + descendantsPage.TotalCount;
+        var truncated = totalCount > runs.Count;
+
+        runs.Sort(static (a, b) =>
+        {
+            var cmp = a.CreatedAt.CompareTo(b.CreatedAt);
+            return cmp != 0 ? cmp : string.CompareOrdinal(a.Id, b.Id);
+        });
+
+        // Iterative (not recursive) so a deep chain can't blow the stack.
+        var byId = runs.ToDictionary(r => r.Id, StringComparer.Ordinal);
+        var depths = new Dictionary<string, int>(runs.Count, StringComparer.Ordinal);
+        var chain = new Stack<JobRun>();
+
+        foreach (var run in runs)
+        {
+            if (depths.ContainsKey(run.Id))
+            {
+                continue;
+            }
+
+            chain.Clear();
+            var current = run;
+            int baseDepth;
+            while (true)
+            {
+                if (depths.TryGetValue(current.Id, out var cached))
+                {
+                    baseDepth = cached;
+                    break;
+                }
+
+                if (current.ParentRunId is { } parentId && byId.TryGetValue(parentId, out var parent))
+                {
+                    chain.Push(current);
+                    current = parent;
+                    continue;
+                }
+
+                // Tree root, or a node whose parent isn't in the result set (orphan).
+                depths[current.Id] = 0;
+                baseDepth = 0;
+                break;
+            }
+
+            while (chain.Count > 0)
+            {
+                baseDepth++;
+                depths[chain.Pop().Id] = baseDepth;
+            }
+        }
+
+        return new RunTreeResponse
+        {
+            RootId = rootId,
+            Runs = runs.Select(r => RunResponse.From(r, depths[r.Id])).ToList(),
+            Truncated = truncated,
+            TotalCount = totalCount
+        };
+    }
 
     private static ProblemHttpResult NotFoundProblem(string detail) =>
         TypedResults.Problem(

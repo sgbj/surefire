@@ -38,18 +38,21 @@ export default function App() {
                 <Route
                   path="*"
                   element={
-                    <div className="space-y-3">
-                      <h2 className="text-xl font-semibold tracking-tight">
-                        Page not found
+                    <div className="max-w-prose space-y-4 py-12">
+                      <div className="eyebrow flex items-center text-accent-brand">
+                                                404 · not found
+                      </div>
+                      <h2 className="text-3xl font-semibold tracking-tight">
+                        This route doesn't exist.
                       </h2>
-                      <p className="text-sm text-muted-foreground">
-                        The requested dashboard route does not exist.
+                      <p className="text-muted-foreground">
+                        The requested dashboard page does not exist.
                       </p>
                       <Link
                         to="/"
-                        className="text-sm font-medium text-primary hover:underline"
+                        className="inline-flex items-center gap-2 text-accent-brand hover:underline eyebrow"
                       >
-                        Go to dashboard
+                        ← back to console
                       </Link>
                     </div>
                   }

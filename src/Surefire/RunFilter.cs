@@ -46,4 +46,10 @@ public sealed record RunFilter
 
     /// <summary>The field to order results by.</summary>
     public RunOrderBy OrderBy { get; init; }
+
+    /// <summary>
+    ///     Sort direction. Defaults to <see cref="RunOrderDirection.Descending" /> so existing
+    ///     "newest first" callers see no behavior change.
+    /// </summary>
+    public RunOrderDirection Direction { get; init; }
 }

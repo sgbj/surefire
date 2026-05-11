@@ -633,13 +633,17 @@ internal sealed class SqliteJobStore(
             RunOrderBy.CompletedAt => "completed_at",
             _ => "created_at"
         };
+        var dir = filter.Direction == RunOrderDirection.Ascending ? "ASC" : "DESC";
+        // Nulls always last for nullable timestamp columns (SQLite 3.30+ supports NULLS LAST).
+        // created_at is non-nullable so the clause is omitted there.
+        var nullsClause = filter.OrderBy == RunOrderBy.CreatedAt ? "" : " NULLS LAST";
 
         cmd.CommandText = $"SELECT COUNT(*) FROM surefire_runs {where}";
         var totalCount = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
 
         cmd.CommandText = $"""
                            SELECT * FROM surefire_runs {where}
-                           ORDER BY {orderColumn} DESC, id DESC
+                           ORDER BY {orderColumn} {dir}{nullsClause}, id {dir}
                            LIMIT @tk OFFSET @sk
                            """;
         cmd.Parameters.AddWithValue("@sk", skip);

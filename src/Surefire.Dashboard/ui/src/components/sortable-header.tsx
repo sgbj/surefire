@@ -1,28 +1,44 @@
 import type {Column} from "@tanstack/react-table";
-import {Button} from "@/components/ui/button";
-import {ArrowUpDown} from "lucide-react";
+import {ArrowDown, ArrowUp, ArrowUpDown} from "lucide-react";
+import {cn} from "@/lib/utils";
 
 interface SortableHeaderProps<TData> {
   column: Column<TData>;
   children: React.ReactNode;
+  align?: "left" | "right";
 }
 
 export function SortableHeader<TData>({
                                         column,
                                         children,
+                                        align = "left",
                                       }: SortableHeaderProps<TData>) {
   if (!column.getCanSort()) {
-    return <span>{children}</span>;
+    return (
+      <span
+        className={cn(
+          "eyebrow",
+          align === "right" ? "block text-right" : "",
+        )}
+      >
+        {children}
+      </span>
+    );
   }
-
+  const sort = column.getIsSorted();
+  const Icon = sort === "asc" ? ArrowUp : sort === "desc" ? ArrowDown : ArrowUpDown;
   return (
-    <Button
-      variant="ghost"
-      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-      className="-ml-4 text-xs font-medium uppercase tracking-wider text-muted-foreground"
+    <button
+      type="button"
+      onClick={() => column.toggleSorting(sort === "asc")}
+      className={cn(
+        "inline-flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground",
+        sort && "text-foreground",
+        align === "right" ? "ml-auto" : "",
+      )}
     >
       {children}
-      <ArrowUpDown className="ml-1 h-3.5 w-3.5 opacity-40"/>
-    </Button>
+      <Icon className="size-3 opacity-60"/>
+    </button>
   );
 }

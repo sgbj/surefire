@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-10
+
+### Added
+
+- `RunOrderDirection` enum and `RunFilter.Direction` for ascending or descending ordering on `IJobStore.GetRunsAsync`.
+- `SurefireDashboardOptions.MaxTreeRuns` (default `50_000`) to cap the run tree response, configurable via a new `configure` parameter on `MapSurefireDashboard`.
+- `GET {prefix}/api/runs/{id}/tree` returns the full run tree in a single response with `Truncated` and `TotalCount`.
+
+### Changed
+
+- `MapSurefireDashboard` signature is now `(prefix, configure)`; callers passing only the prefix are unaffected.
+- Dashboard trace view shows the whole run tree with live updates.
+- Dashboard UI rework
+
+### Removed
+
+- `GET {prefix}/api/runs/{id}/trace` and `GET {prefix}/api/runs/{id}/children` endpoints (use `/tree`).
+- Public response types `RunTraceResponse`, `RunChildrenResponse`, and `SiblingsCursorResponse`.
+
 ## [0.1.0-preview.1] - 2026-05-02
 
 First public preview. APIs and storage schemas may still change before 1.0.

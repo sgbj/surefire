@@ -15,6 +15,9 @@
     <ItemGroup>
         <ProjectReference Include="..\Surefire\Surefire.csproj"/>
     </ItemGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Surefire.Tests.Dashboard"/>
+    </ItemGroup>
 
     <ItemGroup>
         <DashboardUiBuildInput Include="$(DashboardUiDir)/package.json"/>

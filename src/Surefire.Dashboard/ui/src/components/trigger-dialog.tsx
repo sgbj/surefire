@@ -173,7 +173,7 @@ export function TriggerDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button variant="outline" className="cursor-pointer">
+        <Button size="sm" className="bg-foreground text-background hover:bg-foreground/90">
           <Play className="size-3.5"/>
           Run
         </Button>
@@ -470,7 +470,7 @@ function SchemaField({
             onChange(typeof original === "number" ? original : selected);
           }}
         >
-          <option value="">—</option>
+          <option value=""></option>
           {resolvedSchema.enum.map((v) => (
             <option key={String(v)} value={String(v)}>
               {String(v)}

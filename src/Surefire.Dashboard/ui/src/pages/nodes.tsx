@@ -1,123 +1,146 @@
-import {useMemo, useState} from 'react';
-import {useQuery} from '@tanstack/react-query';
-import {type ColumnDef} from '@tanstack/react-table';
-import {api, type NodeResponse} from '@/lib/api';
-import {Badge} from '@/components/ui/badge';
-import {Button} from '@/components/ui/button';
-import {DataTable} from '@/components/data-table';
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu';
-import {SortableHeader} from '@/components/sortable-header';
-import {Input} from '@/components/ui/input';
-import {formatRelative} from '@/lib/format';
-import {Link} from 'react-router';
-import {Alert, AlertDescription} from '@/components/ui/alert';
-import {CircleAlert, ListFilter, Search} from 'lucide-react';
+import {useMemo, useState} from "react";
+import {useQuery} from "@tanstack/react-query";
+import {type ColumnDef} from "@tanstack/react-table";
+import {api, type NodeResponse} from "@/lib/api";
+import {DataTable} from "@/components/data-table";
+import {StatePill} from "@/components/status-badge";
+import {Switch} from "@/components/ui/switch";
+import {SortableHeader} from "@/components/sortable-header";
+import {Input} from "@/components/ui/input";
+import {formatRelative} from "@/lib/format";
+import {Alert, AlertDescription} from "@/components/ui/alert";
+import {CircleAlert, Search} from "lucide-react";
+import {PageShell} from "@/components/page-shell";
+import {cn} from "@/lib/utils";
 
 const columns: ColumnDef<NodeResponse>[] = [
   {
     accessorKey: "name",
     header: ({column}) => <SortableHeader column={column}>Name</SortableHeader>,
     cell: ({row}) => (
-      <Link to={`/nodes/${encodeURIComponent(row.original.name)}`}
-            className={`font-medium text-primary hover:underline truncate max-w-50 inline-block ${!row.original.isActive ? 'opacity-50' : ''}`}
-            title={row.original.name}>
+      <span
+        className={cn(
+          "text-sm font-medium truncate max-w-72 inline-block",
+          row.original.isActive ? "text-foreground" : "text-muted-foreground/70",
+        )}
+        title={row.original.name}
+      >
         {row.original.name}
-      </Link>
+      </span>
     ),
   },
   {
     accessorKey: "lastHeartbeatAt",
     header: ({column}) => <SortableHeader column={column}>Last heartbeat</SortableHeader>,
-    cell: ({row}) => <span
-      className={`text-sm ${!row.original.isActive ? 'opacity-50' : ''}`}>{formatRelative(row.original.lastHeartbeatAt)}</span>,
+    cell: ({row}) => (
+      <span className={cn(
+        "text-sm tnum",
+        row.original.isActive ? "text-foreground/85" : "text-muted-foreground/50",
+      )}>
+        {formatRelative(row.original.lastHeartbeatAt)}
+      </span>
+    ),
   },
   {
     accessorKey: "runningCount",
     header: ({column}) => <SortableHeader column={column}>Running</SortableHeader>,
-    cell: ({row}) => <span className={!row.original.isActive ? 'opacity-50' : ''}>{row.original.runningCount}</span>,
+    cell: ({row}) => (
+      <span className={cn(
+        "text-sm tnum",
+        row.original.runningCount > 0 ? "text-foreground" : "text-muted-foreground/60",
+      )}>
+        {row.original.runningCount}
+      </span>
+    ),
   },
   {
     id: "status",
-    header: "Status",
-    cell: ({row}) => row.original.isActive
-      ? <Badge variant="outline" className="text-emerald-700 dark:text-emerald-400">Active</Badge>
-      : <Badge variant="outline" className="text-muted-foreground opacity-50">Inactive</Badge>,
+    header: "State",
+    cell: ({row}) =>
+      row.original.isActive ? (
+        <StatePill tone="success">
+          <span className="inline-block size-1.5 rounded-full bg-current"/>
+          Active
+        </StatePill>
+      ) : (
+        <StatePill tone="muted">Inactive</StatePill>
+      ),
   },
   {
     id: "queues",
     header: "Queues",
     cell: ({row}) => (
-      <span className={`text-sm ${!row.original.isActive ? 'opacity-50' : ''}`}>
-        {row.original.registeredQueueNames.join(', ')}
+      <span className="text-sm text-muted-foreground truncate max-w-72 block">
+        {row.original.registeredQueueNames.join(", ")}
       </span>
     ),
   },
   {
     id: "registeredJobs",
     header: "Jobs",
-    cell: ({row}) => <span
-      className={`text-sm ${!row.original.isActive ? 'opacity-50' : ''}`}>{row.original.registeredJobNames.length}</span>,
+    cell: ({row}) => (
+      <span className="text-sm tnum text-muted-foreground">
+        {row.original.registeredJobNames.length}
+      </span>
+    ),
   },
 ];
 
 export function NodesPage() {
   const [showInactive, setShowInactive] = useState(false);
   const {data: nodes, isError} = useQuery({
-    queryKey: ['nodes', showInactive],
+    queryKey: ["nodes", showInactive],
     queryFn: () => api.getNodes(showInactive ? {includeInactive: true} : undefined),
     refetchInterval: 10000,
   });
-  const [filter, setFilter] = useState('');
+  const [filter, setFilter] = useState("");
 
   const filtered = useMemo(() => {
     if (!nodes) return [];
     if (!filter) return nodes;
     const lower = filter.toLowerCase();
-    return nodes.filter(n => n.name.toLowerCase().includes(lower));
+    return nodes.filter((n) => n.name.toLowerCase().includes(lower));
   }, [nodes, filter]);
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold tracking-tight">Nodes</h2>
-      {isError &&
-        <Alert variant="destructive"><CircleAlert/><AlertDescription>Failed to load nodes</AlertDescription></Alert>}
+    <PageShell>
+      {isError && (
+        <div className="px-6 pt-5">
+          <Alert variant="destructive">
+            <CircleAlert/>
+            <AlertDescription>Failed to load nodes</AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       <DataTable
         columns={columns}
         data={filtered}
+        getRowHref={(r) => `/nodes/${encodeURIComponent(r.name)}`}
+        getRowLinkLabel={(r) => `Open node ${r.name}`}
         toolbar={
           <>
             <div className="relative max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
               <Input
                 aria-label="Search nodes"
-                placeholder="Search..."
+                placeholder="Filter nodes…"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 className="pl-8"
               />
             </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className={showInactive ? 'border-primary/50' : ''}>
-                  <ListFilter className="size-4"/>
-                  Filter
-                  {showInactive && <Badge variant="secondary" className="ml-1 px-1 py-0 text-[10px]">1</Badge>}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuCheckboxItem checked={showInactive} onCheckedChange={setShowInactive}>
-                  Inactive nodes
-                </DropdownMenuCheckboxItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <label className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none">
+              <Switch
+                size="sm"
+                checked={showInactive}
+                onCheckedChange={setShowInactive}
+              />
+              Show inactive
+            </label>
           </>
         }
       />
-    </div>
+    </PageShell>
   );
 }

@@ -1,6 +1,6 @@
 #nullable enable
 Microsoft.AspNetCore.Builder.DashboardEndpoints
-static Microsoft.AspNetCore.Builder.DashboardEndpoints.MapSurefireDashboard(this Microsoft.AspNetCore.Routing.IEndpointRouteBuilder! endpoints, string! prefix = "/surefire") -> Microsoft.AspNetCore.Builder.IEndpointConventionBuilder!
+static Microsoft.AspNetCore.Builder.DashboardEndpoints.MapSurefireDashboard(this Microsoft.AspNetCore.Routing.IEndpointRouteBuilder! endpoints, string! prefix = "/surefire", System.Action<Surefire.Dashboard.SurefireDashboardOptions!>? configure = null) -> Microsoft.AspNetCore.Builder.IEndpointConventionBuilder!
 static Surefire.Dashboard.JobResponse.From(Surefire.JobDefinition! job, System.DateTimeOffset activeCutoff, System.DateTimeOffset now) -> Surefire.Dashboard.JobResponse!
 static Surefire.Dashboard.JobStatsResponse.From(Surefire.JobStats! stats) -> Surefire.Dashboard.JobStatsResponse!
 static Surefire.Dashboard.NodeResponse.From(Surefire.NodeInfo! node, System.DateTimeOffset activeCutoff) -> Surefire.Dashboard.NodeResponse!
@@ -122,12 +122,6 @@ Surefire.Dashboard.QueueResponse.RateLimitName.get -> string?
 Surefire.Dashboard.QueueResponse.RateLimitName.init -> void
 Surefire.Dashboard.QueueResponse.RunningCount.get -> int
 Surefire.Dashboard.QueueResponse.RunningCount.init -> void
-Surefire.Dashboard.RunChildrenResponse
-Surefire.Dashboard.RunChildrenResponse.Items.get -> System.Collections.Generic.IReadOnlyList<Surefire.Dashboard.RunResponse!>!
-Surefire.Dashboard.RunChildrenResponse.Items.init -> void
-Surefire.Dashboard.RunChildrenResponse.NextCursor.get -> string?
-Surefire.Dashboard.RunChildrenResponse.NextCursor.init -> void
-Surefire.Dashboard.RunChildrenResponse.RunChildrenResponse() -> void
 Surefire.Dashboard.RunIdResponse
 Surefire.Dashboard.RunIdResponse.RunId.get -> string!
 Surefire.Dashboard.RunIdResponse.RunId.init -> void
@@ -192,28 +186,20 @@ Surefire.Dashboard.RunResponse.Status.get -> Surefire.JobStatus
 Surefire.Dashboard.RunResponse.Status.init -> void
 Surefire.Dashboard.RunResponse.TraceId.get -> string?
 Surefire.Dashboard.RunResponse.TraceId.init -> void
-Surefire.Dashboard.RunTraceResponse
-Surefire.Dashboard.RunTraceResponse.Ancestors.get -> System.Collections.Generic.IReadOnlyList<Surefire.Dashboard.RunResponse!>!
-Surefire.Dashboard.RunTraceResponse.Ancestors.init -> void
-Surefire.Dashboard.RunTraceResponse.Children.get -> System.Collections.Generic.IReadOnlyList<Surefire.Dashboard.RunResponse!>!
-Surefire.Dashboard.RunTraceResponse.Children.init -> void
-Surefire.Dashboard.RunTraceResponse.ChildrenCursor.get -> string?
-Surefire.Dashboard.RunTraceResponse.ChildrenCursor.init -> void
-Surefire.Dashboard.RunTraceResponse.Focus.get -> Surefire.Dashboard.RunResponse!
-Surefire.Dashboard.RunTraceResponse.Focus.init -> void
-Surefire.Dashboard.RunTraceResponse.RunTraceResponse() -> void
-Surefire.Dashboard.RunTraceResponse.SiblingsAfter.get -> System.Collections.Generic.IReadOnlyList<Surefire.Dashboard.RunResponse!>!
-Surefire.Dashboard.RunTraceResponse.SiblingsAfter.init -> void
-Surefire.Dashboard.RunTraceResponse.SiblingsBefore.get -> System.Collections.Generic.IReadOnlyList<Surefire.Dashboard.RunResponse!>!
-Surefire.Dashboard.RunTraceResponse.SiblingsBefore.init -> void
-Surefire.Dashboard.RunTraceResponse.SiblingsCursor.get -> Surefire.Dashboard.SiblingsCursorResponse?
-Surefire.Dashboard.RunTraceResponse.SiblingsCursor.init -> void
-Surefire.Dashboard.SiblingsCursorResponse
-Surefire.Dashboard.SiblingsCursorResponse.After.get -> string?
-Surefire.Dashboard.SiblingsCursorResponse.After.init -> void
-Surefire.Dashboard.SiblingsCursorResponse.Before.get -> string?
-Surefire.Dashboard.SiblingsCursorResponse.Before.init -> void
-Surefire.Dashboard.SiblingsCursorResponse.SiblingsCursorResponse() -> void
+Surefire.Dashboard.RunTreeResponse
+Surefire.Dashboard.RunTreeResponse.RootId.get -> string!
+Surefire.Dashboard.RunTreeResponse.RootId.init -> void
+Surefire.Dashboard.RunTreeResponse.Runs.get -> System.Collections.Generic.IReadOnlyList<Surefire.Dashboard.RunResponse!>!
+Surefire.Dashboard.RunTreeResponse.Runs.init -> void
+Surefire.Dashboard.RunTreeResponse.RunTreeResponse() -> void
+Surefire.Dashboard.RunTreeResponse.TotalCount.get -> int
+Surefire.Dashboard.RunTreeResponse.TotalCount.init -> void
+Surefire.Dashboard.RunTreeResponse.Truncated.get -> bool
+Surefire.Dashboard.RunTreeResponse.Truncated.init -> void
+Surefire.Dashboard.SurefireDashboardOptions
+Surefire.Dashboard.SurefireDashboardOptions.MaxTreeRuns.get -> int
+Surefire.Dashboard.SurefireDashboardOptions.MaxTreeRuns.set -> void
+Surefire.Dashboard.SurefireDashboardOptions.SurefireDashboardOptions() -> void
 Surefire.Dashboard.TimelineBucketResponse
 Surefire.Dashboard.TimelineBucketResponse.Canceled.get -> int
 Surefire.Dashboard.TimelineBucketResponse.Canceled.init -> void

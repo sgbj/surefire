@@ -483,6 +483,8 @@ Surefire.RunFilter.CreatedAfter.get -> System.DateTimeOffset?
 Surefire.RunFilter.CreatedAfter.init -> void
 Surefire.RunFilter.CreatedBefore.get -> System.DateTimeOffset?
 Surefire.RunFilter.CreatedBefore.init -> void
+Surefire.RunFilter.Direction.get -> Surefire.RunOrderDirection
+Surefire.RunFilter.Direction.init -> void
 Surefire.RunFilter.IsTerminal.get -> bool?
 Surefire.RunFilter.IsTerminal.init -> void
 Surefire.RunFilter.JobName.get -> string?
@@ -517,6 +519,9 @@ Surefire.RunOrderBy
 Surefire.RunOrderBy.CompletedAt = 2 -> Surefire.RunOrderBy
 Surefire.RunOrderBy.CreatedAt = 0 -> Surefire.RunOrderBy
 Surefire.RunOrderBy.StartedAt = 1 -> Surefire.RunOrderBy
+Surefire.RunOrderDirection
+Surefire.RunOrderDirection.Ascending = 1 -> Surefire.RunOrderDirection
+Surefire.RunOrderDirection.Descending = 0 -> Surefire.RunOrderDirection
 Surefire.RunStatusTransition
 Surefire.RunStatusTransition.CanceledAt.get -> System.DateTimeOffset?
 Surefire.RunStatusTransition.CanceledAt.init -> void

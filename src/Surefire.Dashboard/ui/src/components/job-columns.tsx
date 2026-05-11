@@ -1,9 +1,9 @@
 import {type ColumnDef} from "@tanstack/react-table";
-import {Link} from "react-router";
 
 import {type JobResponse} from "@/lib/api";
-import {Badge} from "@/components/ui/badge";
 import {SortableHeader} from "@/components/sortable-header";
+import {StatePill} from "@/components/status-badge";
+import {cn} from "@/lib/utils";
 
 export function buildJobColumns(): ColumnDef<JobResponse>[] {
   return [
@@ -13,13 +13,15 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
         <SortableHeader column={column}>Name</SortableHeader>
       ),
       cell: ({row}) => (
-        <Link
-          to={`/jobs/${encodeURIComponent(row.original.name)}`}
-          className={`font-medium text-primary hover:underline truncate max-w-50 inline-block ${!row.original.isActive ? "opacity-50" : ""}`}
+        <span
+          className={cn(
+            "text-sm font-medium truncate max-w-72 inline-block",
+            row.original.isActive ? "text-foreground" : "text-muted-foreground/70",
+          )}
           title={row.original.name}
         >
           {row.original.name}
-        </Link>
+        </span>
       ),
     },
     {
@@ -27,60 +29,59 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
       header: "Description",
       cell: ({row}) => (
         <span
-          className={`text-muted-foreground ${!row.original.isActive ? "opacity-50" : ""}`}
+          className={cn(
+            "text-sm",
+            row.original.isActive
+              ? "text-muted-foreground"
+              : "text-muted-foreground/50",
+          )}
         >
-          {row.original.description}
+          {row.original.description ?? ""}
         </span>
       ),
     },
     {
       accessorKey: "cronExpression",
       header: "Schedule",
-      cell: ({row}) => (
-        <span
-          className={`text-sm ${!row.original.isActive ? "opacity-50" : ""}`}
-        >
-          {row.original.isContinuous
-            ? "Continuous"
-            : (row.original.cronExpression ?? "Manual")}
-        </span>
-      ),
+      cell: ({row}) => {
+        const text = row.original.isContinuous
+          ? "Continuous"
+          : (row.original.cronExpression ?? "Manual");
+        return (
+          <span
+            className={cn(
+              row.original.cronExpression ? "font-mono text-xs" : "text-sm",
+              "text-foreground/85",
+            )}
+          >
+            {text}
+          </span>
+        );
+      },
     },
     {
       accessorKey: "queue",
       header: "Queue",
       cell: ({row}) => (
-        <span
-          className={`text-sm ${!row.original.isActive ? "opacity-50" : ""}`}
-        >
+        <span className="text-sm text-muted-foreground">
           {row.original.queue ?? "default"}
         </span>
       ),
     },
     {
       accessorKey: "isEnabled",
-      header: "Status",
+      header: "State",
       cell: ({row}) => {
-        if (!row.original.isActive)
-          return (
-            <Badge
-              variant="outline"
-              className="text-muted-foreground opacity-50"
-            >
-              Inactive
-            </Badge>
-          );
+        if (!row.original.isActive) {
+          return <StatePill tone="muted">Inactive</StatePill>;
+        }
         return row.original.isEnabled ? (
-          <Badge
-            variant="outline"
-            className="text-emerald-700 dark:text-emerald-400"
-          >
+          <StatePill tone="success">
+            <span className="inline-block size-1.5 rounded-full bg-current"/>
             Enabled
-          </Badge>
+          </StatePill>
         ) : (
-          <Badge variant="outline" className="text-muted-foreground">
-            Disabled
-          </Badge>
+          <StatePill tone="muted">Disabled</StatePill>
         );
       },
     },
@@ -88,13 +89,14 @@ export function buildJobColumns(): ColumnDef<JobResponse>[] {
       accessorKey: "tags",
       header: "Tags",
       cell: ({row}) => (
-        <div
-          className={`flex gap-1 ${!row.original.isActive ? "opacity-50" : ""}`}
-        >
+        <div className="flex flex-wrap gap-1">
           {row.original.tags.map((tag) => (
-            <Badge key={tag} variant="outline">
+            <span
+              key={tag}
+              className="inline-flex items-center h-5 px-1.5 rounded-sm border border-border bg-muted/40 text-[11px] text-muted-foreground"
+            >
               {tag}
-            </Badge>
+            </span>
           ))}
         </div>
       ),

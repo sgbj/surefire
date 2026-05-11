@@ -162,17 +162,17 @@ Includes an embedded dashboard that lets you:
 If you expose the dashboard outside local development, be sure to configure the returned endpoint group with
 authorization.
 
-## Documentation
-
-See the full documentation at [batary.dev/surefire](https://batary.dev/surefire).
-
 ## Contributing
 
-Issues and PRs are welcome! To get started with the sample app, clone the repo and run:
+To get started with the sample app, clone the repo and run:
 
 ```bash
 aspire run
 ```
+
+## Documentation
+
+See the full documentation at [batary.dev/surefire](https://batary.dev/surefire).
 
 ## License
 

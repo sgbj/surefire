@@ -589,6 +589,246 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task GetRuns_OrderBy_CreatedAt_Ascending()
+    {
+        // Default Direction is Descending (newest first) to preserve back-compat. Setting
+        // Direction = Ascending flips the order so callers can iterate oldest-first
+        // (chronological backfills, root-down tree walks, etc.).
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Ordered_Asc_{Guid.CreateVersion7():N}";
+
+        var early = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-10) };
+        var middle = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-5) };
+        var late = CreateRun(jobName) with { CreatedAt = DateTimeOffset.UtcNow };
+
+        await Store.CreateRunsAsync([late, early, middle], cancellationToken: ct);
+
+        var results = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.CreatedAt,
+            Direction = RunOrderDirection.Ascending
+        }, cancellationToken: ct);
+
+        Assert.Equal(3, results.Items.Count);
+        Assert.Equal(early.Id, results.Items[0].Id);
+        Assert.Equal(middle.Id, results.Items[1].Id);
+        Assert.Equal(late.Id, results.Items[2].Id);
+    }
+
+    [Fact]
+    public async Task GetRuns_OrderBy_StartedAt_BothDirections()
+    {
+        // Verify direction works for non-default OrderBy fields. All-non-null timestamps so
+        // ordering is fully deterministic by StartedAt alone.
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Ordered_Start_{Guid.CreateVersion7():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var earlyStart = CreateRun(jobName) with { StartedAt = now.AddMinutes(-30), Status = JobStatus.Running };
+        var midStart = CreateRun(jobName) with { StartedAt = now.AddMinutes(-15), Status = JobStatus.Running };
+        var lateStart = CreateRun(jobName) with { StartedAt = now.AddMinutes(-5), Status = JobStatus.Running };
+
+        await Store.CreateRunsAsync([earlyStart, midStart, lateStart], cancellationToken: ct);
+
+        var desc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.StartedAt
+        }, cancellationToken: ct);
+
+        Assert.Equal(3, desc.Items.Count);
+        Assert.Equal(lateStart.Id, desc.Items[0].Id);
+        Assert.Equal(midStart.Id, desc.Items[1].Id);
+        Assert.Equal(earlyStart.Id, desc.Items[2].Id);
+
+        var asc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.StartedAt,
+            Direction = RunOrderDirection.Ascending
+        }, cancellationToken: ct);
+
+        Assert.Equal(3, asc.Items.Count);
+        Assert.Equal(earlyStart.Id, asc.Items[0].Id);
+        Assert.Equal(midStart.Id, asc.Items[1].Id);
+        Assert.Equal(lateStart.Id, asc.Items[2].Id);
+    }
+
+    [Fact]
+    public async Task GetRuns_OrderBy_CompletedAt_BothDirections()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Ordered_Complete_{Guid.CreateVersion7():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var earlyComplete = CreateRun(jobName) with
+        {
+            Status = JobStatus.Succeeded,
+            StartedAt = now.AddMinutes(-30),
+            CompletedAt = now.AddMinutes(-25)
+        };
+        var lateComplete = CreateRun(jobName) with
+        {
+            Status = JobStatus.Succeeded,
+            StartedAt = now.AddMinutes(-10),
+            CompletedAt = now.AddMinutes(-1)
+        };
+
+        await Store.CreateRunsAsync([earlyComplete, lateComplete], cancellationToken: ct);
+
+        var desc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.CompletedAt
+        }, cancellationToken: ct);
+
+        Assert.Equal(lateComplete.Id, desc.Items[0].Id);
+        Assert.Equal(earlyComplete.Id, desc.Items[1].Id);
+
+        var asc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.CompletedAt,
+            Direction = RunOrderDirection.Ascending
+        }, cancellationToken: ct);
+
+        Assert.Equal(earlyComplete.Id, asc.Items[0].Id);
+        Assert.Equal(lateComplete.Id, asc.Items[1].Id);
+    }
+
+    [Fact]
+    public async Task GetRuns_OrderBy_NullTimestamps_SortLast_BothDirections()
+    {
+        // Contract: nulls always sort last. An unstarted run (null StartedAt) never crowds
+        // the top of an ascending or a descending list. Every store must honor this.
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Ordered_Null_{Guid.CreateVersion7():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var earlyStart = CreateRun(jobName) with { StartedAt = now.AddMinutes(-30), Status = JobStatus.Running };
+        var lateStart = CreateRun(jobName) with { StartedAt = now.AddMinutes(-5), Status = JobStatus.Running };
+        var unstartedA = CreateRun(jobName); // StartedAt = null
+        var unstartedB = CreateRun(jobName); // StartedAt = null
+
+        await Store.CreateRunsAsync([earlyStart, lateStart, unstartedA, unstartedB], cancellationToken: ct);
+
+        var desc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.StartedAt
+        }, cancellationToken: ct);
+
+        Assert.Equal(4, desc.Items.Count);
+        Assert.Equal(lateStart.Id, desc.Items[0].Id);
+        Assert.Equal(earlyStart.Id, desc.Items[1].Id);
+        // Both nulls land at the tail; order among them is store-dependent (tie-break by Id).
+        var descTail = new HashSet<string> { desc.Items[2].Id, desc.Items[3].Id };
+        Assert.Equal(new HashSet<string> { unstartedA.Id, unstartedB.Id }, descTail);
+
+        var asc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.StartedAt,
+            Direction = RunOrderDirection.Ascending
+        }, cancellationToken: ct);
+
+        Assert.Equal(4, asc.Items.Count);
+        Assert.Equal(earlyStart.Id, asc.Items[0].Id);
+        Assert.Equal(lateStart.Id, asc.Items[1].Id);
+        var ascTail = new HashSet<string> { asc.Items[2].Id, asc.Items[3].Id };
+        Assert.Equal(new HashSet<string> { unstartedA.Id, unstartedB.Id }, ascTail);
+    }
+
+    [Fact]
+    public async Task GetRuns_OrderBy_NullCompletedAt_SortLast_BothDirections()
+    {
+        // Same contract for CompletedAt: non-terminal runs (null CompletedAt) sort last.
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Ordered_NullComplete_{Guid.CreateVersion7():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var earlyComplete = CreateRun(jobName) with
+        {
+            Status = JobStatus.Succeeded,
+            StartedAt = now.AddMinutes(-30),
+            CompletedAt = now.AddMinutes(-25)
+        };
+        var lateComplete = CreateRun(jobName) with
+        {
+            Status = JobStatus.Succeeded,
+            StartedAt = now.AddMinutes(-10),
+            CompletedAt = now.AddMinutes(-1)
+        };
+        var stillRunning = CreateRun(jobName) with
+        {
+            Status = JobStatus.Running,
+            StartedAt = now.AddMinutes(-15)
+            // CompletedAt = null
+        };
+
+        await Store.CreateRunsAsync([earlyComplete, lateComplete, stillRunning], cancellationToken: ct);
+
+        var desc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.CompletedAt
+        }, cancellationToken: ct);
+
+        Assert.Equal(3, desc.Items.Count);
+        Assert.Equal(lateComplete.Id, desc.Items[0].Id);
+        Assert.Equal(earlyComplete.Id, desc.Items[1].Id);
+        Assert.Equal(stillRunning.Id, desc.Items[2].Id);
+
+        var asc = await Store.GetRunsAsync(new()
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.CompletedAt,
+            Direction = RunOrderDirection.Ascending
+        }, cancellationToken: ct);
+
+        Assert.Equal(3, asc.Items.Count);
+        Assert.Equal(earlyComplete.Id, asc.Items[0].Id);
+        Assert.Equal(lateComplete.Id, asc.Items[1].Id);
+        Assert.Equal(stillRunning.Id, asc.Items[2].Id);
+    }
+
+    [Fact]
+    public async Task GetRuns_OrderBy_Ascending_WithFilters_PaginatesConsistently()
+    {
+        // Ordering must be stable across pages so a skip/take walk visits each run exactly once.
+        // The tie-breaker is the run Id, applied in the same direction as the primary sort.
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"Ordered_Page_{Guid.CreateVersion7():N}";
+        var now = DateTimeOffset.UtcNow;
+
+        var runs = Enumerable.Range(0, 10)
+            .Select(i => CreateRun(jobName) with { CreatedAt = now.AddMinutes(i) })
+            .ToList();
+        await Store.CreateRunsAsync(runs, cancellationToken: ct);
+
+        var filter = new RunFilter
+        {
+            JobName = jobName,
+            OrderBy = RunOrderBy.CreatedAt,
+            Direction = RunOrderDirection.Ascending
+        };
+
+        var page1 = await Store.GetRunsAsync(filter, skip: 0, take: 4, ct);
+        var page2 = await Store.GetRunsAsync(filter, skip: 4, take: 4, ct);
+        var page3 = await Store.GetRunsAsync(filter, skip: 8, take: 4, ct);
+
+        var visited = page1.Items.Concat(page2.Items).Concat(page3.Items)
+            .Select(r => r.Id).ToList();
+
+        Assert.Equal(10, visited.Count);
+        Assert.Equal(10, visited.Distinct().Count());
+
+        var expected = runs.OrderBy(r => r.CreatedAt).Select(r => r.Id).ToList();
+        Assert.Equal(expected, visited);
+    }
+
+    [Fact]
     public async Task GetRuns_FilterByLastHeartbeatBefore()
     {
         var ct = TestContext.Current.CancellationToken;

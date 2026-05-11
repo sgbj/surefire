@@ -69,9 +69,9 @@ public sealed class RunResponse
     public string? Reason { get; init; }
 
     /// <summary>
-    ///     Optional depth in a trace hierarchy. Populated by the trace endpoint so the
-    ///     client can render a tree without rebuilding it. Omitted from non-trace
-    ///     responses; the UI treats presence as "this run came from a trace view".
+    ///     Optional depth in a trace hierarchy. Populated by the tree endpoint so the
+    ///     client can render the run tree without rebuilding it. Omitted from
+    ///     non-tree responses; the UI treats presence as "this run came from a tree view".
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Depth { get; init; }
@@ -176,52 +176,29 @@ public sealed class RunLookupRequest
 }
 
 /// <summary>
-///     Focused trace response: ancestor chain (root to immediate parent), the run itself,
-///     a window of siblings around it, and the first page of direct children. Enough
-///     context for the client to render a tree view without rebuilding it from a flat list.
+///     Complete run-tree response: every run in the focus's hierarchy (the root and every
+///     descendant reachable through <c>ParentRunId</c>), in a single payload. Backed by the
+///     <c>RootRunId</c> index, so the entire tree is one query. Each run carries
+///     <see cref="RunResponse.Depth" /> and <see cref="RunResponse.ParentRunId" />; the client
+///     can flatten in DFS order without any further round-trips. The flat list is sorted by
+///     <c>(CreatedAt, Id)</c> ascending so siblings appear in stable chronological order.
 /// </summary>
-public sealed class RunTraceResponse
+public sealed class RunTreeResponse
 {
-    /// <summary>Ancestors from root to immediate parent, each with a <see cref="RunResponse.Depth" /> starting at 0.</summary>
-    public required IReadOnlyList<RunResponse> Ancestors { get; init; }
+    /// <summary>The topmost ancestor's id. Always present; equals the focus id when the focus is a root.</summary>
+    public required string RootId { get; init; }
 
-    /// <summary>The focus run itself. Depth equals the ancestors count.</summary>
-    public required RunResponse Focus { get; init; }
+    /// <summary>Every run in the tree, sorted by <c>(CreatedAt, Id)</c> ascending, with <c>Depth</c> populated.</summary>
+    public required IReadOnlyList<RunResponse> Runs { get; init; }
 
-    /// <summary>Siblings ordered before the focus (in parent-order). Empty if focus has no parent.</summary>
-    public required IReadOnlyList<RunResponse> SiblingsBefore { get; init; }
+    /// <summary>
+    ///     True when the tree exceeded the server cap and <see cref="Runs" /> is a partial result.
+    ///     <see cref="TotalCount" /> is authoritative either way.
+    /// </summary>
+    public required bool Truncated { get; init; }
 
-    /// <summary>Siblings ordered after the focus (in parent-order). Empty if focus has no parent.</summary>
-    public required IReadOnlyList<RunResponse> SiblingsAfter { get; init; }
-
-    /// <summary>Cursor for loading more siblings before/after.</summary>
-    public SiblingsCursorResponse? SiblingsCursor { get; init; }
-
-    /// <summary>First page of direct children of the focus.</summary>
-    public required IReadOnlyList<RunResponse> Children { get; init; }
-
-    /// <summary>Cursor for loading more children, or null if all children are included.</summary>
-    public string? ChildrenCursor { get; init; }
-}
-
-/// <summary>Bidirectional cursors for paging the siblings window in a trace response.</summary>
-public sealed class SiblingsCursorResponse
-{
-    /// <summary>Cursor to fetch more siblings ordered after the current <c>SiblingsAfter</c>; null if no more.</summary>
-    public string? After { get; init; }
-
-    /// <summary>Cursor to fetch more siblings ordered before the current <c>SiblingsBefore</c>; null if no more.</summary>
-    public string? Before { get; init; }
-}
-
-/// <summary>Response for the direct-children pagination endpoint.</summary>
-public sealed class RunChildrenResponse
-{
-    /// <summary>The page of direct children, ordered by <c>(CreatedAt, Id)</c> ascending.</summary>
-    public required IReadOnlyList<RunResponse> Items { get; init; }
-
-    /// <summary>Cursor for the next forward page, or null if this is the last page.</summary>
-    public string? NextCursor { get; init; }
+    /// <summary>Total number of runs in the tree, including any not returned when <see cref="Truncated" /> is true.</summary>
+    public required int TotalCount { get; init; }
 }
 
 /// <summary>Generic offset-paginated response with a total count.</summary>

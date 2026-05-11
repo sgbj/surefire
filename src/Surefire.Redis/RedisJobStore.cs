@@ -653,6 +653,7 @@ internal sealed partial class RedisJobStore(
         }
 
         var db = Db;
+        var sortOrder = filter.Direction == RunOrderDirection.Ascending ? Order.Ascending : Order.Descending;
 
         RedisValue[] candidateIds;
         int? totalFromIndex = null;
@@ -669,7 +670,7 @@ internal sealed partial class RedisJobStore(
                     lexMin,
                     lexMax,
                     lexExclude,
-                    Order.Descending,
+                    sortOrder,
                     skip,
                     take);
                 var ids = new RedisValue[members.Length];
@@ -703,14 +704,14 @@ internal sealed partial class RedisJobStore(
             {
                 totalFromIndex = (int)await db.SortedSetLengthAsync(key, minScore, maxScore, exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync(key, minScore, maxScore, exclude,
-                    Order.Descending, skip, take);
+                    sortOrder, skip, take);
                 paginatedAtIndex = true;
             }
             else
             {
                 return await GetRunsFromSortedSetWithFilterAsync(key, filter, skip, take,
                     RunOrderBy.CreatedAt, minScore, maxScore, exclude,
-                    Order.Descending, cancellationToken);
+                    sortOrder, cancellationToken);
             }
         }
         else if (filter.BatchId is { } batchId)
@@ -721,14 +722,14 @@ internal sealed partial class RedisJobStore(
             {
                 totalFromIndex = (int)await db.SortedSetLengthAsync(key, minScore, maxScore, exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync(key, minScore, maxScore, exclude,
-                    Order.Descending, skip, take);
+                    sortOrder, skip, take);
                 paginatedAtIndex = true;
             }
             else
             {
                 return await GetRunsFromSortedSetWithFilterAsync(key, filter, skip, take,
                     RunOrderBy.CreatedAt, minScore, maxScore, exclude,
-                    Order.Descending, cancellationToken);
+                    sortOrder, cancellationToken);
             }
         }
         else if (filter.Status is { } status)
@@ -743,7 +744,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     skip,
                     take);
                 paginatedAtIndex = true;
@@ -759,7 +760,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     cancellationToken);
             }
         }
@@ -781,7 +782,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     skip,
                     take);
                 paginatedAtIndex = true;
@@ -797,7 +798,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     cancellationToken);
             }
         }
@@ -819,7 +820,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     skip,
                     take);
                 paginatedAtIndex = true;
@@ -835,7 +836,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     cancellationToken);
             }
         }
@@ -851,7 +852,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     skip,
                     take);
                 paginatedAtIndex = true;
@@ -867,7 +868,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     cancellationToken);
             }
         }
@@ -882,7 +883,7 @@ internal sealed partial class RedisJobStore(
                 completedAfter.ToUnixTimeMilliseconds(),
                 double.PositiveInfinity,
                 Exclude.Start,
-                Order.Descending,
+                sortOrder,
                 cancellationToken);
         }
         else
@@ -904,7 +905,7 @@ internal sealed partial class RedisJobStore(
             {
                 totalFromIndex = (int)await db.SortedSetLengthAsync($"{P}runs:created", minScore, maxScore, exclude);
                 candidateIds = await db.SortedSetRangeByScoreAsync($"{P}runs:created",
-                    minScore, maxScore, exclude, Order.Descending, skip, take);
+                    minScore, maxScore, exclude, sortOrder, skip, take);
                 paginatedAtIndex = true;
             }
             else
@@ -918,7 +919,7 @@ internal sealed partial class RedisJobStore(
                     minScore,
                     maxScore,
                     exclude,
-                    Order.Descending,
+                    sortOrder,
                     cancellationToken);
             }
         }
@@ -949,7 +950,7 @@ internal sealed partial class RedisJobStore(
             }
         }
 
-        runs = SortRuns(runs, filter.OrderBy);
+        runs = SortRuns(runs, filter.OrderBy, filter.Direction);
 
         if (paginatedAtIndex && totalFromIndex.HasValue)
         {
@@ -3251,6 +3252,7 @@ internal sealed partial class RedisJobStore(
         CancellationToken cancellationToken = default)
     {
         var requiresResort = filter.OrderBy != RunOrderBy.CreatedAt;
+        var sortOrder = filter.Direction == RunOrderDirection.Ascending ? Order.Ascending : Order.Descending;
         var matchedCount = 0;
         var page = new List<JobRun>(take);
         if (skip > int.MaxValue - take)
@@ -3260,7 +3262,8 @@ internal sealed partial class RedisJobStore(
 
         var topLimit = skip + take;
         var topRuns = requiresResort ? new List<JobRun>(Math.Min(topLimit, 128)) : null;
-        IComparer<JobRun>? runOrderComparer = requiresResort ? new RunOrderComparer(filter.OrderBy) : null;
+        IComparer<JobRun>? runOrderComparer =
+            requiresResort ? new RunOrderComparer(filter.OrderBy, filter.Direction) : null;
         var offset = 0L;
 
         while (true)
@@ -3272,7 +3275,7 @@ internal sealed partial class RedisJobStore(
                 lexMin,
                 lexMax,
                 lexExclude,
-                Order.Descending,
+                sortOrder,
                 offset,
                 FilterScanChunkSize);
 
@@ -3377,7 +3380,8 @@ internal sealed partial class RedisJobStore(
 
         var topLimit = skip + take;
         var topRuns = requiresResort ? new List<JobRun>(Math.Min(topLimit, 128)) : null;
-        IComparer<JobRun>? runOrderComparer = requiresResort ? new RunOrderComparer(filter.OrderBy) : null;
+        IComparer<JobRun>? runOrderComparer =
+            requiresResort ? new RunOrderComparer(filter.OrderBy, filter.Direction) : null;
         var offset = 0L;
 
         while (true)
@@ -3917,13 +3921,31 @@ internal sealed partial class RedisJobStore(
         return true;
     }
 
-    private static List<JobRun> SortRuns(List<JobRun> runs, RunOrderBy orderBy)
+    private static List<JobRun> SortRuns(List<JobRun> runs, RunOrderBy orderBy, RunOrderDirection direction)
     {
-        return orderBy switch
+        var ascending = direction == RunOrderDirection.Ascending;
+        // Saturate null timestamps to MaxValue (ASC) / MinValue (DESC) so they always sort
+        // to the tail of the result. See RunOrderDirection docs for the contract.
+        return (orderBy, ascending) switch
         {
-            RunOrderBy.StartedAt => runs.OrderByDescending(r => r.StartedAt).ThenByDescending(r => r.Id).ToList(),
-            RunOrderBy.CompletedAt => runs.OrderByDescending(r => r.CompletedAt).ThenByDescending(r => r.Id).ToList(),
-            _ => runs.OrderByDescending(r => r.CreatedAt).ThenByDescending(r => r.Id).ToList()
+            (RunOrderBy.StartedAt, false) => runs
+                .OrderByDescending(r => r.StartedAt ?? DateTimeOffset.MinValue)
+                .ThenByDescending(r => r.Id, StringComparer.Ordinal).ToList(),
+            (RunOrderBy.StartedAt, true) => runs
+                .OrderBy(r => r.StartedAt ?? DateTimeOffset.MaxValue)
+                .ThenBy(r => r.Id, StringComparer.Ordinal).ToList(),
+            (RunOrderBy.CompletedAt, false) => runs
+                .OrderByDescending(r => r.CompletedAt ?? DateTimeOffset.MinValue)
+                .ThenByDescending(r => r.Id, StringComparer.Ordinal).ToList(),
+            (RunOrderBy.CompletedAt, true) => runs
+                .OrderBy(r => r.CompletedAt ?? DateTimeOffset.MaxValue)
+                .ThenBy(r => r.Id, StringComparer.Ordinal).ToList(),
+            (_, false) => runs
+                .OrderByDescending(r => r.CreatedAt)
+                .ThenByDescending(r => r.Id, StringComparer.Ordinal).ToList(),
+            (_, true) => runs
+                .OrderBy(r => r.CreatedAt)
+                .ThenBy(r => r.Id, StringComparer.Ordinal).ToList(),
         };
     }
 
@@ -4156,7 +4178,7 @@ internal sealed partial class RedisJobStore(
     }
 }
 
-file sealed class RunOrderComparer(RunOrderBy orderBy) : IComparer<JobRun>
+file sealed class RunOrderComparer(RunOrderBy orderBy, RunOrderDirection direction) : IComparer<JobRun>
 {
     public int Compare(JobRun? x, JobRun? y)
     {
@@ -4175,11 +4197,12 @@ file sealed class RunOrderComparer(RunOrderBy orderBy) : IComparer<JobRun>
             return -1;
         }
 
+        var ascending = direction == RunOrderDirection.Ascending;
         var valueComparison = orderBy switch
         {
-            RunOrderBy.StartedAt => CompareDescendingNullable(x.StartedAt, y.StartedAt),
-            RunOrderBy.CompletedAt => CompareDescendingNullable(x.CompletedAt, y.CompletedAt),
-            _ => y.CreatedAt.CompareTo(x.CreatedAt)
+            RunOrderBy.StartedAt => CompareNullable(x.StartedAt, y.StartedAt, ascending),
+            RunOrderBy.CompletedAt => CompareNullable(x.CompletedAt, y.CompletedAt, ascending),
+            _ => ascending ? x.CreatedAt.CompareTo(y.CreatedAt) : y.CreatedAt.CompareTo(x.CreatedAt)
         };
 
         if (valueComparison != 0)
@@ -4187,16 +4210,19 @@ file sealed class RunOrderComparer(RunOrderBy orderBy) : IComparer<JobRun>
             return valueComparison;
         }
 
-        return string.CompareOrdinal(y.Id, x.Id);
+        return ascending
+            ? string.CompareOrdinal(x.Id, y.Id)
+            : string.CompareOrdinal(y.Id, x.Id);
     }
 
-    private static int CompareDescendingNullable(DateTimeOffset? left, DateTimeOffset? right)
+    private static int CompareNullable(DateTimeOffset? left, DateTimeOffset? right, bool ascending)
     {
         if (left.HasValue && right.HasValue)
         {
-            return right.Value.CompareTo(left.Value);
+            return ascending ? left.Value.CompareTo(right.Value) : right.Value.CompareTo(left.Value);
         }
 
+        // Nulls sort last in both directions so unstarted/incomplete runs aren't surfaced first.
         if (left.HasValue)
         {
             return -1;

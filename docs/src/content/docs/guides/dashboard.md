@@ -12,6 +12,15 @@ app.MapSurefireDashboard("/admin");   // custom prefix
 
 The dashboard is embedded in the `Surefire.Dashboard` package, with no extra files or build steps.
 
+Pass a `configure` callback to override defaults:
+
+```csharp
+app.MapSurefireDashboard(configure: options =>
+{
+    options.MaxTreeRuns = 100_000; // cap the run tree response (default: 50_000)
+});
+```
+
 ## Authorization
 
 Anyone who can reach the dashboard can view job arguments and results, trigger jobs, cancel runs, rerun completed work, and pause queues.
@@ -29,9 +38,12 @@ app.MapSurefireDashboard()
 
 The home page gives you a quick overview:
 
-- **Stat cards**: total jobs, total runs, active runs, and success rate.
-- **Runs over time**: a stacked area chart showing runs by status. Toggle between 1h, 24h, 7d, and 30d.
-- **Recent runs**: the latest runs with status badges.
+- **Stat cards**: total jobs, total runs, active runs, success rate, and nodes.
+- **Status**: a stacked bar showing the share of runs by status.
+- **Activity**: a stacked area chart of runs by status over time.
+- **Latest runs**: the most recent runs with status badges.
+
+Use the period selector in the top bar to scope **Status** and **Activity** to 1h, 24h, 7d, or 30d.
 
 ![Dashboard home](../../../assets/dashboard.png)
 
@@ -60,12 +72,11 @@ Lists all runs with filters for job name, status, and date range.
 Click into a run to see:
 
 - **Live progress bar** for running jobs.
-- **Streaming logs** that update in real-time as the job runs.
-- **Arguments and result** as formatted JSON.
-- **Error details** for failed runs.
-- **Trace view**: a timeline of parent/child run relationships.
-- **Rerun chain**: navigation between a run and any reruns of it.
-- **Triggered runs**: any child runs this job created.
+- **Streaming input, output, and logs** that update in real-time as the job runs.
+- **Arguments** and **result** as formatted JSON.
+- **Error details** for failed runs, with per-attempt stack traces.
+- **Trace**: the full run tree (ancestors, current run, and descendants) with depth and live status.
+- **Rerun chain**: links to the original run and any reruns of it.
 
 From the run page, you can also cancel a running job or rerun a completed one.
 
@@ -107,11 +118,11 @@ GET   /api/jobs/{name}/stats                        # get job-level stats
 PATCH /api/jobs/{name}                              # update a job (enable/disable)
 POST  /api/jobs/{name}/trigger                      # trigger a new run
 GET   /api/runs?jobName=X&take=20                   # list runs with filters
+POST  /api/runs/lookup                              # refresh many runs by id (JSON body: {"ids":[...]})
 GET   /api/runs/{id}                                # get a single run
 GET   /api/runs/{id}/logs                           # get parsed log events
 GET   /api/runs/{id}/stream                         # live logs & progress (SSE)
-GET   /api/runs/{id}/trace?siblingWindow=50&childrenTake=100   # tree-aware focused trace (ancestors + focus + siblings + first-page children)
-GET   /api/runs/{id}/children?afterCursor=...&take=100         # paginate direct children (forward or reverse via beforeCursor)
+GET   /api/runs/{id}/tree                           # full run tree (flat list, depth populated)
 POST  /api/runs/{id}/cancel                         # cancel a running job
 POST  /api/runs/{id}/rerun                          # re-run a completed run
 GET   /api/queues                                   # list all queues

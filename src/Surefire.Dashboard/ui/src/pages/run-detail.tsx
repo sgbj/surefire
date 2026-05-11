@@ -1,4 +1,4 @@
-import {useInfiniteQuery, useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
+import {useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
 import {Link, useNavigate, useParams} from "react-router";
 import {api, type JobRun, JobStatus, LogLevelLabels, type RunLogEntry} from "@/lib/api";
 import {
@@ -16,18 +16,22 @@ import {Button} from "@/components/ui/button";
 import {Skeleton} from "@/components/ui/skeleton";
 import {StatusBadge} from "@/components/status-badge";
 import {Progress} from "@/components/ui/progress";
-import {formatDate, formatDuration, formatLogTime} from "@/lib/format";
+import {formatDate, formatLogTime} from "@/lib/format";
 import {useLiveDuration} from "@/hooks/use-live-duration";
 import {useStickToBottom} from "@/hooks/use-stick-to-bottom";
 import {Alert, AlertDescription} from "@/components/ui/alert";
 import {Ban, ChevronDown, CircleAlert, RotateCcw} from "lucide-react";
-import {DtDd} from "@/components/dt-dd";
-import {useCallback, useEffect, useMemo, useRef, useState,} from "react";
+import {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,} from "react";
 import {toast} from "sonner";
 import {type TraceItem, TraceView} from "@/components/trace-view";
 import {useVirtualizer} from "@tanstack/react-virtual";
-import {useInfiniteScroll} from "@/hooks/use-infinite-scroll";
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
+import {PageShell, PageBody} from "@/components/page-shell";
+import {TopBarActions, TopBarBadge} from "@/components/topbar-slot";
+import {DtDd} from "@/components/dt-dd";
+import {ResizableHandle, ResizablePanel, ResizablePanelGroup} from "@/components/ui/resizable";
+import {useMediaQuery} from "@/hooks/use-media-query";
+import {cn} from "@/lib/utils";
 
 function formatJsonDisplay(json: string): string {
   try {
@@ -41,12 +45,10 @@ const EMPTY_LOGS: RunLogEntry[] = [];
 const EMPTY_OUTPUT_ITEMS: unknown[] = [];
 const EMPTY_INPUT_ITEMS: { param: string; value: unknown }[] = [];
 const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
-const CHILD_RUN_PAGE_SIZE = 500;
-// Tree-aware: ancestors + sibling window + direct children. Children paginate on demand.
-const TRACE_SIBLING_WINDOW = 200;
-const TRACE_CHILDREN_TAKE = 200;
-const RUN_LOOKUP_CHUNK_SIZE = 500;
-const RUN_FRESHNESS_INTERVAL_MS = 2000;
+
+// One indexed query returns the whole hierarchy, so polling this is the trace's entire
+// freshness mechanism: no per-row polling, no visibility tracking.
+const TREE_REFETCH_INTERVAL_MS = 2000;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -119,81 +121,6 @@ function pruneRunMap<T>(source: Record<string, T>, allowedRunIds: Set<string>) {
   return Object.fromEntries(entries) as Record<string, T>;
 }
 
-function dedupeRuns(runs: JobRun[]): JobRun[] {
-  const seen = new Set<string>();
-  const result: JobRun[] = [];
-  for (const run of runs) {
-    if (seen.has(run.id)) {
-      continue;
-    }
-
-    seen.add(run.id);
-    result.push(run);
-  }
-
-  return result;
-}
-
-function isRunActive(run: JobRun): boolean {
-  return run.status === JobStatus.Pending || run.status === JobStatus.Running;
-}
-
-function chunkIds(ids: string[], size: number): string[][] {
-  const chunks: string[][] = [];
-  for (let i = 0; i < ids.length; i += size) {
-    chunks.push(ids.slice(i, i + size));
-  }
-  return chunks;
-}
-
-function normalizeRunIds(ids: readonly string[]): string[] {
-  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
-}
-
-function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function replaceRunIdsIfChanged(previous: string[], next: readonly string[]) {
-  const normalized = normalizeRunIds(next);
-  return sameStringArray(previous, normalized) ? previous : normalized;
-}
-
-const RUN_SNAPSHOT_KEYS = [
-  "id",
-  "jobName",
-  "status",
-  "arguments",
-  "result",
-  "reason",
-  "progress",
-  "createdAt",
-  "startedAt",
-  "completedAt",
-  "canceledAt",
-  "nodeName",
-  "attempt",
-  "traceId",
-  "spanId",
-  "parentRunId",
-  "rootRunId",
-  "rerunOfRunId",
-  "notBefore",
-  "notAfter",
-  "priority",
-  "queuePriority",
-  "deduplicationId",
-  "lastHeartbeatAt",
-  "batchTotal",
-  "batchCompleted",
-  "batchFailed",
-  "depth",
-] as const satisfies readonly (keyof JobRun)[];
-
-function sameRunSnapshot(a: JobRun, b: JobRun): boolean {
-  return RUN_SNAPSHOT_KEYS.every((key) => Object.is(a[key], b[key]));
-}
-
 export function RunDetailPage() {
   const {id} = useParams();
   const runKey = id ?? "";
@@ -209,107 +136,21 @@ export function RunDetailPage() {
     },
   });
   const isActive = run?.status === JobStatus.Pending || run?.status === JobStatus.Running;
-  const [childRunsSnapshotCreatedBefore, setChildRunsSnapshotCreatedBefore] =
-    useState(() => new Date(Date.now() + 1).toISOString());
 
-  useEffect(() => {
-    setChildRunsSnapshotCreatedBefore(new Date(Date.now() + 1).toISOString());
-  }, [id]);
-
-  const {
-    data: childRunsData,
-    hasNextPage: hasNextChildRunsPage,
-    fetchNextPage: fetchNextChildRunsPage,
-    isFetchingNextPage: isLoadingMoreChildren,
-  } = useInfiniteQuery({
-    queryKey: ["runs", "children", id, childRunsSnapshotCreatedBefore],
-    queryFn: ({pageParam}) =>
-      api.getRuns({
-        parentRunId: id!,
-        skip: pageParam * CHILD_RUN_PAGE_SIZE,
-        take: CHILD_RUN_PAGE_SIZE,
-        createdBefore: childRunsSnapshotCreatedBefore,
-      }),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage, pages) => {
-      const loaded = pages.reduce((sum, page) => sum + page.items.length, 0);
-      return loaded < lastPage.totalCount ? pages.length : undefined;
-    },
-    refetchInterval: (query) => {
-      const pages = query.state.data?.pages;
-      if (!pages) return 5000;
-
-      const items = dedupeRuns(pages.flatMap((page) => page.items));
-      const hasActiveChild = items.some(
-        (r) => r.status === JobStatus.Pending || r.status === JobStatus.Running,
-      );
-      return isActive || hasActiveChild ? 5000 : false;
-    },
-    enabled: !!id,
-  });
-
-  // Single round-trip: ancestor chain + focus + sibling window + first page of children.
-  const {data: traceData} = useQuery({
-    queryKey: ["run-trace", id],
-    queryFn: () =>
-      api.getRunTrace(id!, {
-        siblingWindow: TRACE_SIBLING_WINDOW,
-        childrenTake: TRACE_CHILDREN_TAKE,
-      }),
+  const {data: tree} = useQuery({
+    queryKey: ["run-tree", id],
+    queryFn: () => api.getRunTree(id!),
     enabled: !!id,
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (!data) return 5000;
-      const allRuns = [
-        ...data.ancestors,
-        data.focus,
-        ...data.siblingsBefore,
-        ...data.siblingsAfter,
-        ...data.children,
-      ];
-      return allRuns.some((r) => r.status === JobStatus.Pending || r.status === JobStatus.Running)
-        ? 5000
+      if (!data) return TREE_REFETCH_INTERVAL_MS;
+      return data.runs.some(
+        (r) => r.status === JobStatus.Pending || r.status === JobStatus.Running,
+      )
+        ? TREE_REFETCH_INTERVAL_MS
         : false;
     },
   });
-
-  // Collapsing preserves childrenByNode cache for instant re-open. Focus is always
-  // conceptually expanded; its children merge traceData.children with childrenByNode.
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
-  const [childrenByNode, setChildrenByNode] = useState<
-    Record<string, JobRun[]>
-  >({});
-  const [childrenCursorByNode, setChildrenCursorByNode] = useState<
-    Record<string, string | null>
-  >({});
-  const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set());
-
-  // Cursor tri-state: undefined = use traceData's initial cursor, string = more pages,
-  // null = exhausted. Collapsing null+string would lose the exhaustion signal.
-  const [extraSiblingsBefore, setExtraSiblingsBefore] = useState<JobRun[]>([]);
-  const [extraSiblingsBeforeCursor, setExtraSiblingsBeforeCursor] = useState<
-    string | null | undefined
-  >(undefined);
-  const [extraSiblingsAfter, setExtraSiblingsAfter] = useState<JobRun[]>([]);
-  const [extraSiblingsAfterCursor, setExtraSiblingsAfterCursor] = useState<
-    string | null | undefined
-  >(undefined);
-  const [isLoadingMoreSiblingsAfter, setIsLoadingMoreSiblingsAfter] =
-    useState(false);
-  const [isLoadingMoreSiblingsBefore, setIsLoadingMoreSiblingsBefore] =
-    useState(false);
-
-  // Reset all trace-local state when the focus run changes.
-  useEffect(() => {
-    setExpandedNodes(new Set());
-    setChildrenByNode({});
-    setChildrenCursorByNode({});
-    setLoadingNodes(new Set());
-    setExtraSiblingsBefore([]);
-    setExtraSiblingsBeforeCursor(undefined);
-    setExtraSiblingsAfter([]);
-    setExtraSiblingsAfterCursor(undefined);
-  }, [id]);
   const [logsByRun, setLogsByRun] = useState<Record<string, RunLogEntry[]>>({});
   const [logFilterByRun, setLogFilterByRun] = useState<
     Record<string, number | null>
@@ -326,167 +167,48 @@ export function RunDetailPage() {
   const [attemptFailuresByRun, setAttemptFailuresByRun] = useState<
     Record<string, AttemptFailureItem[]>
   >({});
-  const [latestRunsById, setLatestRunsById] = useState<Record<string, JobRun>>(
-    {},
-  );
-  const [visibleTraceRunIds, setVisibleTraceRunIds] = useState<string[]>([]);
-  const [visibleTriggeredRunIds, setVisibleTriggeredRunIds] = useState<
-    string[]
-  >([]);
   const [expandedFailureRow, setExpandedFailureRow] = useState<string | null>(
     null,
   );
 
-  const mergeLatestRuns = useCallback((runs: readonly JobRun[]) => {
-    if (runs.length === 0) return;
-    setLatestRunsById((prev) => {
-      const next = {...prev};
-      let changed = false;
-      for (const run of runs) {
-        const existing = prev[run.id];
-        const merged =
-          existing?.depth != null && run.depth == null
-            ? {...run, depth: existing.depth}
-            : run;
-        if (existing && sameRunSnapshot(existing, merged)) {
-          continue;
-        }
-
-        next[run.id] = merged;
-        changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, []);
-
-  const resolveRun = useCallback(
-    (run: JobRun): JobRun => {
-      const latest = latestRunsById[run.id];
-      if (!latest) return run;
-      return run.depth != null && latest.depth !== run.depth
-        ? {...latest, depth: run.depth}
-        : latest;
-    },
-    [latestRunsById],
-  );
-
-  useEffect(() => {
-    setLatestRunsById({});
-    setVisibleTraceRunIds([]);
-    setVisibleTriggeredRunIds([]);
-  }, [id]);
-
-  // DFS-flatten the tree. Focus children merge fresh-polled traceData.children with
-  // the fully-paginated childrenByNode[focusId]; other expanded nodes use only the latter.
+  // Server returns runs sorted by (createdAt, id) with depth populated, so building the
+  // tree is one bucketing pass plus an iterative DFS.
   const traceItems = useMemo(() => {
-    if (!traceData) return [] as TraceItem[];
+    if (!tree || tree.runs.length === 0) return [] as TraceItem[];
 
-    const focusId = traceData.focus.id;
-    const focusDepth = traceData.focus.depth ?? traceData.ancestors.length;
+    const childrenByParent = new Map<string, JobRun[]>();
+    const idSet = new Set(tree.runs.map((r) => r.id));
+    const roots: JobRun[] = [];
+    for (const run of tree.runs) {
+      // Treat a missing parent (orphan) as a root within this tree.
+      const parentId =
+        run.parentRunId && idSet.has(run.parentRunId) ? run.parentRunId : null;
+      if (parentId === null) {
+        roots.push(run);
+        continue;
+      }
+      let bucket = childrenByParent.get(parentId);
+      if (!bucket) {
+        bucket = [];
+        childrenByParent.set(parentId, bucket);
+      }
+      bucket.push(run);
+    }
 
-    function childrenOf(node: JobRun): JobRun[] {
-      if (node.id === focusId) {
-        const paginated = childrenByNode[focusId];
-        const fresh = traceData!.children;
-        if (paginated === undefined || paginated.length === 0) return fresh;
-        // Overlay fresh statuses onto paginated; append brand-new items from fresh.
-        const byId = new Map<string, JobRun>();
-        for (const r of paginated) byId.set(r.id, r);
-        for (const r of fresh) byId.set(r.id, r);
-        const merged: JobRun[] = [];
-        const seen = new Set<string>();
-        for (const r of paginated) {
-          const v = byId.get(r.id)!;
-          if (seen.has(v.id)) continue;
-          seen.add(v.id);
-          merged.push(v);
+    const result: TraceItem[] = [];
+    const stack: JobRun[] = [...roots].reverse();
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      result.push({kind: "run", ...node});
+      const children = childrenByParent.get(node.id);
+      if (children) {
+        for (let i = children.length - 1; i >= 0; i--) {
+          stack.push(children[i]);
         }
-        for (const r of fresh) {
-          if (seen.has(r.id)) continue;
-          seen.add(r.id);
-          merged.push(r);
-        }
-        return merged;
-      }
-      if (expandedNodes.has(node.id)) {
-        return childrenByNode[node.id] ?? [];
-      }
-      return [];
-    }
-
-    function flatten(node: JobRun, depth: number): TraceItem[] {
-      const result: TraceItem[] = [{kind: "run", ...node, depth}];
-      const childDepth = depth + 1;
-      const seen = new Set<string>();
-      for (const child of childrenOf(node)) {
-        if (seen.has(child.id)) continue;
-        seen.add(child.id);
-        result.push(...flatten(child, childDepth));
-      }
-      return result;
-    }
-
-    const siblingDepth = focusDepth;
-    // Route every node through flatten() so expansion works on siblings too. Ancestors
-    // aren't expandable but pass through for shape uniformity.
-    const ordered: TraceItem[] = [
-      ...traceData.ancestors.flatMap((a) => flatten(a, a.depth ?? 0)),
-      ...extraSiblingsBefore.flatMap((s) => flatten(s, siblingDepth)),
-      ...traceData.siblingsBefore.flatMap((s) =>
-        flatten(s, s.depth ?? siblingDepth),
-      ),
-      ...flatten(traceData.focus, focusDepth),
-      ...traceData.siblingsAfter.flatMap((s) =>
-        flatten(s, s.depth ?? siblingDepth),
-      ),
-      ...extraSiblingsAfter.flatMap((s) => flatten(s, siblingDepth)),
-    ];
-
-    // Dedup runs by id across the ordered list.
-    const seen = new Set<string>();
-    const deduped: TraceItem[] = [];
-    for (const item of ordered) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      deduped.push(item);
-    }
-    return deduped;
-  }, [
-    traceData,
-    childrenByNode,
-    expandedNodes,
-    extraSiblingsBefore,
-    extraSiblingsAfter,
-  ]);
-
-  // Hide the caret once a node is known to have no children.
-  const knownEmptyNodes = useMemo(() => {
-    const empty = new Set<string>();
-    for (const [id, items] of Object.entries(childrenByNode)) {
-      if (items.length === 0 && childrenCursorByNode[id] == null) {
-        empty.add(id);
       }
     }
-    return empty;
-  }, [childrenByNode, childrenCursorByNode]);
-
-  // Ancestors render as a linear chain; no caret.
-  const ancestorIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const a of traceData?.ancestors ?? []) ids.add(a.id);
-    return ids;
-  }, [traceData]);
-
-  // undefined: not yet paginated, use traceData's initial cursor. Any explicit value
-  // (string or null) is authoritative; null suppresses the load-more button.
-  const siblingsAfterCursor =
-    extraSiblingsAfterCursor !== undefined
-      ? extraSiblingsAfterCursor
-      : traceData?.siblingsCursor?.after ?? null;
-  const siblingsBeforeCursor =
-    extraSiblingsBeforeCursor !== undefined
-      ? extraSiblingsBeforeCursor
-      : traceData?.siblingsCursor?.before ?? null;
+    return result;
+  }, [tree]);
 
   const allowedRunIds = useMemo(() => {
     const ids = new Set<string>();
@@ -494,7 +216,7 @@ export function RunDetailPage() {
       ids.add(runKey);
     }
     for (const item of traceItems) {
-      if (item.kind === "run") ids.add(item.id);
+      ids.add(item.id);
     }
     return ids;
   }, [runKey, traceItems]);
@@ -565,49 +287,84 @@ export function RunDetailPage() {
   const measureRow = (el: Element) =>
     Math.ceil(el.getBoundingClientRect().height);
 
-  // Virtualized log viewer
-  const logScrollContainerRef = useRef<HTMLDivElement>(null);
+  // Logs / input / output share one scroll container, so each virtualizer needs
+  // scrollMargin = its host element's offset within the container, otherwise it
+  // renders the wrong range once the user scrolls past earlier sections.
+  const bodyScrollRef = useRef<HTMLDivElement>(null);
+  const inputContentRef = useRef<HTMLDivElement>(null);
+  const outputContentRef = useRef<HTMLDivElement>(null);
+  const logsContentRef = useRef<HTMLDivElement>(null);
+  const [scrollMargins, setScrollMargins] = useState({input: 0, output: 0, logs: 0});
+
   // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
   const logVirtualizer = useVirtualizer({
     count: filteredLogs.length,
-    getScrollElement: () => logScrollContainerRef.current,
+    getScrollElement: () => bodyScrollRef.current,
     estimateSize: () => LOG_ROW_HEIGHT,
     overscan: 20,
     measureElement: measureRow,
+    scrollMargin: scrollMargins.logs,
   });
 
-  // Virtualized input stream
-  const inputScrollContainerRef = useRef<HTMLDivElement>(null);
   const inputVirtualizer = useVirtualizer({
     count: inputItems.length,
-    getScrollElement: () => inputScrollContainerRef.current,
+    getScrollElement: () => bodyScrollRef.current,
     estimateSize: () => LIST_ROW_HEIGHT,
     overscan: 20,
     measureElement: measureRow,
+    scrollMargin: scrollMargins.input,
   });
 
-  // Virtualized output stream
-  const outputScrollContainerRef = useRef<HTMLDivElement>(null);
   const outputVirtualizer = useVirtualizer({
     count: outputItems.length,
-    getScrollElement: () => outputScrollContainerRef.current,
+    getScrollElement: () => bodyScrollRef.current,
     estimateSize: () => LIST_ROW_HEIGHT,
     overscan: 20,
     measureElement: measureRow,
+    scrollMargin: scrollMargins.output,
+  });
+
+  // Re-read offsets every render, not via ResizeObserver: RO fires after paint, so when
+  // an earlier section grows mid-stream the next section paints one frame with a stale
+  // scrollMargin and the virtualizer drops items at its start.
+  const updateScrollMargins = useCallback(() => {
+    const panel = bodyScrollRef.current;
+    if (!panel) return;
+    const panelRect = panel.getBoundingClientRect();
+    const panelScrollTop = panel.scrollTop;
+    const compute = (el: HTMLElement | null) => {
+      if (!el) return 0;
+      return el.getBoundingClientRect().top - panelRect.top + panelScrollTop;
+    };
+    setScrollMargins((prev) => {
+      const next = {
+        input: compute(inputContentRef.current),
+        output: compute(outputContentRef.current),
+        logs: compute(logsContentRef.current),
+      };
+      if (prev.input === next.input && prev.output === next.output && prev.logs === next.logs) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    updateScrollMargins();
   });
 
   useStickToBottom({
-    scrollElement: logScrollContainerRef.current,
+    scrollElement: bodyScrollRef.current,
     virtualizer: logVirtualizer,
     count: filteredLogs.length,
   });
   useStickToBottom({
-    scrollElement: inputScrollContainerRef.current,
+    scrollElement: bodyScrollRef.current,
     virtualizer: inputVirtualizer,
     count: inputItems.length,
   });
   useStickToBottom({
-    scrollElement: outputScrollContainerRef.current,
+    scrollElement: bodyScrollRef.current,
     virtualizer: outputVirtualizer,
     count: outputItems.length,
   });
@@ -616,7 +373,7 @@ export function RunDetailPage() {
     mutationFn: () => api.cancelRun(id!),
     onSuccess: () => {
       queryClient.invalidateQueries({queryKey: ["run", id]});
-      queryClient.invalidateQueries({queryKey: ["run-trace", id]});
+      queryClient.invalidateQueries({queryKey: ["run-tree", id]});
       toast.success("Run Canceled");
     },
     onError: () => toast.error("Failed to cancel run"),
@@ -786,15 +543,14 @@ export function RunDetailPage() {
     });
     es.addEventListener("status", () => {
       queryClient.invalidateQueries({queryKey: ["run", id]});
-      queryClient.invalidateQueries({queryKey: ["run-trace", id]});
+      queryClient.invalidateQueries({queryKey: ["run-tree", id]});
     });
     es.addEventListener("done", () => {
       doneReceived = true;
       es.close();
       queryClient.invalidateQueries({queryKey: ["run", id]});
-      queryClient.invalidateQueries({queryKey: ["run-trace", id]});
+      queryClient.invalidateQueries({queryKey: ["run-tree", id]});
       queryClient.invalidateQueries({queryKey: ["runs", "job"]});
-      queryClient.invalidateQueries({queryKey: ["runs", "children", id]});
     });
     es.onerror = () => {
       if (doneReceived) {
@@ -824,825 +580,238 @@ export function RunDetailPage() {
     };
   }, [id, queryClient, runKey, scheduleFlush, shouldProcessEvent]);
 
-  const inputHeader = useMemo(() => {
-    if (inputItems.length === 0) return "";
-    const counts = new Map<string, number>();
-    for (const item of inputItems) {
-      counts.set(item.param, (counts.get(item.param) ?? 0) + 1);
-    }
-    if (counts.size <= 1) return `Input stream (${inputItems.length} items)`;
-    return `Input stream (${[...counts.entries()].map(([k, v]) => `${k}: ${v}`).join(", ")})`;
-  }, [inputItems]);
+  const inputHeader = inputItems.length === 0 ? "" : `Input (${inputItems.length})`;
 
-  const sortedStepRuns = useMemo(() => {
-    const items = dedupeRuns(
-      (childRunsData?.pages ?? []).flatMap((page) => page.items),
-    );
-    if (!items?.length) return [];
-    return [...items].sort((a, b) => {
-      const createdDelta =
-        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      if (createdDelta !== 0) return createdDelta;
-      return a.id.localeCompare(b.id);
-    });
-  }, [childRunsData]);
-
-  useEffect(() => {
-    if (run) {
-      mergeLatestRuns([run]);
-    }
-  }, [run, mergeLatestRuns]);
-
-  useEffect(() => {
-    if (!traceData) return;
-    mergeLatestRuns([
-      ...traceData.ancestors,
-      traceData.focus,
-      ...traceData.siblingsBefore,
-      ...traceData.siblingsAfter,
-      ...traceData.children,
-    ]);
-  }, [traceData, mergeLatestRuns]);
-
-  useEffect(() => {
-    const runs = (childRunsData?.pages ?? []).flatMap((page) => page.items);
-    mergeLatestRuns(runs);
-  }, [childRunsData, mergeLatestRuns]);
-
-  const displayedTraceItems = useMemo(
-    () =>
-      traceItems.map((item) => {
-        const latest = resolveRun(item);
-        return {kind: "run" as const, ...latest};
-      }),
-    [traceItems, resolveRun],
-  );
-
-  const displayedStepRuns = useMemo(
-    () => sortedStepRuns.map(resolveRun),
-    [sortedStepRuns, resolveRun],
-  );
-
-  const onVisibleTraceRunIdsChange = useCallback((runIds: string[]) => {
-    setVisibleTraceRunIds((prev) => replaceRunIdsIfChanged(prev, runIds));
-  }, []);
-
-  const onVisibleTriggeredRunIdsChange = useCallback((runIds: string[]) => {
-    setVisibleTriggeredRunIds((prev) => replaceRunIdsIfChanged(prev, runIds));
-  }, []);
-
-  const activeVisibleRunIds = useMemo(() => {
-    const loadedRuns = new Map<string, JobRun>();
-    const addRun = (item: JobRun | undefined) => {
-      if (item) loadedRuns.set(item.id, item);
-    };
-    const visibleIds = new Set([
-      ...visibleTraceRunIds,
-      ...visibleTriggeredRunIds,
-    ]);
-
-    addRun(run);
-    if (traceData) {
-      for (const item of traceData.ancestors) addRun(item);
-      addRun(traceData.focus);
-      for (const item of traceData.siblingsBefore) addRun(item);
-      for (const item of traceData.siblingsAfter) addRun(item);
-      for (const item of traceData.children) addRun(item);
-    }
-    for (const item of traceItems) addRun(item);
-    for (const item of extraSiblingsBefore) addRun(item);
-    for (const item of extraSiblingsAfter) addRun(item);
-    for (const items of Object.values(childrenByNode)) {
-      for (const item of items) addRun(item);
-    }
-    for (const item of sortedStepRuns) addRun(item);
-
-    return [...visibleIds]
-      .map((runId) => loadedRuns.get(runId))
-      .filter((item): item is JobRun => Boolean(item))
-      .map(resolveRun)
-      .filter(isRunActive)
-      .map((item) => item.id)
-      .sort((a, b) => a.localeCompare(b));
-  }, [
-    run,
-    traceData,
-    traceItems,
-    extraSiblingsBefore,
-    extraSiblingsAfter,
-    childrenByNode,
-    sortedStepRuns,
-    visibleTraceRunIds,
-    visibleTriggeredRunIds,
-    resolveRun,
-  ]);
-
-  const {data: refreshedActiveRuns} = useQuery({
-    queryKey: ["runs", "lookup", activeVisibleRunIds],
-    queryFn: async () => {
-      const chunks = chunkIds(activeVisibleRunIds, RUN_LOOKUP_CHUNK_SIZE);
-      const pages = await Promise.all(
-        chunks.map((chunk) => api.getRunsByIds(chunk)),
-      );
-      return pages.flat();
-    },
-    enabled: activeVisibleRunIds.length > 0,
-    refetchInterval:
-      activeVisibleRunIds.length > 0 ? RUN_FRESHNESS_INTERVAL_MS : false,
-  });
-
-  useEffect(() => {
-    if (refreshedActiveRuns) {
-      mergeLatestRuns(refreshedActiveRuns);
-    }
-  }, [refreshedActiveRuns, mergeLatestRuns]);
-
-  // Trace view scroll container
   const traceScrollRef = useRef<HTMLDivElement>(null);
-
-  // Virtualized triggered runs table
-  const TRIGRUN_ROW_HEIGHT = 40;
-  const triggeredRunsScrollRef = useRef<HTMLDivElement>(null);
-  const triggeredRunsVirtualizer = useVirtualizer({
-    count: displayedStepRuns.length,
-    getScrollElement: () => triggeredRunsScrollRef.current,
-    estimateSize: () => TRIGRUN_ROW_HEIGHT,
-    overscan: 20,
-    onChange: (instance) => {
-      onVisibleTriggeredRunIdsChange(
-        instance
-          .getVirtualItems()
-          .map((item) => displayedStepRuns[item.index]?.id)
-          .filter((runId): runId is string => Boolean(runId)),
-      );
-    },
-  });
-  useEffect(() => {
-    onVisibleTriggeredRunIdsChange(
-      triggeredRunsVirtualizer
-        .getVirtualItems()
-        .map((item) => displayedStepRuns[item.index]?.id)
-        .filter((runId): runId is string => Boolean(runId)),
-    );
-  }, [
-    displayedStepRuns,
-    onVisibleTriggeredRunIdsChange,
-    triggeredRunsVirtualizer,
-  ]);
-  useStickToBottom({
-    scrollElement: triggeredRunsScrollRef.current,
-    virtualizer: triggeredRunsVirtualizer,
-    count: displayedStepRuns.length,
-  });
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
   const progress = sseProgress ?? run?.progress ?? 0;
-  const childTotalCount = childRunsData?.pages[0]?.totalCount ?? 0;
-  const canLoadMoreChildren = !!hasNextChildRunsPage;
 
-  const loadMoreSiblingsAfter = useCallback(async () => {
-    if (
-      !traceData ||
-      siblingsAfterCursor == null ||
-      isLoadingMoreSiblingsAfter
-    )
-      return;
-    if (!traceData.focus.parentRunId) return;
-    setIsLoadingMoreSiblingsAfter(true);
+  const isWideViewport = useMediaQuery("(min-width: 1280px)");
+  const persistedSplit = useMemo<Record<string, number> | undefined>(() => {
+    if (typeof window === "undefined") return undefined;
     try {
-      const page = await api.getRunChildren(traceData.focus.parentRunId, {
-        afterCursor: siblingsAfterCursor,
-        take: TRACE_SIBLING_WINDOW,
-      });
-      setExtraSiblingsAfter((prev) => [...prev, ...page.items]);
-      setExtraSiblingsAfterCursor(page.nextCursor ?? null);
-    } finally {
-      setIsLoadingMoreSiblingsAfter(false);
+      const raw = localStorage.getItem("surefire:run-detail:split:v3");
+      return raw ? (JSON.parse(raw) as Record<string, number>) : undefined;
+    } catch {
+      return undefined;
     }
-  }, [traceData, siblingsAfterCursor, isLoadingMoreSiblingsAfter]);
-
-  // TraceView preserves scroll on prepend by shifting scrollTop when extraSiblingsBeforeCount grows.
-  const loadMoreSiblingsBefore = useCallback(async () => {
-    if (
-      !traceData ||
-      siblingsBeforeCursor == null ||
-      isLoadingMoreSiblingsBefore
-    )
-      return;
-    if (!traceData.focus.parentRunId) return;
-    setIsLoadingMoreSiblingsBefore(true);
+  }, []);
+  const persistSplit = useCallback((layout: Record<string, number>) => {
     try {
-      const page = await api.getRunChildren(traceData.focus.parentRunId, {
-        beforeCursor: siblingsBeforeCursor,
-        take: TRACE_SIBLING_WINDOW,
-      });
-      // Before-cursor pagination returns DESC; reverse for chronological display.
-      const reversed = [...page.items].reverse();
-      setExtraSiblingsBefore((prev) => [...reversed, ...prev]);
-      setExtraSiblingsBeforeCursor(page.nextCursor ?? null);
-    } finally {
-      setIsLoadingMoreSiblingsBefore(false);
+      localStorage.setItem("surefire:run-detail:split:v3", JSON.stringify(layout));
+    } catch {
+      // storage quota or disabled
     }
-  }, [traceData, siblingsBeforeCursor, isLoadingMoreSiblingsBefore]);
+  }, []);
 
-  const canLoadMoreSiblingsAfter = siblingsAfterCursor != null;
-  const canLoadMoreSiblingsBefore = siblingsBeforeCursor != null;
-
-  // Dedup against re-entrant expand bursts and concurrent auto-paginations from polling.
-  const inFlightPaginationRef = useRef<Set<string>>(new Set());
-  // Auto-paginate focus once per mount; the 5s trace poll would otherwise refire it.
-  const focusPaginatedRef = useRef<string | null>(null);
-
-  // Paginate every cursor page for a node into childrenByNode. Idempotent.
-  const paginateAllChildren = useCallback(
-    async (nodeId: string, firstCursor?: string) => {
-      if (inFlightPaginationRef.current.has(nodeId)) return;
-      inFlightPaginationRef.current.add(nodeId);
-      setLoadingNodes((prev) => {
-        const next = new Set(prev);
-        next.add(nodeId);
-        return next;
-      });
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const raw = localStorage.getItem("surefire:run-detail:collapsed:v1");
+      return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
+  });
+  const toggleSection = useCallback((key: string) => {
+    setCollapsedSections((prev) => {
+      const next = {...prev, [key]: !prev[key]};
       try {
-        let cursor: string | undefined = firstCursor;
-        if (cursor === undefined) {
-          const page = await api.getRunChildren(nodeId, {
-            take: TRACE_CHILDREN_TAKE,
-          });
-          setChildrenByNode((prev) => ({...prev, [nodeId]: page.items}));
-          setChildrenCursorByNode((prev) => ({
-            ...prev,
-            [nodeId]: page.nextCursor ?? null,
-          }));
-          cursor = page.nextCursor ?? undefined;
-        }
-        while (cursor) {
-          const page = await api.getRunChildren(nodeId, {
-            afterCursor: cursor,
-            take: TRACE_CHILDREN_TAKE,
-          });
-          const newItems = page.items;
-          setChildrenByNode((prev) => ({
-            ...prev,
-            [nodeId]: [...(prev[nodeId] ?? []), ...newItems],
-          }));
-          setChildrenCursorByNode((prev) => ({
-            ...prev,
-            [nodeId]: page.nextCursor ?? null,
-          }));
-          cursor = page.nextCursor ?? undefined;
-        }
-      } finally {
-        inFlightPaginationRef.current.delete(nodeId);
-        setLoadingNodes((prev) => {
-          const next = new Set(prev);
-          next.delete(nodeId);
-          return next;
-        });
+        localStorage.setItem("surefire:run-detail:collapsed:v1", JSON.stringify(next));
+      } catch {
+        // storage quota or disabled
       }
-    },
-    [],
-  );
-
-  const expandNode = useCallback(
-    (nodeId: string) => {
-      setExpandedNodes((prev) => {
-        if (prev.has(nodeId)) return prev;
-        const next = new Set(prev);
-        next.add(nodeId);
-        return next;
-      });
-      if (childrenByNode[nodeId] !== undefined) return;
-      void paginateAllChildren(nodeId);
-    },
-    [childrenByNode, paginateAllChildren],
-  );
-
-  const collapseNode = useCallback((nodeId: string) => {
-    setExpandedNodes((prev) => {
-      if (!prev.has(nodeId)) return prev;
-      const next = new Set(prev);
-      next.delete(nodeId);
       return next;
     });
   }, []);
 
-  const toggleNode = useCallback(
-    (nodeId: string) => {
-      if (expandedNodes.has(nodeId)) {
-        collapseNode(nodeId);
-      } else {
-        expandNode(nodeId);
-      }
-    },
-    [expandedNodes, expandNode, collapseNode],
-  );
-
-  // Auto-paginate focus's children in the background so the tree shows every child without
-  // user action. focusPaginatedRef prevents the 5s poll from refiring this.
-  useEffect(() => {
-    if (!traceData) return;
-    const focusId = traceData.focus.id;
-    const initialCursor = traceData.childrenCursor;
-    if (!initialCursor) return;
-    if (focusPaginatedRef.current === focusId) return;
-    focusPaginatedRef.current = focusId;
-
-    // Seed with traceData's first page so cursor pages append cleanly; childrenOf()
-    // overlays fresh polled statuses on every render.
-    setChildrenByNode((prev) =>
-      prev[focusId] !== undefined ? prev : {...prev, [focusId]: traceData.children},
-    );
-    setChildrenCursorByNode((prev) => ({...prev, [focusId]: initialCursor}));
-    void paginateAllChildren(focusId, initialCursor);
-  }, [traceData, paginateAllChildren]);
-
-  // Clear pagination guards on focus change so a stale in-flight paginate doesn't
-  // block a fresh expand of the same nodeId.
-  useEffect(() => {
-    focusPaginatedRef.current = null;
-    inFlightPaginationRef.current.clear();
-  }, [id]);
-
-  const {sentinelRef: triggeredRunsSentinelRef} = useInfiniteScroll({
-    scrollContainerRef: triggeredRunsScrollRef,
-    hasMore: canLoadMoreChildren,
-    isLoading: isLoadingMoreChildren,
-    onLoadMore: () => void fetchNextChildRunsPage(),
-  });
-
   if (isError)
     return (
-      <div className="space-y-6">
-        <h2 className="text-xl font-semibold tracking-tight truncate">
-          Run {id}
-        </h2>
-        <Alert variant="destructive">
-          <CircleAlert/>
-          <AlertDescription>Failed to load run</AlertDescription>
-        </Alert>
-      </div>
+      <PageShell>
+        <PageBody>
+          <Alert variant="destructive">
+            <CircleAlert/>
+            <AlertDescription>Failed to load run</AlertDescription>
+          </Alert>
+        </PageBody>
+      </PageShell>
     );
   if (!run)
     return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <Skeleton className="h-7 w-56"/>
-            <Skeleton className="h-5 w-18 rounded-full"/>
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <Skeleton className="h-8 w-20"/>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+      <PageShell>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
           {Array.from({length: 6}).map((_, i) => (
             <div key={i}>
-              <Skeleton className="h-3 w-16 mb-1.5"/>
-              <Skeleton className="h-4 w-24"/>
+              <Skeleton className="h-3 w-16 mb-1.5 rounded-sm"/>
+              <Skeleton className="h-4 w-24 rounded-sm"/>
             </div>
           ))}
         </div>
-        <Skeleton className="h-48 w-full rounded-lg"/>
-      </div>
+        <PageBody>
+          <Skeleton className="h-72 w-full rounded-sm"/>
+        </PageBody>
+      </PageShell>
     );
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          <h2 className="text-xl font-semibold tracking-tight truncate">
-            Run {run.id}
-          </h2>
-          <StatusBadge status={run.status}/>
-        </div>
-        <div className="flex gap-2 shrink-0">
-          {isActive && (
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="outline" size="sm" className="cursor-pointer">
-                  <Ban className="size-3.5"/>
-                  Cancel
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Cancel this run?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will request cancellation of the running job.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Back</AlertDialogCancel>
-                  <AlertDialogAction
-                    variant="destructive"
-                    onClick={() => cancel.mutate()}
-                    disabled={cancel.isPending}
-                  >
-                    Cancel run
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          )}
-          {!isActive && (
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="outline" size="sm" className="cursor-pointer">
-                  <RotateCcw className="size-3.5"/>
-                  Re-run
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Re-run this job?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will create a new run for {run.jobName} with the same
-                    arguments.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Back</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => retry.mutate()}
-                    disabled={retry.isPending}
-                  >
-                    Re-run
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          )}
-        </div>
-      </div>
-
-      {run.status === JobStatus.Running && (
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1">
-            <Progress
-              value={progress > 0 ? progress * 100 : null}
-              className="h-1"
-            />
-            <Progress
-              value={progress > 0 ? progress * 100 : null}
-              className="absolute inset-0 h-1 blur-sm opacity-25"
-            />
-          </div>
-          {progress > 0 && (
-            <span className="text-xs text-muted-foreground tabular-nums shrink-0">
-              {Math.round(progress * 100)}%
-            </span>
-          )}
-        </div>
+  // Desktop: trace owns its own scroll container (left pane of the resizable split).
+  // Mobile (!isWideViewport branch below) inlines it into the body scroll instead.
+  const traceHeader = tree?.truncated
+    ? `Trace (${traceItems.length} of ${tree.totalCount})`
+    : `Trace (${traceItems.length})`;
+  const traceContentDesktop = (
+    <div
+      ref={traceScrollRef}
+      className="h-full overflow-auto"
+      style={{scrollPaddingTop: "3rem"}}
+    >
+      {traceItems.length > 0 ? (
+        <TraceView
+          items={traceItems}
+          currentRunId={id!}
+          scrollContainerRef={traceScrollRef}
+          header={
+            <span className="text-base font-semibold tracking-tight text-foreground">{traceHeader}</span>
+          }
+        />
+      ) : (
+        <div className="eyebrow py-8 text-center">no related runs</div>
       )}
+    </div>
+  );
 
-      <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-        <DtDd label="Job">
-          <Link
-            to={`/jobs/${encodeURIComponent(run.jobName)}`}
-            className="text-primary hover:underline truncate max-w-50 inline-block"
-            title={run.jobName}
-          >
-            {run.jobName}
-          </Link>
-        </DtDd>
-        {run.startedAt && (
-          <DtDd label="Duration">
-            <span className="tabular-nums">{duration}</span>
-          </DtDd>
-        )}
-        {run.attempt > 1 && <DtDd label="Attempt">{run.attempt}</DtDd>}
-        {run.nodeName && (
-          <DtDd label="Node">
-            <Link
-              to={`/nodes/${encodeURIComponent(run.nodeName)}`}
-              className="text-primary hover:underline truncate max-w-40 inline-block"
-              title={run.nodeName}
-            >
-              {run.nodeName}
-            </Link>
-          </DtDd>
-        )}
-        <DtDd label="Created">{formatDate(run.createdAt)}</DtDd>
-        {run.notBefore && run.notBefore !== run.createdAt && (
-          <DtDd label="Not before">{formatDate(run.notBefore)}</DtDd>
-        )}
-        {run.notAfter && (
-          <DtDd label="Not after">{formatDate(run.notAfter)}</DtDd>
-        )}
-        <DtDd label="Priority">{run.priority}</DtDd>
-        {run.deduplicationId && (
-          <DtDd label="Deduplication ID">
-            <span
-              className="truncate max-w-50 inline-block"
-              title={run.deduplicationId}
-            >
-              {run.deduplicationId}
-            </span>
-          </DtDd>
-        )}
-        {run.startedAt && (
-          <DtDd label="Started">{formatDate(run.startedAt)}</DtDd>
-        )}
-        {run.completedAt && (
-          <DtDd label="Completed">{formatDate(run.completedAt)}</DtDd>
-        )}
-        {run.canceledAt && (
-          <DtDd label="Canceled">{formatDate(run.canceledAt)}</DtDd>
-        )}
-        {run.rerunOfRunId && (
-          <DtDd label="Rerun of">
-            <Link
-              to={`/runs/${run.rerunOfRunId}`}
-              className="text-primary hover:underline truncate max-w-35 inline-block"
-              title={run.rerunOfRunId}
-            >
-              {run.rerunOfRunId}
-            </Link>
-          </DtDd>
-        )}
-        {run.parentRunId && (
-          <DtDd label="Triggered by">
-            <Link
-              to={`/runs/${run.parentRunId}`}
-              className="text-primary hover:underline truncate max-w-35 inline-block"
-              title={run.parentRunId}
-            >
-              {run.parentRunId}
-            </Link>
-          </DtDd>
-        )}
-      </dl>
-
+  const bodyContent = (
+    <div>
       {(run.reason || failureRows.length > 0) && (
-        <div className="rounded-lg border border-destructive/25 overflow-hidden">
-          <div
-            className="max-h-128 overflow-auto"
-            style={{
-              ["--errors-cols" as string]:
-                "minmax(0,5rem) minmax(0,16rem) minmax(0,1fr) auto",
-            }}
-          >
-            <div className="min-w-3xl">
-              <div
-                className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b border-destructive/25 bg-destructive/10 backdrop-blur-sm">
-                <span className="text-sm text-status-failed">
-                  Errors{failureRows.length > 0 && ` (${failureRows.length})`}
-                </span>
-              </div>
-              {run.reason && (
-                <div
-                  className={`px-3 py-2.5 text-sm whitespace-pre-wrap break-words${
-                    failureRows.length > 0 ? " border-b" : ""
-                  }`}>
-                  {run.reason}
-                </div>
-              )}
-              {failureRows.map(({failure, key}, index) => {
-                const isExpanded = expandedFailureRow === key;
-                const hasStackTrace = Boolean(failure.stackTrace);
-                const headline = [failure.exceptionType, failure.message]
-                  .filter(Boolean)
-                  .join(": ");
-                return (
-                  <div key={key} className={index < failureRows.length - 1 ? "border-b" : ""}>
-                    <button
-                      type="button"
-                      onClick={
-                        hasStackTrace
-                          ? () =>
-                            setExpandedFailureRow((prev) =>
-                              prev === key ? null : key,
-                            )
-                          : undefined
-                      }
-                      disabled={!hasStackTrace}
-                      className={`w-full grid items-start text-left text-sm transition-colors ${
-                        hasStackTrace ? "hover:bg-muted/40 cursor-pointer" : "cursor-default"
-                      }`}
-                      style={{gridTemplateColumns: "var(--errors-cols)"}}
-                    >
-                      <div className="px-2 pl-4 py-2.5 text-muted-foreground tabular-nums truncate">
-                        #{failure.attempt}
-                      </div>
-                      <div className="px-2 py-2.5 text-muted-foreground tabular-nums truncate">
-                        {failure.occurredAt ? formatDate(failure.occurredAt) : ""}
-                      </div>
-                      <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap break-words">
-                        {headline}
-                      </div>
-                      <div className="px-2 pr-3 py-2.5">
-                        {hasStackTrace && (
-                          <ChevronDown
-                            className={`size-4 text-muted-foreground transition-transform ${
-                              isExpanded ? "rotate-180" : ""
-                            }`}
-                          />
-                        )}
-                      </div>
-                    </button>
-                    {isExpanded && failure.stackTrace && (
-                      <pre
-                        className="text-xs px-3 py-3 whitespace-pre-wrap wrap-break-word font-mono text-muted-foreground border-t border-border/50">
-                        {failure.stackTrace}
-                      </pre>
+        <section className="border-t border-border first:border-t-0">
+          <SectionHeading
+            sectionKey="errors"
+            title={`Errors${failureRows.length > 0 ? ` (${failureRows.length})` : ""}`}
+            tone="danger"
+            collapsed={collapsedSections.errors}
+            onToggle={toggleSection}
+          />
+          {!collapsedSections.errors && (
+            <div
+              style={{
+                ["--errors-cols" as string]:
+                  "minmax(0,5rem) minmax(0,16rem) minmax(0,1fr) auto",
+              }}
+            >
+              <div className="min-w-3xl">
+                {run.reason && (
+                  <div
+                    className={cn(
+                      "px-6 py-3 text-sm whitespace-pre-wrap break-words",
+                      failureRows.length > 0 && "border-b border-border",
                     )}
+                  >
+                    {run.reason}
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {displayedTraceItems.length > 1 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div
-            ref={traceScrollRef}
-            className="max-h-128 overflow-auto"
-            // scroll-padding-top so scrollIntoView lands focus below the sticky header.
-            style={{scrollPaddingTop: "2.75rem"}}
-          >
-            <TraceView
-              items={displayedTraceItems}
-              currentRunId={id!}
-              ancestorIds={ancestorIds}
-              expandedNodes={expandedNodes}
-              knownEmptyNodes={knownEmptyNodes}
-              loadingNodes={loadingNodes}
-              onToggle={toggleNode}
-              scrollContainerRef={traceScrollRef}
-              header={<span>Trace</span>}
-              onVisibleRunIdsChange={onVisibleTraceRunIdsChange}
-              loadEarlierSiblings={
-                canLoadMoreSiblingsBefore
-                  ? {
-                    onClick: () => void loadMoreSiblingsBefore(),
-                    isLoading: isLoadingMoreSiblingsBefore,
-                  }
-                  : undefined
-              }
-              loadMoreLaterSiblings={
-                canLoadMoreSiblingsAfter
-                  ? {
-                    onClick: () => void loadMoreSiblingsAfter(),
-                    isLoading: isLoadingMoreSiblingsAfter,
-                  }
-                  : undefined
-              }
-              extraSiblingsBeforeCount={extraSiblingsBefore.length}
-            />
-          </div>
-        </div>
-      )}
-
-      {displayedStepRuns.length > 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div
-            ref={triggeredRunsScrollRef}
-            className="max-h-128 overflow-auto"
-            style={{
-              // Explicit fractions: auto would measure rows independently and misalign
-              // the header against virtualized rows.
-              ["--trigrun-cols" as string]:
-                "minmax(0,2fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1.25fr)",
-            }}
-          >
-            <div className="min-w-3xl">
-              <div className="sticky top-0 z-10 bg-muted/50 backdrop-blur-sm border-b">
-                <div className="flex items-center py-2.5 px-2">
-              <span className="text-sm text-muted-foreground">
-                 Triggered runs ({displayedStepRuns.length} /{" "}
-                 {childTotalCount || displayedStepRuns.length})
-              </span>
-                </div>
-                <div
-                  className="grid items-center border-t border-border/50 text-xs font-medium uppercase tracking-wider text-muted-foreground"
-                  style={{gridTemplateColumns: "var(--trigrun-cols)"}}
-                >
-                  <div className="px-2 py-2.5 pl-4">ID</div>
-                  <div className="px-2 py-2.5">Job</div>
-                  <div className="px-2 py-2.5">Status</div>
-                  <div className="px-2 py-2.5">Started</div>
-                  <div className="px-2 py-2.5">Duration</div>
-                  <div className="px-2 py-2.5">Node</div>
-                </div>
-              </div>
-              <div
-                className="relative"
-                style={{
-                  height: `${triggeredRunsVirtualizer.getTotalSize()}px`,
-                }}
-              >
-                {triggeredRunsVirtualizer.getVirtualItems().map((virtualItem) => {
-                  const r = displayedStepRuns[virtualItem.index];
+                )}
+                {failureRows.map(({failure, key}, index) => {
+                  const isExpanded = expandedFailureRow === key;
+                  const hasStackTrace = Boolean(failure.stackTrace);
+                  const headline = [failure.exceptionType, failure.message]
+                    .filter(Boolean)
+                    .join(": ");
                   return (
-                    <div
-                      key={r.id}
-                      data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full grid items-center border-b border-border/50 text-sm hover:bg-muted/50 transition-colors"
-                      style={{
-                        gridTemplateColumns: "var(--trigrun-cols)",
-                        height: `${TRIGRUN_ROW_HEIGHT}px`,
-                        transform: `translateY(${virtualItem.start}px)`,
-                      }}
-                    >
-                      <div className="px-2 pl-4 flex items-center min-w-0">
-                        <Link
-                          to={`/runs/${r.id}`}
-                          className="text-primary hover:underline truncate block"
-                          title={r.id}
-                        >
-                          {r.id}
-                        </Link>
-                      </div>
-                      <div className="px-2 flex items-center min-w-0">
-                        <Link
-                          to={`/jobs/${encodeURIComponent(r.jobName)}`}
-                          className="text-primary hover:underline truncate block"
-                          title={r.jobName}
-                        >
-                          {r.jobName}
-                        </Link>
-                      </div>
-                      <div className="px-2 flex items-center min-w-0">
-                        <StatusBadge status={r.status}/>
-                      </div>
-                      <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
-                        {r.startedAt ? formatDate(r.startedAt) : ""}
-                      </div>
-                      <div className="px-2 flex items-center min-w-0 tabular-nums truncate">
-                        {formatDuration(r.startedAt, r.completedAt)}
-                      </div>
-                      <div className="px-2 flex items-center min-w-0">
-                        {r.nodeName ? (
-                          <Link
-                            to={`/nodes/${encodeURIComponent(r.nodeName)}`}
-                            className="text-primary hover:underline truncate block"
-                            title={r.nodeName}
-                          >
-                            {r.nodeName}
-                          </Link>
-                        ) : (
-                          ""
+                    <div key={key} className={index < failureRows.length - 1 ? "border-b border-border" : ""}>
+                      <button
+                        type="button"
+                        onClick={
+                          hasStackTrace
+                            ? () =>
+                              setExpandedFailureRow((prev) =>
+                                prev === key ? null : key,
+                              )
+                            : undefined
+                        }
+                        disabled={!hasStackTrace}
+                        className={cn(
+                          "w-full grid items-start text-left text-sm transition-colors",
+                          hasStackTrace ? "hover:bg-muted/40 cursor-pointer" : "cursor-default",
                         )}
-                      </div>
+                        style={{gridTemplateColumns: "var(--errors-cols)"}}
+                      >
+                        <div className="px-2 pl-6 py-2.5 text-muted-foreground tnum truncate">
+                          #{failure.attempt}
+                        </div>
+                        <div className="px-2 py-2.5 text-muted-foreground tnum truncate">
+                          {failure.occurredAt ? formatDate(failure.occurredAt) : ""}
+                        </div>
+                        <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap break-words">
+                          {headline}
+                        </div>
+                        <div className="px-2 pr-6 py-2.5">
+                          {hasStackTrace && (
+                            <ChevronDown
+                              className={cn(
+                                "size-4 text-muted-foreground transition-transform",
+                                isExpanded && "rotate-180",
+                              )}
+                            />
+                          )}
+                        </div>
+                      </button>
+                      {isExpanded && failure.stackTrace && (
+                        <pre className="text-xs px-6 py-3 whitespace-pre-wrap break-all font-mono text-muted-foreground border-t border-border">
+                          {failure.stackTrace}
+                        </pre>
+                      )}
                     </div>
                   );
                 })}
               </div>
-              {canLoadMoreChildren && (
-                <div
-                  ref={triggeredRunsSentinelRef}
-                  className="h-10 flex items-center justify-center text-xs text-muted-foreground"
-                >
-                  {isLoadingMoreChildren ? "Loading…" : ""}
-                </div>
-              )}
             </div>
-          </div>
-        </div>
+          )}
+        </section>
       )}
 
       {run.arguments && (
-        <div className="rounded-lg border overflow-hidden">
-          <div className="max-h-128 overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Arguments</span>
-            </div>
-            <pre className="text-xs p-2 whitespace-pre-wrap break-all font-mono">
+        <section className="border-t border-border first:border-t-0">
+          <SectionHeading
+            sectionKey="arguments"
+            title="Arguments"
+            collapsed={collapsedSections.arguments}
+            onToggle={toggleSection}
+          />
+          {!collapsedSections.arguments && (
+            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap break-words font-mono">
               {formatJsonDisplay(run.arguments)}
             </pre>
-          </div>
-        </div>
+          )}
+        </section>
       )}
 
       {run.result && outputItems.length === 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div className="max-h-128 overflow-y-auto">
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground">Result</span>
-            </div>
-            <pre className="text-xs p-2 whitespace-pre-wrap break-all font-mono">
+        <section className="border-t border-border first:border-t-0">
+          <SectionHeading
+            sectionKey="result"
+            title="Result"
+            collapsed={collapsedSections.result}
+            onToggle={toggleSection}
+          />
+          {!collapsedSections.result && (
+            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap break-words font-mono">
               {formatJsonDisplay(run.result)}
             </pre>
-          </div>
-        </div>
+          )}
+        </section>
       )}
 
       {inputItems.length > 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div
-            ref={inputScrollContainerRef}
-            className="max-h-128 overflow-y-auto font-mono text-xs"
-          >
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground font-sans">
-                {inputHeader}
-              </span>
-            </div>
-            <div className="py-2">
+        <section className="border-t border-border first:border-t-0">
+          <SectionHeading
+            sectionKey="input"
+            title={inputHeader}
+            collapsed={collapsedSections.input}
+            onToggle={toggleSection}
+          />
+          {!collapsedSections.input && (
+            <div className="py-2 font-mono text-xs">
               <div
+                ref={inputContentRef}
                 className="relative"
                 style={{height: `${inputVirtualizer.getTotalSize()}px`}}
               >
@@ -1653,9 +822,9 @@ export function RunDetailPage() {
                       key={virtualItem.index}
                       ref={inputVirtualizer.measureElement}
                       data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
+                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap break-words"
                       style={{
-                        transform: `translateY(${virtualItem.start}px)`,
+                        transform: `translateY(${virtualItem.start - scrollMargins.input}px)`,
                       }}
                     >
                       <span className="text-muted-foreground">{item.param}:</span>{" "}
@@ -1665,23 +834,22 @@ export function RunDetailPage() {
                 })}
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </section>
       )}
 
       {outputItems.length > 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div
-            ref={outputScrollContainerRef}
-            className="max-h-128 overflow-y-auto font-mono text-xs"
-          >
-            <div className="sticky top-0 z-10 flex items-center py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground font-sans">
-                Output stream ({outputItems.length} items)
-              </span>
-            </div>
-            <div className="py-2">
+        <section className="border-t border-border first:border-t-0">
+          <SectionHeading
+            sectionKey="output"
+            title={`Output (${outputItems.length})`}
+            collapsed={collapsedSections.output}
+            onToggle={toggleSection}
+          />
+          {!collapsedSections.output && (
+            <div className="py-2 font-mono text-xs">
               <div
+                ref={outputContentRef}
                 className="relative"
                 style={{height: `${outputVirtualizer.getTotalSize()}px`}}
               >
@@ -1692,9 +860,9 @@ export function RunDetailPage() {
                       key={virtualItem.index}
                       ref={outputVirtualizer.measureElement}
                       data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap break-all"
+                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap break-words"
                       style={{
-                        transform: `translateY(${virtualItem.start}px)`,
+                        transform: `translateY(${virtualItem.start - scrollMargins.output}px)`,
                       }}
                     >
                       {JSON.stringify(item)}
@@ -1703,48 +871,46 @@ export function RunDetailPage() {
                 })}
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </section>
       )}
 
       {logs.length > 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div
-            ref={logScrollContainerRef}
-            className="max-h-128 overflow-y-auto font-mono text-xs"
-          >
-            <div
-              className="sticky top-0 z-10 flex items-center gap-3 py-2.5 px-2 border-b bg-muted/50 backdrop-blur-sm">
-              <span className="text-sm text-muted-foreground font-sans">
-                Logs (
-                {logFilter !== null
-                  ? `${filteredLogs.length} / ${logs.length}`
-                  : logs.length}
-                )
-              </span>
-              <Select
-                value={logFilter === null ? "all" : String(logFilter)}
-                onValueChange={(v) =>
-                  setCurrentLogFilter(v === "all" ? null : Number(v))
-                }
-              >
-                <SelectTrigger
-                  className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground font-sans gap-0.5 [&_svg]:size-3">
-                  <SelectValue/>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  <SelectItem value="0">Trace</SelectItem>
-                  <SelectItem value="1">Debug</SelectItem>
-                  <SelectItem value="2">Info</SelectItem>
-                  <SelectItem value="3">Warning</SelectItem>
-                  <SelectItem value="4">Error</SelectItem>
-                  <SelectItem value="5">Critical</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="py-2">
+        <section className="border-t border-border first:border-t-0">
+          <SectionHeading
+            sectionKey="logs"
+            title={`Logs (${logFilter !== null ? `${filteredLogs.length} / ${logs.length}` : logs.length})`}
+            collapsed={collapsedSections.logs}
+            onToggle={toggleSection}
+            extras={
+              !collapsedSections.logs && (
+                <Select
+                  value={logFilter === null ? "all" : String(logFilter)}
+                  onValueChange={(v) =>
+                    setCurrentLogFilter(v === "all" ? null : Number(v))
+                  }
+                >
+                  <SelectTrigger
+                    className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground gap-0.5 [&_svg]:size-3">
+                    <SelectValue/>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="0">Trace</SelectItem>
+                    <SelectItem value="1">Debug</SelectItem>
+                    <SelectItem value="2">Info</SelectItem>
+                    <SelectItem value="3">Warning</SelectItem>
+                    <SelectItem value="4">Error</SelectItem>
+                    <SelectItem value="5">Critical</SelectItem>
+                  </SelectContent>
+                </Select>
+              )
+            }
+          />
+          {!collapsedSections.logs && (
+            <div className="py-2 font-mono text-xs">
               <div
+                ref={logsContentRef}
                 className="relative"
                 style={{height: `${logVirtualizer.getTotalSize()}px`}}
               >
@@ -1755,12 +921,12 @@ export function RunDetailPage() {
                       key={virtualItem.index}
                       ref={logVirtualizer.measureElement}
                       data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-2 py-0.5 whitespace-pre-wrap wrap-break-word"
+                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap break-words"
                       style={{
-                        transform: `translateY(${virtualItem.start}px)`,
+                        transform: `translateY(${virtualItem.start - scrollMargins.logs}px)`,
                       }}
                     >
-                      <span className="text-muted-foreground tabular-nums">
+                      <span className="text-muted-foreground tnum">
                         {formatLogTime(log.timestamp)}
                       </span>{" "}
                       <span className={logLevelColor(log.level)}>
@@ -1768,8 +934,7 @@ export function RunDetailPage() {
                       </span>{" "}
                       <span>{log.message}</span>
                       {log.exception && (
-                        <pre
-                          className="mt-1 whitespace-pre-wrap wrap-break-word text-muted-foreground">
+                        <pre className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">
                           {log.exception}
                         </pre>
                       )}
@@ -1778,8 +943,196 @@ export function RunDetailPage() {
                 })}
               </div>
             </div>
-          </div>
+          )}
+        </section>
+      )}
+    </div>
+  );
+
+  return (
+    <PageShell>
+      <TopBarBadge>
+        <StatusBadge status={run.status}/>
+      </TopBarBadge>
+      <TopBarActions>
+        {isActive && (
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="outline" size="sm">
+                <Ban className="size-3.5"/>
+                Cancel
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Cancel this run?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will request cancellation of the running job.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Back</AlertDialogCancel>
+                <AlertDialogAction
+                  variant="destructive"
+                  onClick={() => cancel.mutate()}
+                  disabled={cancel.isPending}
+                >
+                  Cancel run
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        )}
+        {!isActive && (
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="outline" size="sm">
+                <RotateCcw className="size-3.5"/>
+                Re-run
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Re-run this job?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will create a new run for {run.jobName} with the same
+                  arguments.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Back</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => retry.mutate()}
+                  disabled={retry.isPending}
+                >
+                  Re-run
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        )}
+      </TopBarActions>
+
+      {run.status === JobStatus.Running && (
+        <Progress
+          value={progress > 0 ? progress * 100 : null}
+          className="h-[2px] rounded-none"
+        />
+      )}
+
+      {isWideViewport ? (
+        <>
+          <RunMetaStrip run={run} duration={duration}/>
+          <ResizablePanelGroup
+            orientation="horizontal"
+            defaultLayout={persistedSplit}
+            onLayoutChanged={persistSplit}
+            className="flex-1"
+          >
+            <ResizablePanel id="trace" defaultSize="36%" minSize="20%" maxSize="70%">
+              {traceContentDesktop}
+            </ResizablePanel>
+            <ResizableHandle/>
+            <ResizablePanel id="content" defaultSize="64%" minSize="30%">
+              <div ref={bodyScrollRef} className="h-full overflow-auto">
+                {bodyContent}
+              </div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </>
+      ) : (
+        <div ref={bodyScrollRef} className="flex-1 overflow-auto min-h-0">
+          <RunMetaStrip run={run} duration={duration}/>
+          <section className="border-t border-border first:border-t-0">
+            {!collapsedSections.trace && traceItems.length > 0 ? (
+              <TraceView
+                items={traceItems}
+                currentRunId={id!}
+                scrollContainerRef={bodyScrollRef}
+                header={
+                  <button
+                    type="button"
+                    onClick={() => toggleSection("trace")}
+                    className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground cursor-pointer"
+                  >
+                    <ChevronDown className="size-3.5 text-muted-foreground"/>
+                    {traceHeader}
+                  </button>
+                }
+              />
+            ) : (
+              <>
+                <SectionHeading
+                  sectionKey="trace"
+                  title={traceHeader}
+                  collapsed={collapsedSections.trace}
+                  onToggle={toggleSection}
+                />
+                {!collapsedSections.trace && (
+                  <div className="eyebrow py-8 text-center">no related runs</div>
+                )}
+              </>
+            )}
+          </section>
+          {bodyContent}
         </div>
+      )}
+    </PageShell>
+  );
+}
+
+function SectionHeading({
+                          sectionKey,
+                          title,
+                          tone = "default",
+                          collapsed,
+                          onToggle,
+                          extras,
+                        }: {
+  sectionKey: string;
+  title: React.ReactNode;
+  tone?: "default" | "danger";
+  collapsed: boolean | undefined;
+  onToggle: (key: string) => void;
+  extras?: React.ReactNode;
+}) {
+  const handleToggle = () => onToggle(sectionKey);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={handleToggle}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleToggle();
+        }
+      }}
+      aria-expanded={!collapsed}
+      className="sticky top-0 z-10 flex items-center gap-2 px-6 py-2 border-b border-border bg-card/95 backdrop-blur-sm cursor-pointer hover:bg-card transition-colors"
+    >
+      <ChevronDown
+        className={cn(
+          "size-3.5 text-muted-foreground transition-transform",
+          collapsed && "-rotate-90",
+        )}
+      />
+      <span
+        className={cn(
+          "text-base font-semibold tracking-tight",
+          tone === "danger" ? "text-status-failed" : "text-foreground",
+        )}
+      >
+        {title}
+      </span>
+      {extras && (
+        <span
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          className="contents"
+        >
+          {extras}
+        </span>
       )}
     </div>
   );
@@ -1788,14 +1141,136 @@ export function RunDetailPage() {
 function logLevelColor(level: number): string {
   switch (level) {
     case 2:
-      return "text-sky-600 dark:text-sky-400";
+      return "text-status-running";
     case 3:
-      return "text-amber-600 dark:text-amber-400";
+      return "text-status-pending";
     case 4:
-      return "text-rose-600 dark:text-rose-400";
+      return "text-status-failed";
     case 5:
-      return "text-rose-700 dark:text-rose-300";
+      return "text-status-failed";
     default:
       return "text-muted-foreground";
   }
+}
+
+interface MetaItem {
+  label: string;
+  value: React.ReactNode;
+  mono?: boolean;
+}
+
+interface RunMetaStripProps {
+  run: JobRun;
+  duration: string;
+}
+
+function RunMetaStrip({run, duration}: RunMetaStripProps) {
+  const items: MetaItem[] = [];
+
+  items.push({
+    label: "Job",
+    value: (
+      <Link
+        to={`/jobs/${encodeURIComponent(run.jobName)}`}
+        className="text-foreground hover:text-accent-brand transition-colors truncate inline-block max-w-50 align-bottom"
+        title={run.jobName}
+      >
+        {run.jobName}
+      </Link>
+    ),
+  });
+
+  if (run.startedAt) {
+    items.push({label: "Duration", value: duration, mono: true});
+  }
+
+  items.push({label: "Created", value: formatDate(run.createdAt), mono: true});
+
+  if (run.startedAt) {
+    items.push({label: "Started", value: formatDate(run.startedAt), mono: true});
+  }
+  if (run.completedAt) {
+    items.push({label: "Completed", value: formatDate(run.completedAt), mono: true});
+  }
+  if (run.canceledAt) {
+    items.push({label: "Canceled", value: formatDate(run.canceledAt), mono: true});
+  }
+
+  if (run.nodeName) {
+    items.push({
+      label: "Node",
+      value: (
+        <Link
+          to={`/nodes/${encodeURIComponent(run.nodeName)}`}
+          className="font-mono text-foreground/85 hover:text-accent-brand transition-colors truncate inline-block max-w-40 align-bottom"
+          title={run.nodeName}
+        >
+          {run.nodeName}
+        </Link>
+      ),
+    });
+  }
+
+  if (run.attempt > 1) {
+    items.push({label: "Attempt", value: run.attempt, mono: true});
+  }
+  items.push({label: "Priority", value: run.priority, mono: true});
+
+  if (run.parentRunId) {
+    items.push({
+      label: "Parent",
+      value: (
+        <Link
+          to={`/runs/${run.parentRunId}`}
+          className="font-mono text-foreground/85 hover:text-accent-brand transition-colors truncate inline-block max-w-32 align-bottom"
+          title={run.parentRunId}
+        >
+          {run.parentRunId}
+        </Link>
+      ),
+    });
+  }
+  if (run.rerunOfRunId) {
+    items.push({
+      label: "Rerun of",
+      value: (
+        <Link
+          to={`/runs/${run.rerunOfRunId}`}
+          className="font-mono text-foreground/85 hover:text-accent-brand transition-colors truncate inline-block max-w-32 align-bottom"
+          title={run.rerunOfRunId}
+        >
+          {run.rerunOfRunId}
+        </Link>
+      ),
+    });
+  }
+  if (run.deduplicationId) {
+    items.push({
+      label: "Dedup",
+      value: (
+        <span
+          className="font-mono text-foreground/85 truncate inline-block max-w-40 align-bottom"
+          title={run.deduplicationId}
+        >
+          {run.deduplicationId}
+        </span>
+      ),
+    });
+  }
+  if (run.notBefore && run.notBefore !== run.createdAt) {
+    items.push({label: "Not before", value: formatDate(run.notBefore), mono: true});
+  }
+  if (run.notAfter) {
+    items.push({label: "Not after", value: formatDate(run.notAfter), mono: true});
+  }
+
+  return (
+    <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+      {items.map((item, i) => (
+        <DtDd key={i} label={item.label} align={item.mono ? "mono" : "default"}>
+          {item.value}
+        </DtDd>
+      ))}
+    </dl>
+  );
 }

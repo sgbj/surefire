@@ -1450,11 +1450,16 @@ internal sealed class SqlServerJobStore(
             return new() { Items = [], TotalCount = totalCount };
         }
 
+        var dir = filter.Direction == RunOrderDirection.Ascending ? "ASC" : "DESC";
+        // Nulls always last: T-SQL has no NULLS LAST keyword, so prepend an "IS NULL" CASE to
+        // bucket non-null rows first regardless of direction. Cheap and uses the index.
         var orderBy = filter.OrderBy switch
         {
-            RunOrderBy.StartedAt => "started_at DESC, id DESC",
-            RunOrderBy.CompletedAt => "completed_at DESC, id DESC",
-            _ => "created_at DESC, id DESC"
+            RunOrderBy.StartedAt =>
+                $"CASE WHEN started_at IS NULL THEN 1 ELSE 0 END, started_at {dir}, id {dir}",
+            RunOrderBy.CompletedAt =>
+                $"CASE WHEN completed_at IS NULL THEN 1 ELSE 0 END, completed_at {dir}, id {dir}",
+            _ => $"created_at {dir}, id {dir}"
         };
 
         await using var cmd = CreateCommand(conn);

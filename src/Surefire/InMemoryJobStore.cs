@@ -285,17 +285,30 @@ internal sealed class InMemoryJobStore : IJobStore
             var all = query.ToList();
             totalCount = all.Count;
 
-            IEnumerable<JobRun> ordered = filter.OrderBy switch
+            var ascending = filter.Direction == RunOrderDirection.Ascending;
+            // Contract: nulls always sort last. Saturate null timestamps to MaxValue for ASC
+            // and MinValue for DESC so they end up at the "tail" of either direction. Tie-break
+            // by Id with ordinal comparison to match the SQL stores' binary collation.
+            IEnumerable<JobRun> ordered = (filter.OrderBy, ascending) switch
             {
-                RunOrderBy.StartedAt => all
-                    .OrderByDescending(r => r.StartedAt)
-                    .ThenByDescending(r => r.Id),
-                RunOrderBy.CompletedAt => all
-                    .OrderByDescending(r => r.CompletedAt)
-                    .ThenByDescending(r => r.Id),
-                _ => all
+                (RunOrderBy.StartedAt, false) => all
+                    .OrderByDescending(r => r.StartedAt ?? DateTimeOffset.MinValue)
+                    .ThenByDescending(r => r.Id, StringComparer.Ordinal),
+                (RunOrderBy.StartedAt, true) => all
+                    .OrderBy(r => r.StartedAt ?? DateTimeOffset.MaxValue)
+                    .ThenBy(r => r.Id, StringComparer.Ordinal),
+                (RunOrderBy.CompletedAt, false) => all
+                    .OrderByDescending(r => r.CompletedAt ?? DateTimeOffset.MinValue)
+                    .ThenByDescending(r => r.Id, StringComparer.Ordinal),
+                (RunOrderBy.CompletedAt, true) => all
+                    .OrderBy(r => r.CompletedAt ?? DateTimeOffset.MaxValue)
+                    .ThenBy(r => r.Id, StringComparer.Ordinal),
+                (_, false) => all
                     .OrderByDescending(r => r.CreatedAt)
-                    .ThenByDescending(r => r.Id)
+                    .ThenByDescending(r => r.Id, StringComparer.Ordinal),
+                (_, true) => all
+                    .OrderBy(r => r.CreatedAt)
+                    .ThenBy(r => r.Id, StringComparer.Ordinal),
             };
 
             items = ordered.Skip(skip).Take(take).ToList();

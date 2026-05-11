@@ -5,6 +5,7 @@ import {type JobRun} from "@/lib/api";
 import {formatDate} from "@/lib/format";
 import {LiveDuration} from "@/components/live-duration";
 import {StatusBadge} from "@/components/status-badge";
+import {SortableHeader} from "@/components/sortable-header";
 
 export interface RunColumnOptions {
   showJob?: boolean;
@@ -28,13 +29,12 @@ export function buildRunColumns(
       accessorKey: "id",
       header: "ID",
       cell: ({row}) => (
-        <Link
-          to={`/runs/${row.original.id}`}
-          className="text-sm text-primary hover:underline truncate max-w-35 inline-block"
+        <span
+          className="font-mono text-xs text-foreground/85 truncate max-w-35 inline-block"
           title={row.original.id}
         >
           {row.original.id}
-        </Link>
+        </span>
       ),
     },
   ];
@@ -46,7 +46,7 @@ export function buildRunColumns(
       cell: ({row}) => (
         <Link
           to={`/jobs/${encodeURIComponent(row.original.jobName)}`}
-          className="text-sm text-primary hover:underline truncate max-w-50 inline-block"
+          className="relative text-sm font-medium text-foreground hover:text-accent-brand transition-colors truncate max-w-50 inline-block"
           title={row.original.jobName}
         >
           {row.original.jobName}
@@ -63,9 +63,11 @@ export function buildRunColumns(
     },
     {
       accessorKey: "createdAt",
-      header: "Created",
+      header: ({column}) => <SortableHeader column={column}>Created</SortableHeader>,
       cell: ({row}) => (
-        <span className="text-sm">{formatDate(row.original.createdAt)}</span>
+        <span className="font-mono text-xs tnum text-muted-foreground">
+          {formatDate(row.original.createdAt)}
+        </span>
       ),
     },
     {
@@ -88,12 +90,14 @@ export function buildRunColumns(
         row.original.nodeName ? (
           <Link
             to={`/nodes/${encodeURIComponent(row.original.nodeName)}`}
-            className="text-sm text-primary hover:underline truncate max-w-40 inline-block"
+            className="relative font-mono text-xs text-muted-foreground hover:text-foreground transition-colors truncate max-w-40 inline-block"
             title={row.original.nodeName}
           >
             {row.original.nodeName}
           </Link>
-        ) : null,
+        ) : (
+          null
+        ),
     });
   }
 
@@ -102,7 +106,9 @@ export function buildRunColumns(
       accessorKey: "startedAt",
       header: "Started",
       cell: ({row}) => (
-        <span className="text-sm">{formatDate(row.original.startedAt)}</span>
+        <span className="font-mono text-xs tnum text-muted-foreground">
+          {formatDate(row.original.startedAt)}
+        </span>
       ),
     });
   }
@@ -111,6 +117,11 @@ export function buildRunColumns(
     columns.push({
       accessorKey: "attempt",
       header: "Attempt",
+      cell: ({row}) => (
+        <span className="font-mono text-xs tnum text-foreground/85">
+          {row.original.attempt}
+        </span>
+      ),
     });
   }
 

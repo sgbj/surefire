@@ -1,30 +1,22 @@
 import {useMemo, useState} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {api} from "@/lib/api";
-import {Button} from "@/components/ui/button";
 import {DataTable} from "@/components/data-table";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import {Switch} from "@/components/ui/switch";
 import {Input} from "@/components/ui/input";
 import {Alert, AlertDescription} from "@/components/ui/alert";
-import {CircleAlert, ListFilter, Search} from "lucide-react";
+import {CircleAlert, Search} from "lucide-react";
 import {buildJobColumns} from "@/components/job-columns";
+import {PageShell} from "@/components/page-shell";
 
 const columns = buildJobColumns();
 
 export function JobsPage() {
   const [showInactive, setShowInactive] = useState(false);
-  const hasFilters = showInactive;
   const {data: jobs, isError} = useQuery({
     queryKey: ["jobs", showInactive],
     queryFn: () =>
-      api.getJobs({
-        includeInactive: showInactive || undefined,
-      }),
+      api.getJobs({includeInactive: showInactive || undefined}),
   });
   const [filter, setFilter] = useState("");
 
@@ -41,52 +33,44 @@ export function JobsPage() {
   }, [jobs, filter]);
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold tracking-tight">Jobs</h2>
+    <PageShell>
       {isError && (
-        <Alert variant="destructive">
-          <CircleAlert/>
-          <AlertDescription>Failed to load jobs</AlertDescription>
-        </Alert>
+        <div className="px-6 pt-5">
+          <Alert variant="destructive">
+            <CircleAlert/>
+            <AlertDescription>Failed to load jobs</AlertDescription>
+          </Alert>
+        </div>
       )}
+
       <DataTable
         columns={columns}
         data={filtered}
+        getRowHref={(r) => `/jobs/${encodeURIComponent(r.name)}`}
+        getRowLinkLabel={(r) => `Open job ${r.name}`}
         toolbar={
           <>
             <div className="relative max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
               <Input
                 aria-label="Search jobs"
-                placeholder="Search..."
+                placeholder="Filter by name, tag, description…"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 className="pl-8"
               />
             </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className={hasFilters ? "border-primary/50" : ""}
-                >
-                  <ListFilter className="size-4"/>
-                  Filter
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuCheckboxItem
-                  checked={showInactive}
-                  onCheckedChange={setShowInactive}
-                >
-                  Inactive jobs
-                </DropdownMenuCheckboxItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <label className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none">
+              <Switch
+                size="sm"
+                checked={showInactive}
+                onCheckedChange={setShowInactive}
+              />
+              Show inactive
+            </label>
           </>
         }
       />
-    </div>
+    </PageShell>
   );
 }

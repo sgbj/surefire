@@ -596,11 +596,15 @@ internal sealed class PostgreSqlJobStore(
             return new() { Items = [], TotalCount = totalCount };
         }
 
+        var dir = filter.Direction == RunOrderDirection.Ascending ? "ASC" : "DESC";
+        // Nulls always last for nullable timestamp columns per the cross-store contract on
+        // RunOrderDirection. Postgres needs the explicit clause for DESC (its default there
+        // is NULLS FIRST); kept explicit for ASC too for readability.
         var orderBy = filter.OrderBy switch
         {
-            RunOrderBy.StartedAt => "started_at DESC NULLS LAST, id DESC",
-            RunOrderBy.CompletedAt => "completed_at DESC NULLS LAST, id DESC",
-            _ => "created_at DESC, id DESC"
+            RunOrderBy.StartedAt => $"started_at {dir} NULLS LAST, id {dir}",
+            RunOrderBy.CompletedAt => $"completed_at {dir} NULLS LAST, id {dir}",
+            _ => $"created_at {dir}, id {dir}"
         };
 
         await using var cmd = CreateCommand(conn);

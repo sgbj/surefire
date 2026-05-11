@@ -198,28 +198,20 @@ export interface JobRun {
   depth?: number;
 }
 
-/** Focused trace response returned by GET /api/runs/{id}/trace. */
-export interface RunTraceResponse {
-  /** Ancestors from root to immediate parent; each has `depth` starting at 0. */
-  ancestors: JobRun[];
-  /** Focus run; depth == ancestors.length. */
-  focus: JobRun;
-  /** Siblings ordered before the focus (same depth). */
-  siblingsBefore: JobRun[];
-  /** Siblings ordered after the focus (same depth). */
-  siblingsAfter: JobRun[];
-  /** Cursors for paginating siblings beyond the initial window in either direction. */
-  siblingsCursor?: { after?: string; before?: string };
-  /** First page of direct children of the focus (depth == focus.depth + 1). */
-  children: JobRun[];
-  /** Cursor for loading more children. */
-  childrenCursor?: string;
-}
-
-/** Direct children pagination response. GET /api/runs/{id}/children. */
-export interface RunChildrenResponse {
-  items: JobRun[];
-  nextCursor?: string;
+/**
+ * Whole-tree response returned by GET /api/runs/{id}/tree. Contains every run in the
+ * focus's hierarchy in a single payload, each with `depth` populated so the client can
+ * DFS-flatten without further round-trips.
+ */
+export interface RunTreeResponse {
+  /** Id of the topmost ancestor. Equals the focus id when the focus is a root. */
+  rootId: string;
+  /** Every run in the tree, sorted by `(createdAt, id)` ascending, with `depth` populated. */
+  runs: JobRun[];
+  /** True when the server cap was exceeded and `runs` is a partial result. */
+  truncated: boolean;
+  /** Total run count in the tree, including any not returned when `truncated` is true. */
+  totalCount: number;
 }
 
 export interface NodeResponse {
@@ -377,12 +369,6 @@ export const api = {
     return fetchApi<PagedResult<JobRun>>(`/runs${qs ? `?${qs}` : ""}`);
   },
   getRun: (id: string) => fetchApi<JobRun>(`/runs/${encodeURIComponent(id)}`),
-  getRunsByIds: (ids: string[]) =>
-    fetchApi<JobRun[]>("/runs/lookup", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ids}),
-    }),
   cancelRun: (id: string) =>
     fetchApi<void>(`/runs/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
@@ -409,33 +395,8 @@ export const api = {
     }
     return all;
   },
-  getRunTrace: (
-    id: string,
-    params?: { siblingWindow?: number; childrenTake?: number },
-  ) => {
-    const search = new URLSearchParams();
-    if (params?.siblingWindow != null)
-      search.set("siblingWindow", params.siblingWindow.toString());
-    if (params?.childrenTake != null)
-      search.set("childrenTake", params.childrenTake.toString());
-    const qs = search.toString();
-    return fetchApi<RunTraceResponse>(
-      `/runs/${encodeURIComponent(id)}/trace${qs ? `?${qs}` : ""}`,
-    );
-  },
-  getRunChildren: (
-    id: string,
-    params?: { afterCursor?: string; beforeCursor?: string; take?: number },
-  ) => {
-    const search = new URLSearchParams();
-    if (params?.afterCursor) search.set("afterCursor", params.afterCursor);
-    if (params?.beforeCursor) search.set("beforeCursor", params.beforeCursor);
-    if (params?.take != null) search.set("take", params.take.toString());
-    const qs = search.toString();
-    return fetchApi<RunChildrenResponse>(
-      `/runs/${encodeURIComponent(id)}/children${qs ? `?${qs}` : ""}`,
-    );
-  },
+  getRunTree: (id: string) =>
+    fetchApi<RunTreeResponse>(`/runs/${encodeURIComponent(id)}/tree`),
   updateJob: (name: string, patch: { isEnabled?: boolean }) =>
     fetchApi<JobResponse>(`/jobs/${encodeURIComponent(name)}`, {
       method: "PATCH",

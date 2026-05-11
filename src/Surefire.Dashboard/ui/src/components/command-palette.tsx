@@ -69,31 +69,38 @@ export function CommandPalette({
       onOpenChange={setOpen}
       title="Command palette"
       description="Navigate or search"
-      className="bg-background/85 backdrop-blur-xl border-border/50 shadow-2xl"
+      className="bg-popover/90 backdrop-blur-xl border-border/70 shadow-2xl"
     >
-      <CommandInput placeholder="Search..."/>
-      <CommandList className="max-h-85">
-        <CommandEmpty>No results found.</CommandEmpty>
+      <CommandInput placeholder="Type to navigate or search…"/>
+      <CommandList className="max-h-[420px]">
+        <CommandEmpty>
+          <span className="text-xs text-muted-foreground">no matches</span>
+        </CommandEmpty>
         <CommandGroup heading="Navigation">
           <CommandItem onSelect={() => go("/")}>
             <House className="size-4 opacity-60"/>
             Dashboard
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G D</span>
           </CommandItem>
           <CommandItem onSelect={() => go("/jobs")}>
             <Workflow className="size-4 opacity-60"/>
             Jobs
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G J</span>
           </CommandItem>
           <CommandItem onSelect={() => go("/runs")}>
             <Play className="size-4 opacity-60"/>
             Runs
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G R</span>
           </CommandItem>
           <CommandItem onSelect={() => go("/queues")}>
             <Layers className="size-4 opacity-60"/>
             Queues
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G Q</span>
           </CommandItem>
           <CommandItem onSelect={() => go("/nodes")}>
             <Server className="size-4 opacity-60"/>
             Nodes
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G N</span>
           </CommandItem>
         </CommandGroup>
         {jobs && jobs.length > 0 && (
@@ -107,10 +114,10 @@ export function CommandPalette({
                 >
                   <Workflow className="size-4 opacity-60"/>
                   <span className="truncate">{job.name}</span>
-                  <span className="ml-auto text-xs text-muted-foreground/70">
+                  <span className="ml-auto text-xs text-muted-foreground">
                     {job.isContinuous
-                      ? "Continuous"
-                      : (job.cronExpression ?? "Manual")}
+                      ? "continuous"
+                      : (job.cronExpression ?? "manual")}
                   </span>
                 </CommandItem>
               ))}
@@ -128,7 +135,7 @@ export function CommandPalette({
                 >
                   <Server className="size-4 opacity-60"/>
                   <span className="truncate">{node.name}</span>
-                  <span className="ml-auto text-xs text-muted-foreground/70 tabular-nums">
+                  <span className="ml-auto text-xs text-muted-foreground tnum">
                     {node.runningCount} running
                   </span>
                 </CommandItem>
@@ -137,6 +144,19 @@ export function CommandPalette({
           </>
         )}
       </CommandList>
+      <div className="flex items-center justify-between gap-3 border-t border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground">
+        <span>Surefire</span>
+        <a
+          href={`https://github.com/sgbj/surefire/releases/tag/v${__APP_VERSION__}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="tnum hover:text-foreground transition-colors"
+        >
+          v{__APP_VERSION__}
+        </a>
+      </div>
     </CommandDialog>
   );
 }
+
+declare const __APP_VERSION__: string;

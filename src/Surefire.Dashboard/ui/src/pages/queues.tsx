@@ -2,14 +2,16 @@ import {useCallback, useMemo, useState} from "react";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import {type ColumnDef} from "@tanstack/react-table";
 import {api, type QueueResponse} from "@/lib/api";
-import {Badge} from "@/components/ui/badge";
 import {Button} from "@/components/ui/button";
 import {DataTable} from "@/components/data-table";
+import {StatePill} from "@/components/status-badge";
 import {SortableHeader} from "@/components/sortable-header";
 import {Input} from "@/components/ui/input";
 import {Alert, AlertDescription} from "@/components/ui/alert";
 import {CircleAlert, Pause, Play, Search} from "lucide-react";
 import {toast} from "sonner";
+import {PageShell} from "@/components/page-shell";
+import {cn} from "@/lib/utils";
 
 export function QueuesPage() {
   const queryClient = useQueryClient();
@@ -46,13 +48,20 @@ export function QueuesPage() {
           <SortableHeader column={column}>Name</SortableHeader>
         ),
         cell: ({row}) => (
-          <span className="font-medium">{row.original.name}</span>
+          <span className="text-sm font-medium text-foreground">
+            {row.original.name}
+          </span>
         ),
       },
       {
         accessorKey: "priority",
         header: ({column}) => (
           <SortableHeader column={column}>Priority</SortableHeader>
+        ),
+        cell: ({row}) => (
+          <span className="text-sm tnum text-foreground/85">
+            {row.original.priority}
+          </span>
         ),
       },
       {
@@ -62,11 +71,12 @@ export function QueuesPage() {
         ),
         cell: ({row}) => (
           <span
-            className={
+            className={cn(
+              "text-sm tnum",
               row.original.pendingCount > 0
-                ? "font-medium"
-                : "text-muted-foreground"
-            }
+                ? "text-foreground font-medium"
+                : "text-muted-foreground/60",
+            )}
           >
             {row.original.pendingCount}
           </span>
@@ -79,11 +89,10 @@ export function QueuesPage() {
         ),
         cell: ({row}) => (
           <span
-            className={
-              row.original.runningCount > 0
-                ? "font-medium"
-                : "text-muted-foreground"
-            }
+            className={cn(
+              "text-sm tnum",
+              row.original.runningCount > 0 ? "text-foreground" : "text-muted-foreground/60",
+            )}
           >
             {row.original.runningCount}
           </span>
@@ -93,7 +102,7 @@ export function QueuesPage() {
         id: "maxConcurrency",
         header: "Concurrency",
         cell: ({row}) => (
-          <span className="text-sm text-muted-foreground">
+          <span className="text-sm tnum text-muted-foreground">
             {row.original.maxConcurrency != null
               ? `${row.original.runningCount} / ${row.original.maxConcurrency}`
               : "Unlimited"}
@@ -102,29 +111,25 @@ export function QueuesPage() {
       },
       {
         id: "status",
-        header: "Status",
+        header: "State",
         cell: ({row}) =>
           row.original.isPaused ? (
-            <Badge
-              variant="outline"
-              className="text-amber-600 dark:text-amber-400"
-            >
+            <StatePill tone="warning">
+              <span className="inline-block size-1.5 rounded-full bg-current"/>
               Paused
-            </Badge>
+            </StatePill>
           ) : (
-            <Badge
-              variant="outline"
-              className="text-emerald-700 dark:text-emerald-400"
-            >
+            <StatePill tone="success">
+              <span className="inline-block size-1.5 rounded-full bg-current"/>
               Active
-            </Badge>
+            </StatePill>
           ),
       },
       {
         id: "nodes",
         header: "Nodes",
         cell: ({row}) => (
-          <span className="text-sm text-muted-foreground">
+          <span className="text-sm tnum text-muted-foreground">
             {row.original.processingNodes.length}
           </span>
         ),
@@ -136,7 +141,7 @@ export function QueuesPage() {
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 cursor-pointer"
+              className="size-8"
               aria-label={
                 row.original.isPaused ? "Resume queue" : "Pause queue"
               }
@@ -166,22 +171,24 @@ export function QueuesPage() {
   }, [queues, filter]);
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold tracking-tight">Queues</h2>
+    <PageShell>
       {isError && (
-        <Alert variant="destructive">
-          <CircleAlert/>
-          <AlertDescription>Failed to load queues</AlertDescription>
-        </Alert>
+        <div className="px-6 pt-5">
+          <Alert variant="destructive">
+            <CircleAlert/>
+            <AlertDescription>Failed to load queues</AlertDescription>
+          </Alert>
+        </div>
       )}
+
       <DataTable
         columns={columns}
         data={filtered}
         toolbar={
           <div className="relative max-w-sm">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
             <Input
-              placeholder="Search..."
+              placeholder="Filter queues…"
               aria-label="Search queues"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -190,6 +197,6 @@ export function QueuesPage() {
           </div>
         }
       />
-    </div>
+    </PageShell>
   );
 }

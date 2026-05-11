@@ -1,8 +1,28 @@
-export function DtDd({label, children}: { label: string; children: React.ReactNode }) {
+import type {ReactNode} from "react";
+import {cn} from "@/lib/utils";
+
+export function DtDd({
+                       label,
+                       children,
+                       align = "default",
+                       className,
+                     }: {
+  label: string;
+  children: ReactNode;
+  align?: "default" | "mono";
+  className?: string;
+}) {
   return (
-    <div>
-      <dt className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{label}</dt>
-      <dd className="text-sm mt-0.5">{children}</dd>
+    <div className={cn("min-w-0", className)}>
+      <dt className="eyebrow">{label}</dt>
+      <dd
+        className={cn(
+          "mt-1 text-sm text-foreground",
+          align === "mono" ? "font-mono tnum" : "",
+        )}
+      >
+        {children}
+      </dd>
     </div>
   );
 }

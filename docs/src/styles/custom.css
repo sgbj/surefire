@@ -4,21 +4,26 @@
 @import "@fontsource/geist-sans/latin-700.css";
 @import "@fontsource/geist-mono/latin-400.css";
 
+/* Palette mirrors the dashboard's index.css — cool slate ivory + cobalt at
+   hue 256. Brand tokens (accent, accent-low) are kept identical across the
+   two surfaces so the docs landing and the dashboard read as one product.
+   Body-copy `accent` is held a step darker in light mode for link contrast
+   (~7:1 vs cobalt's ~4.5:1), but the hue still matches. */
 :root {
-  --sl-color-accent-low: oklch(0.24 0.014 260);
-  --sl-color-accent: oklch(0.7 0.14 250);
-  --sl-color-accent-high: oklch(0.985 0.005 250);
-  --sl-color-white: oklch(0.985 0.005 250);
+  --sl-color-accent-low: oklch(0.30 0.10 256);   /* dashboard --accent-brand-soft */
+  --sl-color-accent: oklch(0.72 0.165 256);       /* dashboard --accent-brand */
+  --sl-color-accent-high: oklch(0.95 0.008 250); /* dashboard --foreground */
+  --sl-color-white: oklch(0.95 0.008 250);
   --sl-color-gray-1: oklch(0.92 0.005 250);
-  --sl-color-gray-2: oklch(0.82 0.01 250);
+  --sl-color-gray-2: oklch(0.82 0.010 250);
   --sl-color-text: oklch(0.83 0.008 250);
-  --sl-color-text-accent: oklch(0.985 0.005 250);
-  --sl-color-gray-3: oklch(0.7 0.012 260);
-  --sl-color-gray-4: oklch(0.4 0.012 260);
-  --sl-color-gray-5: oklch(1 0 0 / 10%);
-  --sl-color-gray-6: oklch(0.175 0.014 260);
-  --sl-color-bg-sidebar: oklch(0.11 0.014 260);
-  --sl-color-black: oklch(0.13 0.012 260);
+  --sl-color-text-accent: oklch(0.95 0.008 250);
+  --sl-color-gray-3: oklch(0.66 0.018 252);      /* dashboard --muted-foreground */
+  --sl-color-gray-4: oklch(0.40 0.012 252);
+  --sl-color-gray-5: oklch(1 0 0 / 9%);          /* dashboard --border */
+  --sl-color-gray-6: oklch(0.165 0.014 256);     /* dashboard --card */
+  --sl-color-bg-sidebar: oklch(0.115 0.012 256); /* dashboard --sidebar */
+  --sl-color-black: oklch(0.135 0.012 255);      /* dashboard --background */
   --sl-font:
     "Geist Sans", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
     "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
@@ -28,20 +33,20 @@
 }
 
 :root[data-theme="light"] {
-  --sl-color-accent-low: oklch(0.95 0.008 250);
-  --sl-color-accent: oklch(0.44 0.12 250);
-  --sl-color-accent-high: oklch(0.18 0.014 250);
-  --sl-color-white: oklch(0.18 0.014 250);
-  --sl-color-gray-1: oklch(0.25 0.012 250);
-  --sl-color-gray-2: oklch(0.35 0.012 250);
-  --sl-color-text: oklch(0.36 0.012 250);
-  --sl-color-text-accent: oklch(0.18 0.014 250);
-  --sl-color-gray-3: oklch(0.42 0.01 250);
-  --sl-color-gray-4: oklch(0.7 0.006 250);
-  --sl-color-gray-5: oklch(0.92 0.006 250);
-  --sl-color-gray-6: oklch(0.965 0.005 250);
-  --sl-color-bg-sidebar: oklch(0.975 0.004 250);
-  --sl-color-black: oklch(0.98 0.003 250);
+  --sl-color-accent-low: oklch(0.92 0.05 256);    /* dashboard --accent-brand-soft */
+  --sl-color-accent: oklch(0.44 0.12 256);         /* cobalt hue, held darker for link contrast */
+  --sl-color-accent-high: oklch(0.18 0.018 255); /* dashboard --foreground */
+  --sl-color-white: oklch(0.18 0.018 255);
+  --sl-color-gray-1: oklch(0.22 0.018 255);
+  --sl-color-gray-2: oklch(0.32 0.014 252);
+  --sl-color-text: oklch(0.36 0.012 252);
+  --sl-color-text-accent: oklch(0.18 0.018 255);
+  --sl-color-gray-3: oklch(0.49 0.014 252);      /* dashboard --muted-foreground */
+  --sl-color-gray-4: oklch(0.70 0.012 250);
+  --sl-color-gray-5: oklch(0.90 0.012 250);      /* dashboard --border */
+  --sl-color-gray-6: oklch(0.955 0.008 250);     /* dashboard --muted */
+  --sl-color-bg-sidebar: oklch(0.97 0.008 250);  /* dashboard --sidebar */
+  --sl-color-black: oklch(0.985 0.003 250);      /* dashboard --background */
 }
 
 body {

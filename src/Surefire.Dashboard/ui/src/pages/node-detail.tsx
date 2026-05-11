@@ -2,17 +2,11 @@ import {useMemo, useState} from "react";
 import {keepPreviousData, useQuery} from "@tanstack/react-query";
 import {type ColumnDef, type PaginationState} from "@tanstack/react-table";
 import {useParams} from "react-router";
-import {CircleAlert, ListFilter, Search} from "lucide-react";
+import {CircleAlert, Search} from "lucide-react";
 import {api, type JobResponse, type JobRun, JobStatusLabels} from "@/lib/api";
 import {DataTable} from "@/components/data-table";
 import {Alert, AlertDescription} from "@/components/ui/alert";
-import {Button} from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import {Switch} from "@/components/ui/switch";
 import {Input} from "@/components/ui/input";
 import {Skeleton} from "@/components/ui/skeleton";
 import {Tabs, TabsContent, TabsList, TabsTrigger} from "@/components/ui/tabs";
@@ -23,6 +17,9 @@ import {buildRunColumns} from "@/components/run-columns";
 import {buildJobColumns} from "@/components/job-columns";
 import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 import {useDebouncedValue} from "@/hooks/use-debounced-value";
+import {PageShell, PageBody} from "@/components/page-shell";
+import {StatePill} from "@/components/status-badge";
+import {TopBarBadge} from "@/components/topbar-slot";
 
 const runColumns: ColumnDef<JobRun>[] = buildRunColumns({showStarted: true});
 const jobColumns: ColumnDef<JobResponse>[] = buildJobColumns();
@@ -99,53 +96,76 @@ export function NodeDetailPage() {
 
   if (isError)
     return (
-      <div className="space-y-6">
-        <h2 className="text-xl font-semibold tracking-tight truncate">
-          {name}
-        </h2>
-        <Alert variant="destructive">
-          <CircleAlert/>
-          <AlertDescription>Failed to load node</AlertDescription>
-        </Alert>
-      </div>
+      <PageShell>
+        <PageBody>
+          <Alert variant="destructive">
+            <CircleAlert/>
+            <AlertDescription>Failed to load node</AlertDescription>
+          </Alert>
+        </PageBody>
+      </PageShell>
     );
 
   if (!node)
     return (
-      <div className="space-y-6">
-        <Skeleton className="h-7 w-48"/>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+      <PageShell>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
           {Array.from({length: 4}).map((_, i) => (
             <div key={i}>
-              <Skeleton className="h-3 w-16 mb-1.5"/>
-              <Skeleton className="h-4 w-24"/>
+              <Skeleton className="h-3 w-16 mb-1.5 rounded-sm"/>
+              <Skeleton className="h-4 w-24 rounded-sm"/>
             </div>
           ))}
         </div>
-        <Skeleton className="h-64 w-full rounded-lg"/>
-      </div>
+        <PageBody>
+          <Skeleton className="h-64 w-full rounded-sm"/>
+        </PageBody>
+      </PageShell>
     );
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold tracking-tight truncate">
-        {node.name}
-      </h2>
+    <PageShell>
+      <TopBarBadge>
+        {node.isActive ? (
+          <StatePill tone="success">
+            <span className="inline-block size-1.5 rounded-full bg-current"/>
+            Active
+          </StatePill>
+        ) : (
+          <StatePill tone="muted">Inactive</StatePill>
+        )}
+      </TopBarBadge>
 
-      <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-        <DtDd label="Started">{formatDate(node.startedAt)}</DtDd>
-        <DtDd label="Last heartbeat">
+      <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+        <DtDd label="Started" align="mono">{formatDate(node.startedAt)}</DtDd>
+        <DtDd label="Last heartbeat" align="mono">
           {formatRelative(node.lastHeartbeatAt)}
         </DtDd>
-        <DtDd label="Running jobs">{node.runningCount}</DtDd>
-        <DtDd label="Queues">{node.registeredQueueNames.join(", ")}</DtDd>
+        <DtDd label="Running jobs" align="mono">{node.runningCount}</DtDd>
+        <DtDd label="Queues">
+          <span className="font-mono text-sm text-foreground/85">
+            {node.registeredQueueNames.join(", ")}
+          </span>
+        </DtDd>
       </dl>
 
-      <Tabs defaultValue="runs" className="space-y-3">
-        <TabsList>
-          <TabsTrigger value="runs">Runs</TabsTrigger>
-          <TabsTrigger value="jobs">Jobs</TabsTrigger>
-        </TabsList>
+      <Tabs defaultValue="runs">
+        <div className="px-6 pt-5">
+          <TabsList className="bg-card/40 border border-border rounded-md p-0.5">
+            <TabsTrigger
+              value="runs"
+              className="text-sm data-[state=active]:bg-foreground/[0.07] data-[state=active]:text-foreground"
+            >
+              Runs
+            </TabsTrigger>
+            <TabsTrigger
+              value="jobs"
+              className="text-sm data-[state=active]:bg-foreground/[0.07] data-[state=active]:text-foreground"
+            >
+              Jobs
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
         <TabsContent value="runs">
           <DataTable
@@ -157,13 +177,15 @@ export function NodeDetailPage() {
             pagination={pagination}
             onPaginationChange={setPagination}
             defaultPageSize={15}
+            getRowHref={(r) => `/runs/${r.id}`}
+            getRowLinkLabel={(r) => `Open run ${r.id}`}
             toolbar={
               <>
                 <div className="relative max-w-sm">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
                   <Input
                     aria-label="Search node runs"
-                    placeholder="Search..."
+                    placeholder="filter by job name…"
                     value={jobNameInput}
                     onChange={(e) => {
                       const next = e.target.value;
@@ -182,7 +204,7 @@ export function NodeDetailPage() {
                     setPagination((prev) => ({...prev, pageIndex: 0}));
                   }}
                 >
-                  <SelectTrigger size="sm" className="w-35">
+                  <SelectTrigger size="sm" className="w-32">
                     <SelectValue/>
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -201,7 +223,7 @@ export function NodeDetailPage() {
                     setPagination((prev) => ({...prev, pageIndex: 0}));
                   }}
                 >
-                  <SelectTrigger size="sm" className="w-35">
+                  <SelectTrigger size="sm" className="w-32">
                     <SelectValue/>
                   </SelectTrigger>
                   <SelectContent position="popper">
@@ -214,11 +236,6 @@ export function NodeDetailPage() {
                 </Select>
               </>
             }
-            header={
-              <span className="text-sm text-muted-foreground">
-                Runs ({runs?.totalCount ?? 0})
-              </span>
-            }
           />
         </TabsContent>
 
@@ -226,48 +243,33 @@ export function NodeDetailPage() {
           <DataTable
             columns={jobColumns}
             data={nodeScopedJobs}
+            getRowHref={(r) => `/jobs/${encodeURIComponent(r.name)}`}
+            getRowLinkLabel={(r) => `Open job ${r.name}`}
             toolbar={
               <>
                 <div className="relative max-w-sm">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
                   <Input
                     aria-label="Search node jobs"
-                    placeholder="Search..."
+                    placeholder="filter jobs…"
                     value={jobSearch}
                     onChange={(e) => setJobSearch(e.target.value)}
                     className="pl-8"
                   />
                 </div>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className={showInactiveJobs ? "border-primary/50" : ""}
-                    >
-                      <ListFilter className="size-4"/>
-                      Filter
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuCheckboxItem
-                      checked={showInactiveJobs}
-                      onCheckedChange={setShowInactiveJobs}
-                    >
-                      Inactive jobs
-                    </DropdownMenuCheckboxItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <label className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none">
+                  <Switch
+                    size="sm"
+                    checked={showInactiveJobs}
+                    onCheckedChange={setShowInactiveJobs}
+                  />
+                  Show inactive
+                </label>
               </>
-            }
-            header={
-              <span className="text-sm text-muted-foreground">
-                Jobs ({nodeScopedJobs.length})
-              </span>
             }
           />
         </TabsContent>
       </Tabs>
-    </div>
+    </PageShell>
   );
 }

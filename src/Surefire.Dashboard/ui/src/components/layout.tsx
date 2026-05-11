@@ -1,9 +1,9 @@
-import {Link, Outlet} from "react-router";
+import {Outlet} from "react-router";
 import {useCallback, useEffect, useState} from "react";
-import {SidebarInset, SidebarProvider, SidebarTrigger,} from "@/components/ui/sidebar";
-import {AppSidebar} from "@/components/app-sidebar";
+import {AppRail, MobileRail, NavTopBar} from "@/components/app-shell";
 import {CommandPalette} from "@/components/command-palette";
 import {useCommandPalette} from "@/hooks/use-command-palette";
+import {TopBarSlotProvider} from "@/components/topbar-slot";
 
 export type Theme = "system" | "light" | "dark";
 
@@ -50,37 +50,37 @@ export function Layout() {
   };
 
   const commandPalette = useCommandPalette();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
-    <SidebarProvider>
-      <AppSidebar
-        theme={theme}
-        onCycleTheme={cycleTheme}
-        onOpenSearch={commandPalette.toggle}
-      />
-      <SidebarInset className="min-w-0">
-        <header
-          className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b bg-background/85 backdrop-blur-sm px-4 md:hidden">
-          <SidebarTrigger/>
-          <Link to="/" className="flex items-center gap-2">
-            <img
-              src={`${import.meta.env.BASE_URL}surefire.svg`}
-              alt=""
-              className="size-6"
-            />
-            <span className="text-base font-semibold tracking-tight">
-              Surefire
-            </span>
-          </Link>
-        </header>
-        <div className="p-4 md:p-6 lg:p-8 overflow-x-clip">
-          <Outlet/>
+    <TopBarSlotProvider>
+      <div className="relative flex h-svh w-full">
+        <AppRail
+          theme={theme}
+          onCycleTheme={cycleTheme}
+          onOpenSearch={commandPalette.toggle}
+        />
+
+        <MobileRail
+          open={mobileOpen}
+          setOpen={setMobileOpen}
+          theme={theme}
+          onCycleTheme={cycleTheme}
+          onOpenSearch={commandPalette.toggle}
+        />
+
+        <div className="relative flex min-w-0 flex-1 flex-col md:pl-14">
+          <NavTopBar onOpenMobile={() => setMobileOpen(true)}/>
+          <main className="relative z-10 flex-1 flex flex-col min-h-0 overflow-y-auto">
+            <Outlet/>
+          </main>
         </div>
-      </SidebarInset>
-      <CommandPalette
-        open={commandPalette.open}
-        setOpen={commandPalette.setOpen}
-      />
-    </SidebarProvider>
+
+        <CommandPalette
+          open={commandPalette.open}
+          setOpen={commandPalette.setOpen}
+        />
+      </div>
+    </TopBarSlotProvider>
   );
 }

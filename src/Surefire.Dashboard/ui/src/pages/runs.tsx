@@ -10,6 +10,7 @@ import {CircleAlert, Search} from "lucide-react";
 import {buildRunColumns} from "@/components/run-columns";
 import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 import {useDebouncedValue} from "@/hooks/use-debounced-value";
+import {PageShell} from "@/components/page-shell";
 
 const columns = buildRunColumns();
 
@@ -24,8 +25,6 @@ export function RunsPage() {
 
   const debouncedJobName = useDebouncedValue(jobNameInput, 300);
 
-  // Use datePreset (not a computed date) in the query key so the cache key is stable.
-  // Compute the actual createdAfter date inside queryFn so each refetch uses a fresh timestamp.
   const queryKey = useMemo(
     () => ({
       jobNameContains: debouncedJobName || undefined,
@@ -59,14 +58,16 @@ export function RunsPage() {
   const resetPage = () => setPagination((prev) => ({...prev, pageIndex: 0}));
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold tracking-tight">Runs</h2>
+    <PageShell>
       {isError && (
-        <Alert variant="destructive">
-          <CircleAlert/>
-          <AlertDescription>Failed to load runs</AlertDescription>
-        </Alert>
+        <div className="px-6 pt-5">
+          <Alert variant="destructive">
+            <CircleAlert/>
+            <AlertDescription>Failed to load runs</AlertDescription>
+          </Alert>
+        </div>
       )}
+
       <DataTable
         columns={columns}
         data={data?.items ?? []}
@@ -76,13 +77,15 @@ export function RunsPage() {
         pagination={pagination}
         onPaginationChange={setPagination}
         defaultPageSize={15}
+        getRowHref={(r) => `/runs/${r.id}`}
+        getRowLinkLabel={(r) => `Open run ${r.id}`}
         toolbar={
           <>
             <div className="relative max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground/60"/>
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
               <Input
                 aria-label="Search runs"
-                placeholder="Search..."
+                placeholder="Filter by job name…"
                 value={jobNameInput}
                 onChange={(e) => {
                   const next = e.target.value;
@@ -101,7 +104,7 @@ export function RunsPage() {
                 resetPage();
               }}
             >
-              <SelectTrigger size="sm" className="w-35">
+              <SelectTrigger size="sm" className="w-36">
                 <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
@@ -120,7 +123,7 @@ export function RunsPage() {
                 resetPage();
               }}
             >
-              <SelectTrigger size="sm" className="w-35">
+              <SelectTrigger size="sm" className="w-36">
                 <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper">
@@ -134,6 +137,6 @@ export function RunsPage() {
           </>
         }
       />
-    </div>
+    </PageShell>
   );
 }
