@@ -45,5 +45,20 @@ internal static class SqlClientCancellation
 
     private static bool IsCancellation(SqlException ex, CancellationToken cancellationToken) =>
         cancellationToken.IsCancellationRequested
-        && (ex.Number == 0 || ex.InnerException is OperationCanceledException);
+        && (ex.InnerException is OperationCanceledException || HasCancellationError(ex));
+
+    private static bool HasCancellationError(SqlException ex)
+    {
+        for (var i = 0; i < ex.Errors.Count; i++)
+        {
+            var error = ex.Errors[i];
+            if (error.Number == 0
+                && error.Message.Contains("Operation cancelled by user", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
