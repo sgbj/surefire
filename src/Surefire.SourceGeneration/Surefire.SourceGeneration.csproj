@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>netstandard2.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <RootNamespace>Surefire.SourceGeneration</RootNamespace>
+        <AssemblyName>Surefire.SourceGeneration</AssemblyName>
+
+        <IsRoslynComponent>true</IsRoslynComponent>
+        <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+        <!-- The analyzer ships inside the Surefire package; it's not published on its own. -->
+        <IsPackable>false</IsPackable>
+        <!-- Analyzer projects don't need public-API tracking or XML docs on internals. -->
+        <GenerateDocumentationFile>false</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+        <!-- Analyzer projects don't ship trim/AOT analyzer attributes themselves. -->
+        <IsAotCompatible>false</IsAotCompatible>
+        <IsTrimmable>false</IsTrimmable>
+        <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+        <EnableAotAnalyzer>false</EnableAotAnalyzer>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" PrivateAssets="all"/>
+    </ItemGroup>
+</Project>

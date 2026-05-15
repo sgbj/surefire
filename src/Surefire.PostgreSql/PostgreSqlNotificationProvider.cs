@@ -23,9 +23,6 @@ internal sealed class PostgreSqlNotificationProvider(
     private static readonly TimeSpan ReconnectBackoffInitial = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan ReconnectBackoffMax = TimeSpan.FromSeconds(30);
 
-    // PublishAsync enqueues instead of executing. A background loop drains, dedupes
-    // (channel, message) pairs within a 2 ms idle window, and emits the survivors as one
-    // multi-pg_notify round trip.
     private static readonly TimeSpan PublishFlushInterval = TimeSpan.FromMilliseconds(2);
 
     private readonly Channel<DispatchWorkItem> _dispatchQueue =
@@ -38,8 +35,6 @@ internal sealed class PostgreSqlNotificationProvider(
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<Guid, Func<string?, Task>>> _handlers = new();
     private readonly Lock _lock = new();
 
-    // Bounded+Wait applies backpressure to producers if PG publishing stalls, instead of the
-    // queue growing unbounded.
     private readonly Channel<OutgoingPublish> _outgoingQueue =
         Channel.CreateBounded<OutgoingPublish>(new BoundedChannelOptions(OutgoingQueueCapacity)
         {
@@ -63,8 +58,7 @@ internal sealed class PostgreSqlNotificationProvider(
 
     public async ValueTask DisposeAsync()
     {
-        // Complete the writer first so the publish loop drains naturally; cancelling the shared
-        // CTS before the drain would lose queued notifications.
+        // Complete publishing before cancellation so queued notifications can flush.
         _outgoingQueue.Writer.TryComplete();
         if (_publishLoop is { } publishLoop)
         {
@@ -137,8 +131,6 @@ internal sealed class PostgreSqlNotificationProvider(
         RegisterNotificationHandler(_listenConnection);
         _dispatchLoop = DispatchLoopAsync(_cts.Token);
         _listenLoop = ListenLoopAsync(_cts.Token);
-        // Runs under CancellationToken.None so DisposeAsync drains via channel completion.
-        // Cancelling via _cts would leave queued notifications unflushed.
         _publishLoop = PublishLoopAsync(CancellationToken.None);
     }
 
@@ -244,9 +236,6 @@ internal sealed class PostgreSqlNotificationProvider(
             await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var cmd = conn.CreateCommand();
 
-            // One SELECT with N pg_notify() calls: single round trip, N channel activations.
-            // PG also coalesces identical (channel, payload) pairs within a transaction, so
-            // anything past our HashSet dedup is still collapsed server-side.
             var sql = new StringBuilder("SELECT ");
             for (var i = 0; i < batch.Count; i++)
             {

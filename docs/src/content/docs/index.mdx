@@ -35,7 +35,7 @@ import ScreenshotCarousel from '../../components/ScreenshotCarousel.astro';
 
 <CardGrid>
   <Card title="Minimal API style" icon="rocket">
-    Register jobs with delegates using the same fluent style as endpoint mapping. Parameters resolve from DI and from arguments passed when triggering a run.
+    Register jobs the same way you map endpoints. Parameters resolve from DI and run arguments. Native AOT and trimming support.
   </Card>
   <Card title="Distributed" icon="random">
     Runs across multiple nodes with coordinated claiming and retry handling. Nodes can register the same or different jobs.
@@ -53,6 +53,7 @@ import ScreenshotCarousel from '../../components/ScreenshotCarousel.astro';
 export const sample = `var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSurefire();
+builder.Services.AddSurefireDashboard();
 
 var app = builder.Build();
 

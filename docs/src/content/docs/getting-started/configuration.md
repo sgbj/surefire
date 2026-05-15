@@ -30,6 +30,8 @@ builder.Services.AddSurefire(options =>
 | `AutoMigrate` | `true` | Runs store migrations at startup |
 | `SerializerOptions` | camelCase, case-insensitive, numbers from strings | JSON options for job arguments and results |
 
+For Native AOT or trimming, add your app's `JsonSerializerContext` to `SerializerOptions.TypeInfoResolverChain`. See [AOT and trimming](/surefire/guides/aot-trimming/).
+
 ## Health checks
 
 `AddSurefire` registers a health check named `surefire`. To expose it:
@@ -40,5 +42,5 @@ app.MapHealthChecks("/health");
 
 ## Dashboard
 
-Map the dashboard with `app.MapSurefireDashboard()`. See [Dashboard](/surefire/guides/dashboard/) for setup, authorization, and the REST API.
+Register the dashboard with `services.AddSurefireDashboard()` and map it with `app.MapSurefireDashboard()`. See [Dashboard](/surefire/guides/dashboard/) for setup, authorization, and the REST API.
 

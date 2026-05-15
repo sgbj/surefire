@@ -1,6 +1,8 @@
 #nullable enable
 Microsoft.AspNetCore.Builder.DashboardEndpoints
-static Microsoft.AspNetCore.Builder.DashboardEndpoints.MapSurefireDashboard(this Microsoft.AspNetCore.Routing.IEndpointRouteBuilder! endpoints, string! prefix = "/surefire", System.Action<Surefire.Dashboard.SurefireDashboardOptions!>? configure = null) -> Microsoft.AspNetCore.Builder.IEndpointConventionBuilder!
+Microsoft.AspNetCore.Builder.SurefireDashboardServiceCollectionExtensions
+static Microsoft.AspNetCore.Builder.DashboardEndpoints.MapSurefireDashboard(this Microsoft.AspNetCore.Routing.IEndpointRouteBuilder! endpoints, string! prefix = "/surefire") -> Microsoft.AspNetCore.Builder.IEndpointConventionBuilder!
+static Microsoft.AspNetCore.Builder.SurefireDashboardServiceCollectionExtensions.AddSurefireDashboard(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Action<Surefire.Dashboard.SurefireDashboardOptions!>? configure = null) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
 static Surefire.Dashboard.JobResponse.From(Surefire.JobDefinition! job, System.DateTimeOffset activeCutoff, System.DateTimeOffset now) -> Surefire.Dashboard.JobResponse!
 static Surefire.Dashboard.JobStatsResponse.From(Surefire.JobStats! stats) -> Surefire.Dashboard.JobStatsResponse!
 static Surefire.Dashboard.NodeResponse.From(Surefire.NodeInfo! node, System.DateTimeOffset activeCutoff) -> Surefire.Dashboard.NodeResponse!

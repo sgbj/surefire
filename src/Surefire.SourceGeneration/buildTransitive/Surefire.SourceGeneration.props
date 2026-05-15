@@ -1,0 +1,19 @@
+<Project>
+    <PropertyGroup>
+        <SurefireSourceGenerationEnabled Condition="'$(SurefireSourceGenerationEnabled)' == ''">true</SurefireSourceGenerationEnabled>
+    </PropertyGroup>
+
+    <!-- Opt the consumer's compilation into receiving interceptors from our generator. The C#
+         compiler only honors `[InterceptsLocation]` for namespaces listed here. Both property
+         names are set so consumers on either side of the C# 13 preview-to-stable transition work. -->
+    <PropertyGroup Condition="'$(SurefireSourceGenerationEnabled)' == 'true'">
+        <InterceptorsNamespaces>$(InterceptorsNamespaces);Surefire.Generated</InterceptorsNamespaces>
+        <InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);Surefire.Generated</InterceptorsPreviewNamespaces>
+    </PropertyGroup>
+
+    <!-- Surface SurefireSourceGenerationEnabled to the analyzer so the generator can honor
+         `<SurefireSourceGenerationEnabled>false</SurefireSourceGenerationEnabled>` opt-outs. -->
+    <ItemGroup Condition="'$(SurefireSourceGenerationEnabled)' == 'true'">
+        <CompilerVisibleProperty Include="SurefireSourceGenerationEnabled"/>
+    </ItemGroup>
+</Project>

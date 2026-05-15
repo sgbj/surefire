@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-14
+
+### Added
+
+- Native AOT and trimming support for the core package, storage providers, and dashboard.
+- Source generation for trim-safe job registration, lifecycle callbacks, `IJobClient` calls, and `BatchItem.Create`.
+- `RunArguments` and descriptor-based APIs for pre-serialized arguments and AOT-safe job and callback registration.
+- `services.AddSurefireDashboard(configure?)` for dashboard services, options, and JSON metadata.
+
+### Changed
+
+- Reflection-based registration and client APIs remain available, and now report AOT/trim warnings when analyzers are enabled unless Surefire can replace the call with generated code.
+- Dashboard setup now registers its JSON metadata through DI and enables ASP.NET Core request delegate generation for AOT builds.
+
+### Fixed
+
+- Cron jobs using the default `Skip` misfire policy now enqueue the next scheduled occurrence while still skipping backlog.
+
+### Breaking changes
+
+- `MapSurefireDashboard(prefix, configure)` was removed. Configure dashboard options with `services.AddSurefireDashboard(...)`, then call `app.MapSurefireDashboard(prefix?)`.
+- `BatchItem` now stores `RunArguments?` instead of `object?`. Use `BatchItem.Create(...)` for object arguments, or construct `BatchItem` with pre-built `RunArguments`.
+
 ## [0.2.0] - 2026-05-10
 
 ### Added

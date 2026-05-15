@@ -1,9 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,7 +24,7 @@ internal sealed partial class SurefireExecutorService(
     BatchedEventWriter eventWriter,
     RunCancellationCoordinator runCancellation,
     Backoff backoff,
-    ILogger<SurefireExecutorService> logger) : BackgroundService
+    ILogger<SurefireExecutorService> logger) : BackgroundService, IJobRunPipe
 {
     internal const string LoopName = "executor";
 
@@ -44,6 +43,34 @@ internal sealed partial class SurefireExecutorService(
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _runCancellation =
         new(StringComparer.Ordinal);
 
+    /// <summary>
+    ///     AOT-safe implementation of <see cref="IJobRunPipe.ReadInputStreamAsync{T}" /> backing the
+    ///     descriptor path. Decodes each <see cref="RunEventType.Input" /> event with the supplied
+    ///     <see cref="JsonTypeInfo{T}" /> rather than the reflection-based resolver.
+    /// </summary>
+    async IAsyncEnumerable<T> IJobRunPipe.ReadInputStreamAsync<T>(JobRun run, string argumentName,
+        JsonTypeInfo<T> typeInfo, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var item in ReadInputStreamCoreAsync<T>(run.Id, argumentName,
+                           payload => JsonSerializer.Deserialize(payload, typeInfo)!, cancellationToken))
+        {
+            yield return item;
+        }
+    }
+
+    /// <summary>
+    ///     AOT-safe implementation of <see cref="IJobRunPipe.WriteOutputStreamAsync{T}" /> backing
+    ///     the descriptor path. Serializes each element with the supplied
+    ///     <see cref="JsonTypeInfo{T}" /> and emits an <see cref="RunEventType.Output" /> event per
+    ///     item, followed by an <see cref="RunEventType.OutputComplete" /> event.
+    /// </summary>
+    async Task<IReadOnlyList<string>> IJobRunPipe.WriteOutputStreamAsync<T>(IAsyncEnumerable<T> stream,
+        JsonTypeInfo<T> typeInfo, JobRun run, CancellationToken cancellationToken)
+    {
+        return await WriteOutputStreamCoreAsync(stream,
+            value => JsonSerializer.Serialize(value, typeInfo), run, cancellationToken);
+    }
+
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
         // Owned here (not as a separate IHostedService) so writer drain is sequenced with the
@@ -61,15 +88,6 @@ internal sealed partial class SurefireExecutorService(
         await eventWriter.StopAsync(cancellationToken);
     }
 
-    // The override seam: BackgroundService.ExecuteAsync isn't RequiresUnreferencedCode/DynamicCode
-    // so we can't propagate the attributes onto the override. The trim/AOT contract surfaces at
-    // AddSurefire/AddJob/IJobClient, where users opt in to reflection-based job dispatch.
-    [UnconditionalSuppressMessage("Trimming", "IL2026",
-        Justification = "Trim/AOT warnings surface at AddSurefire/AddJob/IJobClient; this override "
-                        + "cannot inherit the attribute because BackgroundService.ExecuteAsync is unannotated.")]
-    [UnconditionalSuppressMessage("AOT", "IL3050",
-        Justification = "Trim/AOT warnings surface at AddSurefire/AddJob/IJobClient; this override "
-                        + "cannot inherit the attribute because BackgroundService.ExecuteAsync is unannotated.")]
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         loopHealth.Register(LoopName, options.PollingInterval);
@@ -222,8 +240,6 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    [RequiresUnreferencedCode("Reflects over user-supplied job arguments and results.")]
-    [RequiresDynamicCode("Reflects over user-supplied job arguments and results.")]
     private async Task ExecuteClaimedRunAsync(JobRun run, CancellationToken stoppingToken)
     {
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -817,17 +833,8 @@ internal sealed partial class SurefireExecutorService(
     private async Task<RunTransitionResult> FlushAndTransitionTerminalAsync(JobContext? context, JobRun run,
         RunStatusTransition transition, CancellationToken flushToken, CancellationToken transitionToken)
     {
-        // Flush order: pending progress, log pump, event writer, then transition. Draining in
-        // order guarantees readers never see the terminal status while prior events are in flight.
-        // flushToken is best-effort (ShutdownTimeout-capped); if a pump is wedged we drop late
-        // events rather than hold up the transition.
-        //
-        // The transition itself is an atomic commit under a long-lived transitionToken (callers
-        // pass CancellationToken.None). Cancelling mid-retry would leave the run stuck in Running
-        // and a non-idempotent handler would re-execute on stale recovery, strictly worse than
-        // blocking. Bounds: shutdown caps the whole task at ShutdownTimeout via
-        // WaitForActiveRunsAsync; a permanent store outage blocks heartbeats too, so stale
-        // recovery reclaims the slot regardless.
+        // Flush pending progress, logs, and events before the terminal transition so observers
+        // never see the final status before earlier events are durable.
         if (context is { })
         {
             await context.FlushPendingProgressAsync(flushToken);
@@ -878,14 +885,13 @@ internal sealed partial class SurefireExecutorService(
     }
 
 
-    [RequiresUnreferencedCode("Reflects over user-supplied filter types and handler delegates.")]
-    [RequiresDynamicCode("Reflects over user-supplied filter types and handler delegates.")]
     private async Task<InvocationResult> ExecuteThroughFiltersAsync(RegisteredJob registration, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
-        var allFilterTypes = new List<Type>(options.FilterTypes.Count + registration.FilterTypes.Count);
-        allFilterTypes.AddRange(options.FilterTypes);
-        allFilterTypes.AddRange(registration.FilterTypes);
+        var allFilterFactories = new List<Func<IServiceProvider, IJobFilter>>(
+            options.FilterFactories.Count + registration.FilterFactories.Count);
+        allFilterFactories.AddRange(options.FilterFactories);
+        allFilterFactories.AddRange(registration.FilterFactories);
 
         var invocation = InvocationResult.Empty;
         JobFilterDelegate pipeline = async _ =>
@@ -893,9 +899,9 @@ internal sealed partial class SurefireExecutorService(
             invocation = await InvokeHandlerAsync(registration, run, context, services, cancellationToken);
         };
 
-        for (var i = allFilterTypes.Count - 1; i >= 0; i--)
+        for (var i = allFilterFactories.Count - 1; i >= 0; i--)
         {
-            var filter = (IJobFilter)ActivatorUtilities.GetServiceOrCreateInstance(services, allFilterTypes[i]);
+            var filter = allFilterFactories[i](services);
             var next = pipeline;
             pipeline = ctx => filter.InvokeAsync(ctx, next);
         }
@@ -904,17 +910,15 @@ internal sealed partial class SurefireExecutorService(
         return invocation;
     }
 
-    [RequiresUnreferencedCode("Reflects over user-supplied job arguments and results.")]
-    [RequiresDynamicCode("Reflects over user-supplied job arguments and results.")]
     private async Task<InvocationResult> InvokeHandlerAsync(RegisteredJob registration, JobRun run, JobContext context,
         IServiceProvider services, CancellationToken cancellationToken)
     {
-        var metadata = registration.Metadata;
-        var args = await BindParametersAsync(metadata, run, context, services, cancellationToken);
+        var descriptor = registration.Descriptor;
+        var args = await BindParametersAsync(descriptor, run, context, services, cancellationToken);
 
-        var invocationResult = metadata.Invoke(args);
+        var invocationResult = descriptor.Invoke(args, descriptor.Handler);
 
-        var (hasResult, value) = await AwaitResultAsync(invocationResult, metadata);
+        var (hasResult, value) = await AwaitResultAsync(invocationResult, descriptor);
         if (!hasResult)
         {
             return InvocationResult.Empty;
@@ -928,9 +932,20 @@ internal sealed partial class SurefireExecutorService(
                 null);
         }
 
-        if (metadata.AsyncEnumerableElementType is { })
+        if (descriptor.AsyncEnumerableElementType is { })
         {
-            var items = await metadata.Materializer!(this, value, run, cancellationToken);
+            var materializer = descriptor.Materializer
+                               ?? throw new InvalidOperationException(
+                                   $"Job '{run.JobName}' returned IAsyncEnumerable but its descriptor carries no " +
+                                   "Materializer. The descriptor is malformed; re-register via app.AddJob(\"...\", handler) " +
+                                   "or supply Materializer on a hand-built JobRegistrationDescriptor.");
+            var elementTypeInfo = descriptor.OutputStreamElementJsonTypeInfoFactory?.Invoke(options.SerializerOptions)
+                                  ?? throw new InvalidOperationException(
+                                      $"Job '{run.JobName}' returned IAsyncEnumerable but its descriptor carries no " +
+                                      "OutputStreamElementJsonTypeInfoFactory. The descriptor is malformed; re-register via " +
+                                      "app.AddJob(\"...\", handler) or supply OutputStreamElementJsonTypeInfoFactory on a " +
+                                      "hand-built JobRegistrationDescriptor.");
+            var items = await materializer(this, value, elementTypeInfo, run, cancellationToken);
             var resultJson = $"[{string.Join(',', items)}]";
             return new(
                 resultJson,
@@ -938,82 +953,112 @@ internal sealed partial class SurefireExecutorService(
                 items);
         }
 
-        // Fail clearly when a handler returns IAsyncEnumerable<T> through a type that metadata
-        // didn't detect at registration (e.g. untyped delegate), instead of a confusing JSON error.
-        if (TypeHelpers.TryGetAsyncEnumerableElementType(value.GetType(), out _))
-        {
-            throw new InvalidOperationException(
-                $"Job '{run.JobName}' returned an IAsyncEnumerable but the handler's return type was not detected as async-enumerable. " +
-                "Ensure the handler's declared return type is IAsyncEnumerable<T>, not object or a non-generic wrapper.");
-        }
-
+        var resultTypeInfo = descriptor.ResultJsonTypeInfoFactory?.Invoke(options.SerializerOptions)
+                             ?? throw new InvalidOperationException(
+                                 $"Job '{run.JobName}' produced a result but its descriptor carries no " +
+                                 "ResultJsonTypeInfoFactory. The job was registered through a path that " +
+                                 "skipped result-type metadata; re-register via app.AddJob(\"...\", handler) " +
+                                 "or supply ResultJsonTypeInfoFactory on a hand-built JobRegistrationDescriptor.");
         return new(
-            JsonSerializer.Serialize(value, options.SerializerOptions),
+            JsonSerializer.Serialize(value, resultTypeInfo),
             value,
             null);
     }
 
-    [RequiresUnreferencedCode("Reflects over user-supplied job arguments.")]
-    [RequiresDynamicCode("Reflects over user-supplied job arguments.")]
-    private async Task<object?[]> BindParametersAsync(HandlerMetadata metadata, JobRun run,
+    private async Task<object?[]> BindParametersAsync(JobRegistrationDescriptor descriptor, JobRun run,
         JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
-        var parameters = metadata.Parameters;
+        var parameters = descriptor.Parameters;
         using var doc = run.Arguments is null ? null : JsonDocument.Parse(run.Arguments);
         var root = doc?.RootElement;
         var declaredInputArguments = await GetDeclaredInputArgumentsAsync(run.Id, cancellationToken);
-        var values = new object?[parameters.Length];
+        var values = new object?[parameters.Count];
+        var streamBinders = descriptor.StreamBinders;
+        var inputJsonBinders = descriptor.InputJsonBinders;
+        var typeInfoFactories = descriptor.ParameterJsonTypeInfoFactories;
+        var streamTypeInfoFactories = descriptor.StreamParameterJsonTypeInfoFactories;
 
-        for (var i = 0; i < parameters.Length; i++)
+        for (var i = 0; i < parameters.Count; i++)
         {
             var parameter = parameters[i];
-            if (parameter.ParameterType == typeof(JobContext))
+
+            switch (parameter.Kind)
             {
-                values[i] = context;
-                continue;
+                case ParameterKind.JobContext:
+                    values[i] = context;
+                    continue;
+                case ParameterKind.CancellationToken:
+                    values[i] = context.CancellationToken;
+                    continue;
+                case ParameterKind.ServiceProvider:
+                    values[i] = services;
+                    continue;
+                case ParameterKind.Service:
+                    values[i] = services.GetRequiredService(parameter.Type);
+                    continue;
             }
 
-            if (parameter.ParameterType == typeof(CancellationToken))
+            if (parameter.Kind == ParameterKind.ServiceOrJson)
             {
-                values[i] = context.CancellationToken;
-                continue;
-            }
-
-            var service = services.GetService(parameter.ParameterType);
-            if (service is { })
-            {
-                values[i] = service;
-                continue;
-            }
-
-            if (root is { ValueKind: JsonValueKind.Object }
-                && TryGetJsonProperty(root.Value, parameter.Name!, out var property))
-            {
-                values[i] = BindJsonValue(property, parameter.ParameterType, options.SerializerOptions);
-                continue;
-            }
-
-            if (metadata.StreamBinders[i] is { } binder)
-            {
-                if (TryGetDeclaredInputArgumentName(
-                        parameters,
-                        parameter,
-                        root,
-                        declaredInputArguments,
-                        out var argumentName))
+                var service = services.GetService(parameter.Type);
+                if (service is { })
                 {
-                    values[i] = await binder(this, run.Id, argumentName, cancellationToken);
+                    values[i] = service;
                     continue;
                 }
             }
 
-            if (root.HasValue && root.Value.ValueKind != JsonValueKind.Object)
+            if (parameter.Kind == ParameterKind.Stream
+                && streamBinders?[i] is { } binder
+                && TryGetDeclaredInputArgumentName(parameters, parameter, root, declaredInputArguments,
+                    out var argumentName))
             {
-                values[i] = BindJsonValue(root.Value, parameter.ParameterType, options.SerializerOptions);
+                var streamTypeInfo = streamTypeInfoFactories?[i]?.Invoke(options.SerializerOptions)
+                                     ?? throw new InvalidOperationException(
+                                         $"Parameter '{parameter.Name}' has no StreamParameterJsonTypeInfoFactory. The job " +
+                                         "was registered through a path that skipped stream-parameter metadata; re-register " +
+                                         "via app.AddJob(\"...\", handler) or supply StreamParameterJsonTypeInfoFactories on " +
+                                         "a hand-built JobRegistrationDescriptor.");
+                values[i] = await binder(this, run, argumentName, streamTypeInfo, cancellationToken);
                 continue;
             }
 
-            if (parameter.HasDefaultValue)
+            JsonElement? jsonValue = null;
+            if (root is { ValueKind: JsonValueKind.Object }
+                && TryGetJsonProperty(root.Value, parameter.Name, out var property))
+            {
+                jsonValue = property;
+            }
+            else if (root.HasValue && root.Value.ValueKind != JsonValueKind.Object)
+            {
+                jsonValue = root.Value;
+            }
+
+            if (jsonValue is { } valueElement)
+            {
+                if (parameter.Kind == ParameterKind.Stream)
+                {
+                    if (inputJsonBinders?[i] is not { } jsonBinder)
+                    {
+                        throw new InvalidOperationException(
+                            $"Stream parameter '{parameter.Name}' on job '{context.JobName}' has no " +
+                            "declared input stream and no inline JSON binder. Hand-built descriptors must " +
+                            "populate InputJsonBinders[i] for ParameterKind.Stream parameters that can be " +
+                            "bound from inline JSON arguments.");
+                    }
+
+                    values[i] = jsonBinder(valueElement, options.SerializerOptions);
+                }
+                else
+                {
+                    values[i] = BindJsonValue(valueElement, parameter,
+                        typeInfoFactories?[i], options.SerializerOptions);
+                }
+
+                continue;
+            }
+
+            if (parameter.HasDefault)
             {
                 values[i] = parameter.DefaultValue;
                 continue;
@@ -1060,14 +1105,14 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private static bool TryGetDeclaredInputArgumentName(
-        ParameterInfo[] parameters,
-        ParameterInfo parameter,
+        IReadOnlyList<ParameterDescriptor> parameters,
+        ParameterDescriptor parameter,
         JsonElement? root,
         HashSet<string> declaredInputArguments,
         out string argumentName)
     {
         argumentName = string.Empty;
-        if (parameter.Name is null)
+        if (string.IsNullOrEmpty(parameter.Name))
         {
             return false;
         }
@@ -1079,7 +1124,7 @@ internal sealed partial class SurefireExecutorService(
         }
 
         if (!root.HasValue
-            && parameters.Length == 1
+            && parameters.Count == 1
             && declaredInputArguments.Contains("$root"))
         {
             argumentName = "$root";
@@ -1089,15 +1134,8 @@ internal sealed partial class SurefireExecutorService(
         return false;
     }
 
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
-    internal IAsyncEnumerable<T> CreateInputStreamAsync<T>(string runId, string argumentName,
-        CancellationToken cancellationToken) =>
-        ReadInputStreamAsync<T>(runId, argumentName, cancellationToken);
-
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
-    internal async IAsyncEnumerable<T> ReadInputStreamAsync<T>(string runId, string argumentName,
+    private async IAsyncEnumerable<T> ReadInputStreamCoreAsync<T>(string runId, string argumentName,
+        Func<string, T> deserialize,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         using var wakeup = new SemaphoreSlim(0, 1);
@@ -1130,7 +1168,7 @@ internal sealed partial class SurefireExecutorService(
                 {
                     if (envelope.Payload is { })
                     {
-                        yield return JsonSerializer.Deserialize<T>(envelope.Payload, options.SerializerOptions)!;
+                        yield return deserialize(envelope.Payload);
                     }
 
                     continue;
@@ -1153,43 +1191,20 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    [RequiresUnreferencedCode("Reflects over the target type to deserialize a JSON value.")]
-    [RequiresDynamicCode("Reflects over the target type to deserialize a JSON value.")]
-    private static object? BindJsonValue(JsonElement value, Type targetType, JsonSerializerOptions serializerOptions)
+    private static object? BindJsonValue(
+        JsonElement value,
+        ParameterDescriptor parameter,
+        JsonTypeInfoFactory? typeInfoFactory,
+        JsonSerializerOptions serializerOptions)
     {
-        if (targetType.IsGenericType
-            && targetType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
-        {
-            var elementType = targetType.GetGenericArguments()[0];
-            var listType = typeof(List<>).MakeGenericType(elementType);
-            var list = JsonSerializer.Deserialize(value.GetRawText(), listType, serializerOptions);
-            var method = typeof(SurefireExecutorService)
-                .GetMethod(nameof(ToAsyncEnumerable), BindingFlags.Static | BindingFlags.NonPublic)!
-                .MakeGenericMethod(elementType);
-            return method.Invoke(null, [list]);
-        }
+        var typeInfo = typeInfoFactory?.Invoke(serializerOptions)
+                       ?? throw new InvalidOperationException(
+                           $"Parameter '{parameter.Name}' has no ParameterJsonTypeInfoFactory. The job " +
+                           "was registered through a path that skipped parameter-type metadata; " +
+                           "re-register via app.AddJob(\"...\", handler) or supply " +
+                           "ParameterJsonTypeInfoFactories on a hand-built JobRegistrationDescriptor.");
 
-        return JsonSerializer.Deserialize(value.GetRawText(), targetType, serializerOptions);
-    }
-
-    private static IAsyncEnumerable<T> ToAsyncEnumerable<T>(IEnumerable<T>? values)
-    {
-        return values is null ? EmptyAsync() : YieldAsync(values);
-
-        static async IAsyncEnumerable<T> YieldAsync(IEnumerable<T> source)
-        {
-            foreach (var item in source)
-            {
-                yield return item;
-                await Task.Yield();
-            }
-        }
-
-        static async IAsyncEnumerable<T> EmptyAsync()
-        {
-            await Task.CompletedTask;
-            yield break;
-        }
+        return JsonSerializer.Deserialize(value.GetRawText(), typeInfo);
     }
 
     private static bool TryGetJsonProperty(JsonElement root, string propertyName, out JsonElement value)
@@ -1211,9 +1226,10 @@ internal sealed partial class SurefireExecutorService(
 
     private static async Task<(bool HasResult, object? Value)> AwaitResultAsync(
         object? invocationResult,
-        HandlerMetadata metadata)
+        JobRegistrationDescriptor descriptor)
     {
-        if (!metadata.HasResult)
+        var hasResult = descriptor.ReturnKind is not (ReturnKind.Void or ReturnKind.Task or ReturnKind.ValueTask);
+        if (!hasResult)
         {
             if (invocationResult is Task noResultTask)
             {
@@ -1233,16 +1249,16 @@ internal sealed partial class SurefireExecutorService(
                 return (true, null);
             case Task task:
                 await task;
-                return (true, metadata.ExtractTaskResult!(task));
+                return (true, descriptor.ExtractTaskResult!(task));
             case ValueTask:
                 return (false, null);
             default:
             {
-                if (metadata.AsTaskDelegate is { } asTask)
+                if (descriptor.AsTask is { } asTask)
                 {
                     var task = asTask(invocationResult);
                     await task;
-                    return (true, metadata.ExtractTaskResult!(task));
+                    return (true, descriptor.ExtractTaskResult!(task));
                 }
 
                 return (true, invocationResult);
@@ -1250,16 +1266,16 @@ internal sealed partial class SurefireExecutorService(
         }
     }
 
-    [RequiresUnreferencedCode("Uses JSON serialization.")]
-    [RequiresDynamicCode("Uses JSON serialization.")]
-    internal async Task<List<string>> MaterializeAsyncCore<T>(IAsyncEnumerable<T> stream,
+    private async Task<IReadOnlyList<string>> WriteOutputStreamCoreAsync<T>(
+        IAsyncEnumerable<T> stream,
+        Func<T, string> serialize,
         JobRun run,
         CancellationToken cancellationToken)
     {
         var items = new List<string>();
         await foreach (var item in stream.WithCancellation(cancellationToken))
         {
-            var payload = JsonSerializer.Serialize(item, options.SerializerOptions);
+            var payload = serialize(item);
             items.Add(payload);
             await AppendOutputEventAsync(run, payload, cancellationToken);
         }

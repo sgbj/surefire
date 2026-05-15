@@ -4,7 +4,7 @@
 @import "@fontsource/geist-sans/latin-700.css";
 @import "@fontsource/geist-mono/latin-400.css";
 
-/* Palette mirrors the dashboard's index.css — cool slate ivory + cobalt at
+/* Palette mirrors the dashboard's index.css; cool slate ivory + cobalt at
    hue 256. Brand tokens (accent, accent-low) are kept identical across the
    two surfaces so the docs landing and the dashboard read as one product.
    Body-copy `accent` is held a step darker in light mode for link contrast

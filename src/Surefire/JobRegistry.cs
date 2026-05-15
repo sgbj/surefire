@@ -15,19 +15,27 @@ internal sealed class JobRegistry
 
     private readonly Lock _writeGate = new();
 
-    [RequiresUnreferencedCode("Reflects over a user-supplied handler delegate to build job metadata.")]
-    [RequiresDynamicCode("Reflects over a user-supplied handler delegate to build job metadata.")]
-    public JobBuilder AddOrUpdate(string name, Delegate handler, IServiceProvider services)
+    /// <summary>
+    ///     Registers a job from a pre-built descriptor. The descriptor carries parameter metadata,
+    ///     the invocation shim, materializer, and stream binders, so this method itself doesn't
+    ///     reflect over the handler delegate.
+    /// </summary>
+    public JobBuilder AddOrUpdate(JobRegistrationDescriptor descriptor, IServiceProvider services)
     {
-        var definition = new JobDefinition { Name = name };
-        var serviceChecker = services.GetService<IServiceProviderIsService>();
-        definition.ArgumentsSchema = JobArgumentsSchemaBuilder.Build(
-            handler,
-            parameterType =>
-                parameterType == typeof(IServiceProvider)
-                || (serviceChecker?.IsService(parameterType) ?? false));
+        var definition = new JobDefinition { Name = descriptor.Name };
+        var optionsAccessor = services.GetRequiredService<SurefireOptions>();
+        definition.ArgumentsSchema = descriptor.ArgumentsSchema
+                                     ?? JobArgumentsSchemaBuilder.BuildFromDescriptor(
+                                         descriptor.Parameters,
+                                         descriptor.ParameterJsonTypeInfoFactories,
+                                         optionsAccessor.SerializerOptions,
+                                         services);
 
-        var metadata = HandlerMetadata.Build(handler);
+        return RegisterCore(descriptor.Name, descriptor, definition);
+    }
+
+    private JobBuilder RegisterCore(string name, JobRegistrationDescriptor descriptor, JobDefinition definition)
+    {
         JobBuilder? builder = null;
 
         void SyncRegistration()
@@ -53,13 +61,12 @@ internal sealed class JobRegistry
 
                 _jobs[name] = new(
                     name,
-                    handler,
+                    descriptor,
                     definition.Clone(),
-                    [.. builder!.FilterTypes],
-                    builder.OnSuccessCallbacks.Select(CompiledCallback.Build).ToArray(),
-                    builder.OnRetryCallbacks.Select(CompiledCallback.Build).ToArray(),
-                    builder.OnDeadLetterCallbacks.Select(CompiledCallback.Build).ToArray(),
-                    metadata);
+                    [.. builder!.FilterFactories],
+                    [.. builder.OnSuccessCallbacks],
+                    [.. builder.OnRetryCallbacks],
+                    [.. builder.OnDeadLetterCallbacks]);
             }
         }
 
@@ -92,10 +99,9 @@ internal sealed class JobRegistry
 
 internal sealed record RegisteredJob(
     string Name,
-    Delegate Handler,
+    JobRegistrationDescriptor Descriptor,
     JobDefinition Definition,
-    IReadOnlyList<Type> FilterTypes,
+    IReadOnlyList<Func<IServiceProvider, IJobFilter>> FilterFactories,
     IReadOnlyList<CompiledCallback> OnSuccessCallbacks,
     IReadOnlyList<CompiledCallback> OnRetryCallbacks,
-    IReadOnlyList<CompiledCallback> OnDeadLetterCallbacks,
-    HandlerMetadata Metadata);
+    IReadOnlyList<CompiledCallback> OnDeadLetterCallbacks);

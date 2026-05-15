@@ -90,8 +90,8 @@ var results = await client.RunBatchAsync<Result>("ProcessOrder", new[]
 // Different jobs in one batch
 var mixed = await client.RunBatchAsync(new[]
 {
-    new BatchItem("ProcessOrder", new { orderId = 101 }),
-    new BatchItem("EmailReceipt", new { orderId = 101 })
+    BatchItem.Create("ProcessOrder", new { orderId = 101 }),
+    BatchItem.Create("EmailReceipt", new { orderId = 101 })
 });
 ```
 

@@ -95,10 +95,16 @@ internal sealed partial class SurefireSchedulerService(
             switch (job.MisfirePolicy)
             {
                 case MisfirePolicy.Skip:
-                    // Advance the cursor to the latest missed fire so the next tick resumes correctly.
-                    if (FindLatestMissedOccurrence(cron, timeZone, job.LastCronFireAt.Value, now) is { } skipTo)
+                    var skippedFireTimes = GetMissedFireTimes(cron, timeZone, job.LastCronFireAt.Value, now, 2);
+                    if (skippedFireTimes.FireTimes.Count == 1 && !skippedFireTimes.IsTruncated &&
+                        now - skippedFireTimes.FireTimes[0] <= options.PollingInterval)
                     {
-                        await store.UpdateLastCronFireAtAsync(job.Name, skipTo, cancellationToken);
+                        await TryCreateScheduledRunAsync(job, now, skippedFireTimes.FireTimes[0], cancellationToken);
+                    }
+                    else if (skippedFireTimes.FireTimes.Count > 0)
+                    {
+                        await store.UpdateLastCronFireAtAsync(job.Name, skippedFireTimes.FireTimes[^1],
+                            cancellationToken);
                     }
 
                     break;

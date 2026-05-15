@@ -1,6 +1,6 @@
-import {useEffect} from "react";
-import {useNavigate} from "react-router";
-import {useQuery} from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useNavigate } from "react-router";
+import { useQuery } from "@tanstack/react-query";
 import {
   CommandDialog,
   CommandEmpty,
@@ -10,13 +10,13 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command";
-import {House, Layers, Play, Server, Workflow} from "lucide-react";
-import {api} from "@/lib/api";
+import { House, Layers, Play, Server, Workflow } from "lucide-react";
+import { api } from "@/lib/api";
 
 export function CommandPalette({
-                                 open,
-                                 setOpen,
-                               }: {
+  open,
+  setOpen,
+}: {
   open: boolean;
   setOpen: (open: boolean) => void;
 }) {
@@ -44,14 +44,14 @@ export function CommandPalette({
     return () => document.removeEventListener("keydown", handler);
   }, [open, setOpen]);
 
-  const {data: jobs} = useQuery({
+  const { data: jobs } = useQuery({
     queryKey: ["jobs"],
     queryFn: () => api.getJobs(),
     enabled: open,
     staleTime: 30_000,
   });
 
-  const {data: nodes} = useQuery({
+  const { data: nodes } = useQuery({
     queryKey: ["nodes"],
     queryFn: () => api.getNodes(),
     enabled: open,
@@ -71,48 +71,58 @@ export function CommandPalette({
       description="Navigate or search"
       className="bg-popover/90 backdrop-blur-xl border-border/70 shadow-2xl"
     >
-      <CommandInput placeholder="Type to navigate or search…"/>
-      <CommandList className="max-h-[420px]">
+      <CommandInput placeholder="Type to navigate or search…" />
+      <CommandList className="max-h-105">
         <CommandEmpty>
           <span className="text-xs text-muted-foreground">no matches</span>
         </CommandEmpty>
         <CommandGroup heading="Navigation">
           <CommandItem onSelect={() => go("/")}>
-            <House className="size-4 opacity-60"/>
+            <House className="size-4 opacity-60" />
             Dashboard
-            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G D</span>
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">
+              G D
+            </span>
           </CommandItem>
           <CommandItem onSelect={() => go("/jobs")}>
-            <Workflow className="size-4 opacity-60"/>
+            <Workflow className="size-4 opacity-60" />
             Jobs
-            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G J</span>
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">
+              G J
+            </span>
           </CommandItem>
           <CommandItem onSelect={() => go("/runs")}>
-            <Play className="size-4 opacity-60"/>
+            <Play className="size-4 opacity-60" />
             Runs
-            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G R</span>
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">
+              G R
+            </span>
           </CommandItem>
           <CommandItem onSelect={() => go("/queues")}>
-            <Layers className="size-4 opacity-60"/>
+            <Layers className="size-4 opacity-60" />
             Queues
-            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G Q</span>
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">
+              G Q
+            </span>
           </CommandItem>
           <CommandItem onSelect={() => go("/nodes")}>
-            <Server className="size-4 opacity-60"/>
+            <Server className="size-4 opacity-60" />
             Nodes
-            <span className="ml-auto text-xs text-muted-foreground tracking-widest">G N</span>
+            <span className="ml-auto text-xs text-muted-foreground tracking-widest">
+              G N
+            </span>
           </CommandItem>
         </CommandGroup>
         {jobs && jobs.length > 0 && (
           <>
-            <CommandSeparator/>
+            <CommandSeparator />
             <CommandGroup heading="Jobs">
               {jobs.map((job) => (
                 <CommandItem
                   key={job.name}
                   onSelect={() => go(`/jobs/${encodeURIComponent(job.name)}`)}
                 >
-                  <Workflow className="size-4 opacity-60"/>
+                  <Workflow className="size-4 opacity-60" />
                   <span className="truncate">{job.name}</span>
                   <span className="ml-auto text-xs text-muted-foreground">
                     {job.isContinuous
@@ -126,14 +136,14 @@ export function CommandPalette({
         )}
         {nodes && nodes.length > 0 && (
           <>
-            <CommandSeparator/>
+            <CommandSeparator />
             <CommandGroup heading="Nodes">
               {nodes.map((node) => (
                 <CommandItem
                   key={node.name}
                   onSelect={() => go(`/nodes/${encodeURIComponent(node.name)}`)}
                 >
-                  <Server className="size-4 opacity-60"/>
+                  <Server className="size-4 opacity-60" />
                   <span className="truncate">{node.name}</span>
                   <span className="ml-auto text-xs text-muted-foreground tnum">
                     {node.runningCount} running

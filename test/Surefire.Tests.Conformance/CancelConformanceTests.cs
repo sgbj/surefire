@@ -282,7 +282,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
         await Store.CreateRunsAsync([run], cancellationToken: ct);
         Assert.True((await Store.TryCancelRunAsync(run.Id, cancellationToken: ct)).Transitioned);
 
-        // Root exists but is already terminal and has no descendants — Found=true, Runs empty.
+        // Root exists but is already terminal and has no descendants - Found=true, Runs empty.
         var result = await Store.CancelRunSubtreeAsync(run.Id, cancellationToken: ct);
 
         Assert.True(result.Found);

@@ -4,10 +4,7 @@ using System.Text.Json.Serialization;
 namespace Surefire;
 
 /// <summary>
-///     Serializes <see cref="TimeSpan" /> as a JSON number of ticks. Used on
-///     <see cref="SurefireJsonContext" /> so every store persists durations as a compact,
-///     lossless integer and the JSON payloads remain legible in Lua / SQL JSON primitives
-///     that don't understand ISO-8601 strings.
+///     Serializes <see cref="TimeSpan" /> as a JSON number of ticks.
 /// </summary>
 internal sealed class TimeSpanTicksConverter : JsonConverter<TimeSpan>
 {

@@ -3,11 +3,7 @@ using Microsoft.Data.SqlClient;
 namespace Surefire.SqlServer;
 
 /// <summary>
-///     Microsoft.Data.SqlClient surfaces caller-driven cancellation as a <see cref="SqlException" />
-///     with message "Operation cancelled by user." rather than the
-///     <see cref="OperationCanceledException" /> required by the .NET cancellation contract.
-///     These helpers normalize that quirk at the SqlClient call boundary so the rest of the
-///     codebase can rely on the standard contract.
+///     Normalizes SqlClient cancellation behavior to <see cref="OperationCanceledException" />.
 /// </summary>
 internal static class SqlClientCancellation
 {
@@ -47,10 +43,6 @@ internal static class SqlClientCancellation
         }
     }
 
-    // SqlClient surfaces caller-driven cancel as SqlException with Number == 0 (and either
-    // an OperationCanceledException inner or no inner). Pairing that with the caller's token
-    // state avoids misclassifying unrelated SqlExceptions that happen to coincide with a
-    // cancelled token.
     private static bool IsCancellation(SqlException ex, CancellationToken cancellationToken) =>
         cancellationToken.IsCancellationRequested
         && (ex.Number == 0 || ex.InnerException is OperationCanceledException);

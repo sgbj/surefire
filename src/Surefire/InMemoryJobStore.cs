@@ -16,6 +16,9 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, List<RunEvent>> _batchEventsByBatchId = new();
     private readonly Dictionary<string, List<RunEvent>> _batchOutputEventsByBatchId = new();
 
+    private readonly Dictionary<string, List<string>> _childrenByParent =
+        new(StringComparer.Ordinal);
+
     // (JobName, DeduplicationId) of non-terminal runs.
     private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
     private readonly Dictionary<string, List<RunEvent>> _eventsByRunId = new();
@@ -36,8 +39,6 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, int> _runningCountByJob = new();
     private readonly Dictionary<string, int> _runningCountByQueue = new();
     private readonly Dictionary<string, JobRun> _runs = new();
-    private readonly Dictionary<string, List<string>> _childrenByParent =
-        new(StringComparer.Ordinal);
     private readonly TimeProvider _timeProvider;
     private long _eventIdCounter;
 
@@ -308,7 +309,7 @@ internal sealed class InMemoryJobStore : IJobStore
                     .ThenByDescending(r => r.Id, StringComparer.Ordinal),
                 (_, true) => all
                     .OrderBy(r => r.CreatedAt)
-                    .ThenBy(r => r.Id, StringComparer.Ordinal),
+                    .ThenBy(r => r.Id, StringComparer.Ordinal)
             };
 
             items = ordered.Skip(skip).Take(take).ToList();
@@ -472,152 +473,7 @@ internal sealed class InMemoryJobStore : IJobStore
     public Task<SubtreeCancellation> CancelBatchSubtreeAsync(string batchId,
         string? reason = null,
         CancellationToken cancellationToken = default)
-        => Task.FromResult(CancelSubtreeCore(SubtreeSeed.Batch, batchId, reason, includeRoot: true));
-
-    private enum SubtreeSeed
-    {
-        Run,
-        Batch
-    }
-
-    private SubtreeCancellation CancelSubtreeCore(SubtreeSeed seed, string seedId, string? reason,
-        bool includeRoot)
-    {
-        var canceledRuns = new List<CanceledRun>();
-        var completedBatches = new List<BatchCompletionInfo>();
-        var now = _timeProvider.GetUtcNow();
-
-        lock (_gate)
-        {
-            switch (seed)
-            {
-                case SubtreeSeed.Run when !_runs.ContainsKey(seedId):
-                    return SubtreeCancellation.NotFound;
-                case SubtreeSeed.Batch when !_batches.ContainsKey(seedId):
-                    return SubtreeCancellation.NotFound;
-            }
-
-            var queue = new Queue<string>();
-            var visited = new HashSet<string>(StringComparer.Ordinal);
-
-            void Enqueue(string id)
-            {
-                if (visited.Add(id))
-                {
-                    queue.Enqueue(id);
-                }
-            }
-
-            switch (seed)
-            {
-                case SubtreeSeed.Run:
-                    if (includeRoot)
-                    {
-                        Enqueue(seedId);
-                    }
-                    else if (_childrenByParent.TryGetValue(seedId, out var directChildren))
-                    {
-                        foreach (var c in directChildren)
-                        {
-                            Enqueue(c);
-                        }
-                    }
-
-                    break;
-                case SubtreeSeed.Batch:
-                    foreach (var run in _runs.Values)
-                    {
-                        if (run.BatchId == seedId)
-                        {
-                            Enqueue(run.Id);
-                        }
-                    }
-
-                    break;
-            }
-
-            while (queue.Count > 0)
-            {
-                var currentId = queue.Dequeue();
-
-                if (_childrenByParent.TryGetValue(currentId, out var children))
-                {
-                    foreach (var c in children)
-                    {
-                        Enqueue(c);
-                    }
-                }
-
-                if (!_runs.TryGetValue(currentId, out var run) || run.Status.IsTerminal)
-                {
-                    continue;
-                }
-
-                var oldStatus = run.Status;
-                var canceled = run with
-                {
-                    Status = JobStatus.Canceled,
-                    CanceledAt = now,
-                    CompletedAt = now,
-                    Reason = reason
-                };
-                _runs[currentId] = canceled;
-
-                UpdateIndexes(canceled, oldStatus, JobStatus.Canceled);
-                AppendStatusEventCore(canceled.Id, canceled.Attempt, canceled.Status);
-
-                if (canceled.DeduplicationId is { })
-                {
-                    _dedupIndex.Remove((canceled.JobName, canceled.DeduplicationId));
-                }
-
-                var batchCompletion = IncrementBatchCounter(canceled.BatchId, JobStatus.Canceled, now);
-                if (batchCompletion is { } bc)
-                {
-                    completedBatches.Add(bc);
-                }
-
-                canceledRuns.Add(new(canceled.Id, canceled.BatchId));
-            }
-        }
-
-        return canceledRuns.Count == 0 && completedBatches.Count == 0
-            ? SubtreeCancellation.Empty
-            : new(canceledRuns, completedBatches);
-    }
-
-    private void AddChildIndex(JobRun run)
-    {
-        if (run.ParentRunId is not { } parentId)
-        {
-            return;
-        }
-
-        if (!_childrenByParent.TryGetValue(parentId, out var list))
-        {
-            list = [];
-            _childrenByParent[parentId] = list;
-        }
-
-        list.Add(run.Id);
-    }
-
-    private void RemoveChildIndex(JobRun run)
-    {
-        if (run.ParentRunId is not { } parentId)
-        {
-            return;
-        }
-
-        if (_childrenByParent.TryGetValue(parentId, out var list))
-        {
-            list.Remove(run.Id);
-            if (list.Count == 0)
-            {
-                _childrenByParent.Remove(parentId);
-            }
-        }
-    }
+        => Task.FromResult(CancelSubtreeCore(SubtreeSeed.Batch, batchId, reason, true));
 
     public Task<IReadOnlyList<JobRun>> ClaimRunsAsync(string nodeName, IReadOnlyCollection<string> jobNames,
         IReadOnlyCollection<string> queueNames, int maxCount, CancellationToken cancellationToken = default)
@@ -1178,7 +1034,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         return Task.FromResult(canceledRuns.Count == 0 && completedBatches.Count == 0
             ? SubtreeCancellation.Empty
-            : new SubtreeCancellation(canceledRuns, completedBatches));
+            : new(canceledRuns, completedBatches));
     }
 
     public Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1573,6 +1429,145 @@ internal sealed class InMemoryJobStore : IJobStore
                 .ToList();
 
             return Task.FromResult<IReadOnlyList<string>>(ids);
+        }
+    }
+
+    private SubtreeCancellation CancelSubtreeCore(SubtreeSeed seed, string seedId, string? reason,
+        bool includeRoot)
+    {
+        var canceledRuns = new List<CanceledRun>();
+        var completedBatches = new List<BatchCompletionInfo>();
+        var now = _timeProvider.GetUtcNow();
+
+        lock (_gate)
+        {
+            switch (seed)
+            {
+                case SubtreeSeed.Run when !_runs.ContainsKey(seedId):
+                    return SubtreeCancellation.NotFound;
+                case SubtreeSeed.Batch when !_batches.ContainsKey(seedId):
+                    return SubtreeCancellation.NotFound;
+            }
+
+            var queue = new Queue<string>();
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+
+            void Enqueue(string id)
+            {
+                if (visited.Add(id))
+                {
+                    queue.Enqueue(id);
+                }
+            }
+
+            switch (seed)
+            {
+                case SubtreeSeed.Run:
+                    if (includeRoot)
+                    {
+                        Enqueue(seedId);
+                    }
+                    else if (_childrenByParent.TryGetValue(seedId, out var directChildren))
+                    {
+                        foreach (var c in directChildren)
+                        {
+                            Enqueue(c);
+                        }
+                    }
+
+                    break;
+                case SubtreeSeed.Batch:
+                    foreach (var run in _runs.Values)
+                    {
+                        if (run.BatchId == seedId)
+                        {
+                            Enqueue(run.Id);
+                        }
+                    }
+
+                    break;
+            }
+
+            while (queue.Count > 0)
+            {
+                var currentId = queue.Dequeue();
+
+                if (_childrenByParent.TryGetValue(currentId, out var children))
+                {
+                    foreach (var c in children)
+                    {
+                        Enqueue(c);
+                    }
+                }
+
+                if (!_runs.TryGetValue(currentId, out var run) || run.Status.IsTerminal)
+                {
+                    continue;
+                }
+
+                var oldStatus = run.Status;
+                var canceled = run with
+                {
+                    Status = JobStatus.Canceled,
+                    CanceledAt = now,
+                    CompletedAt = now,
+                    Reason = reason
+                };
+                _runs[currentId] = canceled;
+
+                UpdateIndexes(canceled, oldStatus, JobStatus.Canceled);
+                AppendStatusEventCore(canceled.Id, canceled.Attempt, canceled.Status);
+
+                if (canceled.DeduplicationId is { })
+                {
+                    _dedupIndex.Remove((canceled.JobName, canceled.DeduplicationId));
+                }
+
+                var batchCompletion = IncrementBatchCounter(canceled.BatchId, JobStatus.Canceled, now);
+                if (batchCompletion is { } bc)
+                {
+                    completedBatches.Add(bc);
+                }
+
+                canceledRuns.Add(new(canceled.Id, canceled.BatchId));
+            }
+        }
+
+        return canceledRuns.Count == 0 && completedBatches.Count == 0
+            ? SubtreeCancellation.Empty
+            : new(canceledRuns, completedBatches);
+    }
+
+    private void AddChildIndex(JobRun run)
+    {
+        if (run.ParentRunId is not { } parentId)
+        {
+            return;
+        }
+
+        if (!_childrenByParent.TryGetValue(parentId, out var list))
+        {
+            list = [];
+            _childrenByParent[parentId] = list;
+        }
+
+        list.Add(run.Id);
+    }
+
+    private void RemoveChildIndex(JobRun run)
+    {
+        if (run.ParentRunId is not { } parentId)
+        {
+            return;
+        }
+
+        if (_childrenByParent.TryGetValue(parentId, out var list))
+        {
+            list.Remove(run.Id);
+            if (list.Count == 0)
+            {
+                _childrenByParent.Remove(parentId);
+            }
         }
     }
 
@@ -2046,6 +2041,12 @@ internal sealed class InMemoryJobStore : IJobStore
         {
             index.Remove(batchId);
         }
+    }
+
+    private enum SubtreeSeed
+    {
+        Run,
+        Batch
     }
 
     private sealed class RateLimitWindowState

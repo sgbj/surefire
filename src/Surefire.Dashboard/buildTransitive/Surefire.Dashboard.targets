@@ -1,0 +1,10 @@
+<Project>
+    <!-- Surefire.Dashboard maps Minimal API endpoints. The Request Delegate Generator (RDG)
+         ships with ASP.NET Core and is required for AOT-clean endpoint compilation. Activate
+         it automatically for consumers that publish AOT (PublishAot=true) or have opted into
+         AOT-compatibility analysis (IsAotCompatible=true). JIT-only consumers can opt in
+         explicitly by setting <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>. -->
+    <PropertyGroup Condition="'$(EnableRequestDelegateGenerator)' == '' and ('$(PublishAot)' == 'true' or '$(IsAotCompatible)' == 'true')">
+        <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
+    </PropertyGroup>
+</Project>

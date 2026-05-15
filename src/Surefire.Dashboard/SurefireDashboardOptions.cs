@@ -1,8 +1,8 @@
 namespace Surefire.Dashboard;
 
 /// <summary>
-///     Configuration for the Surefire dashboard endpoints. Pass to
-///     <c>MapSurefireDashboard</c> via the <c>configure</c> callback to override defaults.
+///     Configuration for the Surefire dashboard endpoints. Override defaults via the
+///     <c>configure</c> callback on <c>AddSurefireDashboard</c>.
 /// </summary>
 public sealed class SurefireDashboardOptions
 {

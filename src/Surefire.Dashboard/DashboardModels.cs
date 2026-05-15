@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -349,8 +348,6 @@ public sealed class JobResponse
     /// <param name="job">The job definition.</param>
     /// <param name="activeCutoff">Heartbeat cutoff used to compute <see cref="IsActive" />.</param>
     /// <param name="now">Current time used to compute <see cref="NextRunAt" />.</param>
-    [RequiresUnreferencedCode("Deserializes the arguments schema as a JsonElement.")]
-    [RequiresDynamicCode("Deserializes the arguments schema as a JsonElement.")]
     public static JobResponse From(JobDefinition job, DateTimeOffset activeCutoff, DateTimeOffset now) => new()
     {
         Name = job.Name,
@@ -370,10 +367,21 @@ public sealed class JobResponse
         IsActive = job.LastHeartbeatAt is { } && job.LastHeartbeatAt >= activeCutoff,
         NextRunAt = ComputeNextRun(job, now),
         MisfirePolicy = job.MisfirePolicy,
-        ArgumentsSchema = job.ArgumentsSchema is { }
-            ? JsonSerializer.Deserialize<JsonElement>(job.ArgumentsSchema)
-            : null
+        ArgumentsSchema = CloneElement(job.ArgumentsSchema)
     };
+
+    // JsonDocument.Parse is AOT-safe (it walks JSON tokens rather than reflecting over a target
+    // type) but holds pooled buffers - dispose the document and keep just the cloned element.
+    private static JsonElement? CloneElement(string? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.Clone();
+    }
 
     private static DateTimeOffset? ComputeNextRun(JobDefinition job, DateTimeOffset now)
     {

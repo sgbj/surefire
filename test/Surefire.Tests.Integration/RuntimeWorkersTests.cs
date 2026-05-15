@@ -11,7 +11,7 @@ using Surefire.Tests.Testing;
 
 namespace Surefire.Tests.Integration;
 
-public sealed class RuntimeWorkersTests
+public sealed partial class RuntimeWorkersTests
 {
     [Fact]
     public async Task Executor_Completes_Triggered_Run()
@@ -157,7 +157,7 @@ public sealed class RuntimeWorkersTests
             options.RetentionPeriod = null;
         });
 
-        harness.Host.AddJob("EmptyObject", () => new { });
+        harness.Host.AddJob("EmptyObject", () => new EmptyResult());
         await harness.StartAsync(ct);
 
         var run = await harness.Client.TriggerAsync("EmptyObject", cancellationToken: ct);
@@ -272,6 +272,34 @@ public sealed class RuntimeWorkersTests
             TimeSpan.FromSeconds(4),
             TimeSpan.FromMilliseconds(40),
             "Expected new cron job to start scheduling when LastCronFireAt was initially null.",
+            ct);
+    }
+
+    [Fact]
+    public async Task Scheduler_DefaultMisfirePolicy_EnqueuesNextOccurrence()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(250);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+            options.RetentionPeriod = null;
+        });
+
+        harness.Host.AddJob("CronDefaultSkip", () => 1)
+            .WithCron("* * * * * *");
+
+        await harness.StartAsync(ct);
+
+        await TestWait.PollUntilAsync(
+            async _ => (PagedResult<JobRun>?)await harness.Store.GetRunsAsync(new()
+            {
+                JobName = "CronDefaultSkip"
+            }, 0, 10, ct),
+            runsPage => runsPage.TotalCount > 0,
+            TimeSpan.FromSeconds(4),
+            TimeSpan.FromMilliseconds(40),
+            "Expected the default misfire policy to enqueue the next cron occurrence.",
             ct);
     }
 
@@ -2388,10 +2416,31 @@ public sealed class RuntimeWorkersTests
 
         await harness.StartAsync(ct);
 
-        var originalBatchId = await ((JobClient)harness.Client).TriggerAllAsync("SumBatchInputStreamRerun", [
-            new { values = ProduceDelayedRange(1, 2, 5, ct) },
-            new { values = ProduceDelayedRange(10, 20, 5, ct) }
-        ], ct);
+        var originalBatch = await harness.Client.TriggerBatchAsync("SumBatchInputStreamRerun", [
+            new()
+            {
+                Streams =
+                [
+                    new()
+                    {
+                        ArgumentName = "values",
+                        SerializeItems = _ => SerializeAsync(ProduceDelayedRange(1, 2, 5, ct), ct)
+                    }
+                ]
+            },
+            new()
+            {
+                Streams =
+                [
+                    new()
+                    {
+                        ArgumentName = "values",
+                        SerializeItems = _ => SerializeAsync(ProduceDelayedRange(10, 20, 5, ct), ct)
+                    }
+                ]
+            }
+        ], cancellationToken: ct);
+        var originalBatchId = originalBatch.Id;
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(8));
@@ -2516,6 +2565,15 @@ public sealed class RuntimeWorkersTests
         }
     }
 
+    private static async IAsyncEnumerable<string> SerializeAsync(IAsyncEnumerable<int> source,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var item in source.WithCancellation(cancellationToken))
+        {
+            yield return JsonSerializer.Serialize(item, IntJsonContext.Default.Int32);
+        }
+    }
+
     private static async IAsyncEnumerable<int> ProduceSlowInfiniteRange(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -2573,6 +2631,9 @@ public sealed class RuntimeWorkersTests
 
         return Task.FromResult(new RuntimeHarness(provider, host, store, notifications, client, hostedServices));
     }
+
+    [JsonSerializable(typeof(int))]
+    private sealed partial class IntJsonContext : JsonSerializerContext;
 
     private sealed record PipelineChildren(JobRun Source, JobRun Downstream);
 
@@ -2664,12 +2725,14 @@ public sealed class RuntimeWorkersTests
         }
     }
 
-    private sealed class TraceSink
+    internal sealed record EmptyResult;
+
+    internal sealed class TraceSink
     {
         public Queue<string> Events { get; } = new();
     }
 
-    private sealed class GlobalTraceFilter(TraceSink sink) : IJobFilter
+    internal sealed class GlobalTraceFilter(TraceSink sink) : IJobFilter
     {
         public async Task InvokeAsync(JobContext context, JobFilterDelegate next)
         {
@@ -2679,7 +2742,7 @@ public sealed class RuntimeWorkersTests
         }
     }
 
-    private sealed class JobTraceFilter(TraceSink sink) : IJobFilter
+    internal sealed class JobTraceFilter(TraceSink sink) : IJobFilter
     {
         public async Task InvokeAsync(JobContext context, JobFilterDelegate next)
         {

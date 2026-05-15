@@ -58,7 +58,34 @@ public sealed class SchedulerServiceTests
     }
 
     [Fact]
-    public async Task Skip_UpdatesLastCronFireAt_NoRunCreated()
+    public async Task Skip_SingleMissedFire_CreatesRun()
+    {
+        var (service, store, time) = CreateService(new() { PollingInterval = TimeSpan.FromSeconds(31) });
+        var lastFire = time.GetUtcNow().AddMinutes(-1);
+        store.Jobs.Add(MakeJob(cron: "* * * * *", policy: MisfirePolicy.Skip, lastCronFireAt: lastFire));
+
+        await service.ScheduleDueJobsAsync(CancellationToken.None);
+
+        Assert.Single(store.CreatedRuns);
+        Assert.Empty(store.LastCronFireAtUpdates);
+    }
+
+    [Fact]
+    public async Task Skip_StaleSingleMissedFire_UpdatesLastCronFireAt_NoRunCreated()
+    {
+        var (service, store, time) = CreateService();
+        var lastFire = time.GetUtcNow().AddMinutes(-1);
+        store.Jobs.Add(MakeJob(cron: "* * * * *", policy: MisfirePolicy.Skip, lastCronFireAt: lastFire));
+
+        await service.ScheduleDueJobsAsync(CancellationToken.None);
+
+        Assert.Empty(store.CreatedRuns);
+        Assert.Equal(new DateTimeOffset(2025, 1, 1, 12, 0, 0, TimeSpan.Zero),
+            store.LastCronFireAtUpdates["TestJob"]);
+    }
+
+    [Fact]
+    public async Task Skip_MultipleMissedFires_UpdatesLastCronFireAt_NoRunCreated()
     {
         var (service, store, time) = CreateService();
         var lastFire = time.GetUtcNow().AddMinutes(-3);
@@ -68,7 +95,7 @@ public sealed class SchedulerServiceTests
 
         Assert.Empty(store.CreatedRuns);
         Assert.True(store.LastCronFireAtUpdates.ContainsKey("TestJob"));
-        // Updated to most recent missed fire, not now
+        // Updated to most recent missed fire, not now.
         Assert.True(store.LastCronFireAtUpdates["TestJob"] < time.GetUtcNow());
         Assert.True(store.LastCronFireAtUpdates["TestJob"] > lastFire);
     }
@@ -124,7 +151,7 @@ public sealed class SchedulerServiceTests
 
         await service.ScheduleDueJobsAsync(CancellationToken.None);
 
-        // 10 misses available (one per minute over 10:30), limit 3 keeps the newest 3.
+        // Only the newest due fire times should be scheduled when the limit is exceeded.
         Assert.Equal(
             [
                 now.AddMinutes(-2).AddSeconds(-30),
@@ -133,7 +160,7 @@ public sealed class SchedulerServiceTests
             ],
             store.CreatedRuns.Select(x => x.CronFireAt).ToArray());
 
-        // Cursor lands on the latest miss so subsequent ticks don't replay the older skipped fires.
+        // The cursor advances past skipped fire times.
         Assert.Equal(now.AddSeconds(-30), store.CreatedRuns[^1].CronFireAt);
     }
 

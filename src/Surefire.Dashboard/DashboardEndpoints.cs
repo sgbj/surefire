@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Net.ServerSentEvents;
 using System.Runtime.CompilerServices;
@@ -9,6 +8,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using Surefire;
@@ -25,6 +25,8 @@ public static class DashboardEndpoints
     private const int DefaultRunsPageSize = 50;
     private const int MaxRunsPageSize = 500;
     private const int MaxRunsLookupIds = 500;
+
+    private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
 
     /// <summary>
     ///     Maps the Surefire dashboard endpoints under <paramref name="prefix" />. Mounts:
@@ -45,22 +47,18 @@ public static class DashboardEndpoints
     /// </summary>
     /// <param name="endpoints">The route builder to mount onto.</param>
     /// <param name="prefix">URL prefix the dashboard is served under. Must begin with <c>/</c>. Defaults to <c>/surefire</c>.</param>
-    /// <param name="configure">Optional callback to override <see cref="SurefireDashboardOptions" /> defaults.</param>
     /// <returns>A convention builder over the entire dashboard route group.</returns>
     /// <remarks>
-    ///     Resolves <see cref="Surefire.IJobStore" />, <see cref="Surefire.IJobClient" />,
-    ///     <see cref="Surefire.SurefireOptions" />, and <see cref="TimeProvider" /> from DI.
+    ///     Requires <c>services.AddSurefireDashboard()</c> to be called during DI configuration.
     ///     The dashboard is unauthenticated by default; production deployments should chain
     ///     <c>.RequireAuthorization(...)</c> on the returned builder.
     /// </remarks>
-    [RequiresUnreferencedCode("Minimal API endpoint mapping reflects over delegate parameters.")]
-    [RequiresDynamicCode("Minimal API endpoint mapping reflects over delegate parameters.")]
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
-        string prefix = "/surefire",
-        Action<SurefireDashboardOptions>? configure = null)
+        string prefix = "/surefire")
     {
-        var options = new SurefireDashboardOptions();
-        configure?.Invoke(options);
+        var options = endpoints.ServiceProvider.GetService<SurefireDashboardOptions>()
+                      ?? throw new InvalidOperationException(
+                          "MapSurefireDashboard requires services.AddSurefireDashboard() to be called during DI configuration first.");
 
         var group = endpoints.MapGroup(prefix);
         var api = group.MapGroup("api");
@@ -152,9 +150,15 @@ public static class DashboardEndpoints
             async Task<Results<Ok<RunIdResponse>, ProblemHttpResult>> (string name, TriggerJobRequest? request,
                 IJobClient client, CancellationToken ct) =>
             {
-                object? args = request?.Args;
-                RunOptions? runOptions = null;
+                // The trigger payload arrives as a parsed JsonElement; pass its raw text directly
+                // to the AOT-safe TriggerAsync overload so no reflection-based serialization runs.
+                RunArguments? aotArgs = null;
+                if (request?.Args is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } argsElement)
+                {
+                    aotArgs = new() { Json = argsElement.GetRawText() };
+                }
 
+                RunOptions? runOptions = null;
                 if (request?.NotBefore is { } || request?.NotAfter is { } || request?.Priority is { } ||
                     request?.DeduplicationId is { })
                 {
@@ -169,9 +173,7 @@ public static class DashboardEndpoints
 
                 try
                 {
-                    var runId = runOptions is { }
-                        ? await client.TriggerAsync(name, args, runOptions, ct)
-                        : await client.TriggerAsync(name, args, cancellationToken: ct);
+                    var runId = await client.TriggerAsync(name, aotArgs, runOptions, ct);
                     return TypedResults.Ok(new RunIdResponse(runId.Id));
                 }
                 catch (RunConflictException ex)
@@ -320,7 +322,8 @@ public static class DashboardEndpoints
 
                     try
                     {
-                        logs.Add(JsonSerializer.Deserialize<JsonElement>(@event.Payload));
+                        using var doc = JsonDocument.Parse(@event.Payload);
+                        logs.Add(doc.RootElement.Clone());
                     }
                     catch (JsonException ex)
                     {
@@ -509,8 +512,6 @@ public static class DashboardEndpoints
         return group;
     }
 
-    private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
-
     private static async IAsyncEnumerable<SseItem<string>> StreamRunEventsAsync(IJobClient client, string runId,
         long sinceEventId, TimeProvider timeProvider, [EnumeratorCancellation] CancellationToken ct)
     {
@@ -535,7 +536,7 @@ public static class DashboardEndpoints
 
                     if (winner != pendingMoveNext)
                     {
-                        yield return new SseItem<string>(string.Empty, "keepalive");
+                        yield return new(string.Empty, "keepalive");
                         continue;
                     }
                 }
@@ -547,13 +548,13 @@ public static class DashboardEndpoints
 
                 var evt = enumerator.Current;
                 pendingMoveNext = null;
-                yield return new SseItem<string>(evt.Payload, MapEventType(evt.EventType))
+                yield return new(evt.Payload, MapEventType(evt.EventType))
                 {
                     EventId = evt.Id.ToString(CultureInfo.InvariantCulture)
                 };
             }
 
-            yield return new SseItem<string>("{}", "done");
+            yield return new("{}", "done");
         }
         finally
         {
@@ -563,7 +564,13 @@ public static class DashboardEndpoints
             if (pendingMoveNext is { } pending)
             {
                 enumeratorCts.Cancel();
-                try { await pending; } catch { }
+                try
+                {
+                    await pending;
+                }
+                catch
+                {
+                }
             }
         }
     }
@@ -601,14 +608,14 @@ public static class DashboardEndpoints
         // which gives a useful subtree under the cap. With descending, the page is dominated by
         // deep leaves whose parents aren't visible and would render at the wrong depth.
         var descendantsPage = await store.GetRunsAsync(
-            new RunFilter
+            new()
             {
                 RootRunId = rootId,
                 OrderBy = RunOrderBy.CreatedAt,
                 Direction = RunOrderDirection.Ascending
             },
-            skip: 0,
-            take: maxRuns,
+            0,
+            maxRuns,
             cancellationToken);
 
         // Bucket descendants by parent id for O(N) BFS lookups. Empty string keys the
@@ -680,7 +687,7 @@ public static class DashboardEndpoints
         }
 
         var hasRootRow = focus.Id == rootId
-            || (ancestors.Count > 0 && ancestors[0].Id == rootId);
+                         || (ancestors.Count > 0 && ancestors[0].Id == rootId);
         var totalCount = (hasRootRow ? 1 : 0) + descendantsPage.TotalCount;
         var truncated = totalCount > runs.Count;
 
@@ -733,7 +740,7 @@ public static class DashboardEndpoints
             }
         }
 
-        return new RunTreeResponse
+        return new()
         {
             RootId = rootId,
             Runs = runs.Select(r => RunResponse.From(r, depths[r.Id])).ToList(),

@@ -57,8 +57,13 @@ public abstract class ContentionConformanceTests : StoreConformanceBase
                         RootRunId = rootRunId
                     }, cancellationToken: linked.Token);
                 }
-                catch (OperationCanceledException) { }
-                catch (Exception ex) { failures.Add(ex); }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
 
                 await Task.Yield();
             }
@@ -86,11 +91,19 @@ public abstract class ContentionConformanceTests : StoreConformanceBase
                             NotBefore = run.NotBefore,
                             NodeName = node
                         }, linked.Token);
-                        if (ok.Transitioned) Interlocked.Increment(ref completed);
+                        if (ok.Transitioned)
+                        {
+                            Interlocked.Increment(ref completed);
+                        }
                     }
                 }
-                catch (OperationCanceledException) { }
-                catch (Exception ex) { failures.Add(ex); }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
             }
         })).ToArray();
 

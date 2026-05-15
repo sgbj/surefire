@@ -6,6 +6,8 @@ description: The built-in Surefire dashboard.
 ## Setup
 
 ```csharp
+builder.Services.AddSurefireDashboard();
+// ...
 app.MapSurefireDashboard();           // at /surefire
 app.MapSurefireDashboard("/admin");   // custom prefix
 ```
@@ -15,7 +17,7 @@ The dashboard is embedded in the `Surefire.Dashboard` package, with no extra fil
 Pass a `configure` callback to override defaults:
 
 ```csharp
-app.MapSurefireDashboard(configure: options =>
+builder.Services.AddSurefireDashboard(options =>
 {
     options.MaxTreeRuns = 100_000; // cap the run tree response (default: 50_000)
 });
@@ -122,7 +124,7 @@ POST  /api/runs/lookup                              # refresh many runs by id (J
 GET   /api/runs/{id}                                # get a single run
 GET   /api/runs/{id}/logs                           # get parsed log events
 GET   /api/runs/{id}/stream                         # live logs & progress (SSE)
-GET   /api/runs/{id}/tree                           # full run tree (flat list, depth populated)
+GET   /api/runs/{id}/tree                           # run tree
 POST  /api/runs/{id}/cancel                         # cancel a running job
 POST  /api/runs/{id}/rerun                          # re-run a completed run
 GET   /api/queues                                   # list all queues

@@ -3,10 +3,9 @@
 
     <PropertyGroup>
         <GenerateDocumentationFile>false</GenerateDocumentationFile>
-        <!-- Tests aren't trimmed or AOT-published, so the trim/AOT analyzers add noise without
-             protecting anything. Match what ASP.NET Core / EF Core do in their test trees. -->
         <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
         <EnableAotAnalyzer>false</EnableAotAnalyzer>
+        <InterceptorsNamespaces>$(InterceptorsNamespaces);Surefire.Generated</InterceptorsNamespaces>
     </PropertyGroup>
 
     <ItemGroup>
@@ -16,5 +15,16 @@
 
     <ItemGroup>
         <PackageReference Include="xunit.analyzers"/>
+    </ItemGroup>
+
+    <!--
+        Wire the Surefire source generator into every test project. Tests.SourceGeneration drives
+        the generator manually via CSharpGeneratorDriver, so it references the assembly directly
+        instead of as an analyzer.
+    -->
+    <ItemGroup Condition="'$(MSBuildProjectName)' != 'Surefire.Tests.SourceGeneration'">
+        <ProjectReference Include="$(MSBuildThisFileDirectory)..\src\Surefire.SourceGeneration\Surefire.SourceGeneration.csproj"
+                          OutputItemType="Analyzer"
+                          ReferenceOutputAssembly="false"/>
     </ItemGroup>
 </Project>

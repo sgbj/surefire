@@ -724,7 +724,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.Equal(earlyStart.Id, desc.Items[1].Id);
         // Both nulls land at the tail; order among them is store-dependent (tie-break by Id).
         var descTail = new HashSet<string> { desc.Items[2].Id, desc.Items[3].Id };
-        Assert.Equal(new HashSet<string> { unstartedA.Id, unstartedB.Id }, descTail);
+        Assert.Equal(new() { unstartedA.Id, unstartedB.Id }, descTail);
 
         var asc = await Store.GetRunsAsync(new()
         {
@@ -737,7 +737,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.Equal(earlyStart.Id, asc.Items[0].Id);
         Assert.Equal(lateStart.Id, asc.Items[1].Id);
         var ascTail = new HashSet<string> { asc.Items[2].Id, asc.Items[3].Id };
-        Assert.Equal(new HashSet<string> { unstartedA.Id, unstartedB.Id }, ascTail);
+        Assert.Equal(new() { unstartedA.Id, unstartedB.Id }, ascTail);
     }
 
     [Fact]
@@ -814,9 +814,9 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
             Direction = RunOrderDirection.Ascending
         };
 
-        var page1 = await Store.GetRunsAsync(filter, skip: 0, take: 4, ct);
-        var page2 = await Store.GetRunsAsync(filter, skip: 4, take: 4, ct);
-        var page3 = await Store.GetRunsAsync(filter, skip: 8, take: 4, ct);
+        var page1 = await Store.GetRunsAsync(filter, 0, 4, ct);
+        var page2 = await Store.GetRunsAsync(filter, 4, 4, ct);
+        var page3 = await Store.GetRunsAsync(filter, 8, 4, ct);
 
         var visited = page1.Items.Concat(page2.Items).Concat(page3.Items)
             .Select(r => r.Id).ToList();

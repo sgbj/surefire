@@ -12,10 +12,8 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class SurefireRedisExtensions
 {
     /// <summary>
-    ///     Configures Surefire to use Redis for both job storage and notifications.
-    ///     Resolves <see cref="IConnectionMultiplexer" /> from DI, typically registered by
-    ///     <c>builder.AddRedisClient("name")</c> (Aspire) or
-    ///     <c>services.AddSingleton&lt;IConnectionMultiplexer&gt;(...)</c>.
+    ///     Configures Surefire to use Redis for both job storage and notifications, resolving
+    ///     <see cref="IConnectionMultiplexer" /> from DI.
     /// </summary>
     public static SurefireOptions UseRedis(this SurefireOptions options)
         => options.UseRedis(static sp => sp.GetRequiredService<IConnectionMultiplexer>());

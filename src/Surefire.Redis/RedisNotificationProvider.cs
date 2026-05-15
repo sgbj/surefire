@@ -16,9 +16,6 @@ internal sealed class RedisNotificationProvider(
 
     private const int OutgoingQueueCapacity = MaxPublishBatch * 16;
 
-    // Coalesces identical (channel, message) pairs within a 2 ms window into a single PUBLISH;
-    // survivors flush in one IDatabase.CreateBatch pipeline so round-trip cost is a single
-    // socket write regardless of batch size.
     private static readonly TimeSpan PublishFlushInterval = TimeSpan.FromMilliseconds(2);
 
     private readonly Channel<DispatchWorkItem> _dispatchChannel =
@@ -28,8 +25,6 @@ internal sealed class RedisNotificationProvider(
             SingleWriter = false
         });
 
-    // Bounded+Wait applies backpressure to producers if publishing stalls, instead of growing
-    // the queue unbounded.
     private readonly Channel<OutgoingPublish> _outgoingChannel =
         Channel.CreateBounded<OutgoingPublish>(new BoundedChannelOptions(OutgoingQueueCapacity)
         {
@@ -48,8 +43,7 @@ internal sealed class RedisNotificationProvider(
 
     public async ValueTask DisposeAsync()
     {
-        // Complete the writer so the publish loop drains naturally and every enqueued
-        // notification is flushed; cancel dispatch only after, so in-flight flushes finish.
+        // Complete publishing before cancellation so queued notifications can flush.
         _outgoingChannel.Writer.TryComplete();
         if (_publishLoop is { } publishLoop)
         {
@@ -87,8 +81,6 @@ internal sealed class RedisNotificationProvider(
         _subscriber = connection.GetSubscriber();
         _cts = new();
         _dispatchLoop = DispatchLoopAsync(_cts.Token);
-        // Runs under CancellationToken.None so DisposeAsync drains via channel completion
-        // without losing queued publishes.
         _publishLoop = PublishLoopAsync(CancellationToken.None);
         return Task.CompletedTask;
     }
@@ -213,8 +205,6 @@ internal sealed class RedisNotificationProvider(
             return;
         }
 
-        // Pipeline every publish through one IBatch: collect tasks, Execute flushes them
-        // together, WhenAll waits for ack. One network round trip amortized across the batch.
         var redisBatch = connection.GetDatabase().CreateBatch();
         var tasks = new Task[batch.Count];
         for (var i = 0; i < batch.Count; i++)

@@ -17,6 +17,9 @@ public sealed class RuntimeContractPendingTests
         SurefireOptions options,
         ILogger<JobClient> logger)
     {
+        // Bypasses AddSurefire/Freeze, which would otherwise attach the JIT reflection resolver.
+        TestSerializerOptions.AttachReflectionResolver(options);
+
         var activeRuns = new ActiveRunTracker();
         return new(
             store,

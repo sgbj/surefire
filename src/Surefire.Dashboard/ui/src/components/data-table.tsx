@@ -80,7 +80,7 @@ export function DataTable<TData, TValue>({
     ? rest.onPaginationChange
     : setClientPagination;
 
-  // eslint-disable-next-line react-hooks/incompatible-library
+  // eslint-disable-next-line react-hooks/incompatible-library -- useReactTable manages its own state; React Compiler memoization is unnecessary.
   const table = useReactTable({
     data,
     columns,

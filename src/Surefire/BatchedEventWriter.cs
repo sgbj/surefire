@@ -12,11 +12,9 @@ namespace Surefire;
 ///     bypass this path; only standalone appends (progress reports, stream output, log events,
 ///     batch completion side-events) flow through here.
 ///     <para>
-///         Flush durability is tracked per-run, not globally. A permanent failure on one run's
-///         events poisons only that run's <see cref="FlushRunAsync" />. Sibling runs sharing the
-///         same writer keep flushing normally. The sticky-within-run semantics stay intact: once a
-///         run's events have permanently failed, every subsequent <see cref="FlushRunAsync" /> for
-///         that run throws until <see cref="DropRunState" /> is called on terminal.
+///         Flush durability is tracked per run. A permanent event write failure affects only that
+///         run's <see cref="FlushRunAsync" />. Sibling runs sharing the same writer keep flushing
+///         normally.
 ///     </para>
 /// </summary>
 internal sealed partial class BatchedEventWriter(
@@ -155,9 +153,7 @@ internal sealed partial class BatchedEventWriter(
             TaskCompletionSource tcs;
             lock (state.Lock)
             {
-                // Sticky-within-run: a failure in the middle of a run's event stream means
-                // downstream readers can never see a consistent prefix, so every subsequent flush
-                // for this run observes the error until the state is dropped on terminal.
+                // Keep reporting a permanent write failure for this run until its state is dropped.
                 if (state.Error is { } err)
                 {
                     err.Throw();
@@ -247,11 +243,8 @@ internal sealed partial class BatchedEventWriter(
         }
         finally
         {
-            // Complete the writer (unblocks producers waiting on capacity) then drain queued
-            // events under a fresh ShutdownTimeout-bounded CTS, independent of stoppingToken, so
-            // accepted events aren't dropped just because the host shutdown deadline already fired.
-            // A wedged store burns through the budget and FlushBatchAsync surfaces the timeout
-            // per-run via the sticky error capture.
+            // Drain accepted events with the shutdown timeout instead of dropping them when the
+            // host cancellation token is already signaled.
             _channel.Writer.TryComplete();
             using var drainCts = new CancellationTokenSource(options.ShutdownTimeout);
             while (reader.TryRead(out var item))

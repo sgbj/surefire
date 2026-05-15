@@ -1,6 +1,17 @@
-import {useMutation, useQuery, useQueryClient,} from "@tanstack/react-query";
-import {Link, useNavigate, useParams} from "react-router";
-import {api, type JobRun, JobStatus, LogLevelLabels, type RunLogEntry} from "@/lib/api";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { Link, useNavigate, useParams } from "react-router";
+import {
+  api,
+  type JobRun,
+  JobStatus,
+  LogLevelLabels,
+  type RunLogEntry,
+} from "@/lib/api";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -12,26 +23,47 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import {Button} from "@/components/ui/button";
-import {Skeleton} from "@/components/ui/skeleton";
-import {StatusBadge} from "@/components/status-badge";
-import {Progress} from "@/components/ui/progress";
-import {formatDate, formatLogTime} from "@/lib/format";
-import {useLiveDuration} from "@/hooks/use-live-duration";
-import {useStickToBottom} from "@/hooks/use-stick-to-bottom";
-import {Alert, AlertDescription} from "@/components/ui/alert";
-import {Ban, ChevronDown, CircleAlert, RotateCcw} from "lucide-react";
-import {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,} from "react";
-import {toast} from "sonner";
-import {type TraceItem, TraceView} from "@/components/trace-view";
-import {useVirtualizer} from "@tanstack/react-virtual";
-import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
-import {PageShell, PageBody} from "@/components/page-shell";
-import {TopBarActions, TopBarBadge} from "@/components/topbar-slot";
-import {DtDd} from "@/components/dt-dd";
-import {ResizableHandle, ResizablePanel, ResizablePanelGroup} from "@/components/ui/resizable";
-import {useMediaQuery} from "@/hooks/use-media-query";
-import {cn} from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { StatusBadge } from "@/components/status-badge";
+import { Progress } from "@/components/ui/progress";
+import { formatDate, formatLogTime } from "@/lib/format";
+import { useLiveDuration } from "@/hooks/use-live-duration";
+import { useTailFollow } from "@/hooks/use-tail-follow";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Ban, ChevronDown, CircleAlert, RotateCcw } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { toast } from "sonner";
+import {
+  type TraceItem,
+  TraceView,
+  type TraceScrollState,
+} from "@/components/trace-view";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { PageShell, PageBody } from "@/components/page-shell";
+import { TopBarActions, TopBarBadge } from "@/components/topbar-slot";
+import { DtDd } from "@/components/dt-dd";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import { cn } from "@/lib/utils";
 
 function formatJsonDisplay(json: string): string {
   try {
@@ -86,13 +118,13 @@ function parseInputStreamItem(
 
   if (typeof payloadCandidate === "string") {
     try {
-      return {param: paramCandidate, value: JSON.parse(payloadCandidate)};
+      return { param: paramCandidate, value: JSON.parse(payloadCandidate) };
     } catch {
-      return {param: paramCandidate, value: payloadCandidate};
+      return { param: paramCandidate, value: payloadCandidate };
     }
   }
 
-  return {param: paramCandidate, value: payloadCandidate ?? null};
+  return { param: paramCandidate, value: payloadCandidate ?? null };
 }
 
 function parseAttemptFailureItem(raw: string): AttemptFailureItem | null {
@@ -122,25 +154,28 @@ function pruneRunMap<T>(source: Record<string, T>, allowedRunIds: Set<string>) {
 }
 
 export function RunDetailPage() {
-  const {id} = useParams();
+  const { id } = useParams();
   const runKey = id ?? "";
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const {data: run, isError} = useQuery({
+  const { data: run, isError } = useQuery({
     queryKey: ["run", id],
     queryFn: () => api.getRun(id!),
+    placeholderData: keepPreviousData,
     refetchInterval: (query) => {
       if (query.state.error) return false;
       const s = query.state.data?.status;
       return s === JobStatus.Pending || s === JobStatus.Running ? 5000 : false;
     },
   });
-  const isActive = run?.status === JobStatus.Pending || run?.status === JobStatus.Running;
+  const isActive =
+    run?.status === JobStatus.Pending || run?.status === JobStatus.Running;
 
-  const {data: tree} = useQuery({
+  const { data: tree } = useQuery({
     queryKey: ["run-tree", id],
     queryFn: () => api.getRunTree(id!),
     enabled: !!id,
+    placeholderData: keepPreviousData,
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data) return TREE_REFETCH_INTERVAL_MS;
@@ -199,7 +234,7 @@ export function RunDetailPage() {
     const stack: JobRun[] = [...roots].reverse();
     while (stack.length > 0) {
       const node = stack.pop()!;
-      result.push({kind: "run", ...node});
+      result.push({ kind: "run", ...node });
       const children = childrenByParent.get(node.id);
       if (children) {
         for (let i = children.length - 1; i >= 0; i--) {
@@ -272,7 +307,7 @@ export function RunDetailPage() {
   );
 
   const setCurrentLogFilter = (value: number | null) => {
-    setLogFilterByRun((prev) => ({...prev, [runKey]: value}));
+    setLogFilterByRun((prev) => ({ ...prev, [runKey]: value }));
   };
 
   const filteredLogs = useMemo(
@@ -291,10 +326,15 @@ export function RunDetailPage() {
   // scrollMargin = its host element's offset within the container, otherwise it
   // renders the wrong range once the user scrolls past earlier sections.
   const bodyScrollRef = useRef<HTMLDivElement>(null);
+  const bodyContentRef = useRef<HTMLDivElement>(null);
   const inputContentRef = useRef<HTMLDivElement>(null);
   const outputContentRef = useRef<HTMLDivElement>(null);
   const logsContentRef = useRef<HTMLDivElement>(null);
-  const [scrollMargins, setScrollMargins] = useState({input: 0, output: 0, logs: 0});
+  const [scrollMargins, setScrollMargins] = useState({
+    input: 0,
+    output: 0,
+    logs: 0,
+  });
 
   // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
   const logVirtualizer = useVirtualizer({
@@ -342,7 +382,11 @@ export function RunDetailPage() {
         output: compute(outputContentRef.current),
         logs: compute(logsContentRef.current),
       };
-      if (prev.input === next.input && prev.output === next.output && prev.logs === next.logs) {
+      if (
+        prev.input === next.input &&
+        prev.output === next.output &&
+        prev.logs === next.logs
+      ) {
         return prev;
       }
       return next;
@@ -353,27 +397,17 @@ export function RunDetailPage() {
     updateScrollMargins();
   });
 
-  useStickToBottom({
+  useTailFollow({
     scrollElement: bodyScrollRef.current,
-    virtualizer: logVirtualizer,
-    count: filteredLogs.length,
-  });
-  useStickToBottom({
-    scrollElement: bodyScrollRef.current,
-    virtualizer: inputVirtualizer,
-    count: inputItems.length,
-  });
-  useStickToBottom({
-    scrollElement: bodyScrollRef.current,
-    virtualizer: outputVirtualizer,
-    count: outputItems.length,
+    contentElementRef: bodyContentRef,
+    followKey: isActive ? runKey : undefined,
   });
 
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(id!),
     onSuccess: () => {
-      queryClient.invalidateQueries({queryKey: ["run", id]});
-      queryClient.invalidateQueries({queryKey: ["run-tree", id]});
+      queryClient.invalidateQueries({ queryKey: ["run", id] });
+      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
       toast.success("Run Canceled");
     },
     onError: () => toast.error("Failed to cancel run"),
@@ -542,15 +576,15 @@ export function RunDetailPage() {
       }
     });
     es.addEventListener("status", () => {
-      queryClient.invalidateQueries({queryKey: ["run", id]});
-      queryClient.invalidateQueries({queryKey: ["run-tree", id]});
+      queryClient.invalidateQueries({ queryKey: ["run", id] });
+      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
     });
     es.addEventListener("done", () => {
       doneReceived = true;
       es.close();
-      queryClient.invalidateQueries({queryKey: ["run", id]});
-      queryClient.invalidateQueries({queryKey: ["run-tree", id]});
-      queryClient.invalidateQueries({queryKey: ["runs", "job"]});
+      queryClient.invalidateQueries({ queryKey: ["run", id] });
+      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
+      queryClient.invalidateQueries({ queryKey: ["runs", "job"] });
     });
     es.onerror = () => {
       if (doneReceived) {
@@ -563,11 +597,10 @@ export function RunDetailPage() {
           .getRunLogs(id)
           .then((fetched) => {
             if (!stale && fetched.length > 0) {
-              setLogsByRun((prev) => ({...prev, [runKey]: fetched}));
+              setLogsByRun((prev) => ({ ...prev, [runKey]: fetched }));
             }
           })
-          .catch(() => {
-          });
+          .catch(() => {});
       }
     };
     return () => {
@@ -580,9 +613,14 @@ export function RunDetailPage() {
     };
   }, [id, queryClient, runKey, scheduleFlush, shouldProcessEvent]);
 
-  const inputHeader = inputItems.length === 0 ? "" : `Input (${inputItems.length})`;
+  const inputHeader =
+    inputItems.length === 0 ? "" : `Input (${inputItems.length})`;
 
   const traceScrollRef = useRef<HTMLDivElement>(null);
+  const traceScrollStateRef = useRef<TraceScrollState>({
+    rootId: null,
+    scrollTop: 0,
+  });
 
   const duration = useLiveDuration(run?.startedAt, run?.completedAt);
   const progress = sseProgress ?? run?.progress ?? 0;
@@ -599,13 +637,18 @@ export function RunDetailPage() {
   }, []);
   const persistSplit = useCallback((layout: Record<string, number>) => {
     try {
-      localStorage.setItem("surefire:run-detail:split:v3", JSON.stringify(layout));
+      localStorage.setItem(
+        "surefire:run-detail:split:v3",
+        JSON.stringify(layout),
+      );
     } catch {
       // storage quota or disabled
     }
   }, []);
 
-  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
+  const [collapsedSections, setCollapsedSections] = useState<
+    Record<string, boolean>
+  >(() => {
     if (typeof window === "undefined") return {};
     try {
       const raw = localStorage.getItem("surefire:run-detail:collapsed:v1");
@@ -616,9 +659,12 @@ export function RunDetailPage() {
   });
   const toggleSection = useCallback((key: string) => {
     setCollapsedSections((prev) => {
-      const next = {...prev, [key]: !prev[key]};
+      const next = { ...prev, [key]: !prev[key] };
       try {
-        localStorage.setItem("surefire:run-detail:collapsed:v1", JSON.stringify(next));
+        localStorage.setItem(
+          "surefire:run-detail:collapsed:v1",
+          JSON.stringify(next),
+        );
       } catch {
         // storage quota or disabled
       }
@@ -631,7 +677,7 @@ export function RunDetailPage() {
       <PageShell>
         <PageBody>
           <Alert variant="destructive">
-            <CircleAlert/>
+            <CircleAlert />
             <AlertDescription>Failed to load run</AlertDescription>
           </Alert>
         </PageBody>
@@ -641,15 +687,15 @@ export function RunDetailPage() {
     return (
       <PageShell>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
-          {Array.from({length: 6}).map((_, i) => (
+          {Array.from({ length: 6 }).map((_, i) => (
             <div key={i}>
-              <Skeleton className="h-3 w-16 mb-1.5 rounded-sm"/>
-              <Skeleton className="h-4 w-24 rounded-sm"/>
+              <Skeleton className="h-3 w-16 mb-1.5 rounded-sm" />
+              <Skeleton className="h-4 w-24 rounded-sm" />
             </div>
           ))}
         </div>
         <PageBody>
-          <Skeleton className="h-72 w-full rounded-sm"/>
+          <Skeleton className="h-72 w-full rounded-sm" />
         </PageBody>
       </PageShell>
     );
@@ -663,15 +709,19 @@ export function RunDetailPage() {
     <div
       ref={traceScrollRef}
       className="h-full overflow-auto"
-      style={{scrollPaddingTop: "3rem"}}
+      style={{ scrollPaddingTop: "3rem" }}
     >
       {traceItems.length > 0 ? (
         <TraceView
           items={traceItems}
           currentRunId={id!}
+          rootId={tree?.rootId}
           scrollContainerRef={traceScrollRef}
+          scrollStateRef={traceScrollStateRef}
           header={
-            <span className="text-base font-semibold tracking-tight text-foreground">{traceHeader}</span>
+            <span className="text-base font-semibold tracking-tight text-foreground">
+              {traceHeader}
+            </span>
           }
         />
       ) : (
@@ -687,7 +737,6 @@ export function RunDetailPage() {
           <SectionHeading
             sectionKey="errors"
             title={`Errors${failureRows.length > 0 ? ` (${failureRows.length})` : ""}`}
-            tone="danger"
             collapsed={collapsedSections.errors}
             onToggle={toggleSection}
           />
@@ -702,45 +751,56 @@ export function RunDetailPage() {
                 {run.reason && (
                   <div
                     className={cn(
-                      "px-6 py-3 text-sm whitespace-pre-wrap break-words",
+                      "px-6 py-3 text-sm whitespace-pre-wrap wrap-break-word",
                       failureRows.length > 0 && "border-b border-border",
                     )}
                   >
                     {run.reason}
                   </div>
                 )}
-                {failureRows.map(({failure, key}, index) => {
+                {failureRows.map(({ failure, key }, index) => {
                   const isExpanded = expandedFailureRow === key;
                   const hasStackTrace = Boolean(failure.stackTrace);
                   const headline = [failure.exceptionType, failure.message]
                     .filter(Boolean)
                     .join(": ");
                   return (
-                    <div key={key} className={index < failureRows.length - 1 ? "border-b border-border" : ""}>
+                    <div
+                      key={key}
+                      className={
+                        index < failureRows.length - 1
+                          ? "border-b border-border"
+                          : ""
+                      }
+                    >
                       <button
                         type="button"
                         onClick={
                           hasStackTrace
                             ? () =>
-                              setExpandedFailureRow((prev) =>
-                                prev === key ? null : key,
-                              )
+                                setExpandedFailureRow((prev) =>
+                                  prev === key ? null : key,
+                                )
                             : undefined
                         }
                         disabled={!hasStackTrace}
                         className={cn(
                           "w-full grid items-start text-left text-sm transition-colors",
-                          hasStackTrace ? "hover:bg-muted/40 cursor-pointer" : "cursor-default",
+                          hasStackTrace
+                            ? "hover:bg-muted/40 cursor-pointer"
+                            : "cursor-default",
                         )}
-                        style={{gridTemplateColumns: "var(--errors-cols)"}}
+                        style={{ gridTemplateColumns: "var(--errors-cols)" }}
                       >
                         <div className="px-2 pl-6 py-2.5 text-muted-foreground tnum truncate">
                           #{failure.attempt}
                         </div>
                         <div className="px-2 py-2.5 text-muted-foreground tnum truncate">
-                          {failure.occurredAt ? formatDate(failure.occurredAt) : ""}
+                          {failure.occurredAt
+                            ? formatDate(failure.occurredAt)
+                            : ""}
                         </div>
-                        <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap break-words">
+                        <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap wrap-break-word">
                           {headline}
                         </div>
                         <div className="px-2 pr-6 py-2.5">
@@ -777,7 +837,7 @@ export function RunDetailPage() {
             onToggle={toggleSection}
           />
           {!collapsedSections.arguments && (
-            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap break-words font-mono">
+            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap wrap-break-word font-mono">
               {formatJsonDisplay(run.arguments)}
             </pre>
           )}
@@ -793,7 +853,7 @@ export function RunDetailPage() {
             onToggle={toggleSection}
           />
           {!collapsedSections.result && (
-            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap break-words font-mono">
+            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap wrap-break-word font-mono">
               {formatJsonDisplay(run.result)}
             </pre>
           )}
@@ -813,7 +873,7 @@ export function RunDetailPage() {
               <div
                 ref={inputContentRef}
                 className="relative"
-                style={{height: `${inputVirtualizer.getTotalSize()}px`}}
+                style={{ height: `${inputVirtualizer.getTotalSize()}px` }}
               >
                 {inputVirtualizer.getVirtualItems().map((virtualItem) => {
                   const item = inputItems[virtualItem.index];
@@ -822,12 +882,14 @@ export function RunDetailPage() {
                       key={virtualItem.index}
                       ref={inputVirtualizer.measureElement}
                       data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap break-words"
+                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
                       style={{
                         transform: `translateY(${virtualItem.start - scrollMargins.input}px)`,
                       }}
                     >
-                      <span className="text-muted-foreground">{item.param}:</span>{" "}
+                      <span className="text-muted-foreground">
+                        {item.param}:
+                      </span>{" "}
                       {JSON.stringify(item.value)}
                     </div>
                   );
@@ -851,7 +913,7 @@ export function RunDetailPage() {
               <div
                 ref={outputContentRef}
                 className="relative"
-                style={{height: `${outputVirtualizer.getTotalSize()}px`}}
+                style={{ height: `${outputVirtualizer.getTotalSize()}px` }}
               >
                 {outputVirtualizer.getVirtualItems().map((virtualItem) => {
                   const item = outputItems[virtualItem.index];
@@ -860,7 +922,7 @@ export function RunDetailPage() {
                       key={virtualItem.index}
                       ref={outputVirtualizer.measureElement}
                       data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap break-words"
+                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
                       style={{
                         transform: `translateY(${virtualItem.start - scrollMargins.output}px)`,
                       }}
@@ -890,9 +952,8 @@ export function RunDetailPage() {
                     setCurrentLogFilter(v === "all" ? null : Number(v))
                   }
                 >
-                  <SelectTrigger
-                    className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground gap-0.5 [&_svg]:size-3">
-                    <SelectValue/>
+                  <SelectTrigger className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground gap-0.5 [&_svg]:size-3">
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All</SelectItem>
@@ -912,7 +973,7 @@ export function RunDetailPage() {
               <div
                 ref={logsContentRef}
                 className="relative"
-                style={{height: `${logVirtualizer.getTotalSize()}px`}}
+                style={{ height: `${logVirtualizer.getTotalSize()}px` }}
               >
                 {logVirtualizer.getVirtualItems().map((virtualItem) => {
                   const log = filteredLogs[virtualItem.index];
@@ -921,7 +982,7 @@ export function RunDetailPage() {
                       key={virtualItem.index}
                       ref={logVirtualizer.measureElement}
                       data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap break-words"
+                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
                       style={{
                         transform: `translateY(${virtualItem.start - scrollMargins.logs}px)`,
                       }}
@@ -934,7 +995,7 @@ export function RunDetailPage() {
                       </span>{" "}
                       <span>{log.message}</span>
                       {log.exception && (
-                        <pre className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">
+                        <pre className="mt-1 whitespace-pre-wrap wrap-break-word text-muted-foreground">
                           {log.exception}
                         </pre>
                       )}
@@ -952,14 +1013,14 @@ export function RunDetailPage() {
   return (
     <PageShell>
       <TopBarBadge>
-        <StatusBadge status={run.status}/>
+        <StatusBadge status={run.status} />
       </TopBarBadge>
       <TopBarActions>
         {isActive && (
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button variant="outline" size="sm">
-                <Ban className="size-3.5"/>
+                <Ban className="size-3.5" />
                 Cancel
               </Button>
             </AlertDialogTrigger>
@@ -987,7 +1048,7 @@ export function RunDetailPage() {
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button variant="outline" size="sm">
-                <RotateCcw className="size-3.5"/>
+                <RotateCcw className="size-3.5" />
                 Re-run
               </Button>
             </AlertDialogTrigger>
@@ -1016,65 +1077,81 @@ export function RunDetailPage() {
       {run.status === JobStatus.Running && (
         <Progress
           value={progress > 0 ? progress * 100 : null}
-          className="h-[2px] rounded-none"
+          className="h-0.5 rounded-none"
         />
       )}
 
       {isWideViewport ? (
         <>
-          <RunMetaStrip run={run} duration={duration}/>
+          <RunMetaStrip run={run} duration={duration} />
           <ResizablePanelGroup
             orientation="horizontal"
             defaultLayout={persistedSplit}
             onLayoutChanged={persistSplit}
             className="flex-1"
           >
-            <ResizablePanel id="trace" defaultSize="36%" minSize="20%" maxSize="70%">
+            <ResizablePanel
+              id="trace"
+              defaultSize="36%"
+              minSize="20%"
+              maxSize="70%"
+            >
               {traceContentDesktop}
             </ResizablePanel>
-            <ResizableHandle/>
+            <ResizableHandle />
             <ResizablePanel id="content" defaultSize="64%" minSize="30%">
-              <div ref={bodyScrollRef} className="h-full overflow-auto">
-                {bodyContent}
+              <div
+                ref={bodyScrollRef}
+                className="h-full overflow-auto"
+                style={{ overflowAnchor: "none" }}
+              >
+                <div ref={bodyContentRef}>{bodyContent}</div>
               </div>
             </ResizablePanel>
           </ResizablePanelGroup>
         </>
       ) : (
-        <div ref={bodyScrollRef} className="flex-1 overflow-auto min-h-0">
-          <RunMetaStrip run={run} duration={duration}/>
-          <section className="border-t border-border first:border-t-0">
-            {!collapsedSections.trace && traceItems.length > 0 ? (
-              <TraceView
-                items={traceItems}
-                currentRunId={id!}
-                scrollContainerRef={bodyScrollRef}
-                header={
-                  <button
-                    type="button"
-                    onClick={() => toggleSection("trace")}
-                    className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground cursor-pointer"
-                  >
-                    <ChevronDown className="size-3.5 text-muted-foreground"/>
-                    {traceHeader}
-                  </button>
-                }
-              />
-            ) : (
-              <>
-                <SectionHeading
-                  sectionKey="trace"
-                  title={traceHeader}
-                  collapsed={collapsedSections.trace}
-                  onToggle={toggleSection}
+        <div
+          ref={bodyScrollRef}
+          className="flex-1 overflow-auto min-h-0"
+          style={{ overflowAnchor: "none" }}
+        >
+          <div ref={bodyContentRef}>
+            <RunMetaStrip run={run} duration={duration} />
+            <section className="border-b border-border">
+              {!collapsedSections.trace && traceItems.length > 0 ? (
+                <TraceView
+                  items={traceItems}
+                  currentRunId={id!}
+                  rootId={tree?.rootId}
+                  scrollContainerRef={bodyScrollRef}
+                  manageFocusScroll={false}
+                  onHeaderClick={() => toggleSection("trace")}
+                  header={
+                    <span className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
+                      <ChevronDown className="size-3.5 text-muted-foreground" />
+                      {traceHeader}
+                    </span>
+                  }
                 />
-                {!collapsedSections.trace && (
-                  <div className="eyebrow py-8 text-center">no related runs</div>
-                )}
-              </>
-            )}
-          </section>
-          {bodyContent}
+              ) : (
+                <>
+                  <SectionHeading
+                    sectionKey="trace"
+                    title={traceHeader}
+                    collapsed={collapsedSections.trace}
+                    onToggle={toggleSection}
+                  />
+                  {!collapsedSections.trace && (
+                    <div className="eyebrow py-8 text-center">
+                      no related runs
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+            {bodyContent}
+          </div>
         </div>
       )}
     </PageShell>
@@ -1082,16 +1159,14 @@ export function RunDetailPage() {
 }
 
 function SectionHeading({
-                          sectionKey,
-                          title,
-                          tone = "default",
-                          collapsed,
-                          onToggle,
-                          extras,
-                        }: {
+  sectionKey,
+  title,
+  collapsed,
+  onToggle,
+  extras,
+}: {
   sectionKey: string;
   title: React.ReactNode;
-  tone?: "default" | "danger";
   collapsed: boolean | undefined;
   onToggle: (key: string) => void;
   extras?: React.ReactNode;
@@ -1117,12 +1192,7 @@ function SectionHeading({
           collapsed && "-rotate-90",
         )}
       />
-      <span
-        className={cn(
-          "text-base font-semibold tracking-tight",
-          tone === "danger" ? "text-status-failed" : "text-foreground",
-        )}
-      >
+      <span className="text-base font-semibold tracking-tight text-foreground">
         {title}
       </span>
       {extras && (
@@ -1164,7 +1234,7 @@ interface RunMetaStripProps {
   duration: string;
 }
 
-function RunMetaStrip({run, duration}: RunMetaStripProps) {
+function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   const items: MetaItem[] = [];
 
   items.push({
@@ -1181,19 +1251,35 @@ function RunMetaStrip({run, duration}: RunMetaStripProps) {
   });
 
   if (run.startedAt) {
-    items.push({label: "Duration", value: duration, mono: true});
+    items.push({ label: "Duration", value: duration, mono: true });
   }
 
-  items.push({label: "Created", value: formatDate(run.createdAt), mono: true});
+  items.push({
+    label: "Created",
+    value: formatDate(run.createdAt),
+    mono: true,
+  });
 
   if (run.startedAt) {
-    items.push({label: "Started", value: formatDate(run.startedAt), mono: true});
+    items.push({
+      label: "Started",
+      value: formatDate(run.startedAt),
+      mono: true,
+    });
   }
   if (run.completedAt) {
-    items.push({label: "Completed", value: formatDate(run.completedAt), mono: true});
+    items.push({
+      label: "Completed",
+      value: formatDate(run.completedAt),
+      mono: true,
+    });
   }
   if (run.canceledAt) {
-    items.push({label: "Canceled", value: formatDate(run.canceledAt), mono: true});
+    items.push({
+      label: "Canceled",
+      value: formatDate(run.canceledAt),
+      mono: true,
+    });
   }
 
   if (run.nodeName) {
@@ -1212,9 +1298,9 @@ function RunMetaStrip({run, duration}: RunMetaStripProps) {
   }
 
   if (run.attempt > 1) {
-    items.push({label: "Attempt", value: run.attempt, mono: true});
+    items.push({ label: "Attempt", value: run.attempt, mono: true });
   }
-  items.push({label: "Priority", value: run.priority, mono: true});
+  items.push({ label: "Priority", value: run.priority, mono: true });
 
   if (run.parentRunId) {
     items.push({
@@ -1258,10 +1344,18 @@ function RunMetaStrip({run, duration}: RunMetaStripProps) {
     });
   }
   if (run.notBefore && run.notBefore !== run.createdAt) {
-    items.push({label: "Not before", value: formatDate(run.notBefore), mono: true});
+    items.push({
+      label: "Not before",
+      value: formatDate(run.notBefore),
+      mono: true,
+    });
   }
   if (run.notAfter) {
-    items.push({label: "Not after", value: formatDate(run.notAfter), mono: true});
+    items.push({
+      label: "Not after",
+      value: formatDate(run.notAfter),
+      mono: true,
+    });
   }
 
   return (

@@ -173,12 +173,12 @@ public sealed class ConfigurationValidationTests
     [Fact]
     public void JobRegistry_CaseDivergentJobNames_Throws()
     {
-        using var provider = new ServiceCollection().BuildServiceProvider();
+        using var provider = BuildProvider();
         var registry = new JobRegistry();
-        registry.AddOrUpdate("MyJob", () => 1, provider);
+        registry.AddOrUpdate(NoOpDescriptor("MyJob"), provider);
 
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            registry.AddOrUpdate("myjob", () => 2, provider));
+            registry.AddOrUpdate(NoOpDescriptor("myjob"), provider));
 
         Assert.Contains("differ only in case", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -187,12 +187,33 @@ public sealed class ConfigurationValidationTests
     public void JobRegistry_ExactDuplicateJobName_UpdatesHandler()
     {
         // Re-registering the exact same name is a designed override path (handler hot-swap).
-        using var provider = new ServiceCollection().BuildServiceProvider();
+        using var provider = BuildProvider();
         var registry = new JobRegistry();
-        registry.AddOrUpdate("MyJob", () => 1, provider);
-        registry.AddOrUpdate("MyJob", () => 2, provider);
+        registry.AddOrUpdate(NoOpDescriptor("MyJob"), provider);
+        registry.AddOrUpdate(NoOpDescriptor("MyJob"), provider);
 
         Assert.True(registry.TryGet("MyJob", out _));
+    }
+
+    private static ServiceProvider BuildProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddSurefire();
+        return services.BuildServiceProvider();
+    }
+
+    private static JobRegistrationDescriptor NoOpDescriptor(string name)
+    {
+        var handler = () => 0;
+        return new()
+        {
+            Name = name,
+            Handler = handler,
+            Parameters = [],
+            Invoke = static (_, h) => ((Func<int>)h)(),
+            ReturnKind = ReturnKind.Scalar,
+            ReturnType = typeof(int)
+        };
     }
 
     private static JobBuilder CreateJobBuilder() =>

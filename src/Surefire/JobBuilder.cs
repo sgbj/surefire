@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
 
@@ -7,6 +8,10 @@ namespace Surefire;
 /// </summary>
 public sealed class JobBuilder
 {
+    private const string CallbackReflectionMessage =
+        "Registering a lifecycle callback from a Delegate inspects its parameters and return type " +
+        "via reflection. Build a CallbackDescriptor instead when publishing with trimming or Native AOT.";
+
     private readonly Action _sync;
 
     internal JobBuilder(JobDefinition definition, Action sync)
@@ -16,10 +21,10 @@ public sealed class JobBuilder
     }
 
     internal JobDefinition Definition { get; }
-    internal List<Type> FilterTypes { get; } = [];
-    internal List<Delegate> OnSuccessCallbacks { get; } = [];
-    internal List<Delegate> OnRetryCallbacks { get; } = [];
-    internal List<Delegate> OnDeadLetterCallbacks { get; } = [];
+    internal List<Func<IServiceProvider, IJobFilter>> FilterFactories { get; } = [];
+    internal List<CompiledCallback> OnSuccessCallbacks { get; } = [];
+    internal List<CompiledCallback> OnRetryCallbacks { get; } = [];
+    internal List<CompiledCallback> OnDeadLetterCallbacks { get; } = [];
 
     /// <summary>
     ///     Sets a cron expression for scheduled execution.
@@ -226,54 +231,50 @@ public sealed class JobBuilder
     /// </summary>
     /// <typeparam name="T">The filter type implementing <see cref="IJobFilter" />.</typeparam>
     /// <returns>This builder for chaining.</returns>
-    public JobBuilder UseFilter<T>() where T : class, IJobFilter
+    public JobBuilder UseFilter<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>()
+        where T : class, IJobFilter
     {
-        FilterTypes.Add(typeof(T));
+        FilterFactories.Add(static services => ActivatorUtilities.GetServiceOrCreateInstance<T>(services));
         _sync();
         return this;
     }
 
-    /// <summary>
-    ///     Registers a callback that fires after a successful run.
-    /// </summary>
-    /// <param name="callback">The callback delegate.</param>
-    /// <returns>This builder for chaining.</returns>
-    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
-    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
-    public JobBuilder OnSuccess(Delegate callback)
+    /// <summary>Registers a callback that fires after a successful run.</summary>
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    public JobBuilder OnSuccess(Delegate callback) => AddDelegate(OnSuccessCallbacks, callback);
+
+    /// <summary>Registers a callback that fires after a failed attempt when a retry is scheduled.</summary>
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    public JobBuilder OnRetry(Delegate callback) => AddDelegate(OnRetryCallbacks, callback);
+
+    /// <summary>Registers a callback that fires after retries are exhausted.</summary>
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    public JobBuilder OnDeadLetter(Delegate callback) => AddDelegate(OnDeadLetterCallbacks, callback);
+
+    /// <summary>Registers an on-success callback from a pre-built <see cref="CallbackDescriptor" />.</summary>
+    public JobBuilder OnSuccess(CallbackDescriptor descriptor) => AddDescriptor(OnSuccessCallbacks, descriptor);
+
+    /// <summary>Registers an on-retry callback from a pre-built <see cref="CallbackDescriptor" />.</summary>
+    public JobBuilder OnRetry(CallbackDescriptor descriptor) => AddDescriptor(OnRetryCallbacks, descriptor);
+
+    /// <summary>Registers an on-dead-letter callback from a pre-built <see cref="CallbackDescriptor" />.</summary>
+    public JobBuilder OnDeadLetter(CallbackDescriptor descriptor) => AddDescriptor(OnDeadLetterCallbacks, descriptor);
+
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    private JobBuilder AddDelegate(List<CompiledCallback> list, Delegate callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
-        OnSuccessCallbacks.Add(callback);
-        _sync();
-        return this;
+        return AddDescriptor(list, ReflectionDescriptorBuilder.BuildCallback(callback));
     }
 
-    /// <summary>
-    ///     Registers a callback that fires after a failed attempt when a retry is scheduled.
-    /// </summary>
-    /// <param name="callback">The callback delegate.</param>
-    /// <returns>This builder for chaining.</returns>
-    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
-    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
-    public JobBuilder OnRetry(Delegate callback)
+    private JobBuilder AddDescriptor(List<CompiledCallback> list, CallbackDescriptor descriptor)
     {
-        ArgumentNullException.ThrowIfNull(callback);
-        OnRetryCallbacks.Add(callback);
-        _sync();
-        return this;
-    }
-
-    /// <summary>
-    ///     Registers a callback that fires after retries are exhausted.
-    /// </summary>
-    /// <param name="callback">The callback delegate.</param>
-    /// <returns>This builder for chaining.</returns>
-    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
-    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
-    public JobBuilder OnDeadLetter(Delegate callback)
-    {
-        ArgumentNullException.ThrowIfNull(callback);
-        OnDeadLetterCallbacks.Add(callback);
+        ArgumentNullException.ThrowIfNull(descriptor);
+        list.Add(CompiledCallback.FromDescriptor(descriptor));
         _sync();
         return this;
     }

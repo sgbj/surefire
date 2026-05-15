@@ -4,9 +4,7 @@ using System.Text.Json.Serialization;
 namespace Surefire;
 
 /// <summary>
-///     Serializes <see cref="DateTimeOffset" /> as unix milliseconds (UTC-normalized) so every
-///     store persists a compact integer that Lua scripts, SQL JSON primitives, and date-math
-///     comparisons can use directly without string parsing.
+///     Serializes <see cref="DateTimeOffset" /> as UTC-normalized unix milliseconds.
 /// </summary>
 internal sealed class DateTimeOffsetUnixMsConverter : JsonConverter<DateTimeOffset>
 {

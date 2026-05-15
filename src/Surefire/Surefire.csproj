@@ -1,10 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Description>Distributed job scheduling for .NET with a minimal API style.</Description>
+    </PropertyGroup>
+
     <ItemGroup>
         <InternalsVisibleTo Include="Surefire.Tests.InMemory"/>
         <InternalsVisibleTo Include="Surefire.Tests"/>
         <InternalsVisibleTo Include="Surefire.Tests.Integration"/>
         <InternalsVisibleTo Include="Surefire.Tests.SqlServer"/>
     </ItemGroup>
+
     <ItemGroup>
         <PackageReference Include="Cronos"/>
         <PackageReference Include="Microsoft.Extensions.DependencyInjection"/>
@@ -16,7 +21,24 @@
         <PackageReference Include="Microsoft.Extensions.Logging.Abstractions"/>
     </ItemGroup>
 
-    <PropertyGroup>
-        <Description>Distributed job scheduling for .NET with a minimal API style.</Description>
-    </PropertyGroup>
+    <!--
+        Ship the Surefire source generator inside this package. The analyzer DLL placed under
+        analyzers/dotnet/cs/ is auto-loaded by Roslyn for any consumer; the buildTransitive .props
+        file (named after this package so NuGet imports it automatically) sets InterceptorsNamespaces
+        and surfaces SurefireSourceGenerationEnabled to the analyzer. Mirrors how
+        Microsoft.AspNetCore.OpenApi ships the RDG bits inside its own package.
+    -->
+    <ItemGroup>
+        <ProjectReference Include="..\Surefire.SourceGeneration\Surefire.SourceGeneration.csproj"
+                          OutputItemType="Analyzer"
+                          ReferenceOutputAssembly="false"/>
+        <None Include="..\Surefire.SourceGeneration\bin\$(Configuration)\netstandard2.0\Surefire.SourceGeneration.dll"
+              Pack="true"
+              PackagePath="analyzers/dotnet/cs/"
+              Visible="false"/>
+        <None Include="..\Surefire.SourceGeneration\buildTransitive\Surefire.SourceGeneration.props"
+              Pack="true"
+              PackagePath="buildTransitive/Surefire.props"
+              Visible="false"/>
+    </ItemGroup>
 </Project>

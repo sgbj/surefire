@@ -495,7 +495,7 @@ public sealed class DashboardEndpointsTests
             Assert.Equal(5, tree.TotalCount);
 
             var ids = tree.Runs.Select(r => r.Id).ToHashSet();
-            Assert.Equal(new HashSet<string> { rootId, childAId, childBId, grandAId, grandBId }, ids);
+            Assert.Equal(new() { rootId, childAId, childBId, grandAId, grandBId }, ids);
 
             var depthById = tree.Runs.ToDictionary(r => r.Id, r => r.Depth);
             Assert.Equal(0, depthById[rootId]);
@@ -570,7 +570,7 @@ public sealed class DashboardEndpointsTests
             Assert.True(
                 prev.CreatedAt < curr.CreatedAt ||
                 (prev.CreatedAt == curr.CreatedAt &&
-                    string.CompareOrdinal(prev.Id, curr.Id) <= 0),
+                 string.CompareOrdinal(prev.Id, curr.Id) <= 0),
                 $"Runs not sorted at index {i}");
         }
     }
@@ -685,7 +685,7 @@ public sealed class DashboardEndpointsTests
         // descendants page contains [midA, midB] (oldest first), so midA is reachable from
         // root and gets added. midB never reaches the result because we've already included
         // the lineage. leafA1 is in lineage; leafA2/leafB* drop off the cap.
-        var tree3 = await DashboardEndpoints.BuildRunTreeAsync(store, focus, maxRuns: 3, ct);
+        var tree3 = await DashboardEndpoints.BuildRunTreeAsync(store, focus, 3, ct);
 
         Assert.Equal(rootId, tree3.RootId);
         Assert.True(tree3.Truncated);
@@ -699,7 +699,11 @@ public sealed class DashboardEndpointsTests
         // Every returned run has its parent in the result (no orphans rendering at depth 0).
         foreach (var r in tree3.Runs)
         {
-            if (r.ParentRunId is null) continue;
+            if (r.ParentRunId is null)
+            {
+                continue;
+            }
+
             Assert.Contains(r.ParentRunId, ids3);
         }
 
@@ -710,7 +714,7 @@ public sealed class DashboardEndpointsTests
 
         // Cap = 5: budget grows; ASC order brings in midA/midB before the leaves, then the
         // BFS reaches the focus subtree's siblings. Lineage still guaranteed.
-        var tree5 = await DashboardEndpoints.BuildRunTreeAsync(store, focus, maxRuns: 5, ct);
+        var tree5 = await DashboardEndpoints.BuildRunTreeAsync(store, focus, 5, ct);
 
         Assert.True(tree5.Truncated);
         Assert.Equal(7, tree5.TotalCount);
@@ -721,12 +725,16 @@ public sealed class DashboardEndpointsTests
         // No orphans at higher cap either.
         foreach (var r in tree5.Runs)
         {
-            if (r.ParentRunId is null) continue;
+            if (r.ParentRunId is null)
+            {
+                continue;
+            }
+
             Assert.Contains(r.ParentRunId, ids5);
         }
 
         // Cap = 100: room for everything; no truncation.
-        var treeFull = await DashboardEndpoints.BuildRunTreeAsync(store, focus, maxRuns: 100, ct);
+        var treeFull = await DashboardEndpoints.BuildRunTreeAsync(store, focus, 100, ct);
         Assert.False(treeFull.Truncated);
         Assert.Equal(7, treeFull.TotalCount);
         Assert.Equal(7, treeFull.Runs.Count);
@@ -787,7 +795,7 @@ public sealed class DashboardEndpointsTests
         var root = (await store.GetRunAsync(rootId, ct))!;
 
         // Cap = 2: lineage is just [root], so one slot left. BFS adds child A (oldest).
-        var tree = await DashboardEndpoints.BuildRunTreeAsync(store, root, maxRuns: 2, ct);
+        var tree = await DashboardEndpoints.BuildRunTreeAsync(store, root, 2, ct);
 
         Assert.True(tree.Truncated);
         Assert.Equal(7, tree.TotalCount);
@@ -797,7 +805,11 @@ public sealed class DashboardEndpointsTests
         // No orphans.
         foreach (var r in tree.Runs)
         {
-            if (r.ParentRunId is null) continue;
+            if (r.ParentRunId is null)
+            {
+                continue;
+            }
+
             Assert.Contains(r.ParentRunId, ids);
         }
     }
@@ -885,7 +897,7 @@ public sealed class DashboardEndpointsTests
         await store.CreateRunsAsync(siblings, cancellationToken: ct);
 
         var focus = siblings[2];
-        var tree = await DashboardEndpoints.BuildRunTreeAsync(store, focus, maxRuns: 3, ct);
+        var tree = await DashboardEndpoints.BuildRunTreeAsync(store, focus, 3, ct);
 
         Assert.Equal(batchId, tree.RootId);
         Assert.True(tree.Truncated);
@@ -1307,10 +1319,11 @@ public sealed class DashboardEndpointsTests
             options.PollingInterval = TimeSpan.FromMilliseconds(10);
             options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
         });
+        builder.Services.AddSurefireDashboard(configureDashboard);
 
         var app = builder.Build();
         configure?.Invoke(app);
-        app.MapSurefireDashboard(configure: configureDashboard);
+        app.MapSurefireDashboard();
 
         await app.StartAsync(ct);
         return app;

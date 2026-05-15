@@ -6,6 +6,8 @@ using Surefire.Tests.Testing;
 
 namespace Surefire.Tests;
 
+internal sealed record AddArgs(int A, int B);
+
 public sealed class JobClientContractTests
 {
     private static JobClient CreateClient(
@@ -16,6 +18,9 @@ public sealed class JobClientContractTests
         SurefireOptions options,
         ILogger<JobClient> logger)
     {
+        // Bypasses AddSurefire/Freeze, which would otherwise attach the JIT reflection resolver.
+        TestSerializerOptions.AttachReflectionResolver(options);
+
         var activeRuns = new ActiveRunTracker();
         return new(
             store,
@@ -93,8 +98,8 @@ public sealed class JobClientContractTests
         var batch = await client.TriggerBatchAsync(
             new[]
             {
-                new BatchItem(jobName, new { x = 1 }, new() { Priority = 11 }),
-                new BatchItem(jobName, new { x = 2 }, new() { Priority = 22 })
+                BatchItem.Create(jobName, new { x = 1 }, new() { Priority = 11 }),
+                BatchItem.Create(jobName, new { x = 2 }, new() { Priority = 22 })
             },
             ct);
 
@@ -107,6 +112,38 @@ public sealed class JobClientContractTests
         Assert.Equal(2, children.Count);
         Assert.Contains(children, c => c.Priority == 11);
         Assert.Contains(children, c => c.Priority == 22);
+        // The source generator routes anonymous args through BatchItem.Create's interceptor,
+        // which serializes via the runtime's resolver chain. Verify the per-item args round-trip.
+        var argsByPriority = children.ToDictionary(c => c.Priority, c => c.Arguments);
+        Assert.Equal("{\"x\":1}", argsByPriority[11]);
+        Assert.Equal("{\"x\":2}", argsByPriority[22]);
+    }
+
+    [Fact]
+    public async Task TriggerAsync_NamedRecordArgs_RoundTripThroughSourceGenerator()
+    {
+        // Exercises the NamedType source-gen path: whole-object serialization via
+        // JsonTypeInfo<AddArgs>. The reflection resolver attached in CreateClient resolves the
+        // type at runtime, mirroring what a JsonSerializerContext-only AOT publish would do.
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = CreateClient(store, notifications, eventWriter, time, new(),
+            new CollectingLogger<JobClient>());
+
+        var jobName = "NamedArgs_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
+
+        var triggered = await client.TriggerAsync(jobName, new AddArgs(7, 9), cancellationToken: ct);
+        var run = await store.GetRunAsync(triggered.Id, ct);
+
+        Assert.NotNull(run);
+        // Surefire's serializer options use camelCase, so the source generator's JsonTypeInfo<T>
+        // lookup honors that policy. This is the whole point of routing named types through
+        // JsonSerializer.Serialize instead of per-property emission.
+        Assert.Equal("{\"a\":7,\"b\":9}", run.Arguments);
     }
 
     [Fact]

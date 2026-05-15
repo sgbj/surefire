@@ -7,10 +7,10 @@ import {
   useRef,
   useState,
 } from "react";
-import {useNavigate} from "react-router";
-import {useVirtualizer} from "@tanstack/react-virtual";
-import {type JobRun, JobStatus} from "@/lib/api";
-import {formatMs} from "@/lib/format";
+import { useNavigate } from "react-router";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { type JobRun, JobStatus } from "@/lib/api";
+import { formatMs } from "@/lib/format";
 
 const statusColorVar: Record<number, string> = {
   [JobStatus.Pending]: "var(--status-pending)",
@@ -45,23 +45,43 @@ const ROW_HEIGHT = TRACE_ROW_HEIGHT;
 
 export type TraceItem = { kind: "run" } & JobRun;
 
+export type TraceScrollState = {
+  rootId: string | null;
+  scrollTop: number;
+};
+
 export function TraceView({
   items,
   currentRunId,
+  rootId,
   scrollContainerRef,
+  scrollStateRef,
   headerSticky = true,
+  manageFocusScroll = true,
   header,
-  onVisibleRunIdsChange,
+  onHeaderClick,
 }: {
   items: TraceItem[];
   currentRunId: string;
+  /** Stable identity for the trace. Used to decide whether navigation stays
+   *  inside the same trace (preserve scroll) or moves to a different trace
+   *  (scroll the focus row into view). Comes from the server's RunTreeResponse
+   *  since items[0] isn't stable across truncation. */
+  rootId?: string;
   scrollContainerRef: RefObject<HTMLDivElement | null>;
+  scrollStateRef?: { current: TraceScrollState };
   /** When false, the timeline-tick header flows inline instead of pinning to
    *  the top of the scroll container. Use false when the trace shares a scroll
    *  container with other content that has its own sticky headers. */
   headerSticky?: boolean;
+  /** When false, the trace will never adjust the scroll container itself. Use
+   *  false when the trace shares its scroll container with the rest of the page
+   *  (mobile single-scroll layout), so navigation doesn't yank the whole page. */
+  manageFocusScroll?: boolean;
   header?: React.ReactNode;
-  onVisibleRunIdsChange?: (runIds: string[]) => void;
+  /** When provided, the entire header bar (title cell + time ticks) becomes a
+   *  clickable region, used to collapse/expand the trace section. */
+  onHeaderClick?: () => void;
 }) {
   const navigate = useNavigate();
   const hasActiveRuns = useMemo(
@@ -80,7 +100,7 @@ export function TraceView({
     return () => window.clearInterval(timer);
   }, [hasActiveRuns]);
 
-  const {timeStart, timeRange, ticks} = useMemo(() => {
+  const { timeStart, timeRange, ticks } = useMemo(() => {
     let earliest = Infinity;
     let latest = -Infinity;
     for (const run of items) {
@@ -102,18 +122,6 @@ export function TraceView({
       ticks: computeTicks(range),
     };
   }, [items, nowMs]);
-
-  const reportVisibleRunIds = useCallback(
-    (indices: number[]) => {
-      if (!onVisibleRunIdsChange) return;
-      onVisibleRunIdsChange(
-        indices
-          .map((index) => items[index]?.id)
-          .filter((id): id is string => Boolean(id)),
-      );
-    },
-    [items, onVisibleRunIdsChange],
-  );
 
   // Virtualizer needs scrollMargin = rows-container offset within the scroll container.
   // Otherwise it renders the wrong index range when the trace shares scroll with other
@@ -140,68 +148,81 @@ export function TraceView({
     estimateSize: () => ROW_HEIGHT,
     overscan: 20,
     scrollMargin: rowsScrollMargin,
-    onChange: (instance) => {
-      reportVisibleRunIds(
-        instance.getVirtualItems().map((item) => item.index),
-      );
-    },
   });
-
-  useEffect(() => {
-    reportVisibleRunIds(
-      rowVirtualizer.getVirtualItems().map((item) => item.index),
-    );
-  }, [items, reportVisibleRunIds, rowVirtualizer]);
 
   const focusIdx = useMemo(
     () => items.findIndex((item) => item.id === currentRunId),
     [items, currentRunId],
   );
 
-  // scrollIntoView would walk ancestors and disturb the page's main scroll, so center
-  // via an invisible sentinel + manual scrollTop. rAF lets virtualizer measurements
-  // settle first. Centers once per currentRunId.
-  const hasCenteredRef = useRef(false);
-  const focusSentinelRef = useRef<HTMLDivElement>(null);
-  const lastCenteredRunIdRef = useRef<string>("");
+  // Scroll the focus row into view only when the trace itself changes. Intra-trace
+  // navigation leaves scroll alone so the user keeps their place while clicking
+  // around siblings/children.
+  const lastRootIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-
-    if (lastCenteredRunIdRef.current !== currentRunId) {
-      hasCenteredRef.current = false;
-      lastCenteredRunIdRef.current = currentRunId;
-    }
-
-    if (hasCenteredRef.current) return;
+    if (!manageFocusScroll) return;
     if (focusIdx < 0) return;
+    if (!rootId) return;
+    if (lastRootIdRef.current === rootId) return;
+
+    const savedRootId = scrollStateRef?.current.rootId ?? null;
+    const savedScrollTop = scrollStateRef?.current.scrollTop ?? 0;
 
     const rafId = requestAnimationFrame(() => {
-      const sentinel = focusSentinelRef.current;
       const scrollEl = scrollContainerRef.current;
-      if (!sentinel || !scrollEl) return;
+      if (!scrollEl) return;
       if (scrollEl.clientHeight === 0) return;
 
-      const sentinelRect = sentinel.getBoundingClientRect();
-      const containerRect = scrollEl.getBoundingClientRect();
-      const sentinelTopInScroll =
-        sentinelRect.top - containerRect.top + scrollEl.scrollTop;
-      const sentinelCenter = sentinelTopInScroll + ROW_HEIGHT / 2;
+      if (savedRootId === rootId) {
+        scrollEl.scrollTop = savedScrollTop;
+      } else {
+        const HEADER_OFFSET = 48;
+        const availableHeight = Math.max(
+          scrollEl.clientHeight - HEADER_OFFSET,
+          ROW_HEIGHT,
+        );
+        const focusCenterInScroll =
+          rowsScrollMargin + focusIdx * ROW_HEIGHT + ROW_HEIGHT / 2;
+        scrollEl.scrollTop = Math.max(
+          0,
+          focusCenterInScroll - HEADER_OFFSET - availableHeight / 2,
+        );
+      }
 
-      // Sticky header (h-10 = 40px) plus a small buffer so the focus row
-      // doesn't kiss the bottom edge of the header.
-      const HEADER_OFFSET = 48;
-      const viewportCenter =
-        HEADER_OFFSET + (scrollEl.clientHeight - HEADER_OFFSET) / 2;
-      const target = sentinelCenter - viewportCenter;
-
-      scrollEl.scrollTop = Math.max(0, target);
-      hasCenteredRef.current = true;
+      lastRootIdRef.current = rootId;
+      if (scrollStateRef) {
+        scrollStateRef.current = { rootId, scrollTop: scrollEl.scrollTop };
+      }
     });
 
     return () => cancelAnimationFrame(rafId);
-  }, [focusIdx, currentRunId, scrollContainerRef]);
+  }, [
+    focusIdx,
+    rootId,
+    manageFocusScroll,
+    rowsScrollMargin,
+    scrollContainerRef,
+    scrollStateRef,
+  ]);
+
+  useEffect(() => {
+    if (!manageFocusScroll) return;
+    if (!rootId) return;
+    if (!scrollStateRef) return;
+    const scrollEl = scrollContainerRef.current;
+    if (!scrollEl) return;
+
+    const saveScroll = () => {
+      scrollStateRef.current = { rootId, scrollTop: scrollEl.scrollTop };
+    };
+
+    scrollEl.addEventListener("scroll", saveScroll, { passive: true });
+    return () => {
+      saveScroll();
+      scrollEl.removeEventListener("scroll", saveScroll);
+    };
+  }, [rootId, manageFocusScroll, scrollContainerRef, scrollStateRef]);
 
   if (items.length === 0) return null;
 
@@ -210,7 +231,21 @@ export function TraceView({
   return (
     <div className="[--trace-name-col:13rem]">
       <div
-        className={`${headerSticky ? "sticky top-0 z-10 " : ""}h-10 border-b border-border bg-card/95 backdrop-blur-sm`}
+        role={onHeaderClick ? "button" : undefined}
+        tabIndex={onHeaderClick ? 0 : undefined}
+        aria-expanded={onHeaderClick ? true : undefined}
+        onClick={onHeaderClick}
+        onKeyDown={
+          onHeaderClick
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onHeaderClick();
+                }
+              }
+            : undefined
+        }
+        className={`${headerSticky ? "sticky top-0 z-10 " : ""}h-10 border-b border-border bg-card/95 backdrop-blur-sm${onHeaderClick ? " cursor-pointer hover:bg-card transition-colors" : ""}`}
         style={{
           display: "grid",
           gridTemplateColumns: "var(--trace-name-col) 1fr 1.5rem",
@@ -224,10 +259,10 @@ export function TraceView({
             <span
               key={i}
               className="absolute top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground/70 tnum"
-              style={{left: `${pct(t)}%`}}
+              style={{ left: `${pct(t)}%` }}
             >
-                {formatMs(t)}
-              </span>
+              {formatMs(t)}
+            </span>
           ))}
         </div>
       </div>
@@ -235,19 +270,8 @@ export function TraceView({
       <div
         ref={rowsContainerRef}
         className="relative w-full"
-        style={{height: `${rowVirtualizer.getTotalSize()}px`}}
+        style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
       >
-        {focusIdx >= 0 && (
-          <div
-            ref={focusSentinelRef}
-            aria-hidden="true"
-            className="pointer-events-none invisible absolute left-0 w-px"
-            style={{
-              top: `${focusIdx * ROW_HEIGHT}px`,
-              height: `${ROW_HEIGHT}px`,
-            }}
-          />
-        )}
         {rowVirtualizer.getVirtualItems().map((virtualItem) => {
           const run = items[virtualItem.index];
           const rowStyle = {
@@ -280,7 +304,9 @@ export function TraceView({
             durationMs > 0 ? `· ${formatMs(durationMs)}` : null,
             run.nodeName ? `on ${run.nodeName}` : null,
             `attempt ${run.attempt}`,
-          ].filter(Boolean).join(" ");
+          ]
+            .filter(Boolean)
+            .join(" ");
 
           const goToRun = () => navigate(`/runs/${run.id}`);
 
@@ -300,9 +326,7 @@ export function TraceView({
                 }
               }}
               className={`group/trace-row absolute top-0 left-0 w-full items-stretch transition-colors border-b border-border/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-brand/40 ${
-                isCurrent
-                  ? "bg-accent-brand-soft/40"
-                  : "hover:bg-accent/40"
+                isCurrent ? "bg-accent-brand-soft/40" : "hover:bg-accent/40"
               }`}
               style={{
                 display: "grid",
@@ -313,12 +337,12 @@ export function TraceView({
               {isCurrent && (
                 <span
                   aria-hidden
-                  className="absolute left-0 top-0 bottom-0 w-[2px] bg-accent-brand"
+                  className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent-brand"
                 />
               )}
               <div
                 className="flex items-center min-w-0 pr-3"
-                style={{paddingLeft: `calc(1.5rem + ${depth * 1.25}rem)`}}
+                style={{ paddingLeft: `calc(1.5rem + ${depth * 1.25}rem)` }}
               >
                 <span
                   className={`text-sm leading-none truncate transition-colors ${
@@ -336,7 +360,7 @@ export function TraceView({
                   <div
                     key={i}
                     className="absolute top-0 bottom-0 w-px bg-border/15"
-                    style={{left: `${pct(t)}%`}}
+                    style={{ left: `${pct(t)}%` }}
                   />
                 ))}
                 <div
@@ -352,17 +376,16 @@ export function TraceView({
                 {durationMs > 0 && (
                   <span
                     className="absolute top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground/70 tnum whitespace-nowrap"
-                    style={{left: `calc(${leftPct + widthPct}% + 8px)`}}
+                    style={{ left: `calc(${leftPct + widthPct}% + 8px)` }}
                   >
-                      {formatMs(durationMs)}
-                    </span>
+                    {formatMs(durationMs)}
+                  </span>
                 )}
               </div>
             </div>
           );
         })}
       </div>
-
     </div>
   );
 }

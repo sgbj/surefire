@@ -6,6 +6,7 @@
         <Project Path="src/Surefire.Sqlite/Surefire.Sqlite.csproj"/>
         <Project Path="src/Surefire.Redis/Surefire.Redis.csproj"/>
         <Project Path="src/Surefire.Dashboard/Surefire.Dashboard.csproj"/>
+        <Project Path="src/Surefire.SourceGeneration/Surefire.SourceGeneration.csproj"/>
     </Folder>
     <Folder Name="/test/">
         <Project Path="test/Surefire.Tests.Conformance/Surefire.Tests.Conformance.csproj"/>
@@ -17,6 +18,7 @@
         <Project Path="test/Surefire.Tests.SqlServer/Surefire.Tests.SqlServer.csproj"/>
         <Project Path="test/Surefire.Tests.Sqlite/Surefire.Tests.Sqlite.csproj"/>
         <Project Path="test/Surefire.Tests.Redis/Surefire.Tests.Redis.csproj"/>
+        <Project Path="test/Surefire.Tests.SourceGeneration/Surefire.Tests.SourceGeneration.csproj"/>
     </Folder>
     <Folder Name="/samples/">
         <Project Path="samples/Surefire.Sample/Surefire.Sample.csproj"/>

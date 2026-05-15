@@ -3,6 +3,7 @@
         <Description>Embedded web dashboard for monitoring Surefire jobs.</Description>
         <PackageTags>$(PackageTags);dashboard;monitoring;observability</PackageTags>
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+        <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
         <DashboardUiDir>$(MSBuildProjectDirectory)/ui</DashboardUiDir>
         <DashboardUiOutputDir>$(BaseIntermediateOutputPath)dashboard-ui</DashboardUiOutputDir>
         <DashboardUiOutputDirFullPath>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(DashboardUiOutputDir)'))</DashboardUiOutputDirFullPath>
@@ -17,6 +18,9 @@
     </ItemGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="Surefire.Tests.Dashboard"/>
+    </ItemGroup>
+    <ItemGroup>
+        <None Include="buildTransitive\Surefire.Dashboard.targets" Pack="true" PackagePath="buildTransitive\$(TargetFramework)\Surefire.Dashboard.targets"/>
     </ItemGroup>
 
     <ItemGroup>

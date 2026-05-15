@@ -24,15 +24,15 @@ public sealed record SubtreeCancellation(
     IReadOnlyList<CanceledRun> Runs,
     IReadOnlyList<BatchCompletionInfo> CompletedBatches)
 {
-    /// <summary>
-    ///     Whether the root run or batch existed at the time of the operation. <c>false</c> only when
-    ///     the addressed entity was not found in the store.
-    /// </summary>
-    public bool Found { get; init; } = true;
-
     /// <summary>The root entity existed but had no runs to cancel (already terminal, no children, etc.).</summary>
     public static readonly SubtreeCancellation Empty = new([], []);
 
     /// <summary>The root entity does not exist in the store.</summary>
     public static readonly SubtreeCancellation NotFound = new([], []) { Found = false };
+
+    /// <summary>
+    ///     Whether the root run or batch existed at the time of the operation. <c>false</c> only when
+    ///     the addressed entity was not found in the store.
+    /// </summary>
+    public bool Found { get; init; } = true;
 }

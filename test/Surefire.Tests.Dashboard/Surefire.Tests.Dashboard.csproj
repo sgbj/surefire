@@ -9,6 +9,7 @@
     </ItemGroup>
     <ItemGroup>
         <ProjectReference Include="..\..\src\Surefire.Dashboard\Surefire.Dashboard.csproj"/>
+        <ProjectReference Include="..\Surefire.Tests.Conformance\Surefire.Tests.Conformance.csproj"/>
     </ItemGroup>
     <ItemGroup>
         <PackageReference Include="Microsoft.NET.Test.Sdk"/>

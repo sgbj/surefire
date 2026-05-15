@@ -10,7 +10,7 @@ namespace Surefire.Redis;
 /// <summary>
 ///     Redis implementation of <see cref="IJobStore" />.
 ///     All keys use the <c>{surefire}:</c> hash tag prefix for Redis Cluster slot affinity.
-///     Every mutation is a single Lua script for atomicity.
+///     Mutations are scripted for atomicity.
 /// </summary>
 internal sealed partial class RedisJobStore(
     IConnectionMultiplexer connection,
@@ -206,9 +206,7 @@ internal sealed partial class RedisJobStore(
                                                                   return 1
                                                                   """;
 
-    // Bulk upsert in one Lua call. tags and retry_policy round-trip via cjson.encode so the
-    // on-hash format matches the read shape. is_enabled and last_cron_fire_at are preserved
-    // from the existing hash; first insert takes their input/empty-string defaults.
+    // Preserve is_enabled and last_cron_fire_at on existing rows; first insert takes the input values.
     private const string UpsertJobsScript = """
                                             local payload = cjson.decode(ARGV[1])
                                             local now = ARGV[2]
@@ -275,8 +273,7 @@ internal sealed partial class RedisJobStore(
                                             return 1
                                             """;
 
-    // Bulk upsert in one Lua call. is_paused is preserved from the existing hash so dashboard
-    // pauses survive re-upserts; first insert takes the input value.
+    // Preserve is_paused on existing rows so dashboard pauses survive re-upserts.
     private const string UpsertQueuesScript = """
                                               local payload = cjson.decode(ARGV[1])
                                               local now = ARGV[2]
@@ -311,8 +308,7 @@ internal sealed partial class RedisJobStore(
                                               return 1
                                               """;
 
-    // Bulk upsert in one Lua call. Runtime counters seed on first insert only; updates leave
-    // them untouched so concurrent acquisition is never rewound.
+    // Seed runtime counters on first insert only so concurrent acquisition is never rewound.
     private const string UpsertRateLimitsScript = """
                                                   local payload = cjson.decode(ARGV[1])
                                                   local now = ARGV[2]
@@ -1866,210 +1862,7 @@ internal sealed partial class RedisJobStore(
     public Task<SubtreeCancellation> CancelBatchSubtreeAsync(string batchId,
         string? reason = null,
         CancellationToken cancellationToken = default)
-        => CancelSubtreeCoreAsync("batch", batchId, reason, includeRoot: true, cancellationToken);
-
-    // BFS the {surefire}:children:{runId} ZSETs from the seed and apply per-run cancel
-    // bookkeeping in a single Lua script. Already-terminal runs are skipped, and the visited
-    // table guards against pathological cycles.
-    private async Task<SubtreeCancellation> CancelSubtreeCoreAsync(
-        string seedKind, string seedId, string? reason, bool includeRoot,
-        CancellationToken cancellationToken)
-    {
-        const string script = """
-                              local seed_kind = ARGV[1]
-                              local seed_id = ARGV[2]
-                              local now_ms = tonumber(ARGV[3])
-                              local err = ARGV[4] ~= '' and ARGV[4] or nil
-                              local include_root = ARGV[5] == '1'
-                              local child_member_ts_width = 20
-                              if seed_kind == 'run' and redis.call('EXISTS', '{surefire}:run:' .. seed_id) == 0 then
-                                  return cjson.encode({found = false})
-                              end
-                              if seed_kind == 'batch' and redis.call('EXISTS', '{surefire}:batch:' .. seed_id) == 0 then
-                                  return cjson.encode({found = false})
-                              end
-                              local function strip_ts(member)
-                                  return string.sub(member, child_member_ts_width + 1)
-                              end
-                              local function append_status_event(run, batch_id_for_event)
-                                  local id = redis.call('INCR', '{surefire}:event_seq')
-                                  local evt = {id = id, runId = run.id, eventType = 0, payload = '4', createdAt = now_ms, attempt = run.attempt}
-                                  local payload = cjson.encode(evt)
-                                  local id_str = tostring(id)
-                                  redis.call('SET', '{surefire}:event:' .. id_str, payload)
-                                  redis.call('ZADD', '{surefire}:events:run:' .. run.id, id, id_str)
-                                  redis.call('ZADD', '{surefire}:events:run_type:' .. run.id .. ':0', id, id_str)
-                                  redis.call('ZADD', '{surefire}:events:run_attempt:' .. run.id .. ':' .. tostring(run.attempt), id, id_str)
-                                  redis.call('SADD', '{surefire}:events:run_types:' .. run.id, '0')
-                                  redis.call('SADD', '{surefire}:events:run_attempts:' .. run.id, tostring(run.attempt))
-                                  if batch_id_for_event and batch_id_for_event ~= '' then
-                                      redis.call('ZADD', '{surefire}:events:batch:' .. batch_id_for_event, id, id_str)
-                                  end
-                              end
-                              local subtree = {}
-                              local visited = {}
-                              local frontier = {}
-                              if seed_kind == 'batch' then
-                                  local members = redis.call('ZRANGE', '{surefire}:batch_runs:' .. seed_id, 0, -1)
-                                  for _, rid in ipairs(members) do
-                                      frontier[#frontier + 1] = rid
-                                  end
-                              elseif include_root then
-                                  frontier[#frontier + 1] = seed_id
-                              else
-                                  local members = redis.call('ZRANGE', '{surefire}:children:' .. seed_id, 0, -1)
-                                  for _, m in ipairs(members) do
-                                      frontier[#frontier + 1] = strip_ts(m)
-                                  end
-                              end
-                              while #frontier > 0 do
-                                  local next_frontier = {}
-                                  for _, run_id in ipairs(frontier) do
-                                      if not visited[run_id] then
-                                          visited[run_id] = true
-                                          subtree[#subtree + 1] = run_id
-                                          local cm = redis.call('ZRANGE', '{surefire}:children:' .. run_id, 0, -1)
-                                          for _, m in ipairs(cm) do
-                                              local cid = strip_ts(m)
-                                              if not visited[cid] then
-                                                  next_frontier[#next_frontier + 1] = cid
-                                              end
-                                          end
-                                      end
-                                  end
-                                  frontier = next_frontier
-                              end
-                              local canceled = {}
-                              local batch_counts = {}
-                              for _, run_id in ipairs(subtree) do
-                                  local key = '{surefire}:run:' .. run_id
-                                  local data = redis.call('GET', key)
-                                  if data then
-                                      local r = cjson.decode(data)
-                                      if r.status == 0 or r.status == 1 then
-                                          local old_status = r.status
-                                          r.status = 4
-                                          r.canceledAt = now_ms
-                                          r.completedAt = now_ms
-                                          if err then r.reason = err end
-                                          redis.call('SET', key, cjson.encode(r))
-                                          redis.call('ZREM', '{surefire}:runs:nonterminal', run_id)
-                                          redis.call('ZREM', '{surefire}:status:' .. tostring(old_status), run_id)
-                                          redis.call('ZADD', '{surefire}:status:4', r.createdAt, run_id)
-                                          redis.call('HINCRBY', '{surefire}:status_counts', tostring(old_status), -1)
-                                          redis.call('HINCRBY', '{surefire}:status_counts', '4', 1)
-                                          if old_status == 0 then
-                                              local pm = redis.call('GET', '{surefire}:pending_member:' .. run_id)
-                                              if pm then
-                                                  local q_field = redis.call('HGET', '{surefire}:job:' .. r.jobName, 'queue')
-                                                  local qname = (q_field and q_field ~= '') and q_field or 'default'
-                                                  redis.call('ZREM', '{surefire}:pending_q:' .. qname, pm)
-                                                  redis.call('DEL', '{surefire}:pending_member:' .. run_id)
-                                              end
-                                          elseif old_status == 1 then
-                                              redis.call('SREM', '{surefire}:running:' .. r.jobName, run_id)
-                                              local q_field = redis.call('HGET', '{surefire}:job:' .. r.jobName, 'queue')
-                                              local qname = (q_field and q_field ~= '') and q_field or 'default'
-                                              redis.call('SREM', '{surefire}:running_q:' .. qname, run_id)
-                                              redis.call('ZREM', '{surefire}:heartbeat:running', run_id)
-                                              local old_node = r.nodeName
-                                              if old_node and old_node ~= cjson.null and old_node ~= '' then
-                                                  redis.call('SREM', '{surefire}:node_runs:' .. old_node, run_id)
-                                              end
-                                          end
-                                          redis.call('ZADD', '{surefire}:runs:terminal', r.createdAt, run_id)
-                                          redis.call('ZREM', '{surefire}:expiring', run_id)
-                                          redis.call('SREM', '{surefire}:nonterminal:' .. r.jobName, run_id)
-                                          redis.call('HINCRBY', '{surefire}:job_stats:' .. r.jobName, 'terminal_runs', 1)
-                                          redis.call('ZADD', '{surefire}:runs:completed', now_ms, run_id)
-                                          if r.deduplicationId and r.deduplicationId ~= cjson.null and r.deduplicationId ~= '' then
-                                              redis.call('DEL', '{surefire}:dedup:' .. r.jobName .. ':' .. r.deduplicationId)
-                                          end
-                                          local minute = math.floor(now_ms / 60000)
-                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'canceled', 1)
-                                          redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
-                                          local b_id = (r.batchId and r.batchId ~= cjson.null) and r.batchId or ''
-                                          append_status_event(r, b_id)
-                                          if b_id ~= '' then
-                                              canceled[#canceled + 1] = {runId = run_id, batchId = b_id}
-                                              batch_counts[b_id] = (batch_counts[b_id] or 0) + 1
-                                          else
-                                              canceled[#canceled + 1] = {runId = run_id, batchId = cjson.null}
-                                          end
-                                      end
-                                  end
-                              end
-                              local completed_batches = {}
-                              for bid, cnt in pairs(batch_counts) do
-                                  local batch_key = '{surefire}:batch:' .. bid
-                                  local batch_data = redis.call('GET', batch_key)
-                                  if batch_data then
-                                      local b = cjson.decode(batch_data)
-                                      if b.status ~= 2 and b.status ~= 4 and b.status ~= 5 then
-                                          b.canceled = (b.canceled or 0) + cnt
-                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
-                                          if total_done >= b.total then
-                                              local batch_status
-                                              if (b.failed or 0) > 0 then batch_status = 5
-                                              elseif (b.canceled or 0) > 0 then batch_status = 4
-                                              else batch_status = 2 end
-                                              b.status = batch_status
-                                              b.completedAt = now_ms
-                                              redis.call('SET', batch_key, cjson.encode(b))
-                                              redis.call('SREM', '{surefire}:batches:active', bid)
-                                              redis.call('ZADD', '{surefire}:batches', now_ms, bid)
-                                              completed_batches[#completed_batches + 1] = {batchId = bid, batchStatus = batch_status, completedAt = now_ms}
-                                          else
-                                              redis.call('SET', batch_key, cjson.encode(b))
-                                          end
-                                      end
-                                  end
-                              end
-                              local result = {found = true}
-                              if #canceled > 0 then result.runs = canceled end
-                              if #completed_batches > 0 then result.completedBatches = completed_batches end
-                              return cjson.encode(result)
-                              """;
-
-        var result = await EvaluateScriptAsync(script,
-            [RoutingKey],
-            [
-                seedKind, seedId, timeProvider.GetUtcNow().ToUnixTimeMilliseconds().ToString(),
-                reason ?? "", includeRoot ? "1" : "0"
-            ]);
-
-        var raw = result.ToString()
-            ?? throw new InvalidOperationException("Cancel-subtree script returned null.");
-        var payload = JsonSerializer.Deserialize(raw, SurefireJsonContext.Default.SubtreeCancellationPayload)
-            ?? throw new InvalidOperationException("Cancel-subtree script returned malformed JSON.");
-
-        if (!payload.Found)
-        {
-            return SubtreeCancellation.NotFound;
-        }
-
-        var runs = new List<CanceledRun>(payload.Runs?.Length ?? 0);
-        if (payload.Runs is { })
-        {
-            foreach (var r in payload.Runs)
-            {
-                runs.Add(new(r.RunId, r.BatchId));
-            }
-        }
-
-        var batches = new List<BatchCompletionInfo>(payload.CompletedBatches?.Length ?? 0);
-        if (payload.CompletedBatches is { })
-        {
-            foreach (var b in payload.CompletedBatches)
-            {
-                batches.Add(new(b.BatchId, (JobStatus)b.BatchStatus, b.CompletedAt));
-            }
-        }
-
-        return runs.Count == 0 && batches.Count == 0
-            ? SubtreeCancellation.Empty
-            : new(runs, batches);
-    }
+        => CancelSubtreeCoreAsync("batch", batchId, reason, true, cancellationToken);
 
     public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
     {
@@ -3209,6 +3002,207 @@ internal sealed partial class RedisJobStore(
         _ => false
     };
 
+    // Walk the run subtree and apply cancellation bookkeeping atomically.
+    private async Task<SubtreeCancellation> CancelSubtreeCoreAsync(
+        string seedKind, string seedId, string? reason, bool includeRoot,
+        CancellationToken cancellationToken)
+    {
+        const string script = """
+                              local seed_kind = ARGV[1]
+                              local seed_id = ARGV[2]
+                              local now_ms = tonumber(ARGV[3])
+                              local err = ARGV[4] ~= '' and ARGV[4] or nil
+                              local include_root = ARGV[5] == '1'
+                              local child_member_ts_width = 20
+                              if seed_kind == 'run' and redis.call('EXISTS', '{surefire}:run:' .. seed_id) == 0 then
+                                  return cjson.encode({found = false})
+                              end
+                              if seed_kind == 'batch' and redis.call('EXISTS', '{surefire}:batch:' .. seed_id) == 0 then
+                                  return cjson.encode({found = false})
+                              end
+                              local function strip_ts(member)
+                                  return string.sub(member, child_member_ts_width + 1)
+                              end
+                              local function append_status_event(run, batch_id_for_event)
+                                  local id = redis.call('INCR', '{surefire}:event_seq')
+                                  local evt = {id = id, runId = run.id, eventType = 0, payload = '4', createdAt = now_ms, attempt = run.attempt}
+                                  local payload = cjson.encode(evt)
+                                  local id_str = tostring(id)
+                                  redis.call('SET', '{surefire}:event:' .. id_str, payload)
+                                  redis.call('ZADD', '{surefire}:events:run:' .. run.id, id, id_str)
+                                  redis.call('ZADD', '{surefire}:events:run_type:' .. run.id .. ':0', id, id_str)
+                                  redis.call('ZADD', '{surefire}:events:run_attempt:' .. run.id .. ':' .. tostring(run.attempt), id, id_str)
+                                  redis.call('SADD', '{surefire}:events:run_types:' .. run.id, '0')
+                                  redis.call('SADD', '{surefire}:events:run_attempts:' .. run.id, tostring(run.attempt))
+                                  if batch_id_for_event and batch_id_for_event ~= '' then
+                                      redis.call('ZADD', '{surefire}:events:batch:' .. batch_id_for_event, id, id_str)
+                                  end
+                              end
+                              local subtree = {}
+                              local visited = {}
+                              local frontier = {}
+                              if seed_kind == 'batch' then
+                                  local members = redis.call('ZRANGE', '{surefire}:batch_runs:' .. seed_id, 0, -1)
+                                  for _, rid in ipairs(members) do
+                                      frontier[#frontier + 1] = rid
+                                  end
+                              elseif include_root then
+                                  frontier[#frontier + 1] = seed_id
+                              else
+                                  local members = redis.call('ZRANGE', '{surefire}:children:' .. seed_id, 0, -1)
+                                  for _, m in ipairs(members) do
+                                      frontier[#frontier + 1] = strip_ts(m)
+                                  end
+                              end
+                              while #frontier > 0 do
+                                  local next_frontier = {}
+                                  for _, run_id in ipairs(frontier) do
+                                      if not visited[run_id] then
+                                          visited[run_id] = true
+                                          subtree[#subtree + 1] = run_id
+                                          local cm = redis.call('ZRANGE', '{surefire}:children:' .. run_id, 0, -1)
+                                          for _, m in ipairs(cm) do
+                                              local cid = strip_ts(m)
+                                              if not visited[cid] then
+                                                  next_frontier[#next_frontier + 1] = cid
+                                              end
+                                          end
+                                      end
+                                  end
+                                  frontier = next_frontier
+                              end
+                              local canceled = {}
+                              local batch_counts = {}
+                              for _, run_id in ipairs(subtree) do
+                                  local key = '{surefire}:run:' .. run_id
+                                  local data = redis.call('GET', key)
+                                  if data then
+                                      local r = cjson.decode(data)
+                                      if r.status == 0 or r.status == 1 then
+                                          local old_status = r.status
+                                          r.status = 4
+                                          r.canceledAt = now_ms
+                                          r.completedAt = now_ms
+                                          if err then r.reason = err end
+                                          redis.call('SET', key, cjson.encode(r))
+                                          redis.call('ZREM', '{surefire}:runs:nonterminal', run_id)
+                                          redis.call('ZREM', '{surefire}:status:' .. tostring(old_status), run_id)
+                                          redis.call('ZADD', '{surefire}:status:4', r.createdAt, run_id)
+                                          redis.call('HINCRBY', '{surefire}:status_counts', tostring(old_status), -1)
+                                          redis.call('HINCRBY', '{surefire}:status_counts', '4', 1)
+                                          if old_status == 0 then
+                                              local pm = redis.call('GET', '{surefire}:pending_member:' .. run_id)
+                                              if pm then
+                                                  local q_field = redis.call('HGET', '{surefire}:job:' .. r.jobName, 'queue')
+                                                  local qname = (q_field and q_field ~= '') and q_field or 'default'
+                                                  redis.call('ZREM', '{surefire}:pending_q:' .. qname, pm)
+                                                  redis.call('DEL', '{surefire}:pending_member:' .. run_id)
+                                              end
+                                          elseif old_status == 1 then
+                                              redis.call('SREM', '{surefire}:running:' .. r.jobName, run_id)
+                                              local q_field = redis.call('HGET', '{surefire}:job:' .. r.jobName, 'queue')
+                                              local qname = (q_field and q_field ~= '') and q_field or 'default'
+                                              redis.call('SREM', '{surefire}:running_q:' .. qname, run_id)
+                                              redis.call('ZREM', '{surefire}:heartbeat:running', run_id)
+                                              local old_node = r.nodeName
+                                              if old_node and old_node ~= cjson.null and old_node ~= '' then
+                                                  redis.call('SREM', '{surefire}:node_runs:' .. old_node, run_id)
+                                              end
+                                          end
+                                          redis.call('ZADD', '{surefire}:runs:terminal', r.createdAt, run_id)
+                                          redis.call('ZREM', '{surefire}:expiring', run_id)
+                                          redis.call('SREM', '{surefire}:nonterminal:' .. r.jobName, run_id)
+                                          redis.call('HINCRBY', '{surefire}:job_stats:' .. r.jobName, 'terminal_runs', 1)
+                                          redis.call('ZADD', '{surefire}:runs:completed', now_ms, run_id)
+                                          if r.deduplicationId and r.deduplicationId ~= cjson.null and r.deduplicationId ~= '' then
+                                              redis.call('DEL', '{surefire}:dedup:' .. r.jobName .. ':' .. r.deduplicationId)
+                                          end
+                                          local minute = math.floor(now_ms / 60000)
+                                          redis.call('HINCRBY', '{surefire}:timeline:' .. tostring(minute), 'canceled', 1)
+                                          redis.call('ZADD', '{surefire}:timeline:index', minute, tostring(minute))
+                                          local b_id = (r.batchId and r.batchId ~= cjson.null) and r.batchId or ''
+                                          append_status_event(r, b_id)
+                                          if b_id ~= '' then
+                                              canceled[#canceled + 1] = {runId = run_id, batchId = b_id}
+                                              batch_counts[b_id] = (batch_counts[b_id] or 0) + 1
+                                          else
+                                              canceled[#canceled + 1] = {runId = run_id, batchId = cjson.null}
+                                          end
+                                      end
+                                  end
+                              end
+                              local completed_batches = {}
+                              for bid, cnt in pairs(batch_counts) do
+                                  local batch_key = '{surefire}:batch:' .. bid
+                                  local batch_data = redis.call('GET', batch_key)
+                                  if batch_data then
+                                      local b = cjson.decode(batch_data)
+                                      if b.status ~= 2 and b.status ~= 4 and b.status ~= 5 then
+                                          b.canceled = (b.canceled or 0) + cnt
+                                          local total_done = (b.succeeded or 0) + (b.failed or 0) + (b.canceled or 0)
+                                          if total_done >= b.total then
+                                              local batch_status
+                                              if (b.failed or 0) > 0 then batch_status = 5
+                                              elseif (b.canceled or 0) > 0 then batch_status = 4
+                                              else batch_status = 2 end
+                                              b.status = batch_status
+                                              b.completedAt = now_ms
+                                              redis.call('SET', batch_key, cjson.encode(b))
+                                              redis.call('SREM', '{surefire}:batches:active', bid)
+                                              redis.call('ZADD', '{surefire}:batches', now_ms, bid)
+                                              completed_batches[#completed_batches + 1] = {batchId = bid, batchStatus = batch_status, completedAt = now_ms}
+                                          else
+                                              redis.call('SET', batch_key, cjson.encode(b))
+                                          end
+                                      end
+                                  end
+                              end
+                              local result = {found = true}
+                              if #canceled > 0 then result.runs = canceled end
+                              if #completed_batches > 0 then result.completedBatches = completed_batches end
+                              return cjson.encode(result)
+                              """;
+
+        var result = await EvaluateScriptAsync(script,
+            [RoutingKey],
+            [
+                seedKind, seedId, timeProvider.GetUtcNow().ToUnixTimeMilliseconds().ToString(),
+                reason ?? "", includeRoot ? "1" : "0"
+            ]);
+
+        var raw = result.ToString()
+                  ?? throw new InvalidOperationException("Cancel-subtree script returned null.");
+        var payload = JsonSerializer.Deserialize(raw, SurefireJsonContext.Default.SubtreeCancellationPayload)
+                      ?? throw new InvalidOperationException("Cancel-subtree script returned malformed JSON.");
+
+        if (!payload.Found)
+        {
+            return SubtreeCancellation.NotFound;
+        }
+
+        var runs = new List<CanceledRun>(payload.Runs?.Length ?? 0);
+        if (payload.Runs is { })
+        {
+            foreach (var r in payload.Runs)
+            {
+                runs.Add(new(r.RunId, r.BatchId));
+            }
+        }
+
+        var batches = new List<BatchCompletionInfo>(payload.CompletedBatches?.Length ?? 0);
+        if (payload.CompletedBatches is { })
+        {
+            foreach (var b in payload.CompletedBatches)
+            {
+                batches.Add(new(b.BatchId, (JobStatus)b.BatchStatus, b.CompletedAt));
+            }
+        }
+
+        return runs.Count == 0 && batches.Count == 0
+            ? SubtreeCancellation.Empty
+            : new(runs, batches);
+    }
+
     private static string EncodeChildMember(DateTimeOffset createdAt, string runId)
     {
         var createdAtMs = createdAt.ToUnixTimeMilliseconds();
@@ -3945,7 +3939,7 @@ internal sealed partial class RedisJobStore(
                 .ThenByDescending(r => r.Id, StringComparer.Ordinal).ToList(),
             (_, true) => runs
                 .OrderBy(r => r.CreatedAt)
-                .ThenBy(r => r.Id, StringComparer.Ordinal).ToList(),
+                .ThenBy(r => r.Id, StringComparer.Ordinal).ToList()
         };
     }
 

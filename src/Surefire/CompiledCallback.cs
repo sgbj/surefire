@@ -1,118 +1,88 @@
-using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
-using System.Runtime.ExceptionServices;
-
 namespace Surefire;
 
 /// <summary>
-///     Pre-compiled lifecycle callback invoker. Built once per registered callback at registration
-///     time to avoid <see cref="Delegate.DynamicInvoke" />, <see cref="MethodBase.GetParameters()" />,
-///     and per-call reflection for ValueTask&lt;T&gt; awaiting on every invocation.
+///     Pre-compiled lifecycle callback invoker. Built once from a <see cref="CallbackDescriptor" />
+///     so per-invocation work is a function-pointer call. Callback return values are always
+///     discarded; any return shape is supported so user code can borrow its preferred signature
+///     without ceremony.
 /// </summary>
 internal sealed class CompiledCallback
 {
-    private readonly Func<object, Task>? _asTask; // non-null for ValueTask<T> returns
-    private readonly Func<object?[], object?> _invoke;
-    private readonly ParameterInfo[] _parameters;
-    private readonly ReturnKind _returnKind;
+    private readonly CallbackDescriptor _descriptor;
 
-    private CompiledCallback(
-        Func<object?[], object?> invoke,
-        ParameterInfo[] parameters,
-        ReturnKind returnKind,
-        Func<object, Task>? asTask)
-    {
-        _invoke = invoke;
-        _parameters = parameters;
-        _returnKind = returnKind;
-        _asTask = asTask;
-    }
+    private CompiledCallback(CallbackDescriptor descriptor) => _descriptor = descriptor;
 
-    /// <summary>Compiles a callback delegate into a fast invoker. Call once at registration time.</summary>
-    [RequiresUnreferencedCode("Reflects over a user-supplied callback delegate.")]
-    [RequiresDynamicCode("Reflects over a user-supplied callback delegate.")]
-    public static CompiledCallback Build(Delegate callback)
-    {
-        var parameters = callback.Method.GetParameters();
-        var invoke = DelegateCompiler.CompileInvoke(callback, parameters);
-        var returnType = callback.Method.ReturnType;
-        var returnKind = ClassifyReturn(returnType);
-        var asTask = returnKind == ReturnKind.ValueTaskOfT ? DelegateCompiler.CompileAsTask(returnType) : null;
-
-        return new(invoke, parameters, returnKind, asTask);
-    }
+    public static CompiledCallback FromDescriptor(CallbackDescriptor descriptor) => new(descriptor);
 
     /// <summary>Binds parameters, invokes the compiled delegate, and awaits the result.</summary>
     public async Task InvokeAsync(JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
         var args = BindArgs(context, services, cancellationToken);
+        var returned = _descriptor.Invoke(args, _descriptor.Handler);
 
-        object? returned;
-        try
+        // Match the user's method signature: await tasks, discard everything else. Sync scalar
+        // returns are produced eagerly inside the Invoke call; iterators (IAsyncEnumerable<T>)
+        // don't run their body until enumerated and are effectively no-ops, which matches the
+        // language semantics rather than fighting them.
+        switch (returned)
         {
-            returned = _invoke(args);
-        }
-        catch (TargetInvocationException ex) when (ex.InnerException is { })
-        {
-            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-            return; // unreachable
+            case null:
+                return;
+            case Task task:
+                await task;
+                return;
+            case ValueTask valueTask:
+                await valueTask;
+                return;
         }
 
-        switch (_returnKind)
+        if (_descriptor.AsTask is { } asTask)
         {
-            case ReturnKind.Void:
-                return;
-            case ReturnKind.Task:
-                await (Task)returned!;
-                return;
-            case ReturnKind.ValueTask:
-                await (ValueTask)returned!;
-                return;
-            case ReturnKind.ValueTaskOfT:
-                await _asTask!(returned!);
-                return;
+            await asTask(returned);
         }
     }
 
     private object?[] BindArgs(JobContext context, IServiceProvider services, CancellationToken cancellationToken)
     {
-        var args = new object?[_parameters.Length];
-        for (var i = 0; i < _parameters.Length; i++)
+        var parameters = _descriptor.Parameters;
+        var args = new object?[parameters.Count];
+        for (var i = 0; i < parameters.Count; i++)
         {
-            var p = _parameters[i];
+            var p = parameters[i];
 
-            if (p.ParameterType == typeof(JobContext))
+            switch (p.Kind)
             {
-                args[i] = context;
-                continue;
+                case ParameterKind.JobContext:
+                    args[i] = context;
+                    continue;
+                case ParameterKind.CancellationToken:
+                    args[i] = cancellationToken;
+                    continue;
+                case ParameterKind.ServiceProvider:
+                    args[i] = services;
+                    continue;
             }
 
-            if (p.ParameterType == typeof(CancellationToken))
-            {
-                args[i] = cancellationToken;
-                continue;
-            }
-
-            if (context.Exception is { } ex && p.ParameterType.IsInstanceOfType(ex))
+            if (context.Exception is { } ex && p.Type.IsInstanceOfType(ex))
             {
                 args[i] = ex;
                 continue;
             }
 
-            if (context.Result is { } result && p.ParameterType.IsInstanceOfType(result))
+            if (context.Result is { } result && p.Type.IsInstanceOfType(result))
             {
                 args[i] = result;
                 continue;
             }
 
-            var service = services.GetService(p.ParameterType);
+            var service = services.GetService(p.Type);
             if (service is { })
             {
                 args[i] = service;
                 continue;
             }
 
-            if (p.HasDefaultValue)
+            if (p.HasDefault)
             {
                 args[i] = p.DefaultValue;
                 continue;
@@ -123,44 +93,5 @@ internal sealed class CompiledCallback
         }
 
         return args;
-    }
-
-    private static ReturnKind ClassifyReturn(Type returnType)
-    {
-        if (returnType == typeof(void))
-        {
-            return ReturnKind.Void;
-        }
-
-        if (returnType == typeof(Task))
-        {
-            return ReturnKind.Task;
-        }
-
-        if (returnType == typeof(ValueTask))
-        {
-            return ReturnKind.ValueTask;
-        }
-
-        if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>))
-        {
-            return ReturnKind.ValueTaskOfT;
-        }
-
-        // Task<T> is still a Task; the base case handles it.
-        if (typeof(Task).IsAssignableFrom(returnType))
-        {
-            return ReturnKind.Task;
-        }
-
-        return ReturnKind.Void;
-    }
-
-    private enum ReturnKind
-    {
-        Void,
-        Task,
-        ValueTask,
-        ValueTaskOfT
     }
 }

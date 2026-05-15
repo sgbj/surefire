@@ -1,9 +1,10 @@
 using System.Diagnostics;
+using System.Text.Json.Serialization;
 using Npgsql;
 using StackExchange.Redis;
 using Surefire;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateSlimBuilder(args);
 
 builder.AddServiceDefaults();
 
@@ -45,6 +46,8 @@ builder.Services.AddSurefire(options =>
     options.RetentionPeriod = TimeSpan.FromHours(1);
     options.MaxNodeConcurrency = 50;
 
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, SampleJsonContext.Default);
+
     options.AddFixedWindowLimiter("Fibonacci", 10, TimeSpan.FromSeconds(10));
     options.UseFilter<StopwatchJobFilter>();
 
@@ -74,6 +77,8 @@ builder.Services.AddSurefire(options =>
             break;
     }
 });
+
+builder.Services.AddSurefireDashboard();
 
 var app = builder.Build();
 
@@ -242,3 +247,8 @@ internal class StopwatchJobFilter(ILogger<StopwatchJobFilter> logger) : IJobFilt
         logger.LogInformation("Stopwatch: {JobName} finished in {Elapsed}", context.JobName, elapsed);
     }
 }
+
+[JsonSerializable(typeof(int))]
+[JsonSerializable(typeof(long))]
+[JsonSerializable(typeof(AddRandomResult))]
+internal partial class SampleJsonContext : JsonSerializerContext;

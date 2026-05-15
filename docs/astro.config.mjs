@@ -45,6 +45,7 @@ export default defineConfig({
           label: "Guides",
           items: [
             { label: "Jobs", slug: "guides/jobs" },
+            { label: "AOT and trimming", slug: "guides/aot-trimming" },
             { label: "Scheduling", slug: "guides/scheduling" },
             { label: "Triggering and running", slug: "guides/triggering" },
             { label: "Streaming", slug: "guides/streaming" },

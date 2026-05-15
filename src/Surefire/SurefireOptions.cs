@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
@@ -10,13 +11,18 @@ namespace Surefire;
 /// </summary>
 public sealed class SurefireOptions
 {
-    internal List<Delegate> OnSuccessCallbacks { get; } = [];
-    internal List<Delegate> OnRetryCallbacks { get; } = [];
-    internal List<Delegate> OnDeadLetterCallbacks { get; } = [];
-    internal IReadOnlyList<CompiledCallback> CompiledOnSuccessCallbacks { get; private set; } = [];
-    internal IReadOnlyList<CompiledCallback> CompiledOnRetryCallbacks { get; private set; } = [];
-    internal IReadOnlyList<CompiledCallback> CompiledOnDeadLetterCallbacks { get; private set; } = [];
-    internal List<Type> FilterTypes { get; } = [];
+    private const string CallbackReflectionMessage =
+        "Registering a global lifecycle callback from a Delegate inspects its parameters and return " +
+        "type via reflection. Build a CallbackDescriptor instead when publishing with trimming or Native AOT.";
+
+    private readonly List<CompiledCallback> _onDeadLetterCallbacks = [];
+    private readonly List<CompiledCallback> _onRetryCallbacks = [];
+    private readonly List<CompiledCallback> _onSuccessCallbacks = [];
+
+    internal IReadOnlyList<CompiledCallback> CompiledOnSuccessCallbacks => _onSuccessCallbacks;
+    internal IReadOnlyList<CompiledCallback> CompiledOnRetryCallbacks => _onRetryCallbacks;
+    internal IReadOnlyList<CompiledCallback> CompiledOnDeadLetterCallbacks => _onDeadLetterCallbacks;
+    internal List<Func<IServiceProvider, IJobFilter>> FilterFactories { get; } = [];
     internal List<QueueDefinition> Queues { get; } = [];
     internal List<RateLimitDefinition> RateLimits { get; } = [];
     internal List<Action<IServiceCollection>> ServiceConfigurators { get; } = [];
@@ -186,39 +192,43 @@ public sealed class SurefireOptions
     /// </summary>
     public bool AutoMigrate { get; set; } = true;
 
-    /// <summary>
-    ///     Registers a global callback invoked when any job completes successfully.
-    /// </summary>
-    /// <param name="callback">The callback delegate.</param>
-    /// <returns>This instance for chaining.</returns>
-    public SurefireOptions OnSuccess(Delegate callback)
+    /// <summary>Registers a global callback invoked when any job completes successfully.</summary>
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    public SurefireOptions OnSuccess(Delegate callback) => AddDelegate(_onSuccessCallbacks, callback);
+
+    /// <summary>Registers a global callback invoked when any job transitions to retrying.</summary>
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    public SurefireOptions OnRetry(Delegate callback) => AddDelegate(_onRetryCallbacks, callback);
+
+    /// <summary>Registers a global callback invoked when any job exhausts all retries.</summary>
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    public SurefireOptions OnDeadLetter(Delegate callback) => AddDelegate(_onDeadLetterCallbacks, callback);
+
+    /// <summary>Registers a global on-success callback from a pre-built <see cref="CallbackDescriptor" />.</summary>
+    public SurefireOptions OnSuccess(CallbackDescriptor descriptor) => AddDescriptor(_onSuccessCallbacks, descriptor);
+
+    /// <summary>Registers a global on-retry callback from a pre-built <see cref="CallbackDescriptor" />.</summary>
+    public SurefireOptions OnRetry(CallbackDescriptor descriptor) => AddDescriptor(_onRetryCallbacks, descriptor);
+
+    /// <summary>Registers a global on-dead-letter callback from a pre-built <see cref="CallbackDescriptor" />.</summary>
+    public SurefireOptions OnDeadLetter(CallbackDescriptor descriptor) =>
+        AddDescriptor(_onDeadLetterCallbacks, descriptor);
+
+    [RequiresUnreferencedCode(CallbackReflectionMessage)]
+    [RequiresDynamicCode(CallbackReflectionMessage)]
+    private SurefireOptions AddDelegate(List<CompiledCallback> list, Delegate callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
-        OnSuccessCallbacks.Add(callback);
-        return this;
+        return AddDescriptor(list, ReflectionDescriptorBuilder.BuildCallback(callback));
     }
 
-    /// <summary>
-    ///     Registers a global callback invoked when any job transitions to retrying.
-    /// </summary>
-    /// <param name="callback">The callback delegate.</param>
-    /// <returns>This instance for chaining.</returns>
-    public SurefireOptions OnRetry(Delegate callback)
+    private SurefireOptions AddDescriptor(List<CompiledCallback> list, CallbackDescriptor descriptor)
     {
-        ArgumentNullException.ThrowIfNull(callback);
-        OnRetryCallbacks.Add(callback);
-        return this;
-    }
-
-    /// <summary>
-    ///     Registers a global callback invoked when any job exhausts all retries.
-    /// </summary>
-    /// <param name="callback">The callback delegate.</param>
-    /// <returns>This instance for chaining.</returns>
-    public SurefireOptions OnDeadLetter(Delegate callback)
-    {
-        ArgumentNullException.ThrowIfNull(callback);
-        OnDeadLetterCallbacks.Add(callback);
+        ArgumentNullException.ThrowIfNull(descriptor);
+        list.Add(CompiledCallback.FromDescriptor(descriptor));
         return this;
     }
 
@@ -227,9 +237,11 @@ public sealed class SurefireOptions
     /// </summary>
     /// <typeparam name="T">The filter type implementing <see cref="IJobFilter" />.</typeparam>
     /// <returns>This instance for chaining.</returns>
-    public SurefireOptions UseFilter<T>() where T : class, IJobFilter
+    public SurefireOptions
+        UseFilter<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>()
+        where T : class, IJobFilter
     {
-        FilterTypes.Add(typeof(T));
+        FilterFactories.Add(static services => ActivatorUtilities.GetServiceOrCreateInstance<T>(services));
         return this;
     }
 
@@ -359,10 +371,12 @@ public sealed class SurefireOptions
         }
     }
 
-    [RequiresUnreferencedCode("Compiles user-supplied lifecycle callback delegates.")]
-    [RequiresDynamicCode("Compiles user-supplied lifecycle callback delegates.")]
     internal SurefireOptions Freeze()
     {
+        var serializerClone = new JsonSerializerOptions(SerializerOptions);
+        EnsureSurefireContext(serializerClone);
+        AttachReflectionResolverIfEnabled(serializerClone);
+
         var clone = new SurefireOptions
         {
             NodeName = NodeName,
@@ -372,20 +386,61 @@ public sealed class SurefireOptions
             RetentionPeriod = RetentionPeriod,
             RetentionCheckInterval = RetentionCheckInterval,
             ShutdownTimeout = ShutdownTimeout,
-            SerializerOptions = new(SerializerOptions),
+            SerializerOptions = serializerClone,
             MaxNodeConcurrency = MaxNodeConcurrency,
             AutoMigrate = AutoMigrate
         };
 
-        clone.CompiledOnSuccessCallbacks = OnSuccessCallbacks.Select(CompiledCallback.Build).ToArray();
-        clone.CompiledOnRetryCallbacks = OnRetryCallbacks.Select(CompiledCallback.Build).ToArray();
-        clone.CompiledOnDeadLetterCallbacks = OnDeadLetterCallbacks.Select(CompiledCallback.Build).ToArray();
-        clone.FilterTypes.AddRange(FilterTypes);
+        clone._onSuccessCallbacks.AddRange(_onSuccessCallbacks);
+        clone._onRetryCallbacks.AddRange(_onRetryCallbacks);
+        clone._onDeadLetterCallbacks.AddRange(_onDeadLetterCallbacks);
+        clone.FilterFactories.AddRange(FilterFactories);
         clone.Queues.AddRange(Queues.Select(queue => queue.Clone()));
         clone.RateLimits.AddRange(RateLimits.Select(rateLimit => rateLimit.Clone()));
         clone.ServiceConfigurators.AddRange(ServiceConfigurators);
         return clone;
     }
+
+    // Surefire's framework types (run/event/batch envelopes, upsert payloads, etc.) always need
+    // to resolve regardless of what the user configured. Prepending the source-generated context
+    // means user resolvers can stay focused on user types without re-declaring framework shapes.
+    private static void EnsureSurefireContext(JsonSerializerOptions options)
+    {
+        if (!options.TypeInfoResolverChain.Contains(SurefireJsonContext.Default))
+        {
+            options.TypeInfoResolverChain.Insert(0, SurefireJsonContext.Default);
+        }
+    }
+
+    // Mirrors the JIT-default behavior of System.Text.Json: when reflection is enabled and the
+    // user supplied no resolver, add DefaultJsonTypeInfoResolver so arbitrary user types serialize
+    // without a context. Never touch a user-supplied chain - mutating it would override deliberate
+    // AOT-safe configuration. When PublishAot=true the feature switch flips to false and this
+    // method is a no-op, so the trimmer can drop the resolver entirely.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification =
+            "Guarded by JsonSerializer.IsReflectionEnabledByDefault; the trimmer drops this when reflection is disabled.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification =
+            "Guarded by JsonSerializer.IsReflectionEnabledByDefault; AOT compilations don't enter this branch.")]
+    private static void AttachReflectionResolverIfEnabled(JsonSerializerOptions options)
+    {
+        if (!JsonSerializer.IsReflectionEnabledByDefault)
+        {
+            return;
+        }
+
+        // The chain now contains SurefireJsonContext (prepended above). "User supplied nothing"
+        // means the chain has only that single context. In that case, append the default resolver
+        // so user types deserialize without ceremony.
+        var userChainCount = options.TypeInfoResolverChain
+            .Count(r => r is not SurefireJsonContext);
+        if (userChainCount == 0 && !options.TypeInfoResolverChain.OfType<DefaultJsonTypeInfoResolver>().Any())
+        {
+            options.TypeInfoResolverChain.Add(new DefaultJsonTypeInfoResolver());
+        }
+    }
+
 
     private static void ValidateRateLimitArguments(string name, int maxPermits, TimeSpan window)
     {

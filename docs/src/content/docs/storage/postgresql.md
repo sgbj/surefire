@@ -7,6 +7,7 @@ description: Use PostgreSQL as the Surefire job store with real-time notificatio
 
 ```bash
 dotnet add package Surefire.PostgreSql
+dotnet add package Npgsql.DependencyInjection
 ```
 
 ## Setup

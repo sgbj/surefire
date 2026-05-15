@@ -37,8 +37,6 @@ public interface IJobClient
     /// <param name="runs">The batch items, each carrying its own job name, arguments, and options.</param>
     /// <param name="cancellationToken">A token to cancel the trigger call.</param>
     /// <returns>The created batch.</returns>
-    [RequiresUnreferencedCode("Uses JSON serialization.")]
-    [RequiresDynamicCode("Uses JSON serialization.")]
     Task<JobBatch> TriggerBatchAsync(IEnumerable<BatchItem> runs, CancellationToken cancellationToken = default);
 
     /// <summary>Schedules a homogeneous batch with one run of <paramref name="job" /> per element of <paramref name="args" />.</summary>
@@ -63,7 +61,10 @@ public interface IJobClient
     /// <exception cref="RunNotFoundException">Thrown when the run does not exist.</exception>
     Task CancelAsync(string runId, CancellationToken cancellationToken = default);
 
-    /// <summary>Cancels every non-terminal run in a batch and marks the batch terminal. No-ops silently when the batch is already terminal.</summary>
+    /// <summary>
+    ///     Cancels every non-terminal run in a batch and marks the batch terminal. No-ops silently when the batch is
+    ///     already terminal.
+    /// </summary>
     /// <exception cref="BatchNotFoundException">Thrown when the batch does not exist.</exception>
     Task CancelBatchAsync(string batchId, CancellationToken cancellationToken = default);
 
@@ -125,21 +126,17 @@ public interface IJobClient
     ///     Thrown when the run has no result (null result column and no
     ///     <see cref="RunEventType.OutputComplete" /> event).
     /// </exception>
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
     Task<T> WaitAsync<T>(string runId, CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Streams the deserialized output items of a running or terminal run.
     ///     Yields all Output events in commit order across every attempt, so duplicates on retry are
-    ///     expected. Use <see cref="WaitAsync{T}" /> with a collection <c>T</c> to get only the final
-    ///     attempt's outputs.
+    ///     expected. Use <see cref="WaitAsync{T}(string, CancellationToken)" /> with a collection
+    ///     <c>T</c> to get only the final attempt's outputs.
     /// </summary>
     /// <param name="runId">The run identifier.</param>
     /// <param name="cancellationToken">A token to cancel streaming. Cancellation does not affect the run itself.</param>
     /// <exception cref="JobRunException">Thrown on next <c>MoveNextAsync</c> when the run's final terminal is non-success.</exception>
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
     IAsyncEnumerable<T> WaitStreamAsync<T>(string runId, CancellationToken cancellationToken = default);
 
     /// <summary>Triggers <paramref name="job" /> and waits for it to complete, returning the deserialized result.</summary>
@@ -160,7 +157,8 @@ public interface IJobClient
     /// <summary>Triggers <paramref name="job" /> and streams its output items as they're produced.</summary>
     /// <remarks>
     ///     Cancellation of <paramref name="cancellationToken" /> cancels the triggered run; use
-    ///     <see cref="WaitStreamAsync{T}" /> to stream an existing run without owning it.
+    ///     <see cref="WaitStreamAsync{T}(string, CancellationToken)" /> to stream an existing run
+    ///     without owning it.
     /// </remarks>
     [RequiresUnreferencedCode("Uses JSON deserialization.")]
     [RequiresDynamicCode("Uses JSON deserialization.")]
@@ -179,8 +177,6 @@ public interface IJobClient
     ///     If any child failed or was canceled, throws <see cref="AggregateException" /> at the end.
     /// </summary>
     /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
     Task<IReadOnlyList<T>> WaitBatchAsync<T>(string batchId, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -194,8 +190,6 @@ public interface IJobClient
     ///     first non-success terminal observed, throws <see cref="JobRunException" /> at the yield position.
     ///     The batch itself keeps running.
     /// </summary>
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
     IAsyncEnumerable<T> WaitEachAsync<T>(string batchId, CancellationToken cancellationToken = default);
 
     /// <summary>Triggers a homogeneous batch and waits for every child to complete, returning their results.</summary>
@@ -214,15 +208,11 @@ public interface IJobClient
 
     /// <summary>Triggers a heterogeneous batch and waits for every child to complete, returning their results.</summary>
     /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
     Task<IReadOnlyList<T>> RunBatchAsync<T>(IEnumerable<BatchItem> items,
         CancellationToken cancellationToken = default);
 
     /// <summary>Triggers a heterogeneous batch and waits for every child to complete.</summary>
     /// <exception cref="AggregateException">Thrown at the end when one or more children failed or were canceled.</exception>
-    [RequiresUnreferencedCode("Uses JSON serialization.")]
-    [RequiresDynamicCode("Uses JSON serialization.")]
     Task RunBatchAsync(IEnumerable<BatchItem> items, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -238,8 +228,53 @@ public interface IJobClient
     ///     Triggers a heterogeneous batch and streams each child's result in terminal-commit order.
     ///     Cancellation of <paramref name="cancellationToken" /> cancels the batch.
     /// </summary>
-    [RequiresUnreferencedCode("Uses JSON deserialization.")]
-    [RequiresDynamicCode("Uses JSON deserialization.")]
     IAsyncEnumerable<T> StreamBatchAsync<T>(IEnumerable<BatchItem> items,
         CancellationToken cancellationToken = default);
+
+    /// <summary>AOT-safe variant of <see cref="TriggerAsync(string, object?, RunOptions?, CancellationToken)" />.</summary>
+    Task<JobRun> TriggerAsync(string job, RunArguments? args, RunOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     AOT-safe variant of <see cref="RunAsync{T}(string, object?, RunOptions?, CancellationToken)" /> for scalar
+    ///     result types.
+    /// </summary>
+    Task<T> RunAsync<T>(string job, RunArguments? args, RunOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>AOT-safe variant of <see cref="RunAsync(string, object?, RunOptions?, CancellationToken)" />.</summary>
+    Task RunAsync(string job, RunArguments? args, RunOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>AOT-safe variant of <see cref="StreamAsync{T}(string, object?, RunOptions?, CancellationToken)" />.</summary>
+    IAsyncEnumerable<T> StreamAsync<T>(string job, RunArguments? args, RunOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     AOT-safe variant of
+    ///     <see cref="TriggerBatchAsync(string, IEnumerable{object?}, BatchRunOptions?, CancellationToken)" />.
+    /// </summary>
+    Task<JobBatch> TriggerBatchAsync(string job, IEnumerable<RunArguments?> args,
+        BatchRunOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     AOT-safe variant of
+    ///     <see cref="RunBatchAsync{T}(string, IEnumerable{object?}, BatchRunOptions?, CancellationToken)" />.
+    /// </summary>
+    Task<IReadOnlyList<T>> RunBatchAsync<T>(string job, IEnumerable<RunArguments?> args,
+        BatchRunOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     AOT-safe variant of
+    ///     <see cref="RunBatchAsync(string, IEnumerable{object?}, BatchRunOptions?, CancellationToken)" />.
+    /// </summary>
+    Task RunBatchAsync(string job, IEnumerable<RunArguments?> args,
+        BatchRunOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     AOT-safe variant of
+    ///     <see cref="StreamBatchAsync{T}(string, IEnumerable{object?}, BatchRunOptions?, CancellationToken)" />.
+    /// </summary>
+    IAsyncEnumerable<T> StreamBatchAsync<T>(string job, IEnumerable<RunArguments?> args,
+        BatchRunOptions? options = null, CancellationToken cancellationToken = default);
 }

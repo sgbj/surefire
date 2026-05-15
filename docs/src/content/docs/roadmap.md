@@ -14,14 +14,6 @@ Right now the dashboard is unauthenticated by default, so you have to call
 `.RequireAuthorization(...)` to lock it down. I'd like to make it safe by default, 
 possibly with something like the login token used by the Aspire dashboard, and add more customization options.
 
-## Source generator and Native AOT support
-
-Make Surefire work with Native AOT and trimming.
-
-Possibly generate `IJobClient` extension methods for registered jobs, 
-so if you write `app.AddJob("GenerateReport", (DateOnly date) => ...)`,  
-you can call `client.GenerateReport(date)` instead of 
-`client.RunAsync<Report>("GenerateReport", new { date })`.
 
 ## Durable jobs
 

@@ -14,6 +14,9 @@ dotnet add package Surefire.Redis
 The Redis provider resolves an `IConnectionMultiplexer` from DI. Register one with `StackExchange.Redis` or the Aspire client extension, then call `UseRedis`:
 
 ```csharp
+builder.Services.AddSingleton<IConnectionMultiplexer>(
+    _ => ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("Redis")!));
+
 builder.Services.AddSurefire(options => options.UseRedis());
 ```
 

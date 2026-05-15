@@ -1,6 +1,14 @@
 <Project>
     <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
 
+    <!-- Every packable Surefire library is Native AOT compatible and trim-safe. Storage providers
+         already use SurefireJsonContext.Default.* exclusively; the core library exposes only
+         descriptor-based registration paths that the source generator emits against. -->
+    <PropertyGroup Condition="'$(TargetFramework)' != 'netstandard2.0'">
+        <IsAotCompatible>true</IsAotCompatible>
+        <IsTrimmable>true</IsTrimmable>
+    </PropertyGroup>
+
     <ItemGroup>
         <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers">
             <PrivateAssets>all</PrivateAssets>

@@ -15,7 +15,7 @@
   "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
   monospace;
-  /* Bumped scale — base is now 15 px instead of 13. Mono usage is reserved for
+  /* Bumped scale; base is now 15 px instead of 13. Mono usage is reserved for
      identifiers / timestamps / digit-aligned counts. Heading tokens preserve
      the existing page-title sizes (24/28 px) so we can drop the arbitrary
      classes that bypassed the scale. */
@@ -29,9 +29,9 @@
   --text-lg--line-height: 1.625rem;
   --text-xl: 1.25rem;        /* 20px */
   --text-xl--line-height: 1.75rem;
-  --text-2xl: 1.5rem;        /* 24px — h1 small viewport */
+  --text-2xl: 1.5rem;        /* 24px, h1 small viewport */
   --text-2xl--line-height: 2rem;
-  --text-3xl: 1.75rem;       /* 28px — h1 sm+ */
+  --text-3xl: 1.75rem;       /* 28px, h1 sm+ */
   --text-3xl--line-height: 2.125rem;
 }
 
@@ -69,7 +69,7 @@
     color-scheme: dark;
   }
 
-  /* Hairline scrollbar — feels like a thin pencil margin. */
+  /* Hairline scrollbar; feels like a thin pencil margin. */
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -105,7 +105,7 @@
 }
 
 /* ============================================================================
-   PALETTE — cool slate ivory and deep ink, with a single cobalt accent that
+   PALETTE: cool slate ivory and deep ink, with a single cobalt accent that
    echoes the Surefire logo. Status colors stay tinted-low-chroma so the
    accent remains the only chromatic event in the room.
    ========================================================================= */
@@ -120,7 +120,7 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.18 0.018 255);
 
-  /* Cobalt — calibrated against the logo's #2773d4. Hue 256 is the canonical
+  /* Cobalt, calibrated against the logo's #2773d4. Hue 256 is the canonical
      brand hue and must match in both modes; lightness/chroma vary per mode. */
   --accent-brand: oklch(0.555 0.18 256);
   --accent-brand-soft: oklch(0.92 0.05 256);
@@ -217,7 +217,7 @@
 }
 
 /* ============================================================================
-   ANIMATIONS — used sparingly. Soft breath only on the running indicator;
+   ANIMATIONS: used sparingly. Soft breath only on the running indicator;
    everything else is static.
    ========================================================================= */
 @keyframes indeterminate {
@@ -293,7 +293,7 @@
    UTILITIES
    ========================================================================= */
 @utility eyebrow {
-  /* Small section / kicker label — sentence case, slightly muted. Reads as a
+  /* Small section / kicker label, sentence case, slightly muted. Reads as a
      label, not a stamp. */
   @apply text-xs font-medium text-muted-foreground;
 }

@@ -40,7 +40,14 @@ options.PollingInterval = TimeSpan.FromSeconds(2);
 
 For real-time wakeups, pair the SQL Server store with the Redis notification provider. Register an `IConnectionMultiplexer` in DI, then:
 
+```bash
+dotnet add package Surefire.Redis
+```
+
 ```csharp
+builder.Services.AddSingleton<IConnectionMultiplexer>(
+    _ => ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("Redis")!));
+
 builder.Services.AddSurefire(options =>
 {
     options.UseSqlServer(builder.Configuration.GetConnectionString("Surefire")!);

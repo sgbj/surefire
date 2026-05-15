@@ -3,17 +3,7 @@ using System.Text.Json.Serialization;
 namespace Surefire;
 
 /// <summary>
-///     Source-generated JSON context for every internal wire payload (Redis run/event/batch
-///     shapes, bulk-upsert payloads, AOT-safe tag and name lists, failure/input envelopes).
-///     <para>
-///         Separate from <see cref="SurefireOptions.SerializerOptions" />, which is user-facing
-///         and runtime-configurable. This context is Surefire's internal protocol and must stay
-///         stable regardless of caller configuration.
-///     </para>
-///     <para>
-///         <see cref="System.TimeSpan" /> serializes as ticks; <see cref="System.DateTimeOffset" />
-///         as unix milliseconds, so Lua scripts and SQL JSON paths can compare them numerically.
-///     </para>
+///     Source-generated JSON context for Surefire's internal payloads.
 /// </summary>
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
@@ -38,10 +28,7 @@ namespace Surefire;
 internal sealed partial class SurefireJsonContext : JsonSerializerContext;
 
 /// <summary>
-///     Bulk <c>UpsertJobsAsync</c> wire record. A list of these is serialized to a single JSON
-///     string parameter and consumed server-side by each store's native JSON primitive
-///     (PG <c>jsonb_array_elements</c>, SQL Server <c>OPENJSON WITH</c>, SQLite
-///     <c>json_each</c>, Redis <c>cjson.decode</c>).
+///     Bulk upsert payload for jobs.
 /// </summary>
 internal sealed record UpsertJobPayload
 {
@@ -63,7 +50,7 @@ internal sealed record UpsertJobPayload
     public string? ArgumentsSchema { get; init; }
 }
 
-/// <summary>Bulk <c>UpsertQueuesAsync</c> wire record. See <see cref="UpsertJobPayload" />.</summary>
+/// <summary>Bulk upsert payload for queues.</summary>
 internal sealed record UpsertQueuePayload
 {
     public string Name { get; init; } = string.Empty;
@@ -73,7 +60,7 @@ internal sealed record UpsertQueuePayload
     public string? RateLimitName { get; init; }
 }
 
-/// <summary>Bulk <c>UpsertRateLimitsAsync</c> wire record. See <see cref="UpsertJobPayload" />.</summary>
+/// <summary>Bulk upsert payload for rate limits.</summary>
 internal sealed record UpsertRateLimitPayload
 {
     public string Name { get; init; } = string.Empty;
@@ -83,9 +70,7 @@ internal sealed record UpsertRateLimitPayload
 }
 
 /// <summary>
-///     Wire record for the batch-completion notification returned from Redis Lua scripts and
-///     surfaced to <c>BatchCompletionHandler</c>. Emitted when a terminal transition closes out
-///     the last pending run of a batch.
+///     Batch-completion notification payload.
 /// </summary>
 internal sealed record BatchCompletionPayload
 {
@@ -95,11 +80,7 @@ internal sealed record BatchCompletionPayload
 }
 
 /// <summary>
-///     Wire record for the paged result of Redis's cancel-expired-runs Lua script: the runs it
-///     Canceled this page (with their batch ids), any batches that completed as a side effect,
-///     the count of orphan pending entries it cleaned up, and the count of entries skipped
-///     because they'd already been handled by another node. Arrays are nullable because Lua's
-///     cjson drops empty tables.
+///     Paged result payload for canceling expired runs.
 /// </summary>
 internal sealed record CancelExpiredRunsPayload
 {
@@ -110,10 +91,7 @@ internal sealed record CancelExpiredRunsPayload
 }
 
 /// <summary>
-///     Wire record for the result of Redis's cancel-subtree Lua script: the runs that
-///     transitioned to Canceled (with their batch ids) and any batches that completed.
-///     Fields are nullable so an omitted array (Lua's cjson drops empty tables) round-trips
-///     to an empty C# collection.
+///     Result payload for canceling a run subtree.
 /// </summary>
 internal sealed record SubtreeCancellationPayload
 {

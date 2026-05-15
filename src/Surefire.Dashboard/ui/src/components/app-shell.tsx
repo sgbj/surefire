@@ -12,14 +12,24 @@ import {
   Sun,
   Workflow,
 } from "lucide-react";
-import {Link, useLocation} from "react-router";
-import {useEffect} from "react";
+import { Link, useLocation } from "react-router";
+import { useEffect } from "react";
 
-import {cn} from "@/lib/utils";
-import {Tooltip, TooltipContent, TooltipTrigger} from "@/components/ui/tooltip";
-import {Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,} from "@/components/ui/sheet";
-import {TopBarActionsHost, TopBarBadgeHost} from "@/components/topbar-slot";
-import type {Theme} from "@/components/layout";
+import { cn } from "@/lib/utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { TopBarActionsHost, TopBarBadgeHost } from "@/components/topbar-slot";
+import type { Theme } from "@/components/layout";
 
 interface NavItem {
   title: string;
@@ -28,11 +38,11 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  {title: "Dashboard", url: "/", icon: House},
-  {title: "Jobs", url: "/jobs", icon: Workflow},
-  {title: "Runs", url: "/runs", icon: Play},
-  {title: "Queues", url: "/queues", icon: Layers},
-  {title: "Nodes", url: "/nodes", icon: Server},
+  { title: "Dashboard", url: "/", icon: House },
+  { title: "Jobs", url: "/jobs", icon: Workflow },
+  { title: "Runs", url: "/runs", icon: Play },
+  { title: "Queues", url: "/queues", icon: Layers },
+  { title: "Nodes", url: "/nodes", icon: Server },
 ];
 
 function isActive(pathname: string, url: string) {
@@ -45,7 +55,7 @@ interface RailProps {
   onOpenSearch: () => void;
 }
 
-export function AppRail({theme, onCycleTheme, onOpenSearch}: RailProps) {
+export function AppRail({ theme, onCycleTheme, onOpenSearch }: RailProps) {
   const location = useLocation();
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
 
@@ -82,10 +92,10 @@ export function AppRail({theme, onCycleTheme, onOpenSearch}: RailProps) {
                   {active && (
                     <span
                       aria-hidden
-                      className="absolute -left-3 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-full bg-accent-brand"
+                      className="absolute -left-3 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-accent-brand"
                     />
                   )}
-                  <item.icon className="size-[18px]"/>
+                  <item.icon className="size-4.5" />
                 </Link>
               </TooltipTrigger>
               <TooltipContent side="right">{item.title}</TooltipContent>
@@ -103,7 +113,7 @@ export function AppRail({theme, onCycleTheme, onOpenSearch}: RailProps) {
               className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
               aria-label="Search"
             >
-              <Search className="size-[18px]"/>
+              <Search className="size-4.5" />
             </button>
           </TooltipTrigger>
           <TooltipContent side="right">Search</TooltipContent>
@@ -116,7 +126,7 @@ export function AppRail({theme, onCycleTheme, onOpenSearch}: RailProps) {
               className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
               aria-label="Theme"
             >
-              <ThemeIcon className="size-[18px]"/>
+              <ThemeIcon className="size-4.5" />
             </button>
           </TooltipTrigger>
           <TooltipContent side="right">Theme</TooltipContent>
@@ -130,7 +140,7 @@ export function AppRail({theme, onCycleTheme, onOpenSearch}: RailProps) {
               className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
               aria-label="Docs"
             >
-              <BookOpen className="size-[18px]"/>
+              <BookOpen className="size-4.5" />
             </a>
           </TooltipTrigger>
           <TooltipContent side="right">Docs</TooltipContent>
@@ -144,7 +154,7 @@ export function AppRail({theme, onCycleTheme, onOpenSearch}: RailProps) {
               className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
               aria-label="GitHub"
             >
-              <CodeXml className="size-[18px]"/>
+              <CodeXml className="size-4.5" />
             </a>
           </TooltipTrigger>
           <TooltipContent side="right">GitHub</TooltipContent>
@@ -159,7 +169,13 @@ interface MobileRailProps extends RailProps {
   setOpen: (open: boolean) => void;
 }
 
-export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: MobileRailProps) {
+export function MobileRail({
+  open,
+  setOpen,
+  theme,
+  onCycleTheme,
+  onOpenSearch,
+}: MobileRailProps) {
   const location = useLocation();
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
 
@@ -175,7 +191,9 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
       >
         <SheetHeader className="sr-only">
           <SheetTitle>Navigation</SheetTitle>
-          <SheetDescription>Surefire dashboard navigation menu.</SheetDescription>
+          <SheetDescription>
+            Surefire dashboard navigation menu.
+          </SheetDescription>
         </SheetHeader>
         <div className="flex h-full flex-col">
           <div className="flex items-center gap-3 border-b border-sidebar-border px-5 py-4">
@@ -184,7 +202,9 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
               alt=""
               className="size-5"
             />
-            <span className="text-base font-semibold tracking-tight">Surefire</span>
+            <span className="text-base font-semibold tracking-tight">
+              Surefire
+            </span>
           </div>
 
           <nav className="flex flex-col gap-px p-3">
@@ -201,8 +221,10 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
                       : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
                   )}
                 >
-                  <item.icon className="size-4 opacity-80"/>
-                  <span className={active ? "font-medium" : ""}>{item.title}</span>
+                  <item.icon className="size-4 opacity-80" />
+                  <span className={active ? "font-medium" : ""}>
+                    {item.title}
+                  </span>
                 </Link>
               );
             })}
@@ -217,7 +239,7 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
               }}
               className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground"
             >
-              <Search className="size-4 opacity-80"/>
+              <Search className="size-4 opacity-80" />
               Search
             </button>
             <button
@@ -225,7 +247,7 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
               onClick={onCycleTheme}
               className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground"
             >
-              <ThemeIcon className="size-4 opacity-80"/>
+              <ThemeIcon className="size-4 opacity-80" />
               Theme
             </button>
             <a
@@ -234,7 +256,7 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
               rel="noopener noreferrer"
               className="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground"
             >
-              <BookOpen className="size-4 opacity-80"/>
+              <BookOpen className="size-4 opacity-80" />
               Docs
             </a>
             <a
@@ -243,7 +265,7 @@ export function MobileRail({open, setOpen, theme, onCycleTheme, onOpenSearch}: M
               rel="noopener noreferrer"
               className="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground"
             >
-              <CodeXml className="size-4 opacity-80"/>
+              <CodeXml className="size-4 opacity-80" />
               GitHub
             </a>
           </div>
@@ -257,7 +279,7 @@ interface TopBarProps {
   onOpenMobile: () => void;
 }
 
-export function NavTopBar({onOpenMobile}: TopBarProps) {
+export function NavTopBar({ onOpenMobile }: TopBarProps) {
   const location = useLocation();
   const breadcrumb = computeBreadcrumb(location.pathname);
 
@@ -269,13 +291,10 @@ export function NavTopBar({onOpenMobile}: TopBarProps) {
         className="md:hidden -ml-1 flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         aria-label="Menu"
       >
-        <Menu className="size-5"/>
+        <Menu className="size-5" />
       </button>
 
-      <Link
-        to="/"
-        className="md:hidden flex items-center gap-2"
-      >
+      <Link to="/" className="md:hidden flex items-center gap-2">
         <img
           src={`${import.meta.env.BASE_URL}surefire.svg`}
           alt=""
@@ -284,11 +303,11 @@ export function NavTopBar({onOpenMobile}: TopBarProps) {
       </Link>
 
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <Breadcrumbs items={breadcrumb}/>
-        <TopBarBadgeHost className="flex items-center gap-2"/>
+        <Breadcrumbs items={breadcrumb} />
+        <TopBarBadgeHost className="flex items-center gap-2" />
       </div>
 
-      <TopBarActionsHost className="flex items-center gap-2"/>
+      <TopBarActionsHost className="flex items-center gap-2" />
     </header>
   );
 }
@@ -300,9 +319,9 @@ interface BreadcrumbItem {
 
 function computeBreadcrumb(pathname: string): BreadcrumbItem[] {
   const trimmed = pathname.replace(/\/$/, "");
-  if (!trimmed) return [{label: "Dashboard"}];
+  if (!trimmed) return [{ label: "Dashboard" }];
   const parts = trimmed.split("/").filter(Boolean);
-  if (parts.length === 0) return [{label: "Dashboard"}];
+  if (parts.length === 0) return [{ label: "Dashboard" }];
 
   const items: BreadcrumbItem[] = [];
   const knownTop: Record<string, string> = {
@@ -312,22 +331,33 @@ function computeBreadcrumb(pathname: string): BreadcrumbItem[] {
     nodes: "Nodes",
   };
   const top = parts[0];
-  items.push({label: knownTop[top] ?? top, to: parts.length === 1 ? undefined : `/${top}`});
+  items.push({
+    label: knownTop[top] ?? top,
+    to: parts.length === 1 ? undefined : `/${top}`,
+  });
   if (parts.length > 1) {
     const tail = decodeURIComponent(parts.slice(1).join("/"));
-    items.push({label: tail});
+    items.push({ label: tail });
   }
   return items;
 }
 
-function Breadcrumbs({items}: { items: BreadcrumbItem[] }) {
+function Breadcrumbs({ items }: { items: BreadcrumbItem[] }) {
   return (
-    <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-2 text-sm">
+    <nav
+      aria-label="Breadcrumb"
+      className="flex min-w-0 items-center gap-2 text-sm"
+    >
       {items.map((item, i) => {
         const last = i === items.length - 1;
         return (
-          <span key={i} className={cn("flex items-center gap-2", last && "min-w-0")}>
-            {i > 0 && <span className="shrink-0 text-muted-foreground/40">/</span>}
+          <span
+            key={i}
+            className={cn("flex items-center gap-2", last && "min-w-0")}
+          >
+            {i > 0 && (
+              <span className="shrink-0 text-muted-foreground/40">/</span>
+            )}
             {item.to && !last ? (
               <Link
                 to={item.to}
@@ -338,7 +368,9 @@ function Breadcrumbs({items}: { items: BreadcrumbItem[] }) {
             ) : (
               <span
                 className={cn(
-                  last ? "truncate font-medium text-foreground" : "shrink-0 text-muted-foreground",
+                  last
+                    ? "truncate font-medium text-foreground"
+                    : "shrink-0 text-muted-foreground",
                 )}
                 title={item.label}
               >

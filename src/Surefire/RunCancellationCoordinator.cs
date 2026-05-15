@@ -11,7 +11,7 @@ internal sealed class RunCancellationCoordinator(
         CancellationToken cancellationToken,
         bool cancelSelf = true)
     {
-        var result = await store.CancelRunSubtreeAsync(runId, reason, includeRoot: cancelSelf,
+        var result = await store.CancelRunSubtreeAsync(runId, reason, cancelSelf,
             cancellationToken);
         await PublishSubtreeCancellationAsync(result, cancellationToken);
         return result;
@@ -23,7 +23,7 @@ internal sealed class RunCancellationCoordinator(
         string? fixedReason = null)
     {
         var reason = fixedReason ?? $"Canceled because parent run '{parentRunId}' was canceled.";
-        return CancelRunAndDescendantsAsync(parentRunId, reason, cancellationToken, cancelSelf: false);
+        return CancelRunAndDescendantsAsync(parentRunId, reason, cancellationToken, false);
     }
 
     public async Task<SubtreeCancellation> CancelBatchSubtreeAsync(

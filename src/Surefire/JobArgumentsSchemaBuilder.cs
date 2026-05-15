@@ -1,56 +1,56 @@
-using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Schema;
+using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Surefire;
 
 internal static class JobArgumentsSchemaBuilder
 {
-    private static JsonSerializerOptions? _schemaSerializerOptions;
-
-    private static JsonSerializerOptions SchemaSerializerOptions
+    /// <summary>
+    ///     Builds the JSON schema from a descriptor's per-parameter <see cref="JsonTypeInfo" /> via
+    ///     <see cref="JsonSchemaExporter.GetJsonSchemaAsNode(JsonTypeInfo, JsonSchemaExporterOptions?)" />.
+    ///     AOT-safe when the descriptor's factories return type info from a <c>JsonSerializerContext</c>.
+    /// </summary>
+    public static string? BuildFromDescriptor(
+        IReadOnlyList<ParameterDescriptor> parameters,
+        IReadOnlyList<JsonTypeInfoFactory?>? parameterTypeInfoFactories,
+        JsonSerializerOptions serializerOptions,
+        IServiceProvider services)
     {
-        [RequiresUnreferencedCode("Uses a default JSON type info resolver that reflects over user types.")]
-        [RequiresDynamicCode("Uses a default JSON type info resolver that reflects over user types.")]
-        get => _schemaSerializerOptions ??= new()
-        {
-            TypeInfoResolver = new DefaultJsonTypeInfoResolver()
-        };
-    }
-
-    [RequiresUnreferencedCode("Reflects over user-supplied handler parameters and emits a JSON schema.")]
-    [RequiresDynamicCode("Reflects over user-supplied handler parameters and emits a JSON schema.")]
-    public static string? Build(Delegate handler, Func<Type, bool> isServiceType)
-    {
-        var nullabilityContext = new NullabilityInfoContext();
-        var method = handler.Method;
-        var parameters = method.GetParameters()
-            .Where(p => !IsFrameworkParameter(p.ParameterType) && !isServiceType(p.ParameterType))
-            .ToArray();
-
-        if (parameters.Length == 0)
-        {
-            return null;
-        }
-
+        var serviceChecker = services.GetService<IServiceProviderIsService>();
         var properties = new JsonObject();
         var required = new List<string>();
 
-        foreach (var parameter in parameters)
+        // Schema describes the structural shape of arguments, not deserialization leniency.
+        // Strip NumberHandling.AllowReadingFromString so an int parameter exports as
+        // `{"type":"integer"}` rather than `{"type":["integer","string"]}` even when the runtime
+        // accepts both.
+        var schemaOptions = new JsonSerializerOptions(serializerOptions)
         {
-            var name = parameter.Name;
-            if (string.IsNullOrWhiteSpace(name))
+            NumberHandling = JsonNumberHandling.Strict
+        };
+
+        for (var i = 0; i < parameters.Count; i++)
+        {
+            var parameter = parameters[i];
+            if (!ShouldIncludeInSchema(parameter, serviceChecker))
             {
                 continue;
             }
 
-            properties[name] = BuildSchemaForType(parameter.ParameterType);
-            if (IsRequiredParameter(parameter, nullabilityContext))
+            var typeInfo = parameterTypeInfoFactories?[i]?.Invoke(schemaOptions);
+            if (typeInfo is null)
             {
-                required.Add(name);
+                continue;
+            }
+
+            properties[parameter.Name] = typeInfo.GetJsonSchemaAsNode();
+            if (!parameter.HasDefault && !parameter.IsNullable)
+            {
+                required.Add(parameter.Name);
             }
         }
 
@@ -70,7 +70,10 @@ internal static class JobArgumentsSchemaBuilder
             var requiredArray = new JsonArray();
             foreach (var name in required)
             {
-                requiredArray.Add(name);
+                // Cast picks the non-generic Add(JsonNode?) overload, which is AOT-safe; the
+                // generic Add<T>(T) overload would be picked otherwise and is annotated
+                // RequiresUnreferencedCode for non-primitive T.
+                requiredArray.Add((JsonNode?)JsonValue.Create(name));
             }
 
             schema["required"] = requiredArray;
@@ -79,33 +82,26 @@ internal static class JobArgumentsSchemaBuilder
         return schema.ToJsonString();
     }
 
-    private static bool IsFrameworkParameter(Type type) =>
-        type == typeof(JobContext) || type == typeof(CancellationToken);
-
-    private static bool IsRequiredParameter(ParameterInfo parameter, NullabilityInfoContext nullabilityContext)
+    private static bool ShouldIncludeInSchema(
+        ParameterDescriptor parameter,
+        IServiceProviderIsService? serviceChecker)
     {
-        if (parameter.HasDefaultValue)
+        switch (parameter.Kind)
         {
-            return false;
+            case ParameterKind.JobContext:
+            case ParameterKind.CancellationToken:
+            case ParameterKind.ServiceProvider:
+            case ParameterKind.Service:
+            case ParameterKind.Stream:
+                return false;
+            case ParameterKind.ServiceOrJson:
+                // Generator classified the type as DI-or-JSON because it couldn't statically
+                // distinguish; ask the container at registration time which it is, matching the
+                // Minimal-APIs unattributed-parameter contract.
+                return !(serviceChecker?.IsService(parameter.Type) ?? false);
+            case ParameterKind.Json:
+            default:
+                return true;
         }
-
-        var type = parameter.ParameterType;
-        if (!type.IsValueType)
-        {
-            return nullabilityContext
-                .Create(parameter)
-                .WriteState == NullabilityState.NotNull;
-        }
-
-        return Nullable.GetUnderlyingType(type) is null;
-    }
-
-    [RequiresUnreferencedCode("Emits a JSON schema for a runtime type via reflection.")]
-    [RequiresDynamicCode("Emits a JSON schema for a runtime type via reflection.")]
-    private static JsonNode BuildSchemaForType(Type type)
-    {
-        var targetType = Nullable.GetUnderlyingType(type) ?? type;
-        return SchemaSerializerOptions.GetJsonSchemaAsNode(targetType,
-            new());
     }
 }

@@ -11,6 +11,7 @@ Distributed job scheduling for .NET with a minimal API style.
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSurefire();
+builder.Services.AddSurefireDashboard();
 
 var app = builder.Build();
 
@@ -32,6 +33,7 @@ app.Run();
 - Stream values into and out of jobs with `IAsyncEnumerable<T>`. Run batches and consume their results as a list or a
   stream.
 - Call jobs from other jobs using `IJobClient`.
+- Native AOT and trimming support.
 - OpenTelemetry traces and metrics. ASP.NET Core health checks.
 
 ## Install
@@ -49,6 +51,12 @@ dotnet add package Surefire.PostgreSql
 dotnet add package Surefire.SqlServer
 dotnet add package Surefire.Sqlite
 dotnet add package Surefire.Redis
+```
+
+For PostgreSQL with `AddNpgsqlDataSource`, also add `Npgsql.DependencyInjection`:
+
+```bash
+dotnet add package Npgsql.DependencyInjection
 ```
 
 ```csharp
@@ -148,6 +156,8 @@ app.AddJob("ProcessOrder", async (int orderId) => { /* ... */ })
 ## Dashboard
 
 ```csharp
+builder.Services.AddSurefireDashboard();
+
 app.MapSurefireDashboard();    // at /surefire
 app.MapSurefireDashboard("/"); // at the root
 ```
@@ -161,6 +171,22 @@ Includes an embedded dashboard that lets you:
 
 If you expose the dashboard outside local development, be sure to configure the returned endpoint group with
 authorization.
+
+## Native AOT and trimming
+
+Includes a source generator for AOT and trim-safe job registration, callbacks, and `IJobClient` calls. Register your
+app's JSON source-generated context so job arguments and results can be serialized without reflection:
+
+```csharp
+builder.Services.AddSurefire(options =>
+{
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonContext.Default);
+});
+
+[JsonSerializable(typeof(AddArgs))]
+[JsonSerializable(typeof(AddResult))]
+internal partial class AppJsonContext : JsonSerializerContext;
+```
 
 ## Contributing
 

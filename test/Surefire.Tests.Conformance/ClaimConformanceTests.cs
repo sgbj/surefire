@@ -945,7 +945,7 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
         }
 
         // Claim concurrently from 10 threads; only 2 should succeed due to queue max_concurrency=2.
-        var results = new System.Collections.Concurrent.ConcurrentBag<JobRun?>();
+        var results = new ConcurrentBag<JobRun?>();
         var tasks = Enumerable.Range(0, 10).Select(t => Task.Run(async () =>
         {
             var claimed = (await Store.ClaimRunsAsync($"node-{t}", jobNames, [queueName], 1)).FirstOrDefault();

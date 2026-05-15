@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Surefire\Surefire.csproj"/>
+        <!-- Reference the generator as a regular assembly (not as an analyzer) so the tests
+             can drive it via CSharpGeneratorDriver and inspect its output directly. -->
+        <ProjectReference Include="..\..\src\Surefire.SourceGeneration\Surefire.SourceGeneration.csproj"
+                          ReferenceOutputAssembly="true"
+                          OutputItemType="None"/>
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp"/>
+        <PackageReference Include="Microsoft.Extensions.Hosting"/>
+        <PackageReference Include="Microsoft.NET.Test.Sdk"/>
+        <PackageReference Include="xunit.v3"/>
+        <PackageReference Include="xunit.runner.visualstudio"/>
+    </ItemGroup>
+</Project>
