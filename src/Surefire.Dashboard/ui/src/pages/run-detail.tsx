@@ -30,8 +30,7 @@ import { Progress } from "@/components/ui/progress";
 import { formatDate, formatLogTime } from "@/lib/format";
 import { useLiveDuration } from "@/hooks/use-live-duration";
 import { useTailFollow } from "@/hooks/use-tail-follow";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Ban, ChevronDown, CircleAlert, RotateCcw } from "lucide-react";
+import { Ban, ChevronDown, RotateCcw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -55,8 +54,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PageShell, PageBody } from "@/components/page-shell";
+import { PageErrorBanner } from "@/components/page-error-banner";
 import { TopBarActions, TopBarBadge } from "@/components/topbar-slot";
-import { DtDd } from "@/components/dt-dd";
+import { DtDd, metadataGridClass } from "@/components/dt-dd";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -80,7 +80,8 @@ const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
 
 // One indexed query returns the whole hierarchy, so polling this is the trace's entire
 // freshness mechanism: no per-row polling, no visibility tracking.
-const TREE_REFETCH_INTERVAL_MS = 2000;
+const TREE_REFETCH_INTERVAL_MS = 3000;
+const TREE_INVALIDATION_DEBOUNCE_MS = 1000;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -158,6 +159,28 @@ export function RunDetailPage() {
   const runKey = id ?? "";
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const treeInvalidationTimeoutRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const invalidateTreeSoon = useCallback(() => {
+    if (!id) return;
+    if (treeInvalidationTimeoutRef.current) {
+      clearTimeout(treeInvalidationTimeoutRef.current);
+    }
+    treeInvalidationTimeoutRef.current = setTimeout(() => {
+      treeInvalidationTimeoutRef.current = null;
+      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
+    }, TREE_INVALIDATION_DEBOUNCE_MS);
+  }, [id, queryClient]);
+  const invalidateTreeNow = useCallback(() => {
+    if (treeInvalidationTimeoutRef.current) {
+      clearTimeout(treeInvalidationTimeoutRef.current);
+      treeInvalidationTimeoutRef.current = null;
+    }
+    if (id) {
+      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
+    }
+  }, [id, queryClient]);
   const { data: run, isError } = useQuery({
     queryKey: ["run", id],
     queryFn: () => api.getRun(id!),
@@ -577,13 +600,13 @@ export function RunDetailPage() {
     });
     es.addEventListener("status", () => {
       queryClient.invalidateQueries({ queryKey: ["run", id] });
-      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
+      invalidateTreeSoon();
     });
     es.addEventListener("done", () => {
       doneReceived = true;
       es.close();
       queryClient.invalidateQueries({ queryKey: ["run", id] });
-      queryClient.invalidateQueries({ queryKey: ["run-tree", id] });
+      invalidateTreeNow();
       queryClient.invalidateQueries({ queryKey: ["runs", "job"] });
     });
     es.onerror = () => {
@@ -606,17 +629,35 @@ export function RunDetailPage() {
     return () => {
       stale = true;
       es.close();
+      if (treeInvalidationTimeoutRef.current) {
+        clearTimeout(treeInvalidationTimeoutRef.current);
+        treeInvalidationTimeoutRef.current = null;
+      }
       if (rafId.current) {
         cancelAnimationFrame(rafId.current);
         rafId.current = 0;
       }
     };
-  }, [id, queryClient, runKey, scheduleFlush, shouldProcessEvent]);
+  }, [
+    id,
+    invalidateTreeNow,
+    invalidateTreeSoon,
+    queryClient,
+    runKey,
+    scheduleFlush,
+    shouldProcessEvent,
+  ]);
 
   const inputHeader =
     inputItems.length === 0 ? "" : `Input (${inputItems.length})`;
 
   const traceScrollRef = useRef<HTMLDivElement>(null);
+  const [traceScrollElement, setTraceScrollElement] =
+    useState<HTMLDivElement | null>(null);
+  const setTraceScrollNode = useCallback((node: HTMLDivElement | null) => {
+    traceScrollRef.current = node;
+    setTraceScrollElement(node);
+  }, []);
   const traceScrollStateRef = useRef<TraceScrollState>({
     rootId: null,
     scrollTop: 0,
@@ -675,18 +716,13 @@ export function RunDetailPage() {
   if (isError)
     return (
       <PageShell>
-        <PageBody>
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>Failed to load run</AlertDescription>
-          </Alert>
-        </PageBody>
+        <PageErrorBanner message="Failed to load run" />
       </PageShell>
     );
   if (!run)
     return (
       <PageShell>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+        <div className={metadataGridClass}>
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i}>
               <Skeleton className="h-3 w-16 mb-1.5 rounded-sm" />
@@ -707,12 +743,13 @@ export function RunDetailPage() {
     : `Trace (${traceItems.length})`;
   const traceContentDesktop = (
     <div
-      ref={traceScrollRef}
+      ref={setTraceScrollNode}
       className="h-full overflow-auto"
       style={{ scrollPaddingTop: "3rem" }}
     >
       {traceItems.length > 0 ? (
         <TraceView
+          key={traceScrollElement ? "desktop-trace-ready" : "desktop-trace"}
           items={traceItems}
           currentRunId={id!}
           rootId={tree?.rootId}
@@ -744,7 +781,7 @@ export function RunDetailPage() {
             <div
               style={{
                 ["--errors-cols" as string]:
-                  "minmax(0,5rem) minmax(0,16rem) minmax(0,1fr) auto",
+                  "minmax(0,5rem) minmax(0,14rem) minmax(0,1fr) auto",
               }}
             >
               <div className="min-w-3xl">
@@ -1121,6 +1158,7 @@ export function RunDetailPage() {
             <section className="border-b border-border">
               {!collapsedSections.trace && traceItems.length > 0 ? (
                 <TraceView
+                  key="mobile-trace"
                   items={traceItems}
                   currentRunId={id!}
                   rootId={tree?.rootId}
@@ -1359,7 +1397,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
 
   return (
-    <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+    <dl className={metadataGridClass}>
       {items.map((item, i) => (
         <DtDd key={i} label={item.label} align={item.mono ? "mono" : "default"}>
           {item.value}

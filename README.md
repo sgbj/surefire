@@ -53,21 +53,10 @@ dotnet add package Surefire.Sqlite
 dotnet add package Surefire.Redis
 ```
 
-For PostgreSQL with `AddNpgsqlDataSource`, also add `Npgsql.DependencyInjection`:
-
-```bash
-dotnet add package Npgsql.DependencyInjection
-```
-
-```csharp
-builder.Services.AddNpgsqlDataSource(builder.Configuration.GetConnectionString("Surefire")!);
-
-builder.Services.AddSurefire(options => options.UsePostgreSql());
-```
-
 ## Defining jobs
 
-Register jobs as delegates with `AddJob`. Parameters resolve from DI and from arguments passed when triggering a run.
+You can register a job by calling `AddJob` and passing it a name and delegate. Their parameters resolve from DI and the arguments passed in when triggering a run.
+
 `AddJob` returns a builder that can be used to configure cron, retries, timeouts, rate limits, callbacks, etc.
 
 ```csharp
@@ -94,7 +83,7 @@ app.AddJob("GenerateReport", async (IReportService reports, CancellationToken ct
 
 ## Triggering jobs
 
-Use `IJobClient` to trigger jobs from anywhere in your app, including inside other jobs.
+Use `IJobClient` to trigger jobs from anywhere in your app.
 
 ```csharp
 // Fire and forget
@@ -119,7 +108,7 @@ await foreach (var result in client.StreamBatchAsync<Result>("Process", inputs))
 }
 ```
 
-Inject `IJobClient` into a job to call other jobs from inside it:
+You can inject `IJobClient` inside of jobs to run other jobs. Those runs are automatically linked so you can view them together on the dashboard.
 
 ```csharp
 app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
@@ -130,6 +119,8 @@ app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>
     return new { a, b, sum };
 });
 ```
+
+![Run detail trace](https://raw.githubusercontent.com/sgbj/surefire/main/docs/src/assets/run-detail-trace.png)
 
 ## Lifecycle callbacks
 

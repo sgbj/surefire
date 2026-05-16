@@ -5,12 +5,12 @@ import {api, JobStatusLabels} from "@/lib/api";
 import {DataTable} from "@/components/data-table";
 import {Input} from "@/components/ui/input";
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
-import {Alert, AlertDescription} from "@/components/ui/alert";
-import {CircleAlert, Search} from "lucide-react";
+import {Search} from "lucide-react";
 import {buildRunColumns} from "@/components/run-columns";
 import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 import {useDebouncedValue} from "@/hooks/use-debounced-value";
 import {PageShell} from "@/components/page-shell";
+import {PageErrorBanner} from "@/components/page-error-banner";
 
 const columns = buildRunColumns();
 
@@ -59,14 +59,7 @@ export function RunsPage() {
 
   return (
     <PageShell>
-      {isError && (
-        <div className="px-6 pt-5">
-          <Alert variant="destructive">
-            <CircleAlert/>
-            <AlertDescription>Failed to load runs</AlertDescription>
-          </Alert>
-        </div>
-      )}
+      {isError && <PageErrorBanner message="Failed to load runs" />}
 
       <DataTable
         columns={columns}

@@ -2,20 +2,20 @@ import {keepPreviousData, useMutation, useQuery, useQueryClient,} from "@tanstac
 import {type PaginationState} from "@tanstack/react-table";
 import {useParams} from "react-router";
 import {useMemo, useState} from "react";
-import {CircleAlert, CirclePlay, Pause} from "lucide-react";
-import {Alert, AlertDescription} from "@/components/ui/alert";
+import {CirclePlay, Pause} from "lucide-react";
 import {toast} from "sonner";
 import {api, JobStatusLabels} from "@/lib/api";
 import {Button} from "@/components/ui/button";
 import {Skeleton} from "@/components/ui/skeleton";
 import {DataTable} from "@/components/data-table";
 import {formatDate, formatTimeSpan} from "@/lib/format";
-import {DtDd} from "@/components/dt-dd";
+import {DtDd, metadataGridClass} from "@/components/dt-dd";
 import {TriggerDialog} from "@/components/trigger-dialog";
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
 import {buildRunColumns} from "@/components/run-columns";
 import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 import {PageShell, PageBody} from "@/components/page-shell";
+import {PageErrorBanner} from "@/components/page-error-banner";
 import {StatePill} from "@/components/status-badge";
 import {TopBarActions, TopBarBadge} from "@/components/topbar-slot";
 
@@ -98,19 +98,14 @@ export function JobDetailPage() {
   if (isError)
     return (
       <PageShell>
-        <PageBody>
-          <Alert variant="destructive">
-            <CircleAlert/>
-            <AlertDescription>Failed to load job</AlertDescription>
-          </Alert>
-        </PageBody>
+        <PageErrorBanner message="Failed to load job" />
       </PageShell>
     );
 
   if (!job)
     return (
       <PageShell>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+        <div className={metadataGridClass}>
           {Array.from({length: 6}).map((_, i) => (
             <div key={i}>
               <Skeleton className="h-3 w-16 mb-1.5 rounded-sm"/>
@@ -163,7 +158,7 @@ export function JobDetailPage() {
         />
       </TopBarActions>
 
-      <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+      <dl className={metadataGridClass}>
         {job.description && (
           <DtDd label="Description" className="col-span-full">
             <span className="text-sm text-foreground/85">{job.description}</span>

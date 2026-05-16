@@ -2,22 +2,22 @@ import {useMemo, useState} from "react";
 import {keepPreviousData, useQuery} from "@tanstack/react-query";
 import {type ColumnDef, type PaginationState} from "@tanstack/react-table";
 import {useParams} from "react-router";
-import {CircleAlert, Search} from "lucide-react";
+import {Search} from "lucide-react";
 import {api, type JobResponse, type JobRun, JobStatusLabels} from "@/lib/api";
 import {DataTable} from "@/components/data-table";
-import {Alert, AlertDescription} from "@/components/ui/alert";
 import {Switch} from "@/components/ui/switch";
 import {Input} from "@/components/ui/input";
 import {Skeleton} from "@/components/ui/skeleton";
 import {Tabs, TabsContent, TabsList, TabsTrigger} from "@/components/ui/tabs";
 import {formatDate, formatRelative} from "@/lib/format";
-import {DtDd} from "@/components/dt-dd";
+import {DtDd, metadataGridClass} from "@/components/dt-dd";
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
 import {buildRunColumns} from "@/components/run-columns";
 import {buildJobColumns} from "@/components/job-columns";
 import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 import {useDebouncedValue} from "@/hooks/use-debounced-value";
 import {PageShell, PageBody} from "@/components/page-shell";
+import {PageErrorBanner} from "@/components/page-error-banner";
 import {StatePill} from "@/components/status-badge";
 import {TopBarBadge} from "@/components/topbar-slot";
 
@@ -97,19 +97,14 @@ export function NodeDetailPage() {
   if (isError)
     return (
       <PageShell>
-        <PageBody>
-          <Alert variant="destructive">
-            <CircleAlert/>
-            <AlertDescription>Failed to load node</AlertDescription>
-          </Alert>
-        </PageBody>
+        <PageErrorBanner message="Failed to load node" />
       </PageShell>
     );
 
   if (!node)
     return (
       <PageShell>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+        <div className={metadataGridClass}>
           {Array.from({length: 4}).map((_, i) => (
             <div key={i}>
               <Skeleton className="h-3 w-16 mb-1.5 rounded-sm"/>
@@ -136,7 +131,7 @@ export function NodeDetailPage() {
         )}
       </TopBarBadge>
 
-      <dl className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-x-6 gap-y-5 border-b border-border px-6 py-5">
+      <dl className={metadataGridClass}>
         <DtDd label="Started" align="mono">{formatDate(node.startedAt)}</DtDd>
         <DtDd label="Last heartbeat" align="mono">
           {formatRelative(node.lastHeartbeatAt)}

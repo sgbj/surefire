@@ -19,6 +19,7 @@ internal sealed partial class RedisJobStore(
 {
     private const string P = "{surefire}:";
     private const int FilterScanChunkSize = 500;
+    private const int RunPayloadGetChunkSize = 1000;
     private const int ChildMemberTimestampWidth = 20;
 
     // Shared Lua prelude. Inlined into every script that writes to the pending queue so
@@ -496,25 +497,13 @@ internal sealed partial class RedisJobStore(
             return [];
         }
 
-        var keys = new RedisKey[ids.Count];
+        var runIds = new RedisValue[ids.Count];
         for (var i = 0; i < ids.Count; i++)
         {
-            keys[i] = $"{P}run:{ids[i]}";
+            runIds[i] = ids[i];
         }
 
-        var payloads = await Db.StringGetAsync(keys);
-        var runs = new List<JobRun>(payloads.Length);
-        for (var i = 0; i < payloads.Length; i++)
-        {
-            if (payloads[i].IsNullOrEmpty)
-            {
-                continue;
-            }
-
-            runs.Add(DeserializeRun(payloads[i]!));
-        }
-
-        return runs;
+        return await LoadRunsByIdsAsync(runIds, cancellationToken);
     }
 
     public async Task<DirectChildrenPage> GetDirectChildrenAsync(string parentRunId,
@@ -925,21 +914,10 @@ internal sealed partial class RedisJobStore(
             return new() { Items = [], TotalCount = totalFromIndex ?? 0 };
         }
 
-        var batch = db.CreateBatch();
-        var fetchTasks = candidateIds.Select(id => batch.StringGetAsync($"{P}run:{id}")).ToArray();
-        batch.Execute();
-        await Task.WhenAll(fetchTasks);
-
-        var runs = new List<JobRun>();
-        foreach (var task in fetchTasks)
+        var fetchedRuns = await LoadRunsByIdsAsync(candidateIds, cancellationToken);
+        var runs = new List<JobRun>(fetchedRuns.Count);
+        foreach (var run in fetchedRuns)
         {
-            var json = await task;
-            if (json.IsNullOrEmpty)
-            {
-                continue;
-            }
-
-            var run = DeserializeRun(json!);
             if (MatchesFilter(run, filter))
             {
                 runs.Add(run);
@@ -3296,7 +3274,7 @@ internal sealed partial class RedisJobStore(
                 continue;
             }
 
-            var runs = await LoadRunsByIdsAsync([.. ids]);
+            var runs = await LoadRunsByIdsAsync([.. ids], cancellationToken);
             foreach (var run in runs)
             {
                 if (!MatchesFilter(run, filter))
@@ -3397,7 +3375,7 @@ internal sealed partial class RedisJobStore(
 
             offset += ids.Length;
 
-            var runs = await LoadRunsByIdsAsync(ids);
+            var runs = await LoadRunsByIdsAsync(ids, cancellationToken);
             foreach (var run in runs)
             {
                 if (!MatchesFilter(run, filter))
@@ -3457,28 +3435,36 @@ internal sealed partial class RedisJobStore(
         }
     }
 
-    private async Task<List<JobRun>> LoadRunsByIdsAsync(RedisValue[] runIds)
+    private async Task<List<JobRun>> LoadRunsByIdsAsync(RedisValue[] runIds,
+        CancellationToken cancellationToken = default)
     {
         if (runIds.Length == 0)
         {
             return [];
         }
 
-        var batch = Db.CreateBatch();
-        var fetchTasks = runIds.Select(id => batch.StringGetAsync($"{P}run:{id}")).ToArray();
-        batch.Execute();
-        await Task.WhenAll(fetchTasks);
-
-        var runs = new List<JobRun>(fetchTasks.Length);
-        foreach (var task in fetchTasks)
+        var runs = new List<JobRun>(runIds.Length);
+        for (var offset = 0; offset < runIds.Length; offset += RunPayloadGetChunkSize)
         {
-            var json = await task;
-            if (json.IsNullOrEmpty)
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var chunkLength = Math.Min(RunPayloadGetChunkSize, runIds.Length - offset);
+            var keys = new RedisKey[chunkLength];
+            for (var i = 0; i < chunkLength; i++)
             {
-                continue;
+                keys[i] = $"{P}run:{runIds[offset + i]}";
             }
 
-            runs.Add(DeserializeRun(json!));
+            var payloads = await Db.StringGetAsync(keys);
+            foreach (var json in payloads)
+            {
+                if (json.IsNullOrEmpty)
+                {
+                    continue;
+                }
+
+                runs.Add(DeserializeRun(json!));
+            }
         }
 
         return runs;

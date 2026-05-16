@@ -8,9 +8,9 @@ import {Switch} from "@/components/ui/switch";
 import {SortableHeader} from "@/components/sortable-header";
 import {Input} from "@/components/ui/input";
 import {formatRelative} from "@/lib/format";
-import {Alert, AlertDescription} from "@/components/ui/alert";
-import {CircleAlert, Search} from "lucide-react";
+import {Search} from "lucide-react";
 import {PageShell} from "@/components/page-shell";
+import {PageErrorBanner} from "@/components/page-error-banner";
 import {cn} from "@/lib/utils";
 
 const columns: ColumnDef<NodeResponse>[] = [
@@ -104,14 +104,7 @@ export function NodesPage() {
 
   return (
     <PageShell>
-      {isError && (
-        <div className="px-6 pt-5">
-          <Alert variant="destructive">
-            <CircleAlert/>
-            <AlertDescription>Failed to load nodes</AlertDescription>
-          </Alert>
-        </div>
-      )}
+      {isError && <PageErrorBanner message="Failed to load nodes" />}
 
       <DataTable
         columns={columns}

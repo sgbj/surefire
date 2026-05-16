@@ -7,10 +7,10 @@ import {DataTable} from "@/components/data-table";
 import {StatePill} from "@/components/status-badge";
 import {SortableHeader} from "@/components/sortable-header";
 import {Input} from "@/components/ui/input";
-import {Alert, AlertDescription} from "@/components/ui/alert";
-import {CircleAlert, Pause, Play, Search} from "lucide-react";
+import {Pause, Play, Search} from "lucide-react";
 import {toast} from "sonner";
 import {PageShell} from "@/components/page-shell";
+import {PageErrorBanner} from "@/components/page-error-banner";
 import {cn} from "@/lib/utils";
 
 export function QueuesPage() {
@@ -172,14 +172,7 @@ export function QueuesPage() {
 
   return (
     <PageShell>
-      {isError && (
-        <div className="px-6 pt-5">
-          <Alert variant="destructive">
-            <CircleAlert/>
-            <AlertDescription>Failed to load queues</AlertDescription>
-          </Alert>
-        </div>
-      )}
+      {isError && <PageErrorBanner message="Failed to load queues" />}
 
       <DataTable
         columns={columns}

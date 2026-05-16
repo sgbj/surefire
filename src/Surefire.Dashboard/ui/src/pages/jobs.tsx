@@ -4,10 +4,10 @@ import {api} from "@/lib/api";
 import {DataTable} from "@/components/data-table";
 import {Switch} from "@/components/ui/switch";
 import {Input} from "@/components/ui/input";
-import {Alert, AlertDescription} from "@/components/ui/alert";
-import {CircleAlert, Search} from "lucide-react";
+import {Search} from "lucide-react";
 import {buildJobColumns} from "@/components/job-columns";
 import {PageShell} from "@/components/page-shell";
+import {PageErrorBanner} from "@/components/page-error-banner";
 
 const columns = buildJobColumns();
 
@@ -34,14 +34,7 @@ export function JobsPage() {
 
   return (
     <PageShell>
-      {isError && (
-        <div className="px-6 pt-5">
-          <Alert variant="destructive">
-            <CircleAlert/>
-            <AlertDescription>Failed to load jobs</AlertDescription>
-          </Alert>
-        </div>
-      )}
+      {isError && <PageErrorBanner message="Failed to load jobs" />}
 
       <DataTable
         columns={columns}

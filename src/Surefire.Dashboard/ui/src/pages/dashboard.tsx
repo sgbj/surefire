@@ -13,9 +13,9 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { ArrowUpRight, CircleAlert } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { PageShell, PageBody } from "@/components/page-shell";
+import { PageErrorBanner } from "@/components/page-error-banner";
 import { SectionHeader } from "@/components/section-header";
 import { TopBarActions } from "@/components/topbar-slot";
 import { cn } from "@/lib/utils";
@@ -67,14 +67,7 @@ export function DashboardPage() {
         <PeriodTabs value={period} onChange={setPeriod} />
       </TopBarActions>
 
-      {isError && (
-        <PageBody>
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>Failed to load dashboard</AlertDescription>
-          </Alert>
-        </PageBody>
-      )}
+      {isError && <PageErrorBanner message="Failed to load dashboard" />}
 
       {!stats && !isError ? (
         <DashboardSkeleton />
