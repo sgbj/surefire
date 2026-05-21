@@ -188,11 +188,17 @@ export function RunDetailPage() {
     refetchInterval: (query) => {
       if (query.state.error) return false;
       const s = query.state.data?.status;
-      return s === JobStatus.Pending || s === JobStatus.Running ? 5000 : false;
+      return s === JobStatus.Pending
+          || s === JobStatus.Running
+          || s === JobStatus.Suspended
+        ? 5000
+        : false;
     },
   });
   const isActive =
-    run?.status === JobStatus.Pending || run?.status === JobStatus.Running;
+    run?.status === JobStatus.Pending
+    || run?.status === JobStatus.Running
+    || run?.status === JobStatus.Suspended;
 
   const { data: tree } = useQuery({
     queryKey: ["run-tree", id],
@@ -203,7 +209,10 @@ export function RunDetailPage() {
       const data = query.state.data;
       if (!data) return TREE_REFETCH_INTERVAL_MS;
       return data.runs.some(
-        (r) => r.status === JobStatus.Pending || r.status === JobStatus.Running,
+        (r) =>
+          r.status === JobStatus.Pending
+          || r.status === JobStatus.Running
+          || r.status === JobStatus.Suspended,
       )
         ? TREE_REFETCH_INTERVAL_MS
         : false;
@@ -762,7 +771,7 @@ export function RunDetailPage() {
           }
         />
       ) : (
-        <div className="eyebrow py-8 text-center">no related runs</div>
+        <div className="eyebrow py-8 text-center">No related runs</div>
       )}
     </div>
   );
@@ -1182,7 +1191,7 @@ export function RunDetailPage() {
                   />
                   {!collapsedSections.trace && (
                     <div className="eyebrow py-8 text-center">
-                      no related runs
+                      No related runs
                     </div>
                   )}
                 </>
@@ -1338,6 +1347,12 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   if (run.attempt > 1) {
     items.push({ label: "Attempt", value: run.attempt, mono: true });
   }
+  if (run.failureCount > 0) {
+    items.push({ label: "Failures", value: run.failureCount, mono: true });
+  }
+  if (run.replayCount > 0) {
+    items.push({ label: "Replays", value: run.replayCount, mono: true });
+  }
   items.push({ label: "Priority", value: run.priority, mono: true });
 
   if (run.parentRunId) {
@@ -1392,6 +1407,13 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
     items.push({
       label: "Not after",
       value: formatDate(run.notAfter),
+      mono: true,
+    });
+  }
+  if (run.expiresAt) {
+    items.push({
+      label: "Expires at",
+      value: formatDate(run.expiresAt),
       mono: true,
     });
   }

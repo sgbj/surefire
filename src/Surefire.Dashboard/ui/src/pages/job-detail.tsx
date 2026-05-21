@@ -75,6 +75,7 @@ export function JobDetailPage() {
       args?: unknown;
       notBefore?: string;
       notAfter?: string;
+      expiresAt?: string;
       priority?: number;
       deduplicationId?: string;
     }) => api.triggerJob(name!, opts),

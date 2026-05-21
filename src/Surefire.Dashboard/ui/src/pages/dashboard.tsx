@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 const chartConfig = {
   pending: { label: "Pending", color: "var(--status-pending)" },
   running: { label: "Running", color: "var(--status-running)" },
+  suspended: { label: "Suspended", color: "var(--status-suspended)" },
   succeeded: { label: "Succeeded", color: "var(--status-succeeded)" },
   canceled: { label: "Canceled", color: "var(--status-canceled)" },
   failed: { label: "Failed", color: "var(--status-failed)" },
@@ -132,7 +133,7 @@ function KPIStrip({ stats }: KPIStripProps) {
     {
       label: "Active runs",
       value: stats.activeRuns,
-      accent: stats.activeRuns > 0,
+      accent: false,
     },
     {
       label: "Success rate",
@@ -208,7 +209,7 @@ function ThroughputPanel({ stats, timeline, period }: ThroughputPanelProps) {
             })
           )}
         </div>
-        <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-x-5 gap-y-3">
+        <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-5 gap-y-3">
           {buckets.map((b) => (
             <div key={b.key} className="flex items-center gap-3 min-w-0">
               <span
@@ -321,6 +322,13 @@ function ThroughputPanel({ stats, timeline, period }: ThroughputPanelProps) {
                 />
                 <Area
                   type="monotone"
+                  dataKey="suspended"
+                  stackId="1"
+                  stroke="var(--color-suspended)"
+                  fill="url(#gradient-suspended)"
+                />
+                <Area
+                  type="monotone"
                   dataKey="succeeded"
                   stackId="1"
                   stroke="var(--color-succeeded)"
@@ -373,7 +381,7 @@ function RecentRunsPanel({ stats }: RecentRunsPanelProps) {
         }
       />
       {stats.recentRuns.length === 0 ? (
-        <p className="eyebrow py-8 text-center">no runs yet</p>
+        <p className="eyebrow py-8 text-center">No runs yet</p>
       ) : (
         <ul className="-mx-2.5">
           {stats.recentRuns.slice(0, 10).map((run, idx) => (
@@ -447,18 +455,6 @@ function buildDistribution(stats: DashboardStats): DistBucket[] {
       count: lookup("Succeeded"),
     },
     {
-      key: "running",
-      label: "Running",
-      color: "var(--status-running)",
-      count: lookup("Running"),
-    },
-    {
-      key: "pending",
-      label: "Pending",
-      color: "var(--status-pending)",
-      count: lookup("Pending"),
-    },
-    {
       key: "canceled",
       label: "Canceled",
       color: "var(--status-canceled)",
@@ -469,6 +465,24 @@ function buildDistribution(stats: DashboardStats): DistBucket[] {
       label: "Failed",
       color: "var(--status-failed)",
       count: lookup("Failed"),
+    },
+    {
+      key: "pending",
+      label: "Pending",
+      color: "var(--status-pending)",
+      count: lookup("Pending"),
+    },
+    {
+      key: "running",
+      label: "Running",
+      color: "var(--status-running)",
+      count: lookup("Running"),
+    },
+    {
+      key: "suspended",
+      label: "Suspended",
+      color: "var(--status-suspended)",
+      count: lookup("Suspended"),
     },
   ];
 }

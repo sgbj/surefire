@@ -76,7 +76,7 @@ public sealed class DashboardEndpointsTests
 
         var transition = RunStatusTransition.RunningToSucceeded(
             running.Id,
-            running.Attempt,
+            running.LeaseEpoch,
             now.AddSeconds(1),
             running.NotBefore,
             running.NodeName,
@@ -98,6 +98,45 @@ public sealed class DashboardEndpointsTests
         Assert.Equal([succeeded.Id, running.Id], runs.Select(r => r.Id));
         Assert.All(runs, r => Assert.Equal(JobStatus.Succeeded, r.Status));
         Assert.All(runs, r => Assert.NotNull(r.CompletedAt));
+    }
+
+    [Fact]
+    public async Task RunsLookupEndpoint_DurableUnclaimedRun_ReportsAttemptZero()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(ct: ct);
+
+        var store = app.Services.GetRequiredService<IJobStore>();
+        var now = DateTimeOffset.UtcNow;
+        const string jobName = "tests-durable-attempt-zero";
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default", IsDurable = true }], ct);
+
+        var run = new JobRun
+        {
+            Id = Guid.CreateVersion7().ToString("N"),
+            JobName = jobName,
+            Status = JobStatus.Pending,
+            CreatedAt = now,
+            NotBefore = now,
+            Attempt = 1,
+            FailureCount = 0,
+            ReplayCount = 0,
+            IsDurable = true
+        };
+
+        await store.CreateRunsAsync([run], cancellationToken: ct);
+
+        using var client = app.GetTestClient();
+        var response = await client.PostAsJsonAsync("/surefire/api/runs/lookup",
+            new { ids = new[] { run.Id } },
+            ct);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var runs = await response.Content.ReadFromJsonAsync<List<RunResponse>>(ct);
+        var dto = Assert.Single(runs!);
+        Assert.Equal(1, dto.Attempt);
+        Assert.Equal(0, dto.FailureCount);
+        Assert.Equal(0, dto.ReplayCount);
     }
 
     [Fact]
@@ -394,6 +433,39 @@ public sealed class DashboardEndpointsTests
 
         Assert.NotNull(stats);
         Assert.Equal(50, stats.SuccessRate, 5);
+    }
+
+    [Fact]
+    public async Task StatsEndpoint_SerializesSuspendedTimelineBuckets()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(ct: ct);
+
+        var store = app.Services.GetRequiredService<IJobStore>();
+        var now = DateTimeOffset.UtcNow;
+        const string jobName = "tests-stats-suspended-timeline";
+        await store.UpsertJobsAsync([new() { Name = jobName, Queue = "default", IsDurable = true }], ct);
+        await store.CreateRunsAsync([
+            new()
+            {
+                Id = Guid.CreateVersion7().ToString("N"),
+                JobName = jobName,
+                Status = JobStatus.Suspended,
+                CreatedAt = now,
+                NotBefore = now,
+                Attempt = 1,
+                IsDurable = true
+            }
+        ], cancellationToken: ct);
+
+        using var client = app.GetTestClient();
+        var since = Uri.EscapeDataString(now.AddMinutes(-5).ToString("O"));
+        var json = await client.GetStringAsync($"/surefire/api/stats?since={since}&bucketMinutes=60", ct);
+        using var doc = JsonDocument.Parse(json);
+        var timeline = doc.RootElement.GetProperty("timeline").EnumerateArray().ToArray();
+
+        Assert.Contains(timeline, bucket =>
+            bucket.TryGetProperty("suspended", out var suspended) && suspended.GetInt32() == 1);
     }
 
     [Fact]
@@ -1223,7 +1295,7 @@ public sealed class DashboardEndpointsTests
 
         var transition = RunStatusTransition.RunningToSucceeded(
             run.Id,
-            run.Attempt,
+            run.LeaseEpoch,
             DateTimeOffset.UtcNow,
             run.NotBefore,
             run.NodeName,
@@ -1288,7 +1360,7 @@ public sealed class DashboardEndpointsTests
 
         var completedTransition = RunStatusTransition.RunningToSucceeded(
             run.Id,
-            run.Attempt,
+            run.LeaseEpoch,
             DateTimeOffset.UtcNow,
             run.NotBefore,
             run.NodeName,

@@ -25,7 +25,8 @@ public abstract class StoreConformanceBase : IAsyncLifetime
             JobName = jobName ?? "TestJob",
             Status = status,
             CreatedAt = now,
-            NotBefore = now.AddSeconds(-1)
+            NotBefore = now.AddSeconds(-1),
+            Attempt = 1
         };
     }
 
@@ -37,30 +38,30 @@ public abstract class StoreConformanceBase : IAsyncLifetime
         {
             (JobStatus.Pending, JobStatus.Running) when run.StartedAt.HasValue && run.LastHeartbeatAt.HasValue &&
                                                         run.NodeName is { } => RunStatusTransition.PendingToRunning(
-                run.Id, run.Attempt, run.NodeName,
+                run.Id, run.LeaseEpoch, run.NodeName,
                 run.StartedAt.Value, run.LastHeartbeatAt.Value, run.NotBefore, run.Progress, run.Reason, run.Result),
 
             (JobStatus.Running, JobStatus.Pending)
-                => RunStatusTransition.RunningToPending(run.Id, run.Attempt, run.NotBefore, run.Reason, run.Result,
+                => RunStatusTransition.RunningToPending(run.Id, run.LeaseEpoch, run.NotBefore, run.Reason, run.Result,
                     run.Progress, run.LastHeartbeatAt),
 
             (JobStatus.Running, JobStatus.Succeeded) when run.CompletedAt.HasValue
-                => RunStatusTransition.RunningToSucceeded(run.Id, run.Attempt, run.CompletedAt.Value,
+                => RunStatusTransition.RunningToSucceeded(run.Id, run.LeaseEpoch, run.CompletedAt.Value,
                     run.NotBefore, run.NodeName, run.Progress, run.Result, run.Reason, run.StartedAt,
                     run.LastHeartbeatAt),
 
             (JobStatus.Running, JobStatus.Failed) when run.CompletedAt.HasValue
-                => RunStatusTransition.RunningToFailed(run.Id, run.Attempt, run.CompletedAt.Value,
+                => RunStatusTransition.RunningToFailed(run.Id, run.LeaseEpoch, run.CompletedAt.Value,
                     run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result, run.StartedAt,
                     run.LastHeartbeatAt),
 
             (JobStatus.Pending, JobStatus.Canceled) when run.CompletedAt.HasValue && run.CanceledAt.HasValue
-                => RunStatusTransition.ToCanceled(JobStatus.Pending, run.Id, run.Attempt, run.CompletedAt.Value,
+                => RunStatusTransition.ToCanceled(JobStatus.Pending, run.Id, run.LeaseEpoch, run.CompletedAt.Value,
                     run.CanceledAt.Value, run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result,
                     run.StartedAt, run.LastHeartbeatAt),
 
             (JobStatus.Running, JobStatus.Canceled) when run.CompletedAt.HasValue && run.CanceledAt.HasValue
-                => RunStatusTransition.ToCanceled(JobStatus.Running, run.Id, run.Attempt, run.CompletedAt.Value,
+                => RunStatusTransition.ToCanceled(JobStatus.Running, run.Id, run.LeaseEpoch, run.CompletedAt.Value,
                     run.CanceledAt.Value, run.NotBefore, run.NodeName, run.Progress, run.Reason, run.Result,
                     run.StartedAt, run.LastHeartbeatAt),
 
@@ -72,7 +73,7 @@ public abstract class StoreConformanceBase : IAsyncLifetime
     {
         RunId = run.Id,
         ExpectedStatus = expectedStatus,
-        ExpectedAttempt = run.Attempt,
+        ExpectedLeaseEpoch = run.LeaseEpoch,
         NewStatus = run.Status,
         NodeName = run.NodeName,
         StartedAt = run.StartedAt,

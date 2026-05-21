@@ -117,7 +117,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task TryTransitionRun_AttemptFencing()
+    public async Task TryTransitionRun_LeaseEpochFencing()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
@@ -130,13 +130,14 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
         Assert.NotNull(claimed);
         Assert.Equal(1, claimed.Attempt);
 
-        // Create a stale copy with wrong attempt
+        // Create a stale copy with wrong lease epoch.
         var stale = new JobRun
         {
             Id = claimed.Id,
             JobName = claimed.JobName,
             Status = JobStatus.Succeeded,
-            Attempt = 0, // stale attempt
+            Attempt = claimed.Attempt,
+            LeaseEpoch = 0,
             CreatedAt = claimed.CreatedAt,
             NotBefore = claimed.NotBefore,
             CompletedAt = DateTimeOffset.UtcNow
@@ -169,6 +170,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
             JobName = claimed.JobName,
             Status = JobStatus.Pending,
             Attempt = claimed.Attempt,
+            LeaseEpoch = claimed.LeaseEpoch,
             CreatedAt = claimed.CreatedAt,
             NotBefore = DateTimeOffset.UtcNow.AddSeconds(1),
             Progress = claimed.Progress,
@@ -245,7 +247,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
 
         run = run with
         {
-            Status = JobStatus.Running, Attempt = 0, StartedAt = DateTimeOffset.UtcNow, LastHeartbeatAt = null,
+            Status = JobStatus.Running, Attempt = 1, StartedAt = DateTimeOffset.UtcNow, LastHeartbeatAt = null,
             NodeName = "node-1"
         };
 
@@ -286,6 +288,7 @@ public abstract class TransitionConformanceTests : StoreConformanceBase
                     JobName = claimed.JobName,
                     Status = i < 5 ? JobStatus.Succeeded : JobStatus.Canceled,
                     Attempt = claimed.Attempt,
+                    LeaseEpoch = claimed.LeaseEpoch,
                     CreatedAt = claimed.CreatedAt,
                     NotBefore = claimed.NotBefore,
                     CompletedAt = DateTimeOffset.UtcNow,

@@ -19,8 +19,13 @@ public sealed record JobRun
     /// <summary>Gets the earliest time this run may be claimed.</summary>
     public DateTimeOffset NotBefore { get; init; }
 
-    /// <summary>Gets the latest time this run may be claimed. Null means no expiration.</summary>
+    /// <summary>Gets the latest time this run may be claimed. Null means no start deadline.</summary>
     public DateTimeOffset? NotAfter { get; init; }
+
+    /// <summary>
+    ///     Gets the latest time this run may remain non-terminal. Null means no lifetime deadline.
+    /// </summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
 
     /// <summary>Gets the priority of the run. Higher values are claimed first.</summary>
     public int Priority { get; init; }
@@ -77,15 +82,54 @@ public sealed record JobRun
 
     /// <summary>
     ///     Gets the termination reason for this run when it terminated for a non-exception cause
-    ///     (client-requested cancellation, expiration past <see cref="NotAfter" />, missing handler
-    ///     registration, or shutdown interruption). Null when the run terminated by exception
+    ///     (client-requested cancellation, expiration past <see cref="NotAfter" /> or
+    ///     <see cref="ExpiresAt" />, missing handler registration, or shutdown interruption). Null
+    ///     when the run terminated by exception
     ///     (retry exhaustion); per-attempt exception detail lives on
     ///     <see cref="RunEventType.AttemptFailure" /> events.
     /// </summary>
     public string? Reason { get; init; }
 
-    /// <summary>Gets the current attempt number. 0 means unclaimed.</summary>
+    /// <summary>Gets the current logical user-code attempt number. Starts at 1.</summary>
     public int Attempt { get; init; }
+
+    /// <summary>
+    ///     Gets the count of real handler failures this run has recorded. This count is maintained
+    ///     for both durable and non-durable jobs and does not include durable replays.
+    /// </summary>
+    public int FailureCount { get; init; }
+
+    /// <summary>
+    ///     Gets the count of durable orchestrator replay/resume cycles this run has recorded.
+    ///     Always 0 for non-durable jobs.
+    /// </summary>
+    public int ReplayCount { get; init; }
+
+    /// <summary>
+    ///     Gets whether this run is a durable orchestrator. Captured at create time and authoritative
+    ///     for the run's lifetime. Persisted on the row so cross-process readers (dashboards) do not
+    ///     depend on a local <c>JobRegistry</c>.
+    /// </summary>
+    public bool IsDurable { get; init; }
+
+    // Internal but [JsonInclude]'d so SurefireJsonContext source-gen round-trips it
+    // across the executor/store seam; not part of the public API.
+    /// <summary>
+    ///     The highest <see cref="IJobClient" /> step index recorded by this durable orchestrator
+    ///     across all attempts. Drives the executor's replay boundary on re-claim. Zero for
+    ///     non-durable jobs.
+    /// </summary>
+    [JsonInclude]
+    internal int HighestRecordedStep { get; init; }
+
+    // Internal but [JsonInclude]'d so SurefireJsonContext source-gen round-trips it
+    // across the executor/store seam; not part of the public API.
+    /// <summary>
+    ///     Monotonic store fencing token. Incremented when a worker claims ownership of the run.
+    ///     Used only for compare-and-swap writes.
+    /// </summary>
+    [JsonInclude]
+    internal long LeaseEpoch { get; init; }
 
     /// <summary>Gets the serialized result produced by the run. Null until the run completes.</summary>
     public string? Result { get; init; }

@@ -22,11 +22,6 @@ static Surefire.NotificationChannels.RunInput(string! runId) -> string!
 static Surefire.NotificationChannels.RunTerminated(string! runId) -> string!
 static Surefire.NotificationChannels.ValidateChannel(string! channel) -> void
 static Surefire.RunArguments.Empty.get -> Surefire.RunArguments!
-static Surefire.RunStatusTransition.PendingToRunning(string! runId, int expectedAttempt, string! nodeName, System.DateTimeOffset startedAt, System.DateTimeOffset lastHeartbeatAt, System.DateTimeOffset notBefore, double progress = 0, string? reason = null, string? result = null) -> Surefire.RunStatusTransition!
-static Surefire.RunStatusTransition.RunningToFailed(string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 1, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null) -> Surefire.RunStatusTransition!
-static Surefire.RunStatusTransition.RunningToPending(string! runId, int expectedAttempt, System.DateTimeOffset notBefore, string? reason = null, string? result = null, double progress = 0, System.DateTimeOffset? lastHeartbeatAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null) -> Surefire.RunStatusTransition!
-static Surefire.RunStatusTransition.RunningToSucceeded(string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 1, string? result = null, string? reason = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
-static Surefire.RunStatusTransition.ToCanceled(Surefire.JobStatus expectedStatus, string! runId, int expectedAttempt, System.DateTimeOffset completedAt, System.DateTimeOffset canceledAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 0, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
 Surefire.BackoffType
 Surefire.BackoffType.Exponential = 1 -> Surefire.BackoffType
 Surefire.BackoffType.Fixed = 0 -> Surefire.BackoffType
@@ -183,7 +178,6 @@ Surefire.IJobStore.PingAsync(System.Threading.CancellationToken cancellationToke
 Surefire.IJobStore.PurgeAsync(System.DateTimeOffset threshold, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.SetJobEnabledAsync(string! name, bool enabled, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.SetQueuePausedAsync(string! name, bool isPaused, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
-Surefire.IJobStore.TryCancelRunAsync(string! runId, int? expectedAttempt = null, string? reason = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.RunTransitionResult>!
 Surefire.IJobStore.TryCompleteBatchAsync(string! batchId, Surefire.JobStatus status, System.DateTimeOffset completedAt, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
 Surefire.IJobStore.TryCreateRunAsync(Surefire.JobRun! run, int? maxActiveForJob = null, System.DateTimeOffset? lastCronFireAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? initialEvents = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
 Surefire.IJobStore.TryTransitionRunAsync(Surefire.RunStatusTransition! transition, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.RunTransitionResult>!
@@ -645,8 +639,6 @@ Surefire.RunStatusTransition.CompletedAt.get -> System.DateTimeOffset?
 Surefire.RunStatusTransition.CompletedAt.init -> void
 Surefire.RunStatusTransition.Events.get -> System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>?
 Surefire.RunStatusTransition.Events.init -> void
-Surefire.RunStatusTransition.ExpectedAttempt.get -> int
-Surefire.RunStatusTransition.ExpectedAttempt.init -> void
 Surefire.RunStatusTransition.ExpectedStatus.get -> Surefire.JobStatus
 Surefire.RunStatusTransition.ExpectedStatus.init -> void
 Surefire.RunStatusTransition.HasRequiredFields() -> bool

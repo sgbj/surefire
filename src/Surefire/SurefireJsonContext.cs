@@ -25,7 +25,20 @@ namespace Surefire;
 [JsonSerializable(typeof(BatchCompletionPayload))]
 [JsonSerializable(typeof(CancelExpiredRunsPayload))]
 [JsonSerializable(typeof(SubtreeCancellationPayload))]
+[JsonSerializable(typeof(DurableRecord))]
+[JsonSerializable(typeof(DurableRandomInt32Payload))]
+[JsonSerializable(typeof(Guid))]
+[JsonSerializable(typeof(DateTimeOffset))]
+[JsonSerializable(typeof(int))]
+[JsonSerializable(typeof(double))]
 internal sealed partial class SurefireJsonContext : JsonSerializerContext;
+
+internal sealed record DurableRandomInt32Payload
+{
+    public int Value { get; init; }
+    public int? MinValue { get; init; }
+    public int? MaxValue { get; init; }
+}
 
 /// <summary>
 ///     Bulk upsert payload for jobs.
@@ -105,4 +118,7 @@ internal sealed record CanceledRunPayload
 {
     public string RunId { get; init; } = string.Empty;
     public string? BatchId { get; init; }
+    public int Attempt { get; init; }
+    public string? Reason { get; init; }
+    public int? Kind { get; init; }
 }

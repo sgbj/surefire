@@ -224,7 +224,7 @@ export function DataTable<TData, TValue>({
                   colSpan={columns.length}
                   className="py-8 text-center"
                 >
-                  <span className="eyebrow">no results</span>
+                  <span className="eyebrow">No results</span>
                 </TableCell>
               </TableRow>
             )}
@@ -234,7 +234,7 @@ export function DataTable<TData, TValue>({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-6 py-5 text-xs text-muted-foreground">
         <div className="tnum">
           {totalCount === 0 ? (
-            "no results"
+            "No results"
           ) : (
             <>
               <span className="text-foreground/85">{start}</span>

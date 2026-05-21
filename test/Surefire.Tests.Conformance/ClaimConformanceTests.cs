@@ -21,6 +21,21 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task Claim_SkipsRunPastExpiresAt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var job = CreateJob();
+        await Store.UpsertJobsAsync([job], ct);
+
+        var run = CreateRun(job.Name) with { ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1) };
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        var claimed = await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct);
+
+        Assert.Empty(claimed);
+    }
+
+    [Fact]
     public async Task Claim_SetsRunning_NodeName_StartedAt_Heartbeat()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -40,19 +55,41 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task Claim_IncrementsAttempt()
+    public async Task Claim_PreservesExistingStartedAt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var job = CreateJob();
+        await Store.UpsertJobsAsync([job], ct);
+
+        var firstStartedAt = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddMinutes(-5));
+        var run = CreateRun(job.Name) with { StartedAt = firstStartedAt };
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
+
+        Assert.NotNull(claimed);
+        Assert.Equal(firstStartedAt, claimed.StartedAt);
+        Assert.Equal(JobStatus.Running, claimed.Status);
+        Assert.Equal("node-1", claimed.NodeName);
+        Assert.NotNull(claimed.LastHeartbeatAt);
+    }
+
+    [Fact]
+    public async Task Claim_IncrementsLeaseEpoch()
     {
         var ct = TestContext.Current.CancellationToken;
         var job = CreateJob();
         await Store.UpsertJobsAsync([job], ct);
 
         var run = CreateRun(job.Name);
-        Assert.Equal(0, run.Attempt);
+        Assert.Equal(1, run.Attempt);
+        Assert.Equal(0, run.LeaseEpoch);
         await Store.CreateRunsAsync([run], cancellationToken: ct);
 
         var claimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(claimed);
         Assert.Equal(1, claimed.Attempt);
+        Assert.Equal(1, claimed.LeaseEpoch);
 
         claimed = claimed with { Status = JobStatus.Pending, NotBefore = DateTimeOffset.UtcNow.AddSeconds(-1) };
         var ok = await Store.TryTransitionRunAsync(Transition(claimed, JobStatus.Running), ct);
@@ -60,7 +97,8 @@ public abstract class ClaimConformanceTests : StoreConformanceBase
 
         var reclaimed = (await Store.ClaimRunsAsync("node-1", [job.Name], ["default"], 1, ct)).FirstOrDefault();
         Assert.NotNull(reclaimed);
-        Assert.Equal(2, reclaimed.Attempt);
+        Assert.Equal(1, reclaimed.Attempt);
+        Assert.Equal(2, reclaimed.LeaseEpoch);
     }
 
     [Fact]

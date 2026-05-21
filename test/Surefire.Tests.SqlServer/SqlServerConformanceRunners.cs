@@ -76,3 +76,7 @@ public sealed class SqlServerTraceTests(SqlServerFixture fixture)
 [Collection("SqlServer")]
 public sealed class SqlServerContentionTests(SqlServerFixture fixture)
     : FixtureBackedContentionConformanceTests<SqlServerFixture>(fixture);
+
+[Collection("SqlServer")]
+public sealed class SqlServerDurableTests(SqlServerFixture fixture)
+    : FixtureBackedDurableConformanceTests<SqlServerFixture>(fixture);

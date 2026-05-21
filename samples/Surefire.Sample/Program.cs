@@ -179,8 +179,9 @@ app.AddJob("Fibonacci", async (IJobClient client, CancellationToken ct, int n = 
                await client.RunAsync<int>("Fibonacci", new { n = n - 2 }, cancellationToken: ct);
     })
     .WithDescription("Computes Fibonacci recursively")
+    .WithTags("rate-limit", "durable")
     .WithRateLimit("Fibonacci")
-    .WithTags("rate-limit");
+    .Durable();
 
 app.AddJob("ScheduledDataImport", async (IJobClient client, ILogger<Program> logger) =>
     {
@@ -213,9 +214,11 @@ app.AddJob("Batch", async (IJobClient client, ILogger<Program> logger, Cancellat
             await client.RunBatchAsync<AddRandomResult>("AddRandom", new object?[1_000], cancellationToken: ct);
         return results.Sum(r => (long)r.Sum);
     })
-    .WithTags("batch");
+    .WithTags("batch", "durable")
+    .Durable();
 
-app.AddJob("StreamBatch", async (IJobClient client, ILogger<Program> logger, CancellationToken ct) =>
+app.AddJob("StreamBatch", async (IJobClient client, JobContext ctx, ILogger<Program> logger,
+        CancellationToken ct) =>
     {
         var results = client.StreamBatchAsync<AddRandomResult>("AddRandom", new object?[1_000], cancellationToken: ct);
         var sum = 0L;
@@ -224,7 +227,8 @@ app.AddJob("StreamBatch", async (IJobClient client, ILogger<Program> logger, Can
         await foreach (var result in results)
         {
             sum += result.Sum;
-            logger.LogInformation("Result {Index}: {Result}", i++, result);
+            logger.LogInformation("Result {Index}: {Result}", i, result);
+            i++;
         }
 
         return sum;

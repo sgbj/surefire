@@ -73,6 +73,60 @@ public abstract class EventConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task AppendEventsIfRunNonTerminal_AppendsOnlyForNonTerminalRuns()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var liveRunId = await CreateRunForEventsAsync(ct);
+        var terminalRunId = await CreateRunForEventsAsync(ct);
+        await Store.TryCancelRunAsync(terminalRunId, reason: "done", cancellationToken: ct);
+
+        var accepted = await Store.AppendEventsIfRunNonTerminalAsync([
+            new()
+            {
+                RunId = liveRunId,
+                EventType = RunEventType.Input,
+                Payload = """{"Argument":"value","Sequence":1,"Payload":"{}","IsComplete":false}""",
+                CreatedAt = DateTimeOffset.UtcNow
+            },
+            new()
+            {
+                RunId = terminalRunId,
+                EventType = RunEventType.Input,
+                Payload = """{"Argument":"value","Sequence":1,"Payload":"{}","IsComplete":false}""",
+                CreatedAt = DateTimeOffset.UtcNow
+            }
+        ], ct);
+
+        Assert.Contains(liveRunId, accepted);
+        Assert.DoesNotContain(terminalRunId, accepted);
+        Assert.Single(await Store.GetEventsAsync(liveRunId, cancellationToken: ct));
+        Assert.DoesNotContain(await Store.GetEventsAsync(terminalRunId, cancellationToken: ct),
+            e => e.EventType == RunEventType.Input);
+    }
+
+    [Fact]
+    public async Task GetInputPumpStateAsync_ThrowsOnCorruptInputHistory()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var runId = await CreateRunForEventsAsync(ct);
+        await Store.AppendEventsAsync([
+            new()
+            {
+                RunId = runId,
+                EventType = RunEventType.Input,
+                Payload = "{not-json",
+                CreatedAt = DateTimeOffset.UtcNow
+            }
+        ], ct);
+
+        var ex = await Assert.ThrowsAsync<InvalidInputHistoryException>(() =>
+            Store.GetInputPumpStateAsync(runId, ct));
+        Assert.Equal(runId, ex.RunId);
+        Assert.Equal(RunEventType.Input, ex.EventType);
+        Assert.True(ex.EventId > 0);
+    }
+
+    [Fact]
     public async Task GetEvents_SinceId_ReturnsOnlyNewer()
     {
         var ct = TestContext.Current.CancellationToken;

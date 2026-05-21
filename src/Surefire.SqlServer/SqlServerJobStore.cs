@@ -55,17 +55,21 @@ internal sealed class SqlServerJobStore(
                                            completed_at DATETIMEOFFSET,
                                            canceled_at DATETIMEOFFSET,
                                            node_name NVARCHAR(450),
-                                           attempt INT NOT NULL DEFAULT 0,
+                                           attempt INT NOT NULL DEFAULT 1,
+                                           lease_epoch BIGINT NOT NULL DEFAULT 0,
+                                           failure_count INT NOT NULL DEFAULT 0,
+                                           replay_count INT NOT NULL DEFAULT 0,
                                            trace_id NVARCHAR(450),
                                            span_id NVARCHAR(450),
                                            parent_trace_id NVARCHAR(450),
                                            parent_span_id NVARCHAR(450),
                                            parent_run_id NVARCHAR(450),
                                            root_run_id NVARCHAR(450),
-                                           rerun_of_run_id NVARCHAR(450),
-                                           not_before DATETIMEOFFSET NOT NULL,
-                                           not_after DATETIMEOFFSET,
-                                           priority INT NOT NULL DEFAULT 0,
+                                            rerun_of_run_id NVARCHAR(450),
+                                            not_before DATETIMEOFFSET NOT NULL,
+                                            not_after DATETIMEOFFSET,
+                                            expires_at DATETIMEOFFSET,
+                                            priority INT NOT NULL DEFAULT 0,
                                            deduplication_id NVARCHAR(450),
                                            last_heartbeat_at DATETIMEOFFSET,
                                            batch_id NVARCHAR(450)
@@ -79,9 +83,9 @@ internal sealed class SqlServerJobStore(
 
                                        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_claim')
                                        CREATE INDEX ix_surefire_runs_claim
-                                           ON dbo.surefire_runs (priority DESC, not_before, id)
-                                           INCLUDE (job_name, not_after)
-                                           WHERE status = 0;
+                                            ON dbo.surefire_runs (priority DESC, not_before, id)
+                                            INCLUDE (job_name, not_after, expires_at)
+                                            WHERE status = 0;
 
                                        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'ix_surefire_runs_root')
                                        CREATE INDEX ix_surefire_runs_root
@@ -128,8 +132,13 @@ internal sealed class SqlServerJobStore(
 
                                        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_expiring')
                                        CREATE INDEX ix_surefire_runs_expiring
-                                           ON dbo.surefire_runs (not_after)
-                                           WHERE status = 0 AND not_after IS NOT NULL;
+                                            ON dbo.surefire_runs (not_after)
+                                            WHERE status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL;
+
+                                        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_expires_at')
+                                        CREATE INDEX ix_surefire_runs_expires_at
+                                            ON dbo.surefire_runs (expires_at)
+                                            WHERE status <> 2 AND status <> 4 AND status <> 5 AND expires_at IS NOT NULL;
 
                                        IF OBJECT_ID('dbo.surefire_batches', 'U') IS NULL
                                        CREATE TABLE dbo.surefire_batches (
@@ -228,10 +237,11 @@ internal sealed class SqlServerJobStore(
                                            parent_span_id NVARCHAR(450),
                                            parent_run_id NVARCHAR(450),
                                            root_run_id NVARCHAR(450),
-                                           rerun_of_run_id NVARCHAR(450),
-                                           not_before DATETIMEOFFSET NOT NULL,
-                                           not_after DATETIMEOFFSET,
-                                           priority INT NOT NULL,
+                                            rerun_of_run_id NVARCHAR(450),
+                                            not_before DATETIMEOFFSET NOT NULL,
+                                            not_after DATETIMEOFFSET,
+                                            expires_at DATETIMEOFFSET,
+                                            priority INT NOT NULL,
                                            deduplication_id NVARCHAR(450),
                                            last_heartbeat_at DATETIMEOFFSET,
                                            batch_id NVARCHAR(450)
@@ -259,6 +269,203 @@ internal sealed class SqlServerJobStore(
 
                                        INSERT INTO dbo.surefire_schema_migrations (version)
                                        SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_schema_migrations WHERE version = 1);
+                                       """;
+
+    private const string SchemaV2Sql = """
+                                       IF NOT EXISTS (
+                                           SELECT 1 FROM sys.columns
+                                           WHERE object_id = OBJECT_ID('dbo.surefire_runs')
+                                             AND name = 'lease_epoch'
+                                        )
+                                           ALTER TABLE dbo.surefire_runs ADD lease_epoch BIGINT NOT NULL CONSTRAINT df_surefire_runs_lease_epoch DEFAULT 0;
+
+                                       IF NOT EXISTS (
+                                           SELECT 1 FROM sys.columns
+                                           WHERE object_id = OBJECT_ID('dbo.surefire_runs')
+                                             AND name = 'failure_count'
+                                       )
+                                           ALTER TABLE dbo.surefire_runs ADD failure_count INT NOT NULL CONSTRAINT df_surefire_runs_failure_count DEFAULT 0;
+
+                                       IF NOT EXISTS (
+                                           SELECT 1 FROM sys.columns
+                                           WHERE object_id = OBJECT_ID('dbo.surefire_runs')
+                                             AND name = 'replay_count'
+                                       )
+                                           ALTER TABLE dbo.surefire_runs ADD replay_count INT NOT NULL CONSTRAINT df_surefire_runs_replay_count DEFAULT 0;
+
+                                       IF NOT EXISTS (
+                                           SELECT 1 FROM sys.columns
+                                           WHERE object_id = OBJECT_ID('dbo.surefire_runs')
+                                             AND name = 'highest_recorded_step'
+                                       )
+                                           ALTER TABLE dbo.surefire_runs ADD highest_recorded_step INT NOT NULL CONSTRAINT df_surefire_runs_highest_recorded_step DEFAULT 0;
+
+                                        IF NOT EXISTS (
+                                            SELECT 1 FROM sys.columns
+                                            WHERE object_id = OBJECT_ID('dbo.surefire_runs')
+                                              AND name = 'is_durable'
+                                        )
+                                            ALTER TABLE dbo.surefire_runs ADD is_durable BIT NOT NULL CONSTRAINT df_surefire_runs_is_durable DEFAULT 0;
+
+                                        IF NOT EXISTS (
+                                            SELECT 1 FROM sys.columns
+                                            WHERE object_id = OBJECT_ID('dbo.surefire_runs')
+                                              AND name = 'expires_at'
+                                        )
+                                            ALTER TABLE dbo.surefire_runs ADD expires_at DATETIMEOFFSET NULL;
+
+                                       UPDATE dbo.surefire_runs
+                                       SET lease_epoch = CASE WHEN lease_epoch > attempt THEN lease_epoch ELSE attempt END,
+                                           failure_count = CASE
+                                               WHEN failure_count > CASE WHEN status = 5 THEN attempt ELSE CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END END
+                                                   THEN failure_count
+                                               ELSE CASE WHEN status = 5 THEN attempt ELSE CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END END
+                                           END,
+                                           attempt = CASE WHEN attempt > 1 THEN attempt ELSE 1 END;
+
+                                       -- The TVP type is immutable. Drop and recreate via name swap so referring procedures
+                                       -- are not affected (the type is only used inline as a parameter declaration on
+                                       -- inserts, no schema-bound dependency).
+                                        IF TYPE_ID(N'dbo.surefire_runs_input') IS NOT NULL
+                                            AND NOT EXISTS (
+                                                SELECT 1 FROM sys.columns
+                                                WHERE object_id = TYPE_ID(N'dbo.surefire_runs_input')
+                                                  AND name = 'expires_at'
+                                            )
+                                        BEGIN
+                                            DROP TYPE dbo.surefire_runs_input;
+                                       END;
+
+                                       IF TYPE_ID(N'dbo.surefire_runs_input') IS NULL
+                                       CREATE TYPE dbo.surefire_runs_input AS TABLE (
+                                           id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                                           job_name NVARCHAR(450) NOT NULL,
+                                           status INT NOT NULL,
+                                           arguments NVARCHAR(MAX),
+                                           result NVARCHAR(MAX),
+                                           reason NVARCHAR(MAX),
+                                           progress FLOAT NOT NULL,
+                                           created_at DATETIMEOFFSET NOT NULL,
+                                           started_at DATETIMEOFFSET,
+                                           completed_at DATETIMEOFFSET,
+                                           canceled_at DATETIMEOFFSET,
+                                           node_name NVARCHAR(450),
+                                           attempt INT NOT NULL,
+                                           trace_id NVARCHAR(450),
+                                           span_id NVARCHAR(450),
+                                           parent_trace_id NVARCHAR(450),
+                                           parent_span_id NVARCHAR(450),
+                                           parent_run_id NVARCHAR(450),
+                                           root_run_id NVARCHAR(450),
+                                            rerun_of_run_id NVARCHAR(450),
+                                            not_before DATETIMEOFFSET NOT NULL,
+                                            not_after DATETIMEOFFSET,
+                                            expires_at DATETIMEOFFSET,
+                                            priority INT NOT NULL,
+                                           deduplication_id NVARCHAR(450),
+                                           last_heartbeat_at DATETIMEOFFSET,
+                                           batch_id NVARCHAR(450),
+                                           lease_epoch BIGINT NOT NULL,
+                                           failure_count INT NOT NULL,
+                                           replay_count INT NOT NULL,
+                                           highest_recorded_step INT NOT NULL,
+                                           is_durable BIT NOT NULL
+                                       );
+
+                                       -- Batch -> orchestrator backlink for the executor's claim-time snapshot.
+                                       IF NOT EXISTS (
+                                           SELECT 1 FROM sys.columns
+                                           WHERE object_id = OBJECT_ID('dbo.surefire_batches')
+                                             AND name = 'parent_run_id'
+                                       )
+                                           EXEC sp_executesql N'ALTER TABLE dbo.surefire_batches ADD parent_run_id NVARCHAR(450) NULL';
+
+                                       IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_batches_parent_run_id')
+                                           EXEC sp_executesql N'CREATE INDEX ix_batches_parent_run_id
+                                               ON dbo.surefire_batches (parent_run_id) WHERE parent_run_id IS NOT NULL';
+
+                                       -- Wait table backing the wake-on-all suspend / resume protocol.
+                                       -- Naming is symmetric: awaiter_run_id is the orchestrator that is
+                                       -- waiting; awaited_run_id / awaited_batch_id name the entity it
+                                       -- waits on. exactly_one_awaited keeps the union discriminated.
+                                       IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'surefire_durable_waits')
+                                       BEGIN
+                                           CREATE TABLE dbo.surefire_durable_waits (
+                                               awaiter_run_id   NVARCHAR(450) NOT NULL,
+                                               awaited_run_id   NVARCHAR(450) NULL,
+                                               awaited_batch_id NVARCHAR(450) NULL,
+                                               suspended_at     DATETIMEOFFSET NOT NULL,
+                                               CONSTRAINT fk_durable_waits_awaiter FOREIGN KEY (awaiter_run_id)
+                                                   REFERENCES dbo.surefire_runs(id) ON DELETE CASCADE,
+                                               CONSTRAINT exactly_one_awaited
+                                                   CHECK ((awaited_run_id IS NOT NULL AND awaited_batch_id IS NULL)
+                                                       OR (awaited_run_id IS NULL AND awaited_batch_id IS NOT NULL))
+                                           );
+                                       END;
+
+                                       IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_durable_waits_run_uniq')
+                                           EXEC sp_executesql N'CREATE UNIQUE INDEX ix_durable_waits_run_uniq
+                                               ON dbo.surefire_durable_waits (awaiter_run_id, awaited_run_id)
+                                               WHERE awaited_run_id IS NOT NULL';
+                                       IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_durable_waits_batch_uniq')
+                                           EXEC sp_executesql N'CREATE UNIQUE INDEX ix_durable_waits_batch_uniq
+                                               ON dbo.surefire_durable_waits (awaiter_run_id, awaited_batch_id)
+                                               WHERE awaited_batch_id IS NOT NULL';
+                                       IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_durable_waits_by_awaited_run')
+                                           EXEC sp_executesql N'CREATE INDEX ix_durable_waits_by_awaited_run
+                                               ON dbo.surefire_durable_waits (awaited_run_id)
+                                               WHERE awaited_run_id IS NOT NULL';
+                                        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_durable_waits_by_awaited_batch')
+                                            EXEC sp_executesql N'CREATE INDEX ix_durable_waits_by_awaited_batch
+                                                ON dbo.surefire_durable_waits (awaited_batch_id)
+                                                WHERE awaited_batch_id IS NOT NULL';
+                                        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'surefire_durable_records')
+                                        BEGIN
+                                            CREATE TABLE dbo.surefire_durable_records (
+                                                orchestrator_run_id NVARCHAR(450) NOT NULL,
+                                                step                INT           NOT NULL,
+                                                kind                NVARCHAR(100) NOT NULL,
+                                                name                NVARCHAR(450) NULL,
+                                                payload             NVARCHAR(MAX) NOT NULL,
+                                                created_at          DATETIMEOFFSET NOT NULL,
+                                                CONSTRAINT pk_surefire_durable_records PRIMARY KEY (orchestrator_run_id, step),
+                                                CONSTRAINT fk_durable_records_orchestrator FOREIGN KEY (orchestrator_run_id)
+                                                    REFERENCES dbo.surefire_runs(id) ON DELETE CASCADE
+                                            );
+                                        END;
+
+                                        DROP INDEX IF EXISTS ix_surefire_runs_expiring ON dbo.surefire_runs;
+                                        CREATE INDEX ix_surefire_runs_expiring
+                                            ON dbo.surefire_runs (not_after)
+                                            WHERE status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL;
+                                        IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_surefire_runs_expires_at')
+                                            EXEC sp_executesql N'CREATE INDEX ix_surefire_runs_expires_at
+                                                ON dbo.surefire_runs (expires_at)
+                                                WHERE status <> 2 AND status <> 4 AND status <> 5 AND expires_at IS NOT NULL';
+
+                                       UPDATE j
+                                       SET running_count = ISNULL(r.cnt, 0)
+                                       FROM dbo.surefire_jobs j
+                                       LEFT JOIN (
+                                           SELECT job_name, COUNT(*) AS cnt
+                                           FROM dbo.surefire_runs
+                                           WHERE status = 1
+                                           GROUP BY job_name
+                                       ) r ON r.job_name = j.name;
+
+                                       UPDATE q
+                                       SET running_count = ISNULL(r.cnt, 0)
+                                       FROM dbo.surefire_queues q
+                                       LEFT JOIN (
+                                           SELECT ISNULL(NULLIF(j.queue, ''), 'default') AS queue_name, COUNT(*) AS cnt
+                                           FROM dbo.surefire_runs r
+                                           INNER JOIN dbo.surefire_jobs j ON j.name = r.job_name
+                                           WHERE r.status = 1
+                                           GROUP BY ISNULL(NULLIF(j.queue, ''), 'default')
+                                       ) r ON r.queue_name = q.name;
+
+                                       INSERT INTO dbo.surefire_schema_migrations (version)
+                                       SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_schema_migrations WHERE version = 2);
                                        """;
 
     private static readonly SqlMetaData[] EventsTvpMeta =
@@ -294,10 +501,16 @@ internal sealed class SqlServerJobStore(
         new("rerun_of_run_id", SqlDbType.NVarChar, 450),
         new("not_before", SqlDbType.DateTimeOffset),
         new("not_after", SqlDbType.DateTimeOffset),
+        new("expires_at", SqlDbType.DateTimeOffset),
         new("priority", SqlDbType.Int),
         new("deduplication_id", SqlDbType.NVarChar, 450),
         new("last_heartbeat_at", SqlDbType.DateTimeOffset),
-        new("batch_id", SqlDbType.NVarChar, 450)
+        new("batch_id", SqlDbType.NVarChar, 450),
+        new("lease_epoch", SqlDbType.BigInt),
+        new("failure_count", SqlDbType.Int),
+        new("replay_count", SqlDbType.Int),
+        new("highest_recorded_step", SqlDbType.Int),
+        new("is_durable", SqlDbType.Bit)
     ];
 
     private static readonly SqlMetaData[] NameListTvpMeta =
@@ -363,6 +576,14 @@ internal sealed class SqlServerJobStore(
                 cmd.CommandText = SchemaV1Sql;
                 await cmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
             }
+
+            if (currentVersion < 2)
+            {
+                await using var cmd = CreateCommand(conn);
+                cmd.CommandText = SchemaV2Sql;
+                await cmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            }
+
         }
         catch
         {
@@ -1026,25 +1247,12 @@ internal sealed class SqlServerJobStore(
         await cmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
     }
 
-    public async Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
+    public async Task<DurableSuspendOutcome> TrySuspendRunAsync(string runId, long expectedLeaseEpoch,
+        IReadOnlyCollection<string> awaitedRunIds,
+        IReadOnlyCollection<string> awaitedBatchIds,
+        DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
-        if (!RunTransitionRules.IsAllowed(transition.ExpectedStatus, transition.NewStatus)
-            || !transition.HasRequiredFields())
-        {
-            return RunTransitionResult.NotApplied;
-        }
-
-        var allEvents = new List<RunEvent>(1 + (transition.Events?.Count ?? 0))
-        {
-            RunStatusEvents.Create(transition.RunId, transition.ExpectedAttempt,
-                transition.NewStatus, timeProvider.GetUtcNow())
-        };
-        if (transition.Events is { Count: > 0 })
-        {
-            allEvents.AddRange(transition.Events);
-        }
-
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
         await using var tx = (SqlTransaction)await conn
@@ -1053,21 +1261,19 @@ internal sealed class SqlServerJobStore(
 
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-
+        // The orchestrator and every awaited entity are locked in sorted-id order under UPDLOCK
+        // ROWLOCK so a concurrent terminal transition on an awaited entity serializes against this
+        // suspend - the "child terminated between EXISTS-check and wait-row insert" race is
+        // impossible by construction. Per-run applock and job/queue applocks serialize this run's
+        // counter mutation against claim/transition writers on the same job/queue.
         cmd.CommandText = """
                           SET NOCOUNT ON; SET XACT_ABORT ON;
 
-                          -- Per-run applock serializes concurrent ops on the same run; SQL Server's
-                          -- U/X conversion otherwise produces deadlocks under single-row contention.
                           DECLARE @run_lock_r INT;
                           EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
                               @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
                           IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
 
-                          -- Resolve the canonical lock keys via snapshot reads (RCSI), then take
-                          -- a job-applock and queue-applock so we serialize against multi-row
-                          -- writers (claim / cancel-subtree / cancel-expired) deterministically
-                          -- regardless of how their optimizer chose to scan their TVPs.
                           DECLARE @run_job_name NVARCHAR(450);
                           SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
                           DECLARE @run_queue_name NVARCHAR(450) = N'default';
@@ -1093,7 +1299,590 @@ internal sealed class SqlServerJobStore(
                           SELECT @lock_sink = name FROM dbo.surefire_queues WITH (UPDLOCK, ROWLOCK)
                               WHERE name = @run_queue_name;
 
-                          DECLARE @upd TABLE (job_name NVARCHAR(450) NOT NULL, batch_id NVARCHAR(450));
+                          -- Materialize awaited ids into a single sorted set, including the
+                          -- orchestrator itself, so the SELECT below acquires UPDLOCK/ROWLOCK in
+                          -- sorted-id order. Both run-id and batch-id sets are sorted independently
+                          -- (different tables) but share the deterministic per-table acquisition
+                          -- order that prevents deadlocks across concurrent suspends.
+                          DECLARE @lock_run_ids TABLE (id NVARCHAR(450) NOT NULL PRIMARY KEY);
+                          INSERT INTO @lock_run_ids (id) VALUES (@id);
+                          INSERT INTO @lock_run_ids (id)
+                              SELECT name FROM @awaited_runs WHERE name <> @id;
+                          DECLARE @lock_batch_ids TABLE (id NVARCHAR(450) NOT NULL PRIMARY KEY);
+                          INSERT INTO @lock_batch_ids (id) SELECT name FROM @awaited_batches;
+
+                          SELECT @lock_sink = r.id FROM @lock_run_ids lri
+                              INNER JOIN dbo.surefire_runs r WITH (UPDLOCK, ROWLOCK) ON r.id = lri.id
+                              ORDER BY lri.id OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                          SELECT @lock_sink = b.id FROM @lock_batch_ids lbi
+                              INNER JOIN dbo.surefire_batches b WITH (UPDLOCK, ROWLOCK) ON b.id = lbi.id
+                              ORDER BY lbi.id OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+
+                          -- Decide destination by checking whether any awaited entity is still
+                          -- non-terminal under the just-acquired row locks. If everything is
+                          -- already terminal, the orchestrator goes straight to Pending so the
+                          -- next claim sweep replays immediately.
+                          DECLARE @has_nonterminal_await BIT =
+                              CASE WHEN EXISTS (
+                                  SELECT 1 FROM @awaited_runs a
+                                  INNER JOIN dbo.surefire_runs r ON r.id = a.name
+                                  WHERE r.status NOT IN (2, 4, 5)
+                              ) OR EXISTS (
+                                  SELECT 1 FROM @awaited_batches a
+                                  INNER JOIN dbo.surefire_batches b ON b.id = a.name
+                                  WHERE b.status NOT IN (2, 4, 5)
+                              ) THEN 1 ELSE 0 END;
+
+                          DECLARE @new_status INT = CASE WHEN @has_nonterminal_await = 1 THEN 3 ELSE 0 END;
+                          DECLARE @upd TABLE (attempt INT NOT NULL);
+
+                          UPDATE dbo.surefire_runs SET
+                              status = @new_status,
+                              node_name = NULL,
+                              not_before = CASE WHEN @has_nonterminal_await = 1 THEN not_before ELSE @now END,
+                              last_heartbeat_at = @now,
+                              replay_count = replay_count + CASE WHEN @has_nonterminal_await = 1 THEN 0 ELSE 1 END
+                           OUTPUT INSERTED.attempt INTO @upd (attempt)
+                           WHERE id = @id AND status = 1 AND lease_epoch = @expected_lease_epoch;
+
+                          DECLARE @transitioned INT = (SELECT COUNT(*) FROM @upd);
+
+                           IF @transitioned > 0
+                           BEGIN
+                               -- Running -> Suspended/Pending releases the slot. The later claim reacquires it.
+                               UPDATE dbo.surefire_jobs SET running_count =
+                                   CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                              WHERE name = @run_job_name;
+                              UPDATE dbo.surefire_queues SET running_count =
+                                  CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                              WHERE name = @run_queue_name;
+                          END
+
+                          IF @transitioned > 0 AND @new_status = 3
+                          BEGIN
+                              -- Insert wait rows for every still-non-terminal awaited entity. Already
+                              -- terminal entries are filtered out so the wake mechanism doesn't see
+                              -- ghost rows. The UNIQUE indexes plus IGNORE_DUP_KEY-equivalent via
+                              -- NOT EXISTS prevent duplicate pairs.
+                              INSERT INTO dbo.surefire_durable_waits (awaiter_run_id, awaited_run_id, awaited_batch_id, suspended_at)
+                              SELECT @id, r.id, NULL, @now FROM @awaited_runs a
+                              INNER JOIN dbo.surefire_runs r ON r.id = a.name
+                              WHERE r.status NOT IN (2, 4, 5)
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM dbo.surefire_durable_waits w
+                                    WHERE w.awaiter_run_id = @id AND w.awaited_run_id = r.id
+                                );
+
+                              INSERT INTO dbo.surefire_durable_waits (awaiter_run_id, awaited_run_id, awaited_batch_id, suspended_at)
+                              SELECT @id, NULL, b.id, @now FROM @awaited_batches a
+                              INNER JOIN dbo.surefire_batches b ON b.id = a.name
+                              WHERE b.status NOT IN (2, 4, 5)
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM dbo.surefire_durable_waits w
+                                    WHERE w.awaiter_run_id = @id AND w.awaited_batch_id = b.id
+                                );
+                          END
+
+                          IF @transitioned > 0
+                          BEGIN
+                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                              SELECT @id, 0, CONVERT(NVARCHAR(10), @new_status), @now, u.attempt FROM @upd u;
+                          END
+
+                          SELECT @transitioned AS transitioned, @new_status AS new_status;
+                          """;
+
+        cmd.Parameters.Add(CreateParameter("@id", runId));
+        cmd.Parameters.Add(CreateParameter("@run_lock_key", "surefire_run:" + runId));
+        cmd.Parameters.Add(CreateParameter("@expected_lease_epoch", expectedLeaseEpoch));
+        cmd.Parameters.Add(CreateParameter("@now", now));
+        cmd.Parameters.Add(CreateTvpParameter("@awaited_runs", "dbo.surefire_name_list",
+            NamesToTvp(awaitedRunIds)));
+        cmd.Parameters.Add(CreateTvpParameter("@awaited_batches", "dbo.surefire_name_list",
+            NamesToTvp(awaitedBatchIds)));
+
+        var outcome = DurableSuspendOutcome.NotTransitioned;
+        await using (var reader =
+                     await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                if (reader.GetInt32(0) > 0)
+                {
+                    outcome = (JobStatus)reader.GetInt32(1) == JobStatus.Suspended
+                        ? DurableSuspendOutcome.Suspended
+                        : DurableSuspendOutcome.ImmediatePending;
+                }
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        return outcome;
+    }
+
+    public async Task<DurableExecutionSnapshot> LoadExecutionSnapshotAsync(string orchestratorRunId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+
+        // One round trip with three SELECTs under SNAPSHOT isolation gives a coherent view
+        // of the orchestrator and its children. Without snapshot the three reads could see
+        // a torn state if a child terminal commits between reads, surfacing a child as
+        // non-terminal in `children` whose batch has already counted it.
+        await using var tx = (SqlTransaction)await conn
+            .BeginTransactionAsync(IsolationLevel.Snapshot, cancellationToken)
+            .WithSqlCancellation(cancellationToken);
+
+        int highestRecordedStep = 0;
+        var children = new Dictionary<string, JobRun>(StringComparer.Ordinal);
+        var childBatches = new Dictionary<string, JobBatch>(StringComparer.Ordinal);
+        var records = new Dictionary<int, DurableRecord>();
+
+        await using (var cmd = CreateCommand(conn))
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                              SELECT highest_recorded_step
+                              FROM dbo.surefire_runs WHERE id = @id;
+
+                              SELECT * FROM dbo.surefire_runs WHERE parent_run_id = @id;
+
+                              SELECT * FROM dbo.surefire_batches WHERE parent_run_id = @id;
+
+                              SELECT * FROM dbo.surefire_durable_records WHERE orchestrator_run_id = @id;
+                              """;
+            cmd.Parameters.Add(CreateParameter("@id", orchestratorRunId));
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                highestRecordedStep = reader.GetInt32(0);
+            }
+
+            await reader.NextResultAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                var run = ReadRun(reader);
+                children[run.Id] = run;
+            }
+
+            await reader.NextResultAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                var batch = ReadBatch(reader);
+                childBatches[batch.Id] = batch;
+            }
+
+            await reader.NextResultAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                var record = ReadDurableRecord(reader);
+                records[record.Step] = record;
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        return new DurableExecutionSnapshot(children, childBatches, records, highestRecordedStep);
+    }
+
+    public async Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
+        CancellationToken cancellationToken = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        await using var tx = (SqlTransaction)await conn
+            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .WithSqlCancellation(cancellationToken);
+
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          SET NOCOUNT ON; SET XACT_ABORT ON;
+
+                          DECLARE @inserted INT = 0;
+
+                          IF NOT EXISTS (
+                              SELECT 1 FROM dbo.surefire_durable_records WITH (UPDLOCK, HOLDLOCK)
+                              WHERE orchestrator_run_id = @orchestrator_run_id AND step = @step
+                          )
+                          BEGIN
+                              INSERT INTO dbo.surefire_durable_records (
+                                  orchestrator_run_id, step, kind, name, payload, created_at
+                              )
+                              VALUES (
+                                  @orchestrator_run_id, @step, @kind, @name, @payload, @created_at
+                              );
+
+                              SET @inserted = 1;
+
+                              UPDATE dbo.surefire_runs
+                              SET highest_recorded_step = CASE
+                                      WHEN highest_recorded_step > @step THEN highest_recorded_step
+                                      ELSE @step
+                                  END
+                              WHERE id = @orchestrator_run_id;
+                          END
+
+                          SELECT @inserted;
+                          """;
+        AddDurableRecordParameters(cmd, record);
+        var inserted =
+            Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken)) > 0;
+        if (inserted)
+        {
+            await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            return record;
+        }
+
+        DurableRecord? existing = null;
+        await using (var select = CreateCommand(conn))
+        {
+            select.Transaction = tx;
+            select.CommandText = """
+                                 SELECT * FROM dbo.surefire_durable_records
+                                 WHERE orchestrator_run_id = @orchestrator_run_id AND step = @step;
+                                 """;
+            select.Parameters.Add(CreateParameter("@orchestrator_run_id", record.OrchestratorRunId));
+            select.Parameters.Add(CreateParameter("@step", record.Step));
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                existing = ReadDurableRecord(reader);
+            }
+        }
+
+        if (existing is { } found && DurableRecordsEqual(found, record))
+        {
+            await using var update = CreateCommand(conn);
+            update.Transaction = tx;
+            update.CommandText = """
+                                 UPDATE dbo.surefire_runs
+                                 SET highest_recorded_step = CASE
+                                         WHEN highest_recorded_step > @step THEN highest_recorded_step
+                                         ELSE @step
+                                     END
+                                 WHERE id = @orchestrator_run_id;
+                                 """;
+            update.Parameters.Add(CreateParameter("@orchestrator_run_id", record.OrchestratorRunId));
+            update.Parameters.Add(CreateParameter("@step", record.Step));
+            await update.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            return found;
+        }
+
+        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        throw new DurableReplayMismatchException(record.OrchestratorRunId, record.Step,
+            $"Expected {DescribeRecord(record)}; saw {(existing is null ? "no recorded operation" : DescribeRecord(existing))}.");
+    }
+
+    /// <summary>
+    ///     The unified 3-step wake performed inside every terminal transition transaction. Driven
+    ///     by the persistent <c>surefire_durable_waits</c> table so wake is wake-on-all (every
+    ///     awaited entity must terminate) rather than wake-on-any.
+    ///     <list type="number">
+    ///         <item>Delete the just-terminated run's outgoing waits (cleanup for Suspended -> Canceled).</item>
+    ///         <item>Capture affected orchestrator ids and delete incoming waits referencing the terminated entity.</item>
+    ///         <item>For each captured orchestrator whose wait set is now empty, transition Suspended -> Pending.</item>
+    ///     </list>
+    /// </summary>
+    // Unified wake for a set of terminated runs + batches. Collects the combined affected
+    // orchestrator set ONCE, applocks every orchestrator in sorted-id order, then performs
+    // the per-cascade cleanup. This breaks the cross-helper lock-order inversion that can
+    // arise when two transactions each call WakeForTerminatedRunAsync + WakeForTerminatedBatchAsync
+    // in sequence on overlapping orchestrator sets - per-helper sorts are not enough because
+    // the two helpers' affected sets differ. Locking the union under one canonical order is
+    // the only construction that's deadlock-free for all interleavings.
+    private async Task WakeForTerminatedEntitiesAsync(SqlConnection conn, SqlTransaction tx,
+        IReadOnlyCollection<string> runIds,
+        IReadOnlyCollection<string> batchIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0 && batchIds.Count == 0)
+        {
+            return;
+        }
+
+        // One round trip with two SELECTs collects affected orchestrators across runs + batches.
+        // Fast-skip: if the wait table has no rows referencing any of the terminated ids, the
+        // helper returns immediately without the per-orch applock prelude or the second pass.
+        var affected = new SortedSet<string>(StringComparer.Ordinal);
+        await using (var collectCmd = CreateCommand(conn))
+        {
+            collectCmd.Transaction = tx;
+            var sb = new StringBuilder("SET NOCOUNT ON;\n");
+            if (runIds.Count > 0)
+            {
+                sb.Append("""
+                          SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                          WHERE awaited_run_id IN (SELECT name FROM @rids);
+
+                          """);
+                collectCmd.Parameters.Add(CreateTvpParameter("@rids", "dbo.surefire_name_list", NamesToTvp(runIds)));
+            }
+            if (batchIds.Count > 0)
+            {
+                sb.Append("""
+                          SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                          WHERE awaited_batch_id IN (SELECT name FROM @bids);
+
+                          """);
+                collectCmd.Parameters.Add(CreateTvpParameter("@bids", "dbo.surefire_name_list", NamesToTvp(batchIds)));
+            }
+
+            collectCmd.CommandText = sb.ToString();
+            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            do
+            {
+                while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+                {
+                    affected.Add(reader.GetString(0));
+                }
+            } while (await reader.NextResultAsync(cancellationToken).WithSqlCancellation(cancellationToken));
+        }
+
+        // Prelock every affected orchestrator in canonical sorted order. WakeIfWaitSetEmptyAsync's
+        // internal per-orch applock is reentrant, so its no-op repeat doesn't matter; what matters
+        // is that this ordered acquisition happens before any cascade-driven write.
+        if (affected.Count > 0)
+        {
+            await using var prelockCmd = CreateCommand(conn);
+            prelockCmd.Transaction = tx;
+            var sb = new StringBuilder("SET NOCOUNT ON; SET XACT_ABORT ON;\nDECLARE @lr INT;\n");
+            var i = 0;
+            foreach (var orch in affected)
+            {
+                var paramName = $"@__orch_{i}";
+                sb.Append("EXEC @lr = sp_getapplock @Resource = ").Append(paramName)
+                    .Append(", @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;\n")
+                    .Append("IF @lr < 0 THROW 50006, 'Failed to prelock orchestrator for wake', 1;\n");
+                prelockCmd.Parameters.Add(CreateParameter(paramName, "surefire_run:" + orch));
+                i++;
+            }
+
+            prelockCmd.CommandText = sb.ToString();
+            await prelockCmd.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        foreach (var runId in runIds)
+        {
+            await WakeForTerminatedRunAsync(conn, tx, runId, now, cancellationToken);
+        }
+
+        foreach (var batchId in batchIds)
+        {
+            await WakeForTerminatedBatchAsync(conn, tx, batchId, now, cancellationToken);
+        }
+    }
+
+    private async Task WakeForTerminatedRunAsync(SqlConnection conn, SqlTransaction tx,
+        string terminatedRunId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // Step 1: outgoing cleanup (no-op when the terminated run wasn't Suspended).
+        await using (var deleteOutgoing = CreateCommand(conn))
+        {
+            deleteOutgoing.Transaction = tx;
+            deleteOutgoing.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaiter_run_id = @id;";
+            deleteOutgoing.Parameters.Add(CreateParameter("@id", terminatedRunId));
+            await deleteOutgoing.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        // Step 2: collect affected orchestrators in sorted-id order, then delete the incoming
+        // wait rows. Sorted ordering matches the row-lock acquisition order in step 3.
+        var affected = new List<string>();
+        await using (var collectCmd = CreateCommand(conn))
+        {
+            collectCmd.Transaction = tx;
+            collectCmd.CommandText = """
+                                     SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                                     WHERE awaited_run_id = @id ORDER BY awaiter_run_id;
+                                     """;
+            collectCmd.Parameters.Add(CreateParameter("@id", terminatedRunId));
+            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                affected.Add(reader.GetString(0));
+            }
+        }
+
+        if (affected.Count == 0)
+        {
+            return;
+        }
+
+        await using (var deleteIncoming = CreateCommand(conn))
+        {
+            deleteIncoming.Transaction = tx;
+            deleteIncoming.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaited_run_id = @id;";
+            deleteIncoming.Parameters.Add(CreateParameter("@id", terminatedRunId));
+            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
+    }
+
+    private async Task WakeForTerminatedBatchAsync(SqlConnection conn, SqlTransaction tx,
+        string terminatedBatchId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var affected = new List<string>();
+        await using (var collectCmd = CreateCommand(conn))
+        {
+            collectCmd.Transaction = tx;
+            collectCmd.CommandText = """
+                                     SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                                     WHERE awaited_batch_id = @id ORDER BY awaiter_run_id;
+                                     """;
+            collectCmd.Parameters.Add(CreateParameter("@id", terminatedBatchId));
+            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                affected.Add(reader.GetString(0));
+            }
+        }
+
+        if (affected.Count == 0)
+        {
+            return;
+        }
+
+        await using (var deleteIncoming = CreateCommand(conn))
+        {
+            deleteIncoming.Transaction = tx;
+            deleteIncoming.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaited_batch_id = @id;";
+            deleteIncoming.Parameters.Add(CreateParameter("@id", terminatedBatchId));
+            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Wakes each orchestrator whose wait set is now empty, in sorted-id order so concurrent
+    ///     wakes acquire row locks deterministically. Each wake transitions Suspended -> Pending
+    ///     and appends the Pending status event. The CAS on <c>status = 3</c> plus the <c>NOT EXISTS</c> on residual
+    ///     waits keep wakes idempotent under sibling-race conditions.
+    /// </summary>
+    private async Task WakeIfWaitSetEmptyAsync(SqlConnection conn, SqlTransaction tx,
+        IReadOnlyList<string> orchestratorIds, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (orchestratorIds.Count == 0)
+        {
+            return;
+        }
+
+        // Bulk wake under a single TVP-driven UPDATE. Per-orch applocks were already taken by
+        // WakeForTerminatedEntitiesAsync's prelock in canonical sorted order, so the wake's own
+        // applock chain is redundant. Job / queue UPDLOCK hints in sorted order keep this safe
+        // against concurrent claim / transition writers. The wake row update is CAS-fenced on
+        // status = 3 and emptiness of the wait set; both filters keep it idempotent.
+        await using var wakeCmd = CreateCommand(conn);
+        wakeCmd.Transaction = tx;
+        wakeCmd.CommandText = """
+                              SET NOCOUNT ON; SET XACT_ABORT ON;
+
+                              DECLARE @woken TABLE (
+                                  id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                                  attempt INT NOT NULL,
+                                  job_name NVARCHAR(450) NOT NULL
+                              );
+
+                               UPDATE dbo.surefire_runs SET
+                                   status = 0,
+                                   not_before = @now,
+                                   last_heartbeat_at = @now,
+                                   replay_count = replay_count + 1
+                              OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.job_name
+                                  INTO @woken (id, attempt, job_name)
+                              WHERE id IN (SELECT name FROM @ids) AND status = 3
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM dbo.surefire_durable_waits w WHERE w.awaiter_run_id = surefire_runs.id
+                                );
+
+                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                              SELECT w.id, 0, N'0', @now, w.attempt FROM @woken w;
+                              """;
+        wakeCmd.Parameters.Add(CreateTvpParameter("@ids", "dbo.surefire_name_list",
+            NamesToTvp(orchestratorIds)));
+        wakeCmd.Parameters.Add(CreateParameter("@now", now));
+        await wakeCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+    }
+
+    public async Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
+        CancellationToken cancellationToken = default)
+    {
+        if (!RunTransitionRules.IsAllowed(transition.ExpectedStatus, transition.NewStatus)
+            || !transition.HasRequiredFields())
+        {
+            return RunTransitionResult.NotApplied;
+        }
+
+        var allEvents = new List<RunEvent>(transition.Events?.Count ?? 0);
+        if (transition.Events is { Count: > 0 })
+        {
+            allEvents.AddRange(transition.Events);
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        await using var tx = (SqlTransaction)await conn
+            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .WithSqlCancellation(cancellationToken);
+
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+
+        cmd.CommandText = $$"""
+                          SET NOCOUNT ON; SET XACT_ABORT ON;
+
+                          -- Per-run applock serializes concurrent ops on the same run; SQL Server's
+                          -- U/X conversion otherwise produces deadlocks under single-row contention.
+                          DECLARE @run_lock_r INT;
+                          EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
+                              @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
+                          IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
+
+                          -- Resolve the canonical lock keys via snapshot reads (RCSI). The terminal
+                          -- transition decrements this run's job/queue running_count, so those rows
+                          -- must be locked in the same alphabetical order as any other writer that
+                          -- touches them. Wake of any Suspended orchestrator awaiting this run is
+                          -- handled by WakeForTerminatedRunAsync after this statement commits its
+                          -- read-set, in a sequence of per-orchestrator transactions that take
+                          -- their own job/queue applocks.
+                          DECLARE @run_job_name NVARCHAR(450);
+                          SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
+                          DECLARE @run_queue_name NVARCHAR(450) = N'default';
+                          SELECT @run_queue_name = COALESCE(queue, N'default')
+                              FROM dbo.surefire_jobs WHERE name = @run_job_name;
+
+                          DECLARE @lock_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                          DECLARE @lock_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                          IF @run_job_name IS NOT NULL
+                          BEGIN
+                              INSERT INTO @lock_jobs (name) VALUES (@run_job_name);
+                              INSERT INTO @lock_queues (name) VALUES (@run_queue_name);
+                          END
+
+                          {{BuildSortedApplockSql("@lock_jobs", "surefire_job:", "ttj")}}
+                          {{BuildSortedApplockSql("@lock_queues", "surefire_queue:", "ttq")}}
+
+                          DECLARE @lock_sink NVARCHAR(450);
+                          SELECT @lock_sink = j.name FROM @lock_jobs lj
+                              INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = lj.name
+                              ORDER BY lj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                          SELECT @lock_sink = q.name FROM @lock_queues lq
+                              INNER JOIN dbo.surefire_queues q WITH (UPDLOCK, ROWLOCK) ON q.name = lq.name
+                              ORDER BY lq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+
+                           DECLARE @upd TABLE (job_name NVARCHAR(450) NOT NULL, batch_id NVARCHAR(450), attempt INT NOT NULL);
 
                           UPDATE dbo.surefire_runs SET
                               status = @new_status,
@@ -1105,11 +1894,15 @@ internal sealed class SqlServerJobStore(
                               result = @result,
                               progress = @progress,
                               not_before = @not_before,
-                              last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at)
-                          OUTPUT INSERTED.job_name, INSERTED.batch_id INTO @upd (job_name, batch_id)
-                          WHERE id = @id
-                              AND status = @expected_status
-                              AND attempt = @expected_attempt
+                              last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at),
+                              lease_epoch = lease_epoch + @lease_epoch_increment,
+                              attempt = attempt + @attempt_increment,
+                              failure_count = failure_count + @failure_count_increment
+                           OUTPUT INSERTED.job_name, INSERTED.batch_id, INSERTED.attempt
+                               INTO @upd (job_name, batch_id, attempt)
+                           WHERE id = @id
+                               AND status = @expected_status
+                               AND lease_epoch = @expected_lease_epoch
                               AND status NOT IN (2, 4, 5);
 
                           DECLARE @updated INT = (SELECT COUNT(*) FROM @upd);
@@ -1119,8 +1912,10 @@ internal sealed class SqlServerJobStore(
 
                           IF @updated > 0
                           BEGIN
+                              -- Running is the only active slot holder. Decrement only when
+                              -- transitioning from Running to a non-active status.
                               UPDATE dbo.surefire_jobs SET
-                                  running_count = CASE WHEN @expected_status = 1
+                                  running_count = CASE WHEN @expected_status = 1 AND @new_status <> 1
                                       THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
                                       ELSE running_count END,
                                   non_terminal_count = CASE WHEN @new_status IN (2, 4, 5)
@@ -1128,13 +1923,16 @@ internal sealed class SqlServerJobStore(
                                       ELSE non_terminal_count END
                               WHERE name = @run_job_name;
 
-                              IF @expected_status = 1
+                              IF @expected_status = 1 AND @new_status <> 1
                                   UPDATE dbo.surefire_queues SET running_count =
                                       CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
                                   WHERE name = @run_queue_name;
 
-                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                              SELECT run_id, event_type, payload, created_at, attempt FROM @events;
+                               INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                               SELECT @id, 0, CONVERT(NVARCHAR(MAX), @new_status), @now, attempt FROM @upd;
+
+                               INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                               SELECT run_id, event_type, payload, created_at, attempt FROM @events;
 
                               IF @new_status IN (2, 4, 5)
                               BEGIN
@@ -1173,6 +1971,7 @@ internal sealed class SqlServerJobStore(
                           """;
 
         cmd.Parameters.Add(CreateParameter("@id", transition.RunId));
+        cmd.Parameters.Add(CreateParameter("@now", timeProvider.GetUtcNow()));
         cmd.Parameters.Add(CreateParameter("@run_lock_key", "surefire_run:" + transition.RunId));
         cmd.Parameters.Add(CreateParameter("@new_status", (int)transition.NewStatus));
         cmd.Parameters.Add(CreateParameter("@node_name", (object?)transition.NodeName ?? DBNull.Value));
@@ -1189,7 +1988,10 @@ internal sealed class SqlServerJobStore(
         cmd.Parameters.Add(CreateParameter("@last_heartbeat_at",
             transition.LastHeartbeatAt.HasValue ? transition.LastHeartbeatAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@expected_status", (int)transition.ExpectedStatus));
-        cmd.Parameters.Add(CreateParameter("@expected_attempt", transition.ExpectedAttempt));
+        cmd.Parameters.Add(CreateParameter("@expected_lease_epoch", transition.ExpectedLeaseEpoch));
+        cmd.Parameters.Add(CreateParameter("@lease_epoch_increment", transition.IncrementLeaseEpoch ? 1 : 0));
+        cmd.Parameters.Add(CreateParameter("@attempt_increment", transition.IncrementAttempt ? 1 : 0));
+        cmd.Parameters.Add(CreateParameter("@failure_count_increment", transition.IncrementFailureCount ? 1 : 0));
         cmd.Parameters.Add(CreateTvpParameter("@events", "dbo.surefire_events_input", EventsToTvp(allEvents)));
 
         BatchCompletionInfo? batchCompletion = null;
@@ -1210,12 +2012,22 @@ internal sealed class SqlServerJobStore(
             }
         }
 
+        // Unified wake: clear outgoing waits, delete incoming waits, wake any orchestrator
+        // whose wait set is now empty. Locks all affected orchestrators in one canonical
+        // sorted order so the run and batch cascades cannot deadlock on overlapping sets.
+        if (transitioned && transition.NewStatus.IsTerminal)
+        {
+            var batchIds = batchCompletion is { } bc ? new[] { bc.BatchId } : Array.Empty<string>();
+            await WakeForTerminatedEntitiesAsync(conn, tx, [transition.RunId], batchIds,
+                timeProvider.GetUtcNow(), cancellationToken);
+        }
+
         await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
         return new(transitioned, batchCompletion);
     }
 
     public async Task<RunTransitionResult> TryCancelRunAsync(string runId,
-        int? expectedAttempt = null,
+        long? expectedLeaseEpoch = null,
         string? reason = null,
         IReadOnlyList<RunEvent>? events = null,
         CancellationToken cancellationToken = default)
@@ -1230,41 +2042,43 @@ internal sealed class SqlServerJobStore(
         // OUTPUT clause of the CAS UPDATE.
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
-        cmd.CommandText = """
+        cmd.CommandText = $$"""
                           SET NOCOUNT ON; SET XACT_ABORT ON;
 
-                          -- See TryTransitionRunAsync for why per-run applock + @lock_sink.
+                          -- See TryTransitionRunAsync for the per-run applock + sorted-applock
+                          -- pattern. Wake of any Suspended orchestrator awaiting this run is
+                          -- performed by WakeForTerminatedRunAsync after this statement, in a
+                          -- sequence of per-orchestrator transactions that take their own
+                          -- job/queue applocks.
                           DECLARE @run_lock_r INT;
                           EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
                               @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
                           IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
 
-                          -- See TryTransitionRunAsync: snapshot-resolve canonical lock keys, then
-                          -- take meta applocks before the row UPDLOCK to enforce alpha order.
                           DECLARE @run_job_name NVARCHAR(450);
                           SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
                           DECLARE @run_queue_name NVARCHAR(450) = N'default';
                           SELECT @run_queue_name = COALESCE(queue, N'default')
                               FROM dbo.surefire_jobs WHERE name = @run_job_name;
 
-                          DECLARE @meta_lock_r INT;
+                          DECLARE @lock_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                          DECLARE @lock_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
                           IF @run_job_name IS NOT NULL
                           BEGIN
-                              DECLARE @meta_job_key NVARCHAR(900) = N'surefire_job:' + @run_job_name;
-                              EXEC @meta_lock_r = sp_getapplock @Resource = @meta_job_key,
-                                  @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
-                              IF @meta_lock_r < 0 THROW 50005, 'Failed to acquire job meta lock', 1;
-                              DECLARE @meta_queue_key NVARCHAR(900) = N'surefire_queue:' + @run_queue_name;
-                              EXEC @meta_lock_r = sp_getapplock @Resource = @meta_queue_key,
-                                  @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
-                              IF @meta_lock_r < 0 THROW 50005, 'Failed to acquire queue meta lock', 1;
+                              INSERT INTO @lock_jobs (name) VALUES (@run_job_name);
+                              INSERT INTO @lock_queues (name) VALUES (@run_queue_name);
                           END
 
+                          {{BuildSortedApplockSql("@lock_jobs", "surefire_job:", "ctj")}}
+                          {{BuildSortedApplockSql("@lock_queues", "surefire_queue:", "ctq")}}
+
                           DECLARE @lock_sink NVARCHAR(450);
-                          SELECT @lock_sink = name FROM dbo.surefire_jobs WITH (UPDLOCK, ROWLOCK)
-                              WHERE name = @run_job_name;
-                          SELECT @lock_sink = name FROM dbo.surefire_queues WITH (UPDLOCK, ROWLOCK)
-                              WHERE name = @run_queue_name;
+                          SELECT @lock_sink = j.name FROM @lock_jobs lj
+                              INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = lj.name
+                              ORDER BY lj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                          SELECT @lock_sink = q.name FROM @lock_queues lq
+                              INNER JOIN dbo.surefire_queues q WITH (UPDLOCK, ROWLOCK) ON q.name = lq.name
+                              ORDER BY lq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
 
                           DECLARE @now DATETIMEOFFSET(7) = SYSUTCDATETIME();
                           DECLARE @upd TABLE (
@@ -1280,11 +2094,12 @@ internal sealed class SqlServerJobStore(
                               canceled_at = @now,
                               completed_at = @now,
                               reason = COALESCE(@reason, reason)
-                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status, INSERTED.job_name
+                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status,
+                                 INSERTED.job_name
                               INTO @upd (id, attempt, batch_id, prior_status, job_name)
                           WHERE id = @id
                               AND status NOT IN (2, 4, 5)
-                              AND (@expected_attempt IS NULL OR attempt = @expected_attempt);
+                              AND (@expected_lease_epoch IS NULL OR lease_epoch = @expected_lease_epoch);
 
                           DECLARE @transitioned INT = (SELECT COUNT(*) FROM @upd);
                           DECLARE @attempt INT = (SELECT TOP (1) attempt FROM @upd);
@@ -1295,6 +2110,7 @@ internal sealed class SqlServerJobStore(
 
                           IF @transitioned > 0
                           BEGIN
+                              -- Running (1) is the only active slot holder.
                               UPDATE dbo.surefire_jobs SET
                                   running_count = CASE WHEN @prior_status = 1
                                       THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
@@ -1351,8 +2167,8 @@ internal sealed class SqlServerJobStore(
         cmd.Parameters.Add(CreateParameter("@id", runId));
         cmd.Parameters.Add(CreateParameter("@run_lock_key", "surefire_run:" + runId));
         cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
-        cmd.Parameters.Add(CreateParameter("@expected_attempt",
-            expectedAttempt.HasValue ? expectedAttempt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@expected_lease_epoch",
+            expectedLeaseEpoch.HasValue ? expectedLeaseEpoch.Value : DBNull.Value));
         cmd.Parameters.Add(CreateTvpParameter("@events", "dbo.surefire_events_input",
             EventsToTvp(events ?? Array.Empty<RunEvent>())));
 
@@ -1374,6 +2190,16 @@ internal sealed class SqlServerJobStore(
             }
         }
 
+        // Unified wake: clear outgoing waits (matters if the canceled run was Suspended), delete
+        // incoming waits, wake any orchestrator whose wait set is now empty. Both cascades share
+        // one canonical sorted applock acquisition pass.
+        if (transitioned)
+        {
+            var batchIds = batchCompletion is { } bc ? new[] { bc.BatchId } : Array.Empty<string>();
+            await WakeForTerminatedEntitiesAsync(conn, tx, [runId], batchIds,
+                timeProvider.GetUtcNow(), cancellationToken);
+        }
+
         await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
 
         return transitioned ? new(true, batchCompletion) : RunTransitionResult.NotApplied;
@@ -1384,19 +2210,50 @@ internal sealed class SqlServerJobStore(
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-        await using var cmd = CreateCommand(conn);
-        cmd.CommandText = """
-                          UPDATE dbo.surefire_batches
-                          SET status = @status, completed_at = @completed_at
-                          OUTPUT INSERTED.id
-                          WHERE id = @id AND status NOT IN (2, 4, 5)
-                          """;
-        cmd.Parameters.Add(CreateParameter("@id", batchId));
-        cmd.Parameters.Add(CreateParameter("@status", (short)status));
-        cmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+        await using var tx = (SqlTransaction)await conn
+            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .WithSqlCancellation(cancellationToken);
 
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-        return await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        bool transitioned;
+        await using (var cmd = CreateCommand(conn))
+        {
+            cmd.Transaction = tx;
+            // Take a batch-scoped applock before the UPDATE so concurrent batch terminals on
+            // the same id serialize cleanly; without this, two writers racing on the same batch
+            // can interleave with the cascading WakeForTerminatedEntities pass and deadlock on
+            // overlapping orchestrator applock sets.
+            cmd.CommandText = """
+                              SET NOCOUNT ON; SET XACT_ABORT ON;
+
+                              DECLARE @batch_lock_r INT;
+                              EXEC @batch_lock_r = sp_getapplock @Resource = @batch_lock_key,
+                                  @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
+                              IF @batch_lock_r < 0 THROW 50007, 'Failed to acquire batch lock', 1;
+
+                              UPDATE dbo.surefire_batches
+                              SET status = @status, completed_at = @completed_at
+                              OUTPUT INSERTED.id
+                              WHERE id = @id AND status NOT IN (2, 4, 5);
+                              """;
+            cmd.Parameters.Add(CreateParameter("@id", batchId));
+            cmd.Parameters.Add(CreateParameter("@batch_lock_key", "surefire_batch:" + batchId));
+            cmd.Parameters.Add(CreateParameter("@status", (short)status));
+            cmd.Parameters.Add(CreateParameter("@completed_at", completedAt));
+
+            await using var reader =
+                await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            transitioned = await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        }
+
+        if (transitioned)
+        {
+            // Unified wake propagates the batch terminal to any orchestrator awaiting it.
+            await WakeForTerminatedEntitiesAsync(conn, tx, Array.Empty<string>(),
+                [batchId], completedAt, cancellationToken);
+        }
+
+        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        return transitioned;
     }
 
     public Task CreateRunsAsync(IReadOnlyList<JobRun> runs,
@@ -1407,11 +2264,15 @@ internal sealed class SqlServerJobStore(
     public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, cancellationToken);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, durableStepRecord,
+            cancellationToken);
 
     public async Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
-        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
+        CancellationToken cancellationToken = default)
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
@@ -1419,27 +2280,53 @@ internal sealed class SqlServerJobStore(
             .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
             .WithSqlCancellation(cancellationToken);
 
-        await using var batchCmd = CreateCommand(conn);
-        batchCmd.Transaction = tx;
-        batchCmd.CommandText = """
-                               SET NOCOUNT ON; SET XACT_ABORT ON;
-                               INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, canceled, created_at, completed_at)
-                               VALUES (@id, @status, @total, @succeeded, @failed, @canceled, @created_at, @completed_at);
-                               """;
-        batchCmd.Parameters.Add(CreateParameter("@id", batch.Id));
-        batchCmd.Parameters.Add(CreateParameter("@status", (short)batch.Status));
-        batchCmd.Parameters.Add(CreateParameter("@total", batch.Total));
-        batchCmd.Parameters.Add(CreateParameter("@succeeded", batch.Succeeded));
-        batchCmd.Parameters.Add(CreateParameter("@failed", batch.Failed));
-        batchCmd.Parameters.Add(CreateParameter("@canceled", batch.Canceled));
-        batchCmd.Parameters.Add(CreateParameter("@created_at", batch.CreatedAt));
-        batchCmd.Parameters.Add(CreateParameter("@completed_at",
-            batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value));
-        await batchCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        try
+        {
+            await using var batchCmd = CreateCommand(conn);
+            batchCmd.Transaction = tx;
+            batchCmd.CommandText = """
+                                   SET NOCOUNT ON; SET XACT_ABORT ON;
+                                   INSERT INTO dbo.surefire_batches (id, status, total, succeeded, failed, canceled, created_at, completed_at, parent_run_id)
+                                   VALUES (@id, @status, @total, @succeeded, @failed, @canceled, @created_at, @completed_at, @parent_run_id);
+                                   """;
+            batchCmd.Parameters.Add(CreateParameter("@id", batch.Id));
+            batchCmd.Parameters.Add(CreateParameter("@status", (short)batch.Status));
+            batchCmd.Parameters.Add(CreateParameter("@total", batch.Total));
+            batchCmd.Parameters.Add(CreateParameter("@succeeded", batch.Succeeded));
+            batchCmd.Parameters.Add(CreateParameter("@failed", batch.Failed));
+            batchCmd.Parameters.Add(CreateParameter("@canceled", batch.Canceled));
+            batchCmd.Parameters.Add(CreateParameter("@created_at", batch.CreatedAt));
+            batchCmd.Parameters.Add(CreateParameter("@completed_at",
+                batch.CompletedAt.HasValue ? batch.CompletedAt.Value : DBNull.Value));
+            batchCmd.Parameters.Add(CreateParameter("@parent_run_id", (object?)batch.ParentRunId ?? DBNull.Value));
+            await batchCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
 
-        await CreateRunsCoreInTransactionAsync(conn, tx, runs, initialEvents, cancellationToken);
+            await CreateRunsCoreInTransactionAsync(conn, tx, runs, initialEvents, cancellationToken);
 
-        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            if (durableStepRecord is { } step)
+            {
+                await using var stepCmd = CreateCommand(conn);
+                stepCmd.Transaction = tx;
+                stepCmd.CommandText = """
+                                      UPDATE dbo.surefire_runs
+                                      SET highest_recorded_step = CASE
+                                              WHEN highest_recorded_step > @step THEN highest_recorded_step
+                                              ELSE @step
+                                          END
+                                      WHERE id = @orch_id;
+                                      """;
+                stepCmd.Parameters.Add(CreateParameter("@step", step.Step));
+                stepCmd.Parameters.Add(CreateParameter("@orch_id", step.OrchestratorRunId));
+                await stepCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+            }
+
+            await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        }
+        catch (SqlException ex) when (ex.Number is 2601 or 2627)
+        {
+            throw new RunConflictException(batch.Id,
+                $"Batch '{batch.Id}' or one of its runs already exists.", ex);
+        }
     }
 
     public async Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken cancellationToken = default)
@@ -1509,103 +2396,73 @@ internal sealed class SqlServerJobStore(
     public async Task<SubtreeCancellation> CancelExpiredRunsWithIdsAsync(
         CancellationToken cancellationToken = default)
     {
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-        await using var tx = (SqlTransaction)await conn
-            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
-            .WithSqlCancellation(cancellationToken);
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-
-        cmd.CommandText = $$"""
-                            SET NOCOUNT ON; SET XACT_ABORT ON;
-
-                            DECLARE @now DATETIMEOFFSET(7) = SYSUTCDATETIME();
-                            DECLARE @candidate TABLE (
-                                id NVARCHAR(450) NOT NULL PRIMARY KEY,
-                                job_name NVARCHAR(450) NOT NULL
-                            );
-
-                            INSERT INTO @candidate (id, job_name)
-                            SELECT r.id, r.job_name
-                            FROM dbo.surefire_runs r
-                            WHERE r.status = 0 AND r.not_after IS NOT NULL AND r.not_after < @now;
-
-                            IF NOT EXISTS (SELECT 1 FROM @candidate)
-                            BEGIN
-                                SELECT TOP (0) NULL AS id, NULL AS attempt, NULL AS batch_id;
-                                RETURN;
-                            END
-
-                            DECLARE @target_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
-                            INSERT INTO @target_jobs (name) SELECT DISTINCT job_name FROM @candidate;
-
-                            {{BuildSortedApplockSql("@target_jobs", "surefire_job:", "etj")}}
-
-                            DECLARE @lock_sink NVARCHAR(450);
-                            SELECT @lock_sink = j.name FROM @target_jobs tj
-                            INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = tj.name
-                            ORDER BY tj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
-
-                            DECLARE @canceled TABLE (
-                                id NVARCHAR(450) NOT NULL PRIMARY KEY,
-                                attempt INT NOT NULL,
-                                batch_id NVARCHAR(450),
-                                job_name NVARCHAR(450) NOT NULL
-                            );
-
-                            -- ROWLOCK: same rationale as CancelSubtreeAsyncCore - keep page-level
-                            -- IX intents off surefire_runs to avoid colliding with claim/transition.
-                            UPDATE r SET
-                                status = 4,
-                                canceled_at = @now,
-                                completed_at = @now,
-                                reason = @reason
-                            OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, INSERTED.job_name
-                                INTO @canceled (id, attempt, batch_id, job_name)
-                            FROM dbo.surefire_runs r WITH (ROWLOCK)
-                            INNER JOIN @candidate c ON c.id = r.id
-                            WHERE r.status = 0 AND r.not_after IS NOT NULL AND r.not_after < @now;
-
-                            UPDATE j SET non_terminal_count =
-                                CASE WHEN j.non_terminal_count > nj.cnt
-                                     THEN j.non_terminal_count - nj.cnt ELSE 0 END
-                            FROM dbo.surefire_jobs j
-                            INNER JOIN (SELECT job_name, COUNT(*) AS cnt FROM @canceled GROUP BY job_name) nj
-                                ON nj.job_name = j.name;
-
-                            INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                            SELECT c.id, 0, CONVERT(NVARCHAR(10), 4), @now, c.attempt FROM @canceled c;
-
-                            SELECT id, attempt, batch_id FROM @canceled;
-                            """;
-        cmd.Parameters.Add(CreateParameter("@reason", "Run expired past NotAfter deadline."));
-
         var canceledRuns = new List<CanceledRun>();
-        var canceledBatchIds = new Dictionary<string, int>(StringComparer.Ordinal);
-        await using (var reader =
-                     await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+        var expiredRuns = new List<ExpiredCanceledRun>();
+        var completedBatches = new List<BatchCompletionInfo>();
+        var seeds = await GetRootmostExpiredRunIdsAsync(cancellationToken);
+        foreach (var seed in seeds)
         {
-            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
-            {
-                var runId = reader.GetString(0);
-                var bId = reader.IsDBNull(2) ? null : reader.GetString(2);
-                canceledRuns.Add(new(runId, bId));
-                if (bId is { })
-                {
-                    canceledBatchIds[bId] = canceledBatchIds.GetValueOrDefault(bId) + 1;
-                }
-            }
+            var result = await CancelSubtreeAsyncCore(
+                SubtreeSeed.Run,
+                seed,
+                "Run expired past its deadline.",
+                includeRoot: true,
+                cancellationToken,
+                expirationCancellation: true);
+            canceledRuns.AddRange(result.Runs);
+            expiredRuns.AddRange(result.ExpiredRuns);
+            completedBatches.AddRange(result.CompletedBatches);
         }
 
-        var completedBatches = canceledBatchIds.Count > 0
-            ? await ApplyBatchCancelCountersAsync(conn, tx, canceledBatchIds, cancellationToken)
-            : [];
-
-        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
         return canceledRuns.Count == 0 && completedBatches.Count == 0
             ? SubtreeCancellation.Empty
-            : new(canceledRuns, completedBatches);
+            : new SubtreeCancellation(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns };
+    }
+
+    private async Task<IReadOnlyList<string>> GetRootmostExpiredRunIdsAsync(CancellationToken cancellationToken)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          ;WITH expired AS (
+                              SELECT id
+                              FROM dbo.surefire_runs
+                              WHERE status NOT IN (2, 4, 5)
+                                  AND ((status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL AND not_after < SYSUTCDATETIME())
+                                    OR (expires_at IS NOT NULL AND expires_at < SYSUTCDATETIME()))
+                          ),
+                          ancestors AS (
+                              SELECT e.id AS candidate_id, r.parent_run_id AS parent_id
+                              FROM expired e
+                              INNER JOIN dbo.surefire_runs r ON r.id = e.id
+                              UNION ALL
+                              SELECT a.candidate_id, p.parent_run_id
+                              FROM ancestors a
+                              INNER JOIN dbo.surefire_runs p ON p.id = a.parent_id
+                              WHERE a.parent_id IS NOT NULL
+                          )
+                          SELECT e.id
+                          FROM expired e
+                          WHERE NOT EXISTS (
+                              SELECT 1
+                              FROM ancestors a
+                              INNER JOIN expired ancestor ON ancestor.id = a.parent_id
+                              WHERE a.candidate_id = e.id
+                          )
+                          ORDER BY e.id
+                          OPTION (MAXRECURSION 0)
+                          """;
+
+        var roots = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken)
+            .WithSqlCancellation(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+        {
+            roots.Add(reader.GetString(0));
+        }
+
+        return roots;
     }
 
     public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
@@ -1625,6 +2482,54 @@ internal sealed class SqlServerJobStore(
                           """;
         cmd.Parameters.Add(CreateTvpParameter("@events", "dbo.surefire_events_input", EventsToTvp(events)));
         await cmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+    }
+
+    public async Task<IReadOnlySet<string>> AppendEventsIfRunNonTerminalAsync(
+        IReadOnlyList<RunEvent> events,
+        CancellationToken cancellationToken = default)
+    {
+        if (events.Count == 0)
+        {
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        await using var tx = (SqlTransaction)await conn
+            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .WithSqlCancellation(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+                          SET NOCOUNT ON; SET XACT_ABORT ON;
+                          DECLARE @accepted TABLE (run_id nvarchar(200) PRIMARY KEY);
+
+                          INSERT INTO @accepted (run_id)
+                          SELECT DISTINCT e.run_id
+                          FROM @events e
+                          INNER JOIN dbo.surefire_runs r WITH (UPDLOCK, HOLDLOCK) ON r.id = e.run_id
+                          WHERE r.status NOT IN (2, 4, 5);
+
+                          INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                          SELECT e.run_id, e.event_type, e.payload, e.created_at, e.attempt
+                          FROM @events e
+                          INNER JOIN @accepted a ON a.run_id = e.run_id;
+
+                          SELECT run_id FROM @accepted ORDER BY run_id;
+                          """;
+        cmd.Parameters.Add(CreateTvpParameter("@events", "dbo.surefire_events_input", EventsToTvp(events)));
+
+        var accepted = new HashSet<string>(StringComparer.Ordinal);
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                accepted.Add(reader.GetString(0));
+            }
+        }
+
+        await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        return accepted;
     }
 
     public async Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
@@ -1940,81 +2845,76 @@ internal sealed class SqlServerJobStore(
                 .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
                 .WithSqlCancellation(cancellationToken);
 
-            await using var cmd = CreateCommand(conn);
-            cmd.Transaction = tx;
-            cmd.CommandText = $$"""
-                                SET NOCOUNT ON; SET XACT_ABORT ON;
+            int deleted;
+            await using (var cmd = CreateCommand(conn))
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                                    SET NOCOUNT ON; SET XACT_ABORT ON;
 
-                                DECLARE @candidate TABLE (
-                                    id NVARCHAR(450) NOT NULL PRIMARY KEY,
-                                    job_name NVARCHAR(450) NOT NULL,
-                                    is_pending BIT NOT NULL
-                                );
+                                    DECLARE @candidate TABLE (
+                                        id NVARCHAR(450) NOT NULL PRIMARY KEY
+                                    );
 
-                                INSERT INTO @candidate (id, job_name, is_pending)
-                                SELECT TOP (1000) r.id, r.job_name,
-                                    CASE WHEN r.status = 0 THEN 1 ELSE 0 END
-                                FROM dbo.surefire_runs r
-                                WHERE (r.status IN (2, 4, 5)
-                                    AND r.completed_at < @threshold
-                                    AND (r.batch_id IS NULL OR EXISTS (
-                                        SELECT 1 FROM dbo.surefire_batches b
-                                        WHERE b.id = r.batch_id
-                                            AND b.status IN (2, 4, 5)
-                                            AND b.completed_at IS NOT NULL
-                                            AND b.completed_at < @threshold
-                                    )))
-                                    OR (r.status = 0 AND r.not_before < @threshold)
-                                ORDER BY r.id;
+                                    INSERT INTO @candidate (id)
+                                    SELECT TOP (1000) r.id
+                                    FROM dbo.surefire_runs r
+                                    WHERE r.status IN (2, 4, 5)
+                                        AND r.completed_at < @threshold
+                                        AND NOT EXISTS (
+                                            SELECT 1
+                                            FROM dbo.surefire_runs open_run
+                                            WHERE ISNULL(open_run.root_run_id, open_run.id) = ISNULL(r.root_run_id, r.id)
+                                                AND open_run.status NOT IN (2, 4, 5)
+                                        )
+                                        AND (r.batch_id IS NULL OR EXISTS (
+                                            SELECT 1 FROM dbo.surefire_batches b
+                                            WHERE b.id = r.batch_id
+                                                AND b.status IN (2, 4, 5)
+                                                AND b.completed_at IS NOT NULL
+                                                AND b.completed_at < @threshold
+                                        ))
+                                    ORDER BY r.id;
 
-                                IF NOT EXISTS (SELECT 1 FROM @candidate)
-                                BEGIN
-                                    SELECT 0 AS deleted;
-                                    RETURN;
-                                END
+                                    IF NOT EXISTS (SELECT 1 FROM @candidate)
+                                    BEGIN
+                                        SELECT 0 AS deleted;
+                                        RETURN;
+                                    END
 
-                                -- Lock only the jobs we will decrement (pending candidates).
-                                DECLARE @target_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
-                                INSERT INTO @target_jobs (name)
-                                SELECT DISTINCT job_name FROM @candidate WHERE is_pending = 1;
+                                    DELETE r FROM dbo.surefire_runs r
+                                    INNER JOIN @candidate c ON c.id = r.id
+                                    WHERE r.status IN (2, 4, 5)
+                                        AND r.completed_at < @threshold
+                                        AND NOT EXISTS (
+                                            SELECT 1
+                                            FROM dbo.surefire_runs open_run
+                                            WHERE ISNULL(open_run.root_run_id, open_run.id) = ISNULL(r.root_run_id, r.id)
+                                                AND open_run.status NOT IN (2, 4, 5)
+                                        )
+                                        AND (r.batch_id IS NULL OR EXISTS (
+                                            SELECT 1 FROM dbo.surefire_batches b
+                                            WHERE b.id = r.batch_id
+                                                AND b.status IN (2, 4, 5)
+                                                AND b.completed_at IS NOT NULL
+                                                AND b.completed_at < @threshold
+                                        ));
 
-                                {{BuildSortedApplockSql("@target_jobs", "surefire_job:", "ptj")}}
+                                    DECLARE @deleted INT = @@ROWCOUNT;
+                                    SELECT @deleted AS deleted;
+                                    """;
+                cmd.Parameters.Add(CreateParameter("@threshold", threshold));
 
-                                DECLARE @lock_sink NVARCHAR(450);
-                                SELECT @lock_sink = j.name FROM @target_jobs tj
-                                INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = tj.name
-                                ORDER BY tj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken)
+                    .WithSqlCancellation(cancellationToken);
+                deleted = 0;
+                if (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+                {
+                    deleted = reader.GetInt32(0);
+                }
 
-                                DELETE r FROM dbo.surefire_runs r
-                                INNER JOIN @candidate c ON c.id = r.id
-                                WHERE (r.status IN (2, 4, 5)
-                                    AND r.completed_at < @threshold
-                                    AND (r.batch_id IS NULL OR EXISTS (
-                                        SELECT 1 FROM dbo.surefire_batches b
-                                        WHERE b.id = r.batch_id
-                                            AND b.status IN (2, 4, 5)
-                                            AND b.completed_at IS NOT NULL
-                                            AND b.completed_at < @threshold
-                                    )))
-                                    OR (r.status = 0 AND r.not_before < @threshold);
+            }
 
-                                DECLARE @deleted INT = @@ROWCOUNT;
-
-                                UPDATE j SET non_terminal_count =
-                                    CASE WHEN j.non_terminal_count > v.cnt
-                                         THEN j.non_terminal_count - v.cnt ELSE 0 END
-                                FROM dbo.surefire_jobs j
-                                INNER JOIN (
-                                    SELECT job_name, COUNT(*) AS cnt FROM @candidate
-                                    WHERE is_pending = 1 GROUP BY job_name
-                                ) v ON v.job_name = j.name;
-
-                                SELECT @deleted AS deleted;
-                                """;
-            cmd.Parameters.Add(CreateParameter("@threshold", threshold));
-
-            var deleted =
-                Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken));
             await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
 
             if (deleted == 0)
@@ -2043,8 +2943,11 @@ internal sealed class SqlServerJobStore(
         await rlCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
 
         await using var batchCmd = CreateCommand(conn);
-        batchCmd.CommandText =
-            "DELETE FROM dbo.surefire_batches WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold";
+        batchCmd.CommandText = """
+                               DELETE FROM dbo.surefire_batches
+                               WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold
+                                   AND NOT EXISTS (SELECT 1 FROM dbo.surefire_runs r WHERE r.batch_id = dbo.surefire_batches.id)
+                               """;
         batchCmd.Parameters.Add(CreateParameter("@threshold", threshold));
         await batchCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
 
@@ -2078,6 +2981,7 @@ internal sealed class SqlServerJobStore(
                                    COUNT(*) AS total_runs,
                                    ISNULL(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) AS pending,
                                    ISNULL(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), 0) AS running,
+                                   ISNULL(SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END), 0) AS suspended,
                                    ISNULL(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), 0) AS succeeded,
                                    ISNULL(SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END), 0) AS canceled,
                                    ISNULL(SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END), 0) AS failed
@@ -2101,10 +3005,13 @@ internal sealed class SqlServerJobStore(
 
                 var pending = reader.GetInt32(reader.GetOrdinal("pending"));
                 var running = reader.GetInt32(reader.GetOrdinal("running"));
+                var suspended = reader.GetInt32(reader.GetOrdinal("suspended"));
                 var succeeded = reader.GetInt32(reader.GetOrdinal("succeeded"));
                 var canceled = reader.GetInt32(reader.GetOrdinal("canceled"));
                 var failed = reader.GetInt32(reader.GetOrdinal("failed"));
 
+                // Active dashboard count tracks runnable/executing work. Suspended orchestrators
+                // are durable waits and do not consume execution slots.
                 activeRuns = pending + running;
 
                 if (pending > 0)
@@ -2115,6 +3022,11 @@ internal sealed class SqlServerJobStore(
                 if (running > 0)
                 {
                     runsByStatus["Running"] = running;
+                }
+
+                if (suspended > 0)
+                {
+                    runsByStatus["Suspended"] = suspended;
                 }
 
                 if (succeeded > 0)
@@ -2143,6 +3055,7 @@ internal sealed class SqlServerJobStore(
                                     DATEADD(MINUTE, (DATEDIFF(MINUTE, @since, created_at) / @bucket_minutes) * @bucket_minutes, @since) AS bucket_start,
                                     SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS pending,
                                     SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS running,
+                                    SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) AS suspended,
                                     SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS succeeded,
                                     SUM(CASE WHEN status = 4 THEN 1 ELSE 0 END) AS canceled,
                                     SUM(CASE WHEN status = 5 THEN 1 ELSE 0 END) AS failed
@@ -2167,9 +3080,10 @@ internal sealed class SqlServerJobStore(
                     Start = start,
                     Pending = reader.GetInt32(1),
                     Running = reader.GetInt32(2),
-                    Succeeded = reader.GetInt32(3),
-                    Canceled = reader.GetInt32(4),
-                    Failed = reader.GetInt32(5)
+                    Suspended = reader.GetInt32(3),
+                    Succeeded = reader.GetInt32(4),
+                    Canceled = reader.GetInt32(5),
+                    Failed = reader.GetInt32(6)
                 };
             }
         }
@@ -2461,10 +3375,16 @@ internal sealed class SqlServerJobStore(
             SetNullableString(rec, 19, r.RerunOfRunId);
             rec.SetDateTimeOffset(20, r.NotBefore);
             SetNullableDto(rec, 21, r.NotAfter);
-            rec.SetInt32(22, r.Priority);
-            SetNullableString(rec, 23, r.DeduplicationId);
-            SetNullableDto(rec, 24, r.LastHeartbeatAt);
-            SetNullableString(rec, 25, r.BatchId);
+            SetNullableDto(rec, 22, r.ExpiresAt);
+            rec.SetInt32(23, r.Priority);
+            SetNullableString(rec, 24, r.DeduplicationId);
+            SetNullableDto(rec, 25, r.LastHeartbeatAt);
+            SetNullableString(rec, 26, r.BatchId);
+            rec.SetInt64(27, r.LeaseEpoch);
+            rec.SetInt32(28, r.FailureCount);
+            rec.SetInt32(29, r.ReplayCount);
+            rec.SetInt32(30, r.HighestRecordedStep);
+            rec.SetBoolean(31, r.IsDurable);
             list.Add(rec);
         }
 
@@ -2571,6 +3491,9 @@ internal sealed class SqlServerJobStore(
         NotAfter = reader.IsDBNull(reader.GetOrdinal("not_after"))
             ? null
             : reader.GetDateTimeOffset(reader.GetOrdinal("not_after")),
+        ExpiresAt = reader.IsDBNull(reader.GetOrdinal("expires_at"))
+            ? null
+            : reader.GetDateTimeOffset(reader.GetOrdinal("expires_at")),
         DeduplicationId = reader.IsDBNull(reader.GetOrdinal("deduplication_id"))
             ? null
             : reader.GetString(reader.GetOrdinal("deduplication_id")),
@@ -2579,22 +3502,70 @@ internal sealed class SqlServerJobStore(
             : reader.GetDateTimeOffset(reader.GetOrdinal("last_heartbeat_at")),
         BatchId = reader.IsDBNull(reader.GetOrdinal("batch_id"))
             ? null
-            : reader.GetString(reader.GetOrdinal("batch_id"))
+            : reader.GetString(reader.GetOrdinal("batch_id")),
+        LeaseEpoch = reader.GetInt64(reader.GetOrdinal("lease_epoch")),
+        FailureCount = reader.GetInt32(reader.GetOrdinal("failure_count")),
+        ReplayCount = reader.GetInt32(reader.GetOrdinal("replay_count")),
+        HighestRecordedStep = reader.GetInt32(reader.GetOrdinal("highest_recorded_step")),
+        IsDurable = reader.GetBoolean(reader.GetOrdinal("is_durable"))
     };
 
-    private static JobBatch ReadBatch(SqlDataReader reader) => new()
+    private static JobBatch ReadBatch(SqlDataReader reader)
     {
-        Id = reader.GetString(reader.GetOrdinal("id")),
-        Status = (JobStatus)reader.GetInt16(reader.GetOrdinal("status")),
-        Total = reader.GetInt32(reader.GetOrdinal("total")),
-        Succeeded = reader.GetInt32(reader.GetOrdinal("succeeded")),
-        Failed = reader.GetInt32(reader.GetOrdinal("failed")),
-        Canceled = reader.GetInt32(reader.GetOrdinal("canceled")),
-        CreatedAt = reader.GetDateTimeOffset(reader.GetOrdinal("created_at")),
-        CompletedAt = reader.IsDBNull(reader.GetOrdinal("completed_at"))
-            ? null
-            : reader.GetDateTimeOffset(reader.GetOrdinal("completed_at"))
-    };
+        var idCol = reader.GetOrdinal("id");
+        var statusCol = reader.GetOrdinal("status");
+        var totalCol = reader.GetOrdinal("total");
+        var succeededCol = reader.GetOrdinal("succeeded");
+        var failedCol = reader.GetOrdinal("failed");
+        var canceledCol = reader.GetOrdinal("canceled");
+        var createdAtCol = reader.GetOrdinal("created_at");
+        var completedAtCol = reader.GetOrdinal("completed_at");
+        var parentCol = reader.GetOrdinal("parent_run_id");
+
+        return new()
+        {
+            Id = reader.GetString(idCol),
+            Status = (JobStatus)reader.GetInt16(statusCol),
+            Total = reader.GetInt32(totalCol),
+            Succeeded = reader.GetInt32(succeededCol),
+            Failed = reader.GetInt32(failedCol),
+            Canceled = reader.GetInt32(canceledCol),
+            CreatedAt = reader.GetDateTimeOffset(createdAtCol),
+            CompletedAt = reader.IsDBNull(completedAtCol) ? null : reader.GetDateTimeOffset(completedAtCol),
+            ParentRunId = reader.IsDBNull(parentCol) ? null : reader.GetString(parentCol)
+        };
+    }
+
+    private static DurableRecord ReadDurableRecord(SqlDataReader reader) =>
+        new(
+            reader.GetString(reader.GetOrdinal("orchestrator_run_id")),
+            reader.GetInt32(reader.GetOrdinal("step")),
+            reader.GetString(reader.GetOrdinal("kind")),
+            reader.IsDBNull(reader.GetOrdinal("name")) ? null : reader.GetString(reader.GetOrdinal("name")),
+            reader.GetString(reader.GetOrdinal("payload")),
+            reader.GetDateTimeOffset(reader.GetOrdinal("created_at")));
+
+    private static void AddDurableRecordParameters(SqlCommand cmd, DurableRecord record)
+    {
+        cmd.Parameters.Add(CreateParameter("@orchestrator_run_id", record.OrchestratorRunId));
+        cmd.Parameters.Add(CreateParameter("@step", record.Step));
+        cmd.Parameters.Add(CreateParameter("@kind", record.Kind));
+        cmd.Parameters.Add(CreateParameter("@name", (object?)record.Name ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@payload", record.Payload));
+        cmd.Parameters.Add(CreateParameter("@created_at", record.CreatedAt));
+    }
+
+    private static bool DurableRecordsEqual(DurableRecord left, DurableRecord right) =>
+        string.Equals(left.OrchestratorRunId, right.OrchestratorRunId, StringComparison.Ordinal)
+        && left.Step == right.Step
+        && string.Equals(left.Kind, right.Kind, StringComparison.Ordinal)
+        && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
+        && string.Equals(left.Payload, right.Payload, StringComparison.Ordinal);
+
+    private static string DescribeRecord(DurableRecord record) =>
+        record.Name is { Length: > 0 }
+            ? $"record '{record.Name}' ({record.Kind})"
+            : $"record kind '{record.Kind}'";
 
     private static JobDefinition ReadJob(SqlDataReader reader)
     {
@@ -2877,15 +3848,17 @@ internal sealed class SqlServerJobStore(
                           id, job_name, status, arguments, result, reason, progress,
                           created_at, started_at, completed_at, canceled_at, node_name,
                           attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
-                          rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                          last_heartbeat_at, batch_id
+                          rerun_of_run_id, not_before, not_after, expires_at, priority, deduplication_id,
+                          last_heartbeat_at, batch_id, lease_epoch, failure_count, replay_count,
+                          highest_recorded_step, is_durable
                       )
                       SELECT
                           id, job_name, status, arguments, result, reason, progress,
                           created_at, started_at, completed_at, canceled_at, node_name,
                           attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
-                          rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                          last_heartbeat_at, batch_id
+                          rerun_of_run_id, not_before, not_after, expires_at, priority, deduplication_id,
+                          last_heartbeat_at, batch_id, lease_epoch, failure_count, replay_count,
+                          highest_recorded_step, is_durable
                       FROM @runs;
 
                       """);
@@ -2925,6 +3898,7 @@ internal sealed class SqlServerJobStore(
     private async Task<bool> TryCreateRunAsyncCore(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
         IReadOnlyList<RunEvent>? initialEvents,
+        DurableStepRecord? durableStepRecord,
         CancellationToken cancellationToken)
     {
         await using var conn = new SqlConnection(_connectionString);
@@ -2975,10 +3949,10 @@ internal sealed class SqlServerJobStore(
 
         if (maxActiveForJob is { })
         {
-            conditions.Add("""
-                           ISNULL((SELECT non_terminal_count FROM dbo.surefire_jobs WHERE name = @job_name), 0) < @max_active
-                           AND ISNULL((SELECT is_enabled FROM dbo.surefire_jobs WHERE name = @job_name), 1) = 1
-                           """);
+            // Disabled jobs are gated on the claim path, not creation, so a trigger fired
+            // while a job is disabled produces a Pending run that sits idle until re-enabled.
+            conditions.Add(
+                "ISNULL((SELECT non_terminal_count FROM dbo.surefire_jobs WHERE name = @job_name), 0) < @max_active");
             cmd.Parameters.Add(CreateParameter("@max_active", maxActiveForJob.Value));
         }
 
@@ -2992,15 +3966,17 @@ internal sealed class SqlServerJobStore(
                        id, job_name, status, arguments, result, reason, progress,
                        created_at, started_at, completed_at, canceled_at, node_name,
                        attempt, trace_id, span_id, parent_trace_id, parent_span_id, parent_run_id, root_run_id,
-                       rerun_of_run_id, not_before, not_after, priority, deduplication_id,
-                       last_heartbeat_at, batch_id
+                       rerun_of_run_id, not_before, not_after, expires_at, priority, deduplication_id,
+                       last_heartbeat_at, batch_id, lease_epoch, failure_count, replay_count,
+                       highest_recorded_step, is_durable
                    )
                    SELECT
                        @id, @job_name, @status, @arguments, @result, @reason, @progress,
                        @created_at, @started_at, @completed_at, @canceled_at, @node_name,
                        @attempt, @trace_id, @span_id, @parent_trace_id, @parent_span_id, @parent_run_id, @root_run_id,
-                       @rerun_of_run_id, @not_before, @not_after, @priority, @deduplication_id,
-                       @last_heartbeat_at, @batch_id
+                       @rerun_of_run_id, @not_before, @not_after, @expires_at, @priority, @deduplication_id,
+                       @last_heartbeat_at, @batch_id, @lease_epoch, @failure_count, @replay_count,
+                       @highest_recorded_step, @is_durable
                    {insertWhere};
 
                    DECLARE @inserted INT = @@ROWCOUNT;
@@ -3012,6 +3988,14 @@ internal sealed class SqlServerJobStore(
                    IF @inserted > 0 AND @last_cron_fire_at IS NOT NULL
                        UPDATE dbo.surefire_jobs SET last_cron_fire_at = @last_cron_fire_at
                        WHERE name = @job_name;
+
+                   IF @inserted > 0 AND @orchestrator_run_id IS NOT NULL
+                       UPDATE dbo.surefire_runs
+                       SET highest_recorded_step = CASE
+                               WHEN highest_recorded_step > @durable_step THEN highest_recorded_step
+                               ELSE @durable_step
+                           END
+                       WHERE id = @orchestrator_run_id;
 
                    """);
 
@@ -3035,17 +4019,68 @@ internal sealed class SqlServerJobStore(
         cmd.Parameters.Add(CreateParameter("@initial_status", (int)run.Status));
         cmd.Parameters.Add(CreateParameter("@last_cron_fire_at",
             lastCronFireAt.HasValue ? lastCronFireAt.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@orchestrator_run_id",
+            (object?)durableStepRecord?.OrchestratorRunId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@durable_step",
+            durableStepRecord is { } drr ? drr.Step : 0));
 
         try
         {
             var result = await cmd.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken);
             var inserted = Convert.ToInt32(result) > 0;
+            if (inserted)
+            {
+                await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+                return true;
+            }
+
+            // Inserted == 0: disambiguate id conflict from dedup hit vs capacity hit. Same
+            // transaction so reads see the same snapshot the INSERT saw.
+            await using (var idCheck = CreateCommand(conn))
+            {
+                idCheck.Transaction = tx;
+                idCheck.CommandText = "SELECT TOP 1 1 FROM dbo.surefire_runs WHERE id = @id";
+                idCheck.Parameters.Add(CreateParameter("@id", run.Id));
+                if (await idCheck.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken) is not null)
+                {
+                    await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+                    return false;
+                }
+            }
+
+            if (run.DeduplicationId is { } dedup)
+            {
+                await using var dedupCheck = CreateCommand(conn);
+                dedupCheck.Transaction = tx;
+                dedupCheck.CommandText = """
+                                         SELECT TOP 1 1 FROM dbo.surefire_runs
+                                         WHERE job_name = @job_name AND deduplication_id = @dedup_id
+                                             AND status NOT IN (2, 4, 5)
+                                         """;
+                dedupCheck.Parameters.Add(CreateParameter("@job_name", run.JobName));
+                dedupCheck.Parameters.Add(CreateParameter("@dedup_id", dedup));
+                if (await dedupCheck.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken) is not null)
+                {
+                    await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+                    throw new RunConflictException(run.Id,
+                        $"Run with deduplication id '{dedup}' is already active for job '{run.JobName}'.");
+                }
+            }
+
             await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-            return inserted;
+            throw new RunConflictException(run.Id,
+                $"Job '{run.JobName}' is at the maximum active run capacity ({maxActiveForJob ?? 0}).");
         }
         catch (SqlException ex) when (ex.Number is 2601 or 2627)
         {
-            // A concurrent caller won the insert race (id PK or dedup unique index).
+            // A concurrent caller won the insert race. Disambiguate the dedup unique index from
+            // the run id PK so the caller still observes the dedup contract.
+            if (ex.Message.Contains("ix_surefire_runs_dedup", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new RunConflictException(run.Id,
+                    $"Run with deduplication id '{run.DeduplicationId}' is already active for job '{run.JobName}'.", ex);
+            }
+
             return false;
         }
     }
@@ -3078,11 +4113,18 @@ internal sealed class SqlServerJobStore(
         cmd.Parameters.Add(CreateParameter("@not_before", run.NotBefore));
         cmd.Parameters.Add(CreateParameter("@not_after",
             run.NotAfter.HasValue ? run.NotAfter.Value : DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@expires_at",
+            run.ExpiresAt.HasValue ? run.ExpiresAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@priority", run.Priority));
         cmd.Parameters.Add(CreateParameter("@deduplication_id", (object?)run.DeduplicationId ?? DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@last_heartbeat_at",
             run.LastHeartbeatAt.HasValue ? run.LastHeartbeatAt.Value : DBNull.Value));
         cmd.Parameters.Add(CreateParameter("@batch_id", (object?)run.BatchId ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@lease_epoch", run.LeaseEpoch));
+        cmd.Parameters.Add(CreateParameter("@failure_count", run.FailureCount));
+        cmd.Parameters.Add(CreateParameter("@replay_count", run.ReplayCount));
+        cmd.Parameters.Add(CreateParameter("@highest_recorded_step", run.HighestRecordedStep));
+        cmd.Parameters.Add(CreateParameter("@is_durable", run.IsDurable));
     }
 
     private async Task<IReadOnlyList<JobRun>> ClaimRunsAsyncCore(string nodeName,
@@ -3238,7 +4280,8 @@ internal sealed class SqlServerJobStore(
                                 LEFT JOIN dbo.surefire_queues q ON q.name = ISNULL(j.queue, N'default')
                                 WHERE r.status = 0
                                     AND r.not_before <= @now
-                                    AND (r.not_after IS NULL OR r.not_after > @now)
+                                    AND (r.not_after IS NULL OR r.lease_epoch > 0 OR r.not_after >= @now)
+                                    AND (r.expires_at IS NULL OR r.expires_at >= @now)
                                     AND r.job_name IN (SELECT name FROM @job_names)
                                     AND ISNULL(j.queue, N'default') IN (SELECT name FROM @queue_names)
                                     AND ISNULL(q.is_paused, 0) = 0
@@ -3258,20 +4301,21 @@ internal sealed class SqlServerJobStore(
                             SELECT id, run_queue_name, j_rl, q_rl FROM eligible
                             OPTION (MAXDOP 1);
 
-                            UPDATE r SET
-                                status = 1,
-                                node_name = @node_name,
-                                started_at = @now,
-                                last_heartbeat_at = @now,
-                                attempt = r.attempt + 1
-                            OUTPUT INSERTED.id, INSERTED.job_name, c.run_queue_name, c.j_rl, c.q_rl,
+                             UPDATE r SET
+                                 status = 1,
+                                 node_name = @node_name,
+                                 started_at = COALESCE(r.started_at, @now),
+                                 last_heartbeat_at = @now,
+                                 lease_epoch = r.lease_epoch + 1
+                             OUTPUT INSERTED.id, INSERTED.job_name, c.run_queue_name, c.j_rl, c.q_rl,
                                    INSERTED.status, INSERTED.attempt
                                 INTO @claimed (id, job_name, queue_name, j_rl, q_rl, status, attempt)
                             FROM dbo.surefire_runs r WITH (UPDLOCK, ROWLOCK, READPAST)
                             INNER JOIN @candidate c ON c.id = r.id
                             WHERE r.status = 0
                                 AND r.not_before <= @now
-                                AND (r.not_after IS NULL OR r.not_after > @now);
+                                AND (r.not_after IS NULL OR r.lease_epoch > 0 OR r.not_after >= @now)
+                                AND (r.expires_at IS NULL OR r.expires_at >= @now);
 
                             UPDATE j SET running_count = j.running_count + ji.cnt
                             FROM dbo.surefire_jobs j
@@ -3322,8 +4366,9 @@ internal sealed class SqlServerJobStore(
                             SELECT r.id, r.job_name, r.status, r.arguments, r.result, r.reason, r.progress,
                                    r.created_at, r.started_at, r.completed_at, r.canceled_at, r.node_name, r.attempt,
                                    r.trace_id, r.span_id, r.parent_trace_id, r.parent_span_id, r.parent_run_id,
-                                   r.root_run_id, r.rerun_of_run_id, r.not_before, r.not_after, r.priority,
-                                   r.deduplication_id, r.last_heartbeat_at, r.batch_id
+                                   r.root_run_id, r.rerun_of_run_id, r.not_before, r.not_after, r.expires_at, r.priority,
+                                    r.deduplication_id, r.last_heartbeat_at, r.batch_id,
+                                    r.lease_epoch, r.failure_count, r.replay_count, r.highest_recorded_step, r.is_durable
                             FROM dbo.surefire_runs r INNER JOIN @claimed c ON c.id = r.id;
                             """;
 
@@ -3352,7 +4397,8 @@ internal sealed class SqlServerJobStore(
     // RootRunId = enclosing run's RootRunId), so TOP(1) is sufficient: any row from the batch
     // resolves the canonical tree key.
     private async Task<SubtreeCancellation> CancelSubtreeAsyncCore(SubtreeSeed seed, string seedId,
-        string? reason, bool includeRoot, CancellationToken cancellationToken)
+        string? reason, bool includeRoot, CancellationToken cancellationToken,
+        bool expirationCancellation = false)
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
@@ -3391,6 +4437,7 @@ internal sealed class SqlServerJobStore(
             ? "(SELECT TOP (1) ISNULL(root_run_id, id) FROM dbo.surefire_runs WHERE id = @seed)"
             : "(SELECT TOP (1) ISNULL(root_run_id, id) FROM dbo.surefire_runs WHERE batch_id = @seed)";
 
+        var nowOffset = timeProvider.GetUtcNow();
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = $"""
@@ -3412,11 +4459,15 @@ internal sealed class SqlServerJobStore(
                            )
                            INSERT INTO @subtree (id) SELECT id FROM walk OPTION (MAXRECURSION 0);
 
+                           -- Subtree jobs/queues only. Wake of any Suspended orchestrator awaiting
+                           -- a canceled member is performed by WakeForTerminatedRunAsync after this
+                           -- statement, in a sequence of per-orchestrator transactions that take
+                           -- their own job/queue applocks.
                            DECLARE @target_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
                            INSERT INTO @target_jobs (name)
                            SELECT DISTINCT r.job_name FROM dbo.surefire_runs r
                            INNER JOIN @subtree s ON s.id = r.id
-                           WHERE r.status IN (0, 1){includeRootPredicate};
+                           WHERE r.status IN (0, 1, 3){includeRootPredicate};
 
                            DECLARE @target_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
                            INSERT INTO @target_queues (name)
@@ -3424,7 +4475,7 @@ internal sealed class SqlServerJobStore(
                            FROM dbo.surefire_runs r
                            INNER JOIN @subtree s ON s.id = r.id
                            INNER JOIN dbo.surefire_jobs j ON j.name = r.job_name
-                           WHERE r.status IN (0, 1){includeRootPredicate};
+                           WHERE r.status IN (0, 1, 3){includeRootPredicate};
 
                            {BuildSortedApplockSql("@target_jobs", "surefire_job:", "stj")}
 
@@ -3441,13 +4492,15 @@ internal sealed class SqlServerJobStore(
                            ORDER BY tq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
 
                            DECLARE @now DATETIMEOFFSET(7) = SYSUTCDATETIME();
-                           DECLARE @canceled TABLE (
-                               id NVARCHAR(450) NOT NULL PRIMARY KEY,
-                               attempt INT NOT NULL,
-                               batch_id NVARCHAR(450),
-                               prior_status INT NOT NULL,
-                               job_name NVARCHAR(450) NOT NULL
-                           );
+                            DECLARE @canceled TABLE (
+                                id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                                attempt INT NOT NULL,
+                                batch_id NVARCHAR(450),
+                                prior_status INT NOT NULL,
+                                job_name NVARCHAR(450) NOT NULL,
+                                reason NVARCHAR(MAX) NULL,
+                                expiration_kind INT NULL
+                            );
 
                            -- ROWLOCK keeps lock granularity at row level even for large
                            -- subtrees. Without it, a 1000+ row UPDATE can take page X-locks
@@ -3455,17 +4508,25 @@ internal sealed class SqlServerJobStore(
                            -- TryTransitionRunAsync calls touching unrelated rows on the same
                            -- pages.
                            UPDATE r SET
-                               status = 4,
-                               canceled_at = @now,
-                               completed_at = @now,
-                               reason = COALESCE(@reason, r.reason)
-                           OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id,
-                                  DELETED.status, INSERTED.job_name
-                               INTO @canceled (id, attempt, batch_id, prior_status, job_name)
+                                status = 4,
+                                canceled_at = @now,
+                                completed_at = @now,
+                                reason = CASE
+                                    WHEN @expiration_cancellation = 1 THEN
+                                        CASE WHEN r.id = @seed THEN @reason
+                                             ELSE N'Canceled because parent run ''' + ISNULL(r.parent_run_id, @seed) + N''' expired.'
+                                        END
+                                    ELSE COALESCE(@reason, r.reason)
+                                END
+                            OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id,
+                                   DELETED.status, INSERTED.job_name, INSERTED.reason,
+                                   CASE WHEN INSERTED.id = @seed THEN 0 ELSE 1 END
+                                INTO @canceled (id, attempt, batch_id, prior_status, job_name, reason, expiration_kind)
                            FROM dbo.surefire_runs r WITH (ROWLOCK)
                                INNER JOIN @subtree s ON s.id = r.id
-                           WHERE r.status IN (0, 1){includeRootPredicate};
+                           WHERE r.status IN (0, 1, 3){includeRootPredicate};
 
+                           -- Running (1) is the only active slot holder.
                            UPDATE j SET
                                running_count = CASE WHEN j.running_count > ag.running_cnt
                                    THEN j.running_count - ag.running_cnt ELSE 0 END,
@@ -3493,12 +4554,14 @@ internal sealed class SqlServerJobStore(
                            INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
                            SELECT c.id, 0, CONVERT(NVARCHAR(10), 4), @now, c.attempt FROM @canceled c;
 
-                           SELECT id, attempt, batch_id FROM @canceled;
+                           SELECT id, attempt, batch_id, reason, expiration_kind FROM @canceled ORDER BY id;
                            """;
         cmd.Parameters.Add(CreateParameter("@seed", seedId));
         cmd.Parameters.Add(CreateParameter("@reason", (object?)reason ?? DBNull.Value));
+        cmd.Parameters.Add(CreateParameter("@expiration_cancellation", expirationCancellation));
 
         var canceledRuns = new List<CanceledRun>();
+        var expiredRuns = new List<ExpiredCanceledRun>();
         var batchCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         await using (var reader =
                      await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken))
@@ -3506,8 +4569,17 @@ internal sealed class SqlServerJobStore(
             while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
             {
                 var runId = reader.GetString(0);
+                var attempt = reader.GetInt32(1);
                 var batchId = reader.IsDBNull(2) ? null : reader.GetString(2);
                 canceledRuns.Add(new(runId, batchId));
+                if (expirationCancellation)
+                {
+                    var runReason = reader.IsDBNull(3) ? "Run expired past its deadline." : reader.GetString(3);
+                    var kind = reader.GetInt32(4) == 0
+                        ? ExpiredCancellationKind.Expired
+                        : ExpiredCancellationKind.AncestorExpired;
+                    expiredRuns.Add(new(runId, batchId, attempt, runReason, kind));
+                }
                 if (batchId is { })
                 {
                     batchCounts[batchId] = batchCounts.GetValueOrDefault(batchId) + 1;
@@ -3523,8 +4595,23 @@ internal sealed class SqlServerJobStore(
 
         var completedBatches = await ApplyBatchCancelCountersAsync(conn, tx, batchCounts, cancellationToken);
 
+        // Unified wake for canceled runs AND newly-terminal batches; one canonical sorted
+        // applock acquisition pass keeps overlapping subtree cancels deadlock-free.
+        if (canceledRuns.Count > 0 || completedBatches.Count > 0)
+        {
+            var runIds = canceledRuns.Count == 0
+                ? Array.Empty<string>()
+                : canceledRuns.Select(c => c.RunId).ToArray();
+            var batchIds = completedBatches.Count == 0
+                ? Array.Empty<string>()
+                : completedBatches.Select(b => b.BatchId).ToArray();
+            await WakeForTerminatedEntitiesAsync(conn, tx, runIds, batchIds, nowOffset, cancellationToken);
+        }
+
         await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-        return new(canceledRuns, completedBatches);
+        return expirationCancellation
+            ? new SubtreeCancellation(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns }
+            : new(canceledRuns, completedBatches);
     }
 
     private async Task<List<BatchCompletionInfo>> ApplyBatchCancelCountersAsync(SqlConnection conn,

@@ -63,4 +63,10 @@ public sealed class RunArgumentStream
     ///     don't need to capture serializer state at trigger time.
     /// </summary>
     public required Func<JsonSerializerOptions, IAsyncEnumerable<string>> SerializeItems { get; init; }
+
+    // Replay resume marker (internal): when a durable run is replayed and its prior pump didn't
+    // emit InputComplete for this argument, the client wraps the original stream and supplies
+    // the recorded LastSequence here so the pump skips already-written items and continues
+    // numbering past LastSequence. Zero on first-trigger.
+    internal long ResumeFromSequence { get; init; }
 }

@@ -115,8 +115,42 @@ public sealed class JobBuilder
     /// <returns>This builder for chaining.</returns>
     public JobBuilder Continuous()
     {
+        if (Definition.IsDurable)
+        {
+            throw new InvalidOperationException(
+                "Continuous and Durable are mutually exclusive: a durable orchestrator's replay " +
+                "semantics are undefined for re-firing on terminal.");
+        }
+
         Definition.IsContinuous = true;
         Definition.MaxConcurrency ??= 1;
+        _sync();
+        return this;
+    }
+
+    /// <summary>
+    ///     Marks this job as a durable orchestrator. The handler may call any
+    ///     <see cref="IJobClient" /> method; each call is recorded and replayed deterministically
+    ///     on resume. While awaiting child runs the orchestrator is suspended and does not consume
+    ///     a worker, job, or queue concurrency slot.
+    /// </summary>
+    /// <remarks>
+    ///     Durable handlers must be deterministic: their <see cref="IJobClient" /> call sequence
+    ///     must depend only on run arguments and prior call results. Avoid <see cref="DateTime.UtcNow" />,
+    ///     <see cref="Random" />, <see cref="Guid.NewGuid" />, and direct IO inside the handler;
+    ///     wrap them in a child job instead. Cannot be combined with <see cref="Continuous" />.
+    /// </remarks>
+    /// <returns>This builder for chaining.</returns>
+    public JobBuilder Durable()
+    {
+        if (Definition.IsContinuous)
+        {
+            throw new InvalidOperationException(
+                "Continuous and Durable are mutually exclusive: a durable orchestrator's replay " +
+                "semantics are undefined for re-firing on terminal.");
+        }
+
+        Definition.IsDurable = true;
         _sync();
         return this;
     }

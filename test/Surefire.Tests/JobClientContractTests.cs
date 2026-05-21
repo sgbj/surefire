@@ -80,6 +80,60 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
+    public async Task TriggerAsync_DefaultExpiresAt_IsAnchoredToEffectiveNotBefore()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = CreateClient(
+            store,
+            notifications,
+            eventWriter,
+            time,
+            new() { RunExpirationPeriod = TimeSpan.FromHours(2) },
+            new CollectingLogger<JobClient>());
+
+        var jobName = "ExpiresAtNotBefore_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
+
+        var notBefore = time.GetUtcNow().AddDays(3);
+        var triggered = await client.TriggerAsync(jobName, null, new() { NotBefore = notBefore }, ct);
+
+        var run = await store.GetRunAsync(triggered.Id, ct);
+        Assert.NotNull(run);
+        Assert.Equal(notBefore, run.NotBefore);
+        Assert.Equal(notBefore.AddHours(2), run.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task TriggerAsync_RetentionPeriod_DoesNotSetDefaultExpiresAt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var client = CreateClient(
+            store,
+            notifications,
+            eventWriter,
+            time,
+            new() { RetentionPeriod = TimeSpan.FromHours(1) },
+            new CollectingLogger<JobClient>());
+
+        var jobName = "NoDefaultExpiresAt_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobsAsync([new() { Name = jobName }], ct);
+
+        var triggered = await client.TriggerAsync(jobName, cancellationToken: ct);
+
+        var run = await store.GetRunAsync(triggered.Id, ct);
+        Assert.NotNull(run);
+        Assert.Null(run.ExpiresAt);
+    }
+
+    [Fact]
     public async Task TriggerBatchAsync_PreservesPerItemRunOptions()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -170,7 +224,7 @@ public sealed class JobClientContractTests
     }
 
     [Fact]
-    public async Task TriggerAsync_Rejected_ThrowsRunConflictException()
+    public async Task TriggerAsync_DuplicateDeduplicationId_ThrowsRunConflictException()
     {
         var ct = TestContext.Current.CancellationToken;
         var time = CreateTime();
@@ -357,7 +411,7 @@ public sealed class JobClientContractTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -426,7 +480,7 @@ public sealed class JobClientContractTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -607,7 +661,7 @@ public sealed class JobClientContractTests
         var claimed = await WaitForClaimAsync(store, jobName, ct);
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -690,7 +744,7 @@ public sealed class JobClientContractTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -762,7 +816,7 @@ public sealed class JobClientContractTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -838,7 +892,7 @@ public sealed class JobClientContractTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -924,7 +978,7 @@ public sealed class JobClientContractTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             runId,
-            claimed.Attempt,
+            claimed.LeaseEpoch,
             time.GetUtcNow(),
             claimed.NotBefore,
             claimed.NodeName,
@@ -986,7 +1040,7 @@ public sealed class JobClientContractTests
         foreach (var run in claimed)
         {
             var complete = RunStatusTransition.RunningToSucceeded(
-                run.Id, run.Attempt, completedAt, run.NotBefore, run.NodeName,
+                run.Id, run.LeaseEpoch, completedAt, run.NotBefore, run.NodeName,
                 1, $"{{\"v\":{run.Id}}}", null, run.StartedAt, run.LastHeartbeatAt);
             var result = await store.TryTransitionRunAsync(complete, ct);
             Assert.True(result.Transitioned);
@@ -1065,11 +1119,11 @@ public sealed class JobClientContractTests
         Assert.True((await store.TryTransitionRunAsync(
             RunStatusTransition.RunningToSucceeded(
                 childA.Id,
-                childA.Attempt,
+                childA.LeaseEpoch,
                 completedAt,
                 childA.NotBefore,
                 childA.NodeName,
-                1,
+                0,
                 null,
                 null,
                 childA.StartedAt,
@@ -1077,11 +1131,11 @@ public sealed class JobClientContractTests
         var resultB = await store.TryTransitionRunAsync(
             RunStatusTransition.RunningToSucceeded(
                 childB.Id,
-                childB.Attempt,
+                childB.LeaseEpoch,
                 completedAt,
                 childB.NotBefore,
                 childB.NodeName,
-                1,
+                0,
                 JsonSerializer.Serialize(21),
                 null,
                 childB.StartedAt,
@@ -1185,7 +1239,7 @@ public sealed class JobClientContractTests
         var result = await store.TryTransitionRunAsync(
             RunStatusTransition.RunningToSucceeded(
                 childId,
-                1,
+                0,
                 time.GetUtcNow(),
                 now,
                 null,
@@ -1263,7 +1317,7 @@ public sealed class JobClientContractTests
                     Attempt = 1
                 }
             ],
-            ct);
+            cancellationToken: ct);
 
         var streamTask = Task.Run(async () =>
         {
@@ -1300,7 +1354,7 @@ public sealed class JobClientContractTests
         var result = await store.TryTransitionRunAsync(
             RunStatusTransition.RunningToSucceeded(
                 childId,
-                1,
+                0,
                 time.GetUtcNow(),
                 now,
                 null,
@@ -1595,7 +1649,7 @@ public sealed class JobClientContractTests
 
         // Succeed the run with null result; output events must be used to reconstruct the result.
         var succeeded = RunStatusTransition.RunningToSucceeded(
-            runId, claimed.Attempt, time.GetUtcNow(), claimed.NotBefore,
+            runId, claimed.LeaseEpoch, time.GetUtcNow(), claimed.NotBefore,
             claimed.NodeName, 1, null, null,
             claimed.StartedAt, claimed.LastHeartbeatAt);
         Assert.True((await store.TryTransitionRunAsync(succeeded, ct)).Transitioned);
@@ -1605,6 +1659,255 @@ public sealed class JobClientContractTests
 
         Assert.IsType<int[]>(result);
         Assert.Equal([10, 20, 30], result);
+    }
+
+    // Regression for B1: when a durable orchestrator replays and the snapshot already holds
+    // the child run (the child row exists from the prior attempt, but the host crashed
+    // mid-pump before InputComplete was recorded), the snapshot-hit branch in TriggerAsync
+    // must restart the pump from the recorded sequence. Without the fix the child waits
+    // forever on an InputComplete event nobody will write.
+    [Fact]
+    public async Task TriggerAsync_SnapshotHit_WithIncompleteInputStream_ResumesPump()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var logger = new CollectingLogger<JobClient>();
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
+
+        var orchJob = "DurableOrch_" + Guid.CreateVersion7().ToString("N");
+        var childJob = "DurableChild_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobsAsync([
+            new() { Name = orchJob, IsDurable = true },
+            new() { Name = childJob }
+        ], ct);
+
+        var orchId = await SeedRunningOrchestratorAsync(store, orchJob, ct);
+        var childId = DurableIds.DerivedRunId(orchId, 1);
+
+        // Simulate the mid-pump crash: child row exists with the InputDeclared event but
+        // no Input or InputComplete events for the declared stream.
+        var now = time.GetUtcNow();
+        var child = new JobRun
+        {
+            Id = childId,
+            JobName = childJob,
+            Status = JobStatus.Pending,
+            CreatedAt = now,
+            NotBefore = now,
+            ParentRunId = orchId,
+            RootRunId = orchId,
+            Attempt = 1,
+            DeduplicationId = DurableIds.DedupId(orchId, 1)
+        };
+        var inputDeclared = new RunEvent
+        {
+            RunId = childId,
+            EventType = RunEventType.InputDeclared,
+            Payload = """{"arguments":["values"]}""",
+            CreatedAt = now,
+            Attempt = 1
+        };
+        Assert.True(await store.TryCreateRunAsync(child, initialEvents: [inputDeclared], cancellationToken: ct));
+
+        var snapshot = new DurableExecutionSnapshot(
+            new Dictionary<string, JobRun>(StringComparer.Ordinal) { [childId] = (await store.GetRunAsync(childId, ct))! },
+            new Dictionary<string, JobBatch>(StringComparer.Ordinal),
+            new Dictionary<int, DurableRecord>(),
+            HighestRecordedStep: 1);
+
+        var context = new JobContext
+        {
+            RunId = orchId,
+            RootRunId = orchId,
+            JobName = orchJob,
+            Attempt = 1,
+            CancellationToken = ct,
+            OrchestratorRunId = orchId,
+            HighestRecordedStep = 1,
+            DurableSnapshot = snapshot
+        };
+
+        var args = new RunArguments
+        {
+            Streams =
+            [
+                new()
+                {
+                    ArgumentName = "values",
+                    SerializeItems = _ => SerializeAsync([1, 2, 3], ct)
+                }
+            ]
+        };
+
+        using (JobContext.EnterScope(context))
+        {
+            var resolved = await client.TriggerAsync(childJob, args, cancellationToken: ct);
+            Assert.Equal(childId, resolved.Id);
+        }
+
+        await TestWait.PollUntilConditionAsync(
+            async pollCt =>
+            {
+                var pumpState = await ((IJobStore)store).GetInputPumpStateAsync(childId, pollCt);
+                return pumpState.TryGetValue("values", out var s) && s.InputComplete;
+            },
+            TimeSpan.FromSeconds(3),
+            TimeSpan.FromMilliseconds(10),
+            "Expected the resumed pump to write InputComplete for the declared stream.",
+            ct);
+
+        var pumped = await store.GetEventsAsync(childId, 0, [RunEventType.Input], cancellationToken: ct);
+        Assert.Equal(3, pumped.Count);
+    }
+
+    // Regression for B2: identical shape to B1 but the snapshot-hit branch on
+    // TriggerBatchCoreAsync must also restart every batch child's pump.
+    [Fact]
+    public async Task TriggerBatchAsync_SnapshotHit_WithIncompleteInputStream_ResumesPumps()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var time = CreateTime();
+        var store = new InMemoryJobStore(time);
+        var notifications = new InMemoryNotificationProvider(NullLogger<InMemoryNotificationProvider>.Instance);
+        await using var eventWriter = await TestEventWriter.StartAsync(store, notifications);
+        var logger = new CollectingLogger<JobClient>();
+        var client = CreateClient(store, notifications, eventWriter, time, new(), logger);
+
+        var orchJob = "DurableBatchOrch_" + Guid.CreateVersion7().ToString("N");
+        var childJob = "DurableBatchChild_" + Guid.CreateVersion7().ToString("N");
+        await store.UpsertJobsAsync([
+            new() { Name = orchJob, IsDurable = true },
+            new() { Name = childJob }
+        ], ct);
+
+        var orchId = await SeedRunningOrchestratorAsync(store, orchJob, ct);
+        var batchId = DurableIds.DerivedBatchId(orchId, 1);
+        var childIds = new[]
+        {
+            DurableIds.DerivedBatchChildRunId(batchId, 0),
+            DurableIds.DerivedBatchChildRunId(batchId, 1)
+        };
+
+        var now = time.GetUtcNow();
+        var batch = new JobBatch
+        {
+            Id = batchId,
+            Status = JobStatus.Pending,
+            Total = childIds.Length,
+            CreatedAt = now,
+            ParentRunId = orchId
+        };
+        var children = childIds.Select(id => new JobRun
+        {
+            Id = id,
+            JobName = childJob,
+            Status = JobStatus.Pending,
+            CreatedAt = now,
+            NotBefore = now,
+            ParentRunId = orchId,
+            RootRunId = orchId,
+            BatchId = batchId,
+            Attempt = 0
+        }).ToArray();
+        var initialEvents = childIds.Select(id => new RunEvent
+        {
+            RunId = id,
+            EventType = RunEventType.InputDeclared,
+            Payload = """{"arguments":["values"]}""",
+            CreatedAt = now,
+            Attempt = 0
+        }).ToArray();
+        await store.CreateBatchAsync(batch, children, initialEvents, cancellationToken: ct);
+
+        var snapshot = new DurableExecutionSnapshot(
+            new Dictionary<string, JobRun>(StringComparer.Ordinal),
+            new Dictionary<string, JobBatch>(StringComparer.Ordinal)
+            {
+                [batchId] = (await store.GetBatchAsync(batchId, ct))!
+            },
+            new Dictionary<int, DurableRecord>(),
+            HighestRecordedStep: 1);
+
+        var context = new JobContext
+        {
+            RunId = orchId,
+            RootRunId = orchId,
+            JobName = orchJob,
+            Attempt = 1,
+            CancellationToken = ct,
+            OrchestratorRunId = orchId,
+            HighestRecordedStep = 1,
+            DurableSnapshot = snapshot
+        };
+
+        var items = new RunArguments?[]
+        {
+            new() { Streams = [new() { ArgumentName = "values", SerializeItems = _ => SerializeAsync([1, 2], ct) }] },
+            new() { Streams = [new() { ArgumentName = "values", SerializeItems = _ => SerializeAsync([3, 4, 5], ct) }] }
+        };
+
+        using (JobContext.EnterScope(context))
+        {
+            var resolved = await client.TriggerBatchAsync(childJob, items, cancellationToken: ct);
+            Assert.Equal(batchId, resolved.Id);
+        }
+
+        foreach (var (id, expected) in childIds.Zip(new[] { 2, 3 }))
+        {
+            var childIdLocal = id;
+            await TestWait.PollUntilConditionAsync(
+                async pollCt =>
+                {
+                    var pumpState = await ((IJobStore)store).GetInputPumpStateAsync(childIdLocal, pollCt);
+                    return pumpState.TryGetValue("values", out var s) && s.InputComplete;
+                },
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromMilliseconds(10),
+                $"Expected the resumed pump for child '{id}' to write InputComplete.",
+                ct);
+
+            var pumped = await store.GetEventsAsync(id, 0, [RunEventType.Input], cancellationToken: ct);
+            Assert.Equal(expected, pumped.Count);
+        }
+    }
+
+    private static async Task<string> SeedRunningOrchestratorAsync(InMemoryJobStore store, string jobName,
+        CancellationToken ct)
+    {
+        var orchId = Guid.CreateVersion7().ToString("N");
+        var now = DateTimeOffset.UtcNow;
+        var run = new JobRun
+        {
+            Id = orchId,
+            JobName = jobName,
+            Status = JobStatus.Pending,
+            CreatedAt = now,
+            NotBefore = now.AddSeconds(-1),
+            IsDurable = true,
+            Attempt = 1,
+            RootRunId = orchId
+        };
+        Assert.True(await store.TryCreateRunAsync(run, cancellationToken: ct));
+
+        var startedAt = DateTimeOffset.UtcNow;
+        var transition = RunStatusTransition.PendingToRunning(
+            orchId, 0, "test-node", startedAt, startedAt, startedAt);
+        Assert.True((await store.TryTransitionRunAsync(transition, ct)).Transitioned);
+        return orchId;
+    }
+
+    private static async IAsyncEnumerable<string> SerializeAsync(IEnumerable<int> values,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        foreach (var value in values)
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            await Task.Yield();
+        }
     }
 
     private static FakeTimeProvider CreateTime() => new(new(2025, 6, 15, 10, 0, 0, TimeSpan.Zero));

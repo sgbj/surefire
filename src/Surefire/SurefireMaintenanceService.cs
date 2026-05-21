@@ -63,7 +63,7 @@ internal sealed partial class SurefireMaintenanceService(
         }
     }
 
-    private async Task RunMaintenanceTickAsync(CancellationToken cancellationToken)
+    internal async Task RunMaintenanceTickAsync(CancellationToken cancellationToken)
     {
         var registrations = registry.Snapshot();
 
@@ -106,6 +106,7 @@ internal sealed partial class SurefireMaintenanceService(
                 store,
                 notifications,
                 timeProvider,
+                options,
                 registered.Definition,
                 cancellationToken);
         }
@@ -124,20 +125,34 @@ internal sealed partial class SurefireMaintenanceService(
             return;
         }
 
+        var expiredDetails = expired.ExpiredRuns.Count > 0
+            ? expired.ExpiredRuns.ToDictionary(run => run.RunId, StringComparer.Ordinal)
+            : await LoadExpiredRunDetailsAsync(expired.Runs, cancellationToken);
+
         foreach (var entry in expired.Runs)
         {
             var runId = entry.RunId;
-            var run = await store.GetRunAsync(runId, cancellationToken);
-            if (run is { })
+            activeRuns.TryRequestCancel(runId);
+            await notifications.PublishAsync(NotificationChannels.RunCancel(runId), null, cancellationToken);
+
+            if (expiredDetails.TryGetValue(runId, out var run))
             {
+                var failureCode = run.Kind == ExpiredCancellationKind.Expired
+                    ? "expired_cancellation"
+                    : "parent_canceled";
+                var message = failureCode == "expired_cancellation"
+                    ? "Canceled: run expired past its deadline."
+                    : run.Reason;
                 await batchCompletionHandler.AppendFailureEventAsync(
-                    run,
+                    run.RunId,
+                    run.BatchId,
+                    run.Attempt,
                     RunFailureEnvelope.FromMessage(
                         run.Attempt,
                         timeProvider.GetUtcNow(),
                         "maintenance",
-                        "expired_cancellation",
-                        "Canceled: run expired past its NotAfter deadline."),
+                        failureCode,
+                        message),
                     cancellationToken);
             }
 
@@ -157,6 +172,36 @@ internal sealed partial class SurefireMaintenanceService(
             await notifications.PublishAsync(NotificationChannels.BatchTerminated(batch.BatchId), batch.BatchId,
                 cancellationToken);
         }
+    }
+
+    private async Task<Dictionary<string, ExpiredCanceledRun>> LoadExpiredRunDetailsAsync(
+        IReadOnlyList<CanceledRun> expiredRuns,
+        CancellationToken cancellationToken)
+    {
+        if (expiredRuns.Count == 0)
+        {
+            return new(StringComparer.Ordinal);
+        }
+
+        var runs = await store.GetRunsByIdsAsync(expiredRuns.Select(run => run.RunId).ToArray(), cancellationToken);
+        return runs.ToDictionary(
+            run => run.Id,
+            run =>
+            {
+                var isDirectExpiration = string.Equals(run.Reason, "Run expired past its deadline.",
+                    StringComparison.Ordinal);
+                return new ExpiredCanceledRun(
+                    run.Id,
+                    run.BatchId,
+                    run.Attempt,
+                    run.Reason ?? (run.ParentRunId is { } parentRunId
+                        ? $"Canceled because parent run '{parentRunId}' expired."
+                        : "Canceled because an ancestor run expired."),
+                    isDirectExpiration
+                        ? ExpiredCancellationKind.Expired
+                        : ExpiredCancellationKind.AncestorExpired);
+            },
+            StringComparer.Ordinal);
     }
 
     private async Task RecoverStuckBatchesAsync(CancellationToken cancellationToken)
@@ -197,14 +242,17 @@ internal sealed partial class SurefireMaintenanceService(
                 var retryPolicy = await GetRetryPolicyForStaleRecoveryAsync(run.JobName, retryPolicyCache,
                     cancellationToken);
 
-                if (run.Attempt > retryPolicy.MaxRetries)
+                // Durable orchestrators always replay on stale recovery: stale recovery is
+                // environmental (node died mid-yield) and should not consume retry slots that
+                // belong to real handler exceptions.
+                if (!run.IsDurable && run.FailureCount >= retryPolicy.MaxRetries)
                 {
                     var now = timeProvider.GetUtcNow();
                     // Detail lives on the AttemptFailure event below. Preserve any Reason the
                     // run already carried; don't synthesize one here.
                     var deadLetter = RunStatusTransition.RunningToFailed(
                         run.Id,
-                        run.Attempt,
+                        run.LeaseEpoch,
                         now,
                         run.NotBefore,
                         run.NodeName,
@@ -213,6 +261,7 @@ internal sealed partial class SurefireMaintenanceService(
                         run.Result,
                         run.StartedAt,
                         run.LastHeartbeatAt);
+                    deadLetter.IncrementFailureCount = true;
 
                     var result = await store.TryTransitionRunAsync(deadLetter, cancellationToken);
                     if (!result.Transitioned)
@@ -259,8 +308,13 @@ internal sealed partial class SurefireMaintenanceService(
                     continue;
                 }
 
-                var retryNotBefore = timeProvider.GetUtcNow() + backoff.NextDelay(run.Attempt - 1,
-                    retryPolicy.InitialDelay, retryPolicy.MaxDelay, retryPolicy.Jitter, retryPolicy.BackoffType);
+                // Durable replay is environmental, not a retry of a failed attempt. Schedule it
+                // for immediate re-claim so the orchestrator picks up where it left off without
+                // an exponential delay accruing across innocuous restarts.
+                var retryNotBefore = run.IsDurable
+                    ? timeProvider.GetUtcNow()
+                    : timeProvider.GetUtcNow() + backoff.NextDelay(run.FailureCount,
+                        retryPolicy.InitialDelay, retryPolicy.MaxDelay, retryPolicy.Jitter, retryPolicy.BackoffType);
 
                 var failureEvent = batchCompletionHandler.CreateFailureEvent(
                     run,
@@ -273,16 +327,23 @@ internal sealed partial class SurefireMaintenanceService(
 
                 var pending = RunStatusTransition.RunningToPending(
                     run.Id,
-                    run.Attempt,
+                    run.LeaseEpoch,
                     retryNotBefore,
                     run.Reason,
                     run.Result,
                     events: failureEvent is { } ? [failureEvent] : null);
+                pending.IncrementFailureCount = !run.IsDurable;
+                pending.IncrementAttempt = !run.IsDurable;
 
                 var pendingResult = await store.TryTransitionRunAsync(pending, cancellationToken);
                 if (!pendingResult.Transitioned)
                 {
                     continue;
+                }
+
+                if (run.IsDurable)
+                {
+                    instrumentation.RecordDurableStaleRecovered(run.JobName);
                 }
 
                 await runCancellation.CancelDescendantsAsync(

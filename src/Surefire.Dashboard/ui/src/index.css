@@ -152,6 +152,7 @@
   --status-succeeded: oklch(0.52 0.10 160);
   --status-pending:   oklch(0.62 0.13 60);
   --status-running:   var(--accent-brand);
+  --status-suspended: oklch(0.55 0.10 295);
   --status-canceled:  oklch(0.55 0.012 252);
   --status-failed:    oklch(0.52 0.16 22);
 
@@ -203,6 +204,7 @@
   --status-succeeded: oklch(0.76 0.12 160);
   --status-pending:   oklch(0.80 0.14 60);
   --status-running:   var(--accent-brand);
+  --status-suspended: oklch(0.74 0.12 295);
   --status-canceled:  oklch(0.66 0.014 252);
   --status-failed:    oklch(0.70 0.18 22);
 
@@ -277,6 +279,7 @@
   --color-status-succeeded: var(--status-succeeded);
   --color-status-pending: var(--status-pending);
   --color-status-running: var(--status-running);
+  --color-status-suspended: var(--status-suspended);
   --color-status-canceled: var(--status-canceled);
   --color-status-failed: var(--status-failed);
   --color-sidebar: var(--sidebar);

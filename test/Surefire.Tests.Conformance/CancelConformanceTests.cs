@@ -338,6 +338,7 @@ public abstract class CancelConformanceTests : StoreConformanceBase
                         JobName = claimed.JobName,
                         Status = JobStatus.Pending,
                         Attempt = claimed.Attempt,
+                        LeaseEpoch = claimed.LeaseEpoch,
                         CreatedAt = claimed.CreatedAt,
                         NotBefore = claimed.NotBefore
                     };

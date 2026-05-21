@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace Surefire;
 
@@ -43,9 +46,19 @@ public sealed class JobContext
     public required CancellationToken CancellationToken { get; init; }
 
     /// <summary>
-    ///     Gets the current attempt number for this run.
+    ///     Gets the failure-aware attempt number, counted from 1. For durable jobs, suspend / resume
+    ///     cycles do not increment this counter.
     /// </summary>
     public int Attempt { get; init; }
+
+    /// <summary>
+    ///     Gets whether this durable orchestrator is still executing inside previously recorded
+    ///     history. Always <c>false</c> for non-durable jobs. Use this for replay-safe logs and
+    ///     metrics; use durable APIs such as <see cref="RecordAsync{T}" /> for non-deterministic
+    ///     values or external side effects that must participate in replay.
+    /// </summary>
+    public bool IsReplaying => OrchestratorRunId is not null
+                               && Volatile.Read(ref _nextStep) < HighestRecordedStep;
 
     /// <summary>
     ///     Gets the batch ID if this run is part of a batch.
@@ -75,13 +88,396 @@ public sealed class JobContext
 
     internal TimeProvider TimeProvider { get; init; } = null!;
 
+    internal JsonSerializerOptions SerializerOptions { get; init; } = null!;
+
     internal string NodeName { get; init; } = null!;
+
+    /// <summary>
+    ///     Gets whether the current run is a durable orchestrator. Use this together with
+    ///     <see cref="IsReplaying" /> to distinguish non-durable code, durable-but-new-territory,
+    ///     and durable-but-replaying.
+    /// </summary>
+    public bool IsDurable => OrchestratorRunId is not null;
+
+    /// <summary>
+    ///     When non-null, identifies the durable orchestrator owning this execution. Used by
+    ///     <see cref="IJobClient" /> to derive deterministic child run / batch ids via
+    ///     <c>DurableIds.DerivedRunId(OrchestratorRunId, step)</c>.
+    /// </summary>
+    internal string? OrchestratorRunId { get; init; }
+
+    /// <summary>
+    ///     The highest step number recorded by prior executions of this orchestrator, captured
+    ///     once at claim time. Frozen for the duration of this execution. The handler is in
+    ///     "recorded replay" territory while <c>_nextStep &lt; HighestRecordedStep</c> and in
+    ///     "new" territory thereafter; see <see cref="IsReplaying" />.
+    /// </summary>
+    internal int HighestRecordedStep { get; init; }
+
+    /// <summary>
+    ///     Bulk-loaded snapshot of the orchestrator's recorded children and on-row replay counters,
+    ///     captured once at claim time. Used by <see cref="IJobClient" /> replay paths so every
+    ///     <c>RunAsync</c> / <c>RunBatchAsync</c> call satisfies itself from in-memory state
+    ///     rather than per-call store reads. Null for non-durable runs.
+    /// </summary>
+    internal DurableExecutionSnapshot? DurableSnapshot { get; init; }
+
+    /// <summary>
+    ///     Collector for the run ids / batch ids the handler awaited during this invocation.
+    ///     Both throw-yield iterator methods and cooperative-TCS await methods write here; the
+    ///     executor reads here once when deciding whether to suspend. Null for non-durable runs.
+    /// </summary>
+    internal PendingAwaitSet? PendingAwaits { get; init; }
+
+    private int _nextStep;
+
+    /// <summary>
+    ///     Allocates a step index and captures the replay flag in the same call so concurrent
+    ///     <see cref="IJobClient" /> calls inside a <c>Task.WhenAll</c> never observe one another's
+    ///     step increments through the shared <see cref="IsReplaying" /> read.
+    /// </summary>
+    internal (int Step, bool IsReplay) AllocateStep()
+    {
+        var step = Interlocked.Increment(ref _nextStep);
+        return (step, HasRecordedOperation(step));
+    }
+
+    /// <summary>
+    ///     Records a value produced by <paramref name="valueFactory" /> so durable replay returns
+    ///     the same value without invoking the factory again.
+    /// </summary>
+    /// <typeparam name="T">The recorded value type. Keep this type stable for running orchestrators.</typeparam>
+    /// <param name="name">A non-empty diagnostic name for the recorded value. It does not need to be unique.</param>
+    /// <param name="valueFactory">The factory invoked only when recording new durable history.</param>
+    /// <param name="cancellationToken">
+    ///     A token to cancel the factory and store write. When omitted, the job cancellation token is used.
+    /// </param>
+    /// <returns>The newly recorded value, or the stored value during replay.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when called outside a durable orchestrator.</exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="name" /> is empty.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="valueFactory" /> is null.</exception>
+    /// <exception cref="DurableReplayMismatchException">Thrown when code no longer matches replay history.</exception>
+    [RequiresUnreferencedCode("Uses JSON serialization for recorded values.")]
+    [RequiresDynamicCode("Uses JSON serialization for recorded values.")]
+    public async ValueTask<T> RecordAsync<T>(string name, Func<CancellationToken, ValueTask<T>> valueFactory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(valueFactory);
+
+        var effectiveToken = cancellationToken.CanBeCanceled ? cancellationToken : CancellationToken;
+        var (step, isReplay) = AllocateDurableStep();
+        if (isReplay)
+        {
+            var replayRecord = GetReplayRecord(step, DurableRecordKinds.Record, name);
+            return JsonSerializer.Deserialize<T>(replayRecord.Payload, SerializerOptions)!;
+        }
+
+        var value = await valueFactory(effectiveToken);
+        var payload = JsonSerializer.Serialize(value, SerializerOptions);
+        var record = new DurableRecord(
+            OrchestratorRunId!,
+            step,
+            DurableRecordKinds.Record,
+            name,
+            payload,
+            TimeProvider.GetUtcNow());
+        await Store.CreateDurableRecordAsync(record, effectiveToken);
+        return value;
+    }
+
+    /// <summary>Records and returns a replay-safe equivalent of <see cref="Guid.NewGuid" />.</summary>
+    public ValueTask<Guid> NewGuidAsync(CancellationToken cancellationToken = default) =>
+        RecordBuiltInAsync(DurableRecordKinds.GuidV4, () => Guid.NewGuid(),
+            SurefireJsonContext.Default.Guid, cancellationToken);
+
+    /// <summary>Records and returns a replay-safe version 7 GUID.</summary>
+    public ValueTask<Guid> NewGuidV7Async(CancellationToken cancellationToken = default) =>
+        RecordBuiltInAsync(DurableRecordKinds.GuidV7, () => Guid.CreateVersion7(TimeProvider.GetUtcNow()),
+            SurefireJsonContext.Default.Guid, cancellationToken);
+
+    /// <summary>Records and returns a replay-safe equivalent of <see cref="TimeProvider.GetUtcNow" />.</summary>
+    public ValueTask<DateTimeOffset> GetUtcNowAsync(CancellationToken cancellationToken = default) =>
+        RecordBuiltInAsync(DurableRecordKinds.UtcNow, () => TimeProvider.GetUtcNow(),
+            SurefireJsonContext.Default.DateTimeOffset, cancellationToken);
+
+    /// <summary>Records and returns a replay-safe non-negative random integer.</summary>
+    public ValueTask<int> NextInt32Async(CancellationToken cancellationToken = default) =>
+        RecordRandomInt32Async(() => Random.Shared.Next(), null, null, cancellationToken);
+
+    /// <summary>Records and returns a replay-safe random integer less than <paramref name="maxValue" />.</summary>
+    public ValueTask<int> NextInt32Async(int maxValue, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxValue);
+        return RecordRandomInt32Async(() => Random.Shared.Next(maxValue), 0, maxValue, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Records and returns a replay-safe random integer in the half-open range
+    ///     <paramref name="minValue" /> to <paramref name="maxValue" />.
+    /// </summary>
+    public ValueTask<int> NextInt32Async(int minValue, int maxValue, CancellationToken cancellationToken = default)
+    {
+        if (minValue > maxValue)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minValue), "minValue must be less than or equal to maxValue.");
+        }
+
+        return RecordRandomInt32Async(() => Random.Shared.Next(minValue, maxValue), minValue, maxValue, cancellationToken);
+    }
+
+    /// <summary>Records and returns a replay-safe random double greater than or equal to 0.0 and less than 1.0.</summary>
+    public ValueTask<double> NextDoubleAsync(CancellationToken cancellationToken = default) =>
+        RecordBuiltInAsync(DurableRecordKinds.RandomDouble, () => Random.Shared.NextDouble(),
+            SurefireJsonContext.Default.Double, cancellationToken);
+
+    internal void ValidateReplayChildRun(int step, string runId)
+    {
+        var operation = GetRecordedOperation(step, out var record, out var recordedId);
+        if (operation != DurableRecordedOperation.ChildRun || !string.Equals(recordedId, runId, StringComparison.Ordinal))
+        {
+            throw BuildReplayMismatch(step, DescribeOperation(DurableRecordedOperation.ChildRun, runId),
+                DescribeOperation(operation, recordedId, record));
+        }
+    }
+
+    internal void ValidateReplayChildBatch(int step, string batchId)
+    {
+        var operation = GetRecordedOperation(step, out var record, out var recordedId);
+        if (operation != DurableRecordedOperation.ChildBatch ||
+            !string.Equals(recordedId, batchId, StringComparison.Ordinal))
+        {
+            throw BuildReplayMismatch(step, DescribeOperation(DurableRecordedOperation.ChildBatch, batchId),
+                DescribeOperation(operation, recordedId, record));
+        }
+    }
+
+    internal void ThrowIfRecordedStepsSkipped()
+    {
+        if (OrchestratorRunId is null)
+        {
+            return;
+        }
+
+        var currentStep = Volatile.Read(ref _nextStep);
+        if (currentStep < HighestRecordedStep)
+        {
+            throw BuildReplayMismatch(currentStep + 1,
+                "the next recorded durable operation",
+                "handler completed before replaying all recorded durable steps");
+        }
+    }
 
     internal static IDisposable EnterScope(JobContext context)
     {
         var previous = CurrentContext.Value;
         CurrentContext.Value = context;
         return new Scope(previous);
+    }
+
+    private async ValueTask<T> RecordBuiltInAsync<T>(string kind, Func<T> valueFactory,
+        JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken, string? name = null)
+    {
+        var effectiveToken = cancellationToken.CanBeCanceled ? cancellationToken : CancellationToken;
+        var (step, isReplay) = AllocateDurableStep();
+        if (isReplay)
+        {
+            var replayRecord = GetReplayRecord(step, kind, name);
+            return JsonSerializer.Deserialize(replayRecord.Payload, jsonTypeInfo)!;
+        }
+
+        var value = valueFactory();
+        var payload = JsonSerializer.Serialize(value, jsonTypeInfo);
+        var record = new DurableRecord(
+            OrchestratorRunId!,
+            step,
+            kind,
+            name,
+            payload,
+            TimeProvider.GetUtcNow());
+        await Store.CreateDurableRecordAsync(record, effectiveToken);
+        return value;
+    }
+
+    private async ValueTask<int> RecordRandomInt32Async(Func<int> valueFactory, int? minValue, int? maxValue,
+        CancellationToken cancellationToken)
+    {
+        var effectiveToken = cancellationToken.CanBeCanceled ? cancellationToken : CancellationToken;
+        var (step, isReplay) = AllocateDurableStep();
+        if (isReplay)
+        {
+            var replayRecord = GetReplayRecord(step, DurableRecordKinds.RandomInt32, null);
+            var replayPayload = JsonSerializer.Deserialize(replayRecord.Payload,
+                                    SurefireJsonContext.Default.DurableRandomInt32Payload)
+                                ?? throw BuildReplayMismatch(step,
+                                    DescribeRandomInt32(minValue, maxValue),
+                                    "null random-int32 payload");
+            if (replayPayload.MinValue != minValue || replayPayload.MaxValue != maxValue)
+            {
+                throw BuildReplayMismatch(step,
+                    DescribeRandomInt32(minValue, maxValue),
+                    DescribeRandomInt32(replayPayload.MinValue, replayPayload.MaxValue));
+            }
+
+            if (!IsValidRandomInt32Value(replayPayload.Value, minValue, maxValue))
+            {
+                throw BuildReplayMismatch(step,
+                    $"value in {DescribeRandomInt32(minValue, maxValue)}",
+                    replayPayload.Value.ToString(CultureInfo.InvariantCulture));
+            }
+
+            return replayPayload.Value;
+        }
+
+        var value = valueFactory();
+        var payload = JsonSerializer.Serialize(
+            new DurableRandomInt32Payload
+            {
+                Value = value,
+                MinValue = minValue,
+                MaxValue = maxValue
+            },
+            SurefireJsonContext.Default.DurableRandomInt32Payload);
+        var record = new DurableRecord(
+            OrchestratorRunId!,
+            step,
+            DurableRecordKinds.RandomInt32,
+            null,
+            payload,
+            TimeProvider.GetUtcNow());
+        await Store.CreateDurableRecordAsync(record, effectiveToken);
+        return value;
+    }
+
+    private (int Step, bool IsReplay) AllocateDurableStep()
+    {
+        if (OrchestratorRunId is null)
+        {
+            throw new InvalidOperationException("Recorded durable values can only be used inside a durable job.");
+        }
+
+        return AllocateStep();
+    }
+
+    private bool HasRecordedOperation(int step)
+    {
+        if (OrchestratorRunId is not { } orchestratorRunId || DurableSnapshot is null)
+        {
+            return false;
+        }
+
+        if (DurableSnapshot.Records.ContainsKey(step))
+        {
+            return true;
+        }
+
+        return DurableSnapshot.Children.ContainsKey(DurableIds.DerivedRunId(orchestratorRunId, step))
+               || DurableSnapshot.ChildBatches.ContainsKey(DurableIds.DerivedBatchId(orchestratorRunId, step));
+    }
+
+    private DurableRecord GetReplayRecord(int step, string kind, string? name)
+    {
+        var operation = GetRecordedOperation(step, out var record, out var recordedId);
+        if (operation != DurableRecordedOperation.Record || record is null)
+        {
+            throw BuildReplayMismatch(step, DescribeRecord(kind, name), DescribeOperation(operation, recordedId, record));
+        }
+
+        if (!string.Equals(record.Kind, kind, StringComparison.Ordinal)
+            || !string.Equals(record.Name, name, StringComparison.Ordinal))
+        {
+            throw BuildReplayMismatch(step, DescribeRecord(kind, name), DescribeRecord(record.Kind, record.Name));
+        }
+
+        return record;
+    }
+
+    private DurableRecordedOperation GetRecordedOperation(int step, out DurableRecord? record, out string? recordedId)
+    {
+        if (OrchestratorRunId is not { } orchestratorRunId || DurableSnapshot is null)
+        {
+            throw new InvalidOperationException("Durable replay history is not available for the current job.");
+        }
+
+        record = null;
+        recordedId = null;
+        DurableRecordedOperation? operation = null;
+
+        if (DurableSnapshot.Records.TryGetValue(step, out var durableRecord))
+        {
+            record = durableRecord;
+            operation = DurableRecordedOperation.Record;
+        }
+
+        var childRunId = DurableIds.DerivedRunId(orchestratorRunId, step);
+        if (DurableSnapshot.Children.ContainsKey(childRunId))
+        {
+            EnsureSingleRecordedOperation(step, operation, DurableRecordedOperation.ChildRun);
+            recordedId = childRunId;
+            operation = DurableRecordedOperation.ChildRun;
+        }
+
+        var childBatchId = DurableIds.DerivedBatchId(orchestratorRunId, step);
+        if (DurableSnapshot.ChildBatches.ContainsKey(childBatchId))
+        {
+            EnsureSingleRecordedOperation(step, operation, DurableRecordedOperation.ChildBatch);
+            recordedId = childBatchId;
+            operation = DurableRecordedOperation.ChildBatch;
+        }
+
+        return operation ?? throw BuildReplayMismatch(step, "recorded durable operation", "no recorded operation");
+    }
+
+    private void EnsureSingleRecordedOperation(int step, DurableRecordedOperation? existing,
+        DurableRecordedOperation next)
+    {
+        if (existing is { } prior)
+        {
+            throw BuildReplayMismatch(step, DescribeOperation(next, null, null),
+                $"ambiguous history containing both {prior} and {next}");
+        }
+    }
+
+    private DurableReplayMismatchException BuildReplayMismatch(int step, string expected, string actual) =>
+        new(OrchestratorRunId ?? RunId, step, $"Expected {expected}; saw {actual}.");
+
+    private static string DescribeOperation(DurableRecordedOperation operation, string? recordedId,
+        DurableRecord? record = null) => operation switch
+    {
+        DurableRecordedOperation.ChildRun => $"child run '{recordedId}'",
+        DurableRecordedOperation.ChildBatch => $"child batch '{recordedId}'",
+        DurableRecordedOperation.Record when record is { } r => DescribeRecord(r.Kind, r.Name),
+        DurableRecordedOperation.Record => "recorded value",
+        _ => operation.ToString()
+    };
+
+    private static string DescribeRecord(string kind, string? name) =>
+        name is { Length: > 0 }
+            ? $"record '{name}' ({kind})"
+            : $"record kind '{kind}'";
+
+    private static string DescribeRandomInt32(int? minValue, int? maxValue) =>
+        (minValue, maxValue) switch
+        {
+            (null, null) => "random-int32 with no bounds",
+            (0, { } max) => $"random-int32 with maxValue {max.ToString(CultureInfo.InvariantCulture)}",
+            ({ } min, { } max) =>
+                $"random-int32 with range {min.ToString(CultureInfo.InvariantCulture)}..{max.ToString(CultureInfo.InvariantCulture)}",
+            _ => "random-int32 with invalid bounds"
+        };
+
+    private static bool IsValidRandomInt32Value(int value, int? minValue, int? maxValue)
+    {
+        if (minValue is null && maxValue is null)
+        {
+            return value >= 0 && value < int.MaxValue;
+        }
+
+        var min = minValue.GetValueOrDefault();
+        var max = maxValue.GetValueOrDefault();
+        return min == max
+            ? value == min
+            : value >= min && value < max;
     }
 
     /// <summary>

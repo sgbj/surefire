@@ -22,13 +22,14 @@ builder.Services.AddSurefire(options =>
 
 With `AutoMigrate` enabled (the default), Surefire creates and migrates the required `dbo.surefire_*` tables on startup. The principal you use for migration needs permission to create tables. At runtime, `db_datareader` and `db_datawriter` are enough.
 
-Enable `READ_COMMITTED_SNAPSHOT` on the database to keep dashboard reads from blocking writers and reduce lock contention between claims, inserts, and maintenance under load:
+Surefire requires both `ALLOW_SNAPSHOT_ISOLATION` and `READ_COMMITTED_SNAPSHOT` to be ON on the target database. Snapshot isolation backs the multi-statement snapshot reads durable orchestrators take at claim time, and `READ_COMMITTED_SNAPSHOT` keeps dashboard reads from blocking writers and reduces lock contention between claims, inserts, and maintenance under load. Enable both once during provisioning:
 
 ```sql
+ALTER DATABASE [YourDb] SET ALLOW_SNAPSHOT_ISOLATION ON;
 ALTER DATABASE [YourDb] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
 ```
 
-This requires `ALTER` on the database and exclusive access (hence `ROLLBACK IMMEDIATE`), so run it once during provisioning.
+These require `ALTER` on the database and `READ_COMMITTED_SNAPSHOT` requires exclusive access (hence `ROLLBACK IMMEDIATE`).
 
 ## Notifications
 

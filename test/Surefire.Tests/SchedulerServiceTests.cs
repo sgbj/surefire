@@ -129,6 +129,45 @@ public sealed class SchedulerServiceTests
     }
 
     [Fact]
+    public async Task ScheduledRun_AppliesDefaultRunExpirationFromFireTime()
+    {
+        var (service, store, time) = CreateService(new()
+        {
+            RunExpirationPeriod = TimeSpan.FromHours(2),
+            PollingInterval = TimeSpan.FromSeconds(31)
+        });
+        var lastFire = time.GetUtcNow().AddMinutes(-1);
+        store.Jobs.Add(MakeJob(cron: "* * * * *", policy: MisfirePolicy.Skip, lastCronFireAt: lastFire));
+
+        await service.ScheduleDueJobsAsync(CancellationToken.None);
+
+        var created = Assert.Single(store.CreatedRuns);
+        Assert.Equal(created.Run.NotBefore.AddHours(2), created.Run.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task ContinuousSeeder_AppliesDefaultRunExpiration()
+    {
+        var time = new FakeTimeProvider(new(2025, 1, 1, 12, 0, 0, TimeSpan.Zero));
+        var store = new FakeSchedulerStore();
+        var notifications = new FakeNotificationProvider();
+        var options = new SurefireOptions { RunExpirationPeriod = TimeSpan.FromHours(3) };
+        var job = MakeJob("ContinuousSeed");
+        job.IsContinuous = true;
+
+        await ContinuousRunSeeder.EnsureCapacityAsync(
+            store,
+            notifications,
+            time,
+            options,
+            job,
+            CancellationToken.None);
+
+        var created = Assert.Single(store.CreatedRuns);
+        Assert.Equal(created.Run.NotBefore.AddHours(3), created.Run.ExpiresAt);
+    }
+
+    [Fact]
     public async Task FireAll_MultipleMissed_CreatesOneRunPerFireTime()
     {
         var (service, store, time) = CreateService();
@@ -373,13 +412,15 @@ public sealed class SchedulerServiceTests
         public override Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
             DateTimeOffset? lastCronFireAt = null,
             IReadOnlyList<RunEvent>? initialEvents = null,
+            DurableStepRecord? durableStepRecord = null,
             CancellationToken ct = default)
         {
             TryCreateCallCount++;
             if (RejectNextCreate)
             {
                 RejectNextCreate = false;
-                return Task.FromResult(false);
+                throw new RunConflictException(run.Id,
+                    $"Run with deduplication id '{run.DeduplicationId}' is already active for job '{run.JobName}'.");
             }
 
             CreatedRuns.Add((run, lastCronFireAt ?? default));

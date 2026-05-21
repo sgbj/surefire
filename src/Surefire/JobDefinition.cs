@@ -56,6 +56,14 @@ public sealed class JobDefinition
     public bool IsContinuous { get; set; }
 
     /// <summary>
+    ///     Gets or sets whether this job is a durable orchestrator. Durable jobs record every
+    ///     <see cref="IJobClient" /> call in the run's event log and replay it deterministically
+    ///     on resume. Between un-completed calls the orchestrator is suspended and does not
+    ///     consume a worker, job, or queue concurrency slot.
+    /// </summary>
+    public bool IsDurable { get; set; }
+
+    /// <summary>
     ///     Gets or sets the name of the queue this job is assigned to.
     /// </summary>
     public string? Queue { get; set; }
@@ -109,6 +117,7 @@ public sealed class JobDefinition
         Priority = Priority,
         RetryPolicy = RetryPolicy with { },
         IsContinuous = IsContinuous,
+        IsDurable = IsDurable,
         Queue = Queue,
         RateLimitName = RateLimitName,
         IsEnabled = IsEnabled,

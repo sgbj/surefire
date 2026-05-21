@@ -7,6 +7,19 @@ namespace Surefire;
 /// <param name="BatchId">The batch ID, if the run belongs to a batch; <c>null</c> otherwise.</param>
 public readonly record struct CanceledRun(string RunId, string? BatchId);
 
+internal enum ExpiredCancellationKind
+{
+    Expired,
+    AncestorExpired
+}
+
+internal sealed record ExpiredCanceledRun(
+    string RunId,
+    string? BatchId,
+    int Attempt,
+    string Reason,
+    ExpiredCancellationKind Kind);
+
 /// <summary>
 ///     Result of a subtree cancellation: every run that transitioned to <see cref="JobStatus.Canceled" />
 ///     in the same atomic operation, plus any batches that completed as a side effect because
@@ -35,4 +48,6 @@ public sealed record SubtreeCancellation(
     ///     the addressed entity was not found in the store.
     /// </summary>
     public bool Found { get; init; } = true;
+
+    internal IReadOnlyList<ExpiredCanceledRun> ExpiredRuns { get; init; } = [];
 }

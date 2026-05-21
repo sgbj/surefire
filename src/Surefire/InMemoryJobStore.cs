@@ -19,6 +19,27 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, List<string>> _childrenByParent =
         new(StringComparer.Ordinal);
 
+    private readonly Dictionary<string, List<string>> _batchesByParentRun =
+        new(StringComparer.Ordinal);
+
+    // Wait table modeled as in-process: outgoing (orchestrator -> awaited entities) and incoming
+    // (awaited entity -> orchestrators waiting). Both directions kept in sync so wake-on-terminal
+    // looks up reverse, suspend-replay inserts both, and run-cancel clears outgoing without
+    // scanning. HashSet for uniqueness (re-suspend reuses ids) and O(1) remove.
+    private readonly Dictionary<string, HashSet<string>> _durableWaitsByOrchestratorRun =
+        new(StringComparer.Ordinal);
+
+    private readonly Dictionary<string, HashSet<string>> _durableWaitsByOrchestratorBatch =
+        new(StringComparer.Ordinal);
+
+    private readonly Dictionary<string, HashSet<string>> _orchestratorsAwaitingRun =
+        new(StringComparer.Ordinal);
+
+    private readonly Dictionary<string, HashSet<string>> _orchestratorsAwaitingBatch =
+        new(StringComparer.Ordinal);
+
+    private readonly Dictionary<(string OrchestratorRunId, int Step), DurableRecord> _durableRecords = new();
+
     // (JobName, DeduplicationId) of non-terminal runs.
     private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
     private readonly Dictionary<string, List<RunEvent>> _eventsByRunId = new();
@@ -162,8 +183,9 @@ internal sealed class InMemoryJobStore : IJobStore
     public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
         CancellationToken cancellationToken = default)
-        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents);
+        => TryCreateRunAsyncCore(run, maxActiveForJob, lastCronFireAt, initialEvents, durableStepRecord);
 
     public Task<JobRun?> GetRunAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -355,6 +377,340 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
+    public Task<DurableSuspendOutcome> TrySuspendRunAsync(string runId, long expectedLeaseEpoch,
+        IReadOnlyCollection<string> awaitedRunIds,
+        IReadOnlyCollection<string> awaitedBatchIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_runs.TryGetValue(runId, out var stored))
+            {
+                return Task.FromResult(DurableSuspendOutcome.NotTransitioned);
+            }
+
+            if (stored.Status != JobStatus.Running || stored.LeaseEpoch != expectedLeaseEpoch)
+            {
+                return Task.FromResult(DurableSuspendOutcome.NotTransitioned);
+            }
+
+            // Check whether any awaited entity is still non-terminal. If yes, the orchestrator
+            // parks in Suspended; the wake mechanism will replay it when the last awaited entity
+            // terminates. If everything is already terminal, route straight to Pending so the
+            // next claim sweep replays immediately (no wake source would ever arrive otherwise).
+            var hasNonTerminal = false;
+            foreach (var awaitedRunId in awaitedRunIds)
+            {
+                if (_runs.TryGetValue(awaitedRunId, out var awaited) && !awaited.Status.IsTerminal)
+                {
+                    hasNonTerminal = true;
+                    break;
+                }
+            }
+
+            if (!hasNonTerminal)
+            {
+                foreach (var awaitedBatchId in awaitedBatchIds)
+                {
+                    if (_batches.TryGetValue(awaitedBatchId, out var awaited) && !awaited.Status.IsTerminal)
+                    {
+                        hasNonTerminal = true;
+                        break;
+                    }
+                }
+            }
+
+            var newStatus = hasNonTerminal ? JobStatus.Suspended : JobStatus.Pending;
+            var oldStatus = stored.Status;
+            var newStored = stored with
+            {
+                Status = newStatus,
+                NodeName = null,
+                NotBefore = hasNonTerminal ? stored.NotBefore : now,
+                LastHeartbeatAt = now,
+                ReplayCount = hasNonTerminal ? stored.ReplayCount : stored.ReplayCount + 1
+            };
+            _runs[runId] = newStored;
+
+            UpdateIndexes(newStored, oldStatus, newStatus);
+            AppendStatusEventCore(runId, newStored.Attempt, newStatus);
+
+            if (hasNonTerminal)
+            {
+                // Persist the wait set: outgoing index (orchestrator -> awaited) and the inverse
+                // (awaited -> orchestrators). Only non-terminal entities are stored; terminals
+                // are observed inline above and won't drive a wake (they already happened).
+                foreach (var awaitedRunId in awaitedRunIds)
+                {
+                    if (_runs.TryGetValue(awaitedRunId, out var awaited) && !awaited.Status.IsTerminal)
+                    {
+                        AddDurableWaitForRun(runId, awaitedRunId);
+                    }
+                }
+
+                foreach (var awaitedBatchId in awaitedBatchIds)
+                {
+                    if (_batches.TryGetValue(awaitedBatchId, out var awaited) && !awaited.Status.IsTerminal)
+                    {
+                        AddDurableWaitForBatch(runId, awaitedBatchId);
+                    }
+                }
+            }
+
+            return Task.FromResult(hasNonTerminal
+                ? DurableSuspendOutcome.Suspended
+                : DurableSuspendOutcome.ImmediatePending);
+        }
+    }
+
+    public Task<DurableExecutionSnapshot> LoadExecutionSnapshotAsync(string orchestratorRunId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _runs.TryGetValue(orchestratorRunId, out var orchestrator);
+
+            var children = new Dictionary<string, JobRun>(StringComparer.Ordinal);
+            if (_childrenByParent.TryGetValue(orchestratorRunId, out var childIds))
+            {
+                foreach (var childId in childIds)
+                {
+                    if (_runs.TryGetValue(childId, out var child))
+                    {
+                        children[childId] = child;
+                    }
+                }
+            }
+
+            var childBatches = new Dictionary<string, JobBatch>(StringComparer.Ordinal);
+            if (_batchesByParentRun.TryGetValue(orchestratorRunId, out var batchIds))
+            {
+                foreach (var batchId in batchIds)
+                {
+                    if (_batches.TryGetValue(batchId, out var batch))
+                    {
+                        childBatches[batchId] = batch;
+                    }
+                }
+            }
+
+            var records = _durableRecords
+                .Where(kvp => string.Equals(kvp.Key.OrchestratorRunId, orchestratorRunId, StringComparison.Ordinal))
+                .ToDictionary(kvp => kvp.Key.Step, kvp => kvp.Value);
+
+            return Task.FromResult(new DurableExecutionSnapshot(
+                children,
+                childBatches,
+                records,
+                orchestrator?.HighestRecordedStep ?? 0));
+        }
+    }
+
+    public Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var key = (record.OrchestratorRunId, record.Step);
+            if (_durableRecords.TryGetValue(key, out var existing))
+            {
+                if (DurableRecordsEqual(existing, record))
+                {
+                    AdvanceHighestRecordedStep(record.OrchestratorRunId, record.Step);
+                    return Task.FromResult(existing);
+                }
+
+                throw new DurableReplayMismatchException(record.OrchestratorRunId, record.Step,
+                    $"Expected {DescribeRecord(record)}; saw {DescribeRecord(existing)}.");
+            }
+
+            _durableRecords[key] = record;
+            AdvanceHighestRecordedStep(record.OrchestratorRunId, record.Step);
+
+            return Task.FromResult(record);
+        }
+    }
+
+    private void AdvanceHighestRecordedStep(string orchestratorRunId, int step)
+    {
+        if (_runs.TryGetValue(orchestratorRunId, out var orchestrator)
+            && step > orchestrator.HighestRecordedStep)
+        {
+            _runs[orchestratorRunId] = orchestrator with { HighestRecordedStep = step };
+        }
+    }
+
+
+    // --- Durable wait table (in-process model) ---
+
+    private void AddDurableWaitForRun(string orchestratorId, string awaitedRunId)
+    {
+        if (!_durableWaitsByOrchestratorRun.TryGetValue(orchestratorId, out var outgoing))
+        {
+            outgoing = new(StringComparer.Ordinal);
+            _durableWaitsByOrchestratorRun[orchestratorId] = outgoing;
+        }
+
+        outgoing.Add(awaitedRunId);
+
+        if (!_orchestratorsAwaitingRun.TryGetValue(awaitedRunId, out var incoming))
+        {
+            incoming = new(StringComparer.Ordinal);
+            _orchestratorsAwaitingRun[awaitedRunId] = incoming;
+        }
+
+        incoming.Add(orchestratorId);
+    }
+
+    private void AddDurableWaitForBatch(string orchestratorId, string awaitedBatchId)
+    {
+        if (!_durableWaitsByOrchestratorBatch.TryGetValue(orchestratorId, out var outgoing))
+        {
+            outgoing = new(StringComparer.Ordinal);
+            _durableWaitsByOrchestratorBatch[orchestratorId] = outgoing;
+        }
+
+        outgoing.Add(awaitedBatchId);
+
+        if (!_orchestratorsAwaitingBatch.TryGetValue(awaitedBatchId, out var incoming))
+        {
+            incoming = new(StringComparer.Ordinal);
+            _orchestratorsAwaitingBatch[awaitedBatchId] = incoming;
+        }
+
+        incoming.Add(orchestratorId);
+    }
+
+    /// <summary>
+    ///     Removes every wait row owned by <paramref name="orchestratorId" /> (step 1 of the wake
+    ///     mechanism: outgoing cleanup). No-op for non-Suspended runs; required for cancel paths
+    ///     where a Suspended -> Canceled run still has outgoing wait rows.
+    /// </summary>
+    private void RemoveOutgoingDurableWaits(string orchestratorId)
+    {
+        if (_durableWaitsByOrchestratorRun.Remove(orchestratorId, out var outgoingRuns))
+        {
+            foreach (var awaitedRunId in outgoingRuns)
+            {
+                if (_orchestratorsAwaitingRun.TryGetValue(awaitedRunId, out var incoming))
+                {
+                    incoming.Remove(orchestratorId);
+                    if (incoming.Count == 0)
+                    {
+                        _orchestratorsAwaitingRun.Remove(awaitedRunId);
+                    }
+                }
+            }
+        }
+
+        if (_durableWaitsByOrchestratorBatch.Remove(orchestratorId, out var outgoingBatches))
+        {
+            foreach (var awaitedBatchId in outgoingBatches)
+            {
+                if (_orchestratorsAwaitingBatch.TryGetValue(awaitedBatchId, out var incoming))
+                {
+                    incoming.Remove(orchestratorId);
+                    if (incoming.Count == 0)
+                    {
+                        _orchestratorsAwaitingBatch.Remove(awaitedBatchId);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Step 2 + 3 of the wake mechanism. Deletes every incoming wait row referencing
+    ///     <paramref name="terminatedId" /> (interpreted as a run id or batch id per
+    ///     <paramref name="kind" />), and for each affected orchestrator whose wait set is now
+    ///     empty, transitions <see cref="JobStatus.Suspended" /> -> <see cref="JobStatus.Pending" />.
+    /// </summary>
+    private void WakeOrchestratorsAwaiting(string terminatedId, DurableWaitKind kind, DateTimeOffset now)
+    {
+        var incomingIndex = kind == DurableWaitKind.Run ? _orchestratorsAwaitingRun : _orchestratorsAwaitingBatch;
+        if (!incomingIndex.Remove(terminatedId, out var affectedOrchestrators) ||
+            affectedOrchestrators.Count == 0)
+        {
+            return;
+        }
+
+        // Deterministic id order matches the SQL stores' sorted-id locking discipline; the
+        // in-process gate already serializes here, but ordered iteration keeps debug traces
+        // stable across stores.
+        var orderedAffected = affectedOrchestrators.ToArray();
+        Array.Sort(orderedAffected, StringComparer.Ordinal);
+
+        foreach (var orchestratorId in orderedAffected)
+        {
+            // Step 2: clean the orchestrator's outgoing edge for this awaited entity.
+            var outgoingIndex = kind == DurableWaitKind.Run
+                ? _durableWaitsByOrchestratorRun
+                : _durableWaitsByOrchestratorBatch;
+            if (outgoingIndex.TryGetValue(orchestratorId, out var outgoing))
+            {
+                outgoing.Remove(terminatedId);
+                if (outgoing.Count == 0)
+                {
+                    outgoingIndex.Remove(orchestratorId);
+                }
+            }
+
+            // Step 3: wake if the orchestrator's combined wait set is now empty.
+            var runsRemain = _durableWaitsByOrchestratorRun.TryGetValue(orchestratorId, out var rem1) &&
+                             rem1.Count > 0;
+            var batchesRemain = _durableWaitsByOrchestratorBatch.TryGetValue(orchestratorId, out var rem2) &&
+                                rem2.Count > 0;
+            if (runsRemain || batchesRemain)
+            {
+                continue;
+            }
+
+            if (!_runs.TryGetValue(orchestratorId, out var orchestrator) ||
+                orchestrator.Status != JobStatus.Suspended)
+            {
+                continue;
+            }
+
+            var waked = orchestrator with
+            {
+                Status = JobStatus.Pending,
+                NotBefore = now,
+                LastHeartbeatAt = now,
+                ReplayCount = orchestrator.ReplayCount + 1
+            };
+            _runs[orchestratorId] = waked;
+            UpdateIndexes(waked, JobStatus.Suspended, JobStatus.Pending);
+            AppendStatusEventCore(orchestratorId, waked.Attempt, JobStatus.Pending);
+        }
+    }
+
+    /// <summary>
+    ///     Convenience: runs all three wake steps for a just-terminated run id. Step 1 clears the
+    ///     terminated run's outgoing waits (matters when a Suspended run is canceled mid-wait);
+    ///     steps 2 + 3 wake any orchestrator awaiting this run id whose wait set is now empty.
+    /// </summary>
+    private void WakeForTerminatedRun(string terminatedRunId, DateTimeOffset now)
+    {
+        RemoveOutgoingDurableWaits(terminatedRunId);
+        WakeOrchestratorsAwaiting(terminatedRunId, DurableWaitKind.Run, now);
+    }
+
+    private void WakeForTerminatedBatch(string terminatedBatchId, DateTimeOffset now) =>
+        WakeOrchestratorsAwaiting(terminatedBatchId, DurableWaitKind.Batch, now);
+
+    private enum DurableWaitKind
+    {
+        Run,
+        Batch
+    }
+
     public Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
         CancellationToken cancellationToken = default)
     {
@@ -365,7 +721,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 return Task.FromResult(RunTransitionResult.NotApplied);
             }
 
-            if (stored.Status != transition.ExpectedStatus || stored.Attempt != transition.ExpectedAttempt)
+            if (stored.Status != transition.ExpectedStatus || stored.LeaseEpoch != transition.ExpectedLeaseEpoch)
             {
                 return Task.FromResult(RunTransitionResult.NotApplied);
             }
@@ -394,7 +750,10 @@ internal sealed class InMemoryJobStore : IJobStore
                 Result = transition.Result,
                 Progress = transition.Progress,
                 NotBefore = transition.NotBefore,
-                LastHeartbeatAt = transition.LastHeartbeatAt ?? stored.LastHeartbeatAt
+                LastHeartbeatAt = transition.LastHeartbeatAt ?? stored.LastHeartbeatAt,
+                LeaseEpoch = transition.IncrementLeaseEpoch ? stored.LeaseEpoch + 1 : stored.LeaseEpoch,
+                Attempt = transition.IncrementAttempt ? stored.Attempt + 1 : stored.Attempt,
+                FailureCount = transition.IncrementFailureCount ? stored.FailureCount + 1 : stored.FailureCount
             };
             _runs[newStored.Id] = newStored;
 
@@ -407,16 +766,26 @@ internal sealed class InMemoryJobStore : IJobStore
                 _dedupIndex.Remove((newStored.JobName, newStored.DeduplicationId));
             }
 
+            var now = _timeProvider.GetUtcNow();
             var batchCompletion = newStatus.IsTerminal
-                ? IncrementBatchCounter(newStored.BatchId, newStatus, _timeProvider.GetUtcNow())
+                ? IncrementBatchCounter(newStored.BatchId, newStatus, now)
                 : null;
+
+            if (newStatus.IsTerminal)
+            {
+                WakeForTerminatedRun(newStored.Id, now);
+                if (batchCompletion is { } bc)
+                {
+                    WakeForTerminatedBatch(bc.BatchId, now);
+                }
+            }
 
             return Task.FromResult(new RunTransitionResult(true, batchCompletion));
         }
     }
 
     public Task<RunTransitionResult> TryCancelRunAsync(string runId,
-        int? expectedAttempt = null,
+        long? expectedLeaseEpoch = null,
         string? reason = null,
         IReadOnlyList<RunEvent>? events = null,
         CancellationToken cancellationToken = default)
@@ -433,7 +802,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 return Task.FromResult(RunTransitionResult.NotApplied);
             }
 
-            if (expectedAttempt is { } ea && stored.Attempt != ea)
+            if (expectedLeaseEpoch is { } epoch && stored.LeaseEpoch != epoch)
             {
                 return Task.FromResult(RunTransitionResult.NotApplied);
             }
@@ -459,6 +828,11 @@ internal sealed class InMemoryJobStore : IJobStore
             }
 
             var batchCompletion = IncrementBatchCounter(Canceled.BatchId, JobStatus.Canceled, CanceledAt);
+            WakeForTerminatedRun(Canceled.Id, CanceledAt);
+            if (batchCompletion is { } bc)
+            {
+                WakeForTerminatedBatch(bc.BatchId, CanceledAt);
+            }
 
             return Task.FromResult(new RunTransitionResult(true, batchCompletion));
         }
@@ -524,7 +898,12 @@ internal sealed class InMemoryJobStore : IJobStore
                     continue;
                 }
 
-                if (run.NotAfter is { } notAfter && notAfter <= now)
+                if (run.LeaseEpoch == 0 && run.NotAfter is { } notAfter && notAfter < now)
+                {
+                    continue;
+                }
+
+                if (run.ExpiresAt is { } expiresAt && expiresAt < now)
                 {
                     continue;
                 }
@@ -590,9 +969,9 @@ internal sealed class InMemoryJobStore : IJobStore
                 {
                     Status = JobStatus.Running,
                     NodeName = nodeName,
-                    StartedAt = now,
+                    StartedAt = run.StartedAt ?? now,
                     LastHeartbeatAt = now,
-                    Attempt = run.Attempt + 1
+                    LeaseEpoch = run.LeaseEpoch + 1
                 };
                 _runs[run.Id] = claimedRun;
 
@@ -608,21 +987,40 @@ internal sealed class InMemoryJobStore : IJobStore
     }
 
     public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
-        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
+        CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            _batches[batch.Id] = batch;
+            if (_batches.ContainsKey(batch.Id))
+            {
+                throw new RunConflictException(batch.Id,
+                    $"Batch '{batch.Id}' already exists.");
+            }
 
             var copies = new List<JobRun>(runs.Count);
             foreach (var run in runs)
             {
                 if (_runs.ContainsKey(run.Id))
                 {
-                    throw new InvalidOperationException($"Run '{run.Id}' already exists.");
+                    throw new RunConflictException(run.Id,
+                        $"Run '{run.Id}' already exists.");
                 }
 
                 copies.Add(run);
+            }
+
+            _batches[batch.Id] = batch;
+            if (batch.ParentRunId is { } parentRunId)
+            {
+                if (!_batchesByParentRun.TryGetValue(parentRunId, out var siblings))
+                {
+                    siblings = [];
+                    _batchesByParentRun[parentRunId] = siblings;
+                }
+
+                siblings.Add(batch.Id);
             }
 
             foreach (var run in copies)
@@ -645,6 +1043,15 @@ internal sealed class InMemoryJobStore : IJobStore
                 {
                     _dedupIndex.Add((run.JobName, run.DeduplicationId));
                 }
+            }
+
+            // Atomically advance the orchestrator's HighestRecordedStep (monotonic max) for
+            // durable orchestrators whose handler is creating this batch as a recorded step.
+            if (durableStepRecord is { } step
+                && _runs.TryGetValue(step.OrchestratorRunId, out var orchestrator)
+                && step.Step > orchestrator.HighestRecordedStep)
+            {
+                _runs[step.OrchestratorRunId] = orchestrator with { HighestRecordedStep = step.Step };
             }
 
             if (initialEvents?.Count > 0)
@@ -675,6 +1082,7 @@ internal sealed class InMemoryJobStore : IJobStore
             }
 
             _batches[batchId] = batch with { Status = status, CompletedAt = completedAt };
+            WakeForTerminatedBatch(batchId, completedAt);
             return Task.FromResult(true);
         }
     }
@@ -766,6 +1174,30 @@ internal sealed class InMemoryJobStore : IJobStore
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlySet<string>> AppendEventsIfRunNonTerminalAsync(
+        IReadOnlyList<RunEvent> events,
+        CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            var acceptedRunIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var runId in events.Select(e => e.RunId).Distinct(StringComparer.Ordinal))
+            {
+                if (_runs.TryGetValue(runId, out var run) && !run.Status.IsTerminal)
+                {
+                    acceptedRunIds.Add(runId);
+                }
+            }
+
+            if (acceptedRunIds.Count > 0)
+            {
+                AppendEventsCore(events.Where(e => acceptedRunIds.Contains(e.RunId)).ToList());
+            }
+
+            return Task.FromResult<IReadOnlySet<string>>(acceptedRunIds);
+        }
     }
 
     public Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0, RunEventType[]? types = null,
@@ -989,29 +1421,60 @@ internal sealed class InMemoryJobStore : IJobStore
     {
         var now = _timeProvider.GetUtcNow();
         var canceledRuns = new List<CanceledRun>();
+        var expiredRuns = new List<ExpiredCanceledRun>();
         var completedBatches = new List<BatchCompletionInfo>();
 
         lock (_gate)
         {
-            foreach (var run in _runs.Values.ToList())
+            var directExpiredIds = _runs.Values
+                .Where(run => IsExpired(run, now))
+                .Select(run => run.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            if (directExpiredIds.Count == 0)
             {
-                if (run.Status is not JobStatus.Pending)
+                return Task.FromResult(SubtreeCancellation.Empty);
+            }
+
+            var expiredSeedIds = directExpiredIds
+                .Where(id => !HasExpiredAncestor(id, directExpiredIds))
+                .OrderBy(id => id, StringComparer.Ordinal)
+                .ToHashSet(StringComparer.Ordinal);
+            var queue = new Queue<string>(expiredSeedIds);
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            var terminatedBatchIds = new List<string>();
+
+            while (queue.Count > 0)
+            {
+                var runId = queue.Dequeue();
+                if (!visited.Add(runId))
                 {
                     continue;
                 }
 
-                if (run.NotAfter is null || run.NotAfter.Value >= now)
+                if (_childrenByParent.TryGetValue(runId, out var children))
+                {
+                    foreach (var childId in children.OrderBy(id => id, StringComparer.Ordinal))
+                    {
+                        queue.Enqueue(childId);
+                    }
+                }
+
+                if (!_runs.TryGetValue(runId, out var run) || run.Status.IsTerminal)
                 {
                     continue;
                 }
 
                 var oldStatus = run.Status;
+                var isDirectExpiration = expiredSeedIds.Contains(run.Id);
+                var reason = isDirectExpiration
+                    ? "Run expired past its deadline."
+                    : $"Canceled because parent run '{run.ParentRunId}' expired.";
                 var canceled = run with
                 {
                     Status = JobStatus.Canceled,
                     CanceledAt = now,
                     CompletedAt = now,
-                    Reason = "Run expired past NotAfter deadline."
+                    Reason = reason
                 };
                 _runs[run.Id] = canceled;
 
@@ -1023,18 +1486,65 @@ internal sealed class InMemoryJobStore : IJobStore
                 UpdateIndexes(canceled, oldStatus, JobStatus.Canceled);
                 AppendStatusEventCore(canceled.Id, canceled.Attempt, canceled.Status);
                 var batchCompletion = IncrementBatchCounter(canceled.BatchId, JobStatus.Canceled, now);
+                WakeForTerminatedRun(canceled.Id, now);
                 if (batchCompletion is { } bc)
                 {
+                    terminatedBatchIds.Add(bc.BatchId);
                     completedBatches.Add(bc);
                 }
 
                 canceledRuns.Add(new(canceled.Id, canceled.BatchId));
+                expiredRuns.Add(new(
+                    canceled.Id,
+                    canceled.BatchId,
+                    canceled.Attempt,
+                    reason,
+                    isDirectExpiration
+                        ? ExpiredCancellationKind.Expired
+                        : ExpiredCancellationKind.AncestorExpired));
+            }
+
+            terminatedBatchIds.Sort(StringComparer.Ordinal);
+            foreach (var batchId in terminatedBatchIds)
+            {
+                WakeForTerminatedBatch(batchId, now);
             }
         }
 
         return Task.FromResult(canceledRuns.Count == 0 && completedBatches.Count == 0
             ? SubtreeCancellation.Empty
-            : new(canceledRuns, completedBatches));
+            : new SubtreeCancellation(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns });
+
+        static bool IsExpired(JobRun run, DateTimeOffset now)
+        {
+            if (run.Status.IsTerminal)
+            {
+                return false;
+            }
+
+            var startExpired = run.Status == JobStatus.Pending
+                               && run.LeaseEpoch == 0
+                               && run.NotAfter is { } notAfter
+                               && notAfter < now;
+            var lifetimeExpired = run.ExpiresAt is { } expiresAt && expiresAt < now;
+            return startExpired || lifetimeExpired;
+        }
+
+        bool HasExpiredAncestor(string runId, IReadOnlySet<string> directExpiredIds)
+        {
+            var currentId = runId;
+            while (_runs.TryGetValue(currentId, out var current) && current.ParentRunId is { } parentId)
+            {
+                if (directExpiredIds.Contains(parentId))
+                {
+                    return true;
+                }
+
+                currentId = parentId;
+            }
+
+            return false;
+        }
     }
 
     public Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -1043,8 +1553,7 @@ internal sealed class InMemoryJobStore : IJobStore
         {
             var runsToRemove = _runs.Values
                 .Where(r =>
-                    (CanPurgeTerminalRun(r, threshold) && r.CompletedAt < threshold) ||
-                    (r.Status == JobStatus.Pending && r.NotBefore < threshold))
+                    CanPurgeTerminalRun(r, threshold) && r.CompletedAt < threshold)
                 .Select(r => r.Id)
                 .ToList();
 
@@ -1059,6 +1568,13 @@ internal sealed class InMemoryJobStore : IJobStore
                         RemoveBatchEventIndexes(removed, removedEvents);
                     }
 
+                    foreach (var recordKey in _durableRecords.Keys
+                                 .Where(k => string.Equals(k.OrchestratorRunId, id, StringComparison.Ordinal))
+                                 .ToArray())
+                    {
+                        _durableRecords.Remove(recordKey);
+                    }
+
                     var queueName = GetQueueName(removed.JobName);
 
                     if (removed.Status == JobStatus.Pending)
@@ -1066,7 +1582,7 @@ internal sealed class InMemoryJobStore : IJobStore
                         DecrementCount(_pendingCountByQueue, queueName);
                     }
 
-                    if (ConsumesWorkerCapacity(removed.Status))
+                    if (removed.Status.ConsumesActiveSlot)
                     {
                         DecrementCount(_runningCountByJob, removed.JobName);
                         DecrementCount(_runningCountByQueue, queueName);
@@ -1130,11 +1646,23 @@ internal sealed class InMemoryJobStore : IJobStore
 
             var batchesToRemove = _batches.Values
                 .Where(b => b.Status.IsTerminal && b.CompletedAt < threshold)
+                .Where(b => !_runs.Values.Any(r => r.BatchId == b.Id))
                 .Select(b => b.Id)
                 .ToList();
 
             foreach (var id in batchesToRemove)
             {
+                if (_batches.TryGetValue(id, out var purged)
+                    && purged.ParentRunId is { } purgedParent
+                    && _batchesByParentRun.TryGetValue(purgedParent, out var siblings))
+                {
+                    siblings.Remove(id);
+                    if (siblings.Count == 0)
+                    {
+                        _batchesByParentRun.Remove(purgedParent);
+                    }
+                }
+
                 _batches.Remove(id);
                 _batchEventsByBatchId.Remove(id);
                 _batchOutputEventsByBatchId.Remove(id);
@@ -1166,6 +1694,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         var bucketPending = new int[bucketCount];
         var bucketRunning = new int[bucketCount];
+        var bucketSuspended = new int[bucketCount];
         var bucketSucceeded = new int[bucketCount];
         var bucketCanceled = new int[bucketCount];
         var bucketFailed = new int[bucketCount];
@@ -1198,7 +1727,7 @@ internal sealed class InMemoryJobStore : IJobStore
                         completedCount++;
                     }
                 }
-                else
+                else if (run.Status is JobStatus.Pending or JobStatus.Running)
                 {
                     activeRuns++;
                 }
@@ -1216,6 +1745,9 @@ internal sealed class InMemoryJobStore : IJobStore
                                 break;
                             case JobStatus.Running:
                                 bucketRunning[bucketIndex]++;
+                                break;
+                            case JobStatus.Suspended:
+                                bucketSuspended[bucketIndex]++;
                                 break;
                             case JobStatus.Succeeded:
                                 bucketSucceeded[bucketIndex]++;
@@ -1243,6 +1775,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 Start = bucketStart,
                 Pending = bucketPending[i],
                 Running = bucketRunning[i],
+                Suspended = bucketSuspended[i],
                 Succeeded = bucketSucceeded[i],
                 Canceled = bucketCanceled[i],
                 Failed = bucketFailed[i]
@@ -1488,6 +2021,9 @@ internal sealed class InMemoryJobStore : IJobStore
                     break;
             }
 
+            var canceledSet = new HashSet<string>(StringComparer.Ordinal);
+            var terminatedBatchIds = new List<string>();
+
             while (queue.Count > 0)
             {
                 var currentId = queue.Dequeue();
@@ -1527,9 +2063,29 @@ internal sealed class InMemoryJobStore : IJobStore
                 if (batchCompletion is { } bc)
                 {
                     completedBatches.Add(bc);
+                    terminatedBatchIds.Add(bc.BatchId);
                 }
 
+                canceledSet.Add(canceled.Id);
                 canceledRuns.Add(new(canceled.Id, canceled.BatchId));
+            }
+
+            // Three-step wake per terminated entity, in deterministic id order to match the SQL
+            // stores' sorted-id locking. Each canceled run might be itself awaited by another
+            // orchestrator (the canceled run's incoming waits get cleared and any orchestrator
+            // whose wait set is now empty is transitioned Suspended -> Pending). Outgoing waits
+            // (step 1) handle the case where a Suspended -> Canceled run still had outgoing rows.
+            var orderedRunIds = canceledSet.ToArray();
+            Array.Sort(orderedRunIds, StringComparer.Ordinal);
+            foreach (var canceledRunId in orderedRunIds)
+            {
+                WakeForTerminatedRun(canceledRunId, now);
+            }
+
+            terminatedBatchIds.Sort(StringComparer.Ordinal);
+            foreach (var bid in terminatedBatchIds)
+            {
+                WakeForTerminatedBatch(bid, now);
             }
         }
 
@@ -1606,7 +2162,7 @@ internal sealed class InMemoryJobStore : IJobStore
                     AddToPendingIndex(run);
                     IncrementCount(_pendingCountByQueue, GetQueueName(run.JobName));
                 }
-                else if (ConsumesWorkerCapacity(run.Status))
+                else if (run.Status.ConsumesActiveSlot)
                 {
                     IncrementCount(_runningCountByJob, run.JobName);
                     IncrementCount(_runningCountByQueue, GetQueueName(run.JobName));
@@ -1631,36 +2187,32 @@ internal sealed class InMemoryJobStore : IJobStore
 
     private Task<bool> TryCreateRunAsyncCore(JobRun run, int? maxActiveForJob,
         DateTimeOffset? lastCronFireAt,
-        IReadOnlyList<RunEvent>? initialEvents)
+        IReadOnlyList<RunEvent>? initialEvents,
+        DurableStepRecord? durableStepRecord = null)
     {
         lock (_gate)
         {
-            if (run.DeduplicationId is { })
+            if (_runs.ContainsKey(run.Id))
             {
-                if (_dedupIndex.Contains((run.JobName, run.DeduplicationId)))
-                {
-                    return Task.FromResult(false);
-                }
+                return Task.FromResult(false);
+            }
+
+            if (run.DeduplicationId is { }
+                && _dedupIndex.Contains((run.JobName, run.DeduplicationId)))
+            {
+                throw new RunConflictException(run.Id,
+                    $"Run with deduplication id '{run.DeduplicationId}' is already active for job '{run.JobName}'.");
             }
 
             if (maxActiveForJob is { })
             {
-                if (_jobs.TryGetValue(run.JobName, out var job) && !job.IsEnabled)
-                {
-                    return Task.FromResult(false);
-                }
-
                 _nonTerminalCountByJob.TryGetValue(run.JobName, out var activeCount);
 
                 if (activeCount >= maxActiveForJob.Value)
                 {
-                    return Task.FromResult(false);
+                    throw new RunConflictException(run.Id,
+                        $"Job '{run.JobName}' is at the maximum active run capacity ({maxActiveForJob.Value}).");
                 }
-            }
-
-            if (_runs.ContainsKey(run.Id))
-            {
-                return Task.FromResult(false);
             }
 
             _runs[run.Id] = run;
@@ -1671,7 +2223,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 AddToPendingIndex(run);
                 IncrementCount(_pendingCountByQueue, GetQueueName(run.JobName));
             }
-            else if (ConsumesWorkerCapacity(run.Status))
+            else if (run.Status.ConsumesActiveSlot)
             {
                 IncrementCount(_runningCountByJob, run.JobName);
                 IncrementCount(_runningCountByQueue, GetQueueName(run.JobName));
@@ -1690,6 +2242,15 @@ internal sealed class InMemoryJobStore : IJobStore
             if (lastCronFireAt is { } fireAt && _jobs.TryGetValue(run.JobName, out var jobDef))
             {
                 jobDef.LastCronFireAt = fireAt;
+            }
+
+            // Atomically advance the orchestrator's HighestRecordedStep (monotonic max) for
+            // durable orchestrators whose handler is creating this run as a recorded step.
+            if (durableStepRecord is { } step
+                && _runs.TryGetValue(step.OrchestratorRunId, out var orchestrator)
+                && step.Step > orchestrator.HighestRecordedStep)
+            {
+                _runs[step.OrchestratorRunId] = orchestrator with { HighestRecordedStep = step.Step };
             }
 
             AppendEventsCore(initialEvents);
@@ -1729,6 +2290,18 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
+    private static bool DurableRecordsEqual(DurableRecord left, DurableRecord right) =>
+        string.Equals(left.OrchestratorRunId, right.OrchestratorRunId, StringComparison.Ordinal)
+        && left.Step == right.Step
+        && string.Equals(left.Kind, right.Kind, StringComparison.Ordinal)
+        && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
+        && string.Equals(left.Payload, right.Payload, StringComparison.Ordinal);
+
+    private static string DescribeRecord(DurableRecord record) =>
+        record.Name is { Length: > 0 }
+            ? $"record '{record.Name}' ({record.Kind})"
+            : $"record kind '{record.Kind}'";
+
     private bool CanPurgeTerminalRun(JobRun run, DateTimeOffset threshold)
     {
         if (!run.Status.IsTerminal || run.CompletedAt is null)
@@ -1738,7 +2311,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         if (run.BatchId is null)
         {
-            return true;
+            return !TreeHasOpenRun(run);
         }
 
         if (!_batches.TryGetValue(run.BatchId, out var batch))
@@ -1746,9 +2319,16 @@ internal sealed class InMemoryJobStore : IJobStore
             return true;
         }
 
-        return batch.Status.IsTerminal
+        return !TreeHasOpenRun(run)
+               && batch.Status.IsTerminal
                && batch.CompletedAt is { } batchCompletedAt
                && batchCompletedAt < threshold;
+    }
+
+    private bool TreeHasOpenRun(JobRun run)
+    {
+        var rootId = run.RootRunId ?? run.Id;
+        return _runs.Values.Any(r => (r.RootRunId ?? r.Id) == rootId && !r.Status.IsTerminal);
     }
 
     private void AddToPendingIndex(JobRun run)
@@ -1771,7 +2351,7 @@ internal sealed class InMemoryJobStore : IJobStore
             DecrementCount(_pendingCountByQueue, queueName);
         }
 
-        if (ConsumesWorkerCapacity(oldStatus))
+        if (oldStatus.ConsumesActiveSlot)
         {
             DecrementCount(_runningCountByJob, run.JobName);
             DecrementCount(_runningCountByQueue, queueName);
@@ -1783,7 +2363,7 @@ internal sealed class InMemoryJobStore : IJobStore
             IncrementCount(_pendingCountByQueue, queueName);
         }
 
-        if (ConsumesWorkerCapacity(newStatus))
+        if (newStatus.ConsumesActiveSlot)
         {
             IncrementCount(_runningCountByJob, run.JobName);
             IncrementCount(_runningCountByQueue, queueName);
@@ -1797,9 +2377,6 @@ internal sealed class InMemoryJobStore : IJobStore
 
     private string GetQueueName(string jobName) =>
         _jobs.TryGetValue(jobName, out var job) ? job.Queue ?? "default" : "default";
-
-    private static bool ConsumesWorkerCapacity(JobStatus status) =>
-        status is JobStatus.Running;
 
     private void AppendStatusEventCore(string runId, int attempt, JobStatus status) =>
         AppendEventsCore([RunStatusEvents.Create(runId, attempt, status, _timeProvider.GetUtcNow())]);

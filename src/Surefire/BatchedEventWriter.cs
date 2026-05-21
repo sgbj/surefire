@@ -125,7 +125,30 @@ internal sealed partial class BatchedEventWriter(
             }
         }
 
-        return _channel.Writer.WriteAsync(new(evt, channels, sequence), cancellationToken);
+        return _channel.Writer.WriteAsync(new(evt, channels, sequence, false, null), cancellationToken);
+    }
+
+    /// <summary>
+    ///     Schedules an event for persistence only if the target run is still non-terminal when
+    ///     the store appends it. Returns false when the run is missing or already terminal.
+    /// </summary>
+    public async ValueTask<bool> EnqueueIfRunNonTerminalAsync(RunEvent evt,
+        IReadOnlyList<NotificationPublish> channels,
+        CancellationToken cancellationToken = default)
+    {
+        var sequence = Interlocked.Increment(ref _enqueueSeq);
+        var state = _runStates.GetOrAdd(evt.RunId, static _ => new());
+        lock (state.Lock)
+        {
+            if (sequence > state.EnqueuedSeq)
+            {
+                state.EnqueuedSeq = sequence;
+            }
+        }
+
+        var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await _channel.Writer.WriteAsync(new(evt, channels, sequence, true, accepted), cancellationToken);
+        return await accepted.Task.WaitAsync(cancellationToken);
     }
 
     /// <summary>
@@ -271,6 +294,24 @@ internal sealed partial class BatchedEventWriter(
             return;
         }
 
+        var start = 0;
+        while (start < batch.Count)
+        {
+            var conditional = batch[start].ConditionalOnRunNonTerminal;
+            var end = start + 1;
+            while (end < batch.Count && batch[end].ConditionalOnRunNonTerminal == conditional)
+            {
+                end++;
+            }
+
+            await FlushContiguousBatchAsync(batch.GetRange(start, end - start), conditional, cancellationToken);
+            start = end;
+        }
+    }
+
+    private async Task FlushContiguousBatchAsync(List<EventRequest> batch, bool conditional,
+        CancellationToken cancellationToken)
+    {
         var events = new RunEvent[batch.Count];
         for (var i = 0; i < batch.Count; i++)
         {
@@ -279,12 +320,21 @@ internal sealed partial class BatchedEventWriter(
 
         // Retry transient errors indefinitely; permanent errors propagate to FlushRunAsync callers
         // so terminal transitions never proceed with events unpersisted.
+        IReadOnlySet<string>? acceptedRunIds = null;
         var attempt = 0;
         while (true)
         {
             try
             {
-                await store.AppendEventsAsync(events, cancellationToken);
+                if (conditional)
+                {
+                    acceptedRunIds = await store.AppendEventsIfRunNonTerminalAsync(events, cancellationToken);
+                }
+                else
+                {
+                    await store.AppendEventsAsync(events, cancellationToken);
+                }
+
                 break;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -322,6 +372,11 @@ internal sealed partial class BatchedEventWriter(
         HashSet<string>? published = null;
         foreach (var request in batch)
         {
+            if (acceptedRunIds is not null && !acceptedRunIds.Contains(request.Event.RunId))
+            {
+                continue;
+            }
+
             foreach (var pub in request.Notifications)
             {
                 published ??= new(StringComparer.Ordinal);
@@ -336,7 +391,7 @@ internal sealed partial class BatchedEventWriter(
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    SignalBatchCompleted(batch, null);
+                    SignalBatchCompleted(batch, null, acceptedRunIds);
                     return;
                 }
                 catch (Exception ex)
@@ -346,15 +401,28 @@ internal sealed partial class BatchedEventWriter(
             }
         }
 
-        SignalBatchCompleted(batch, null);
+        SignalBatchCompleted(batch, null, acceptedRunIds);
     }
 
-    private void SignalBatchCompleted(List<EventRequest> batch, ExceptionDispatchInfo? error)
+    private void SignalBatchCompleted(List<EventRequest> batch, ExceptionDispatchInfo? error,
+        IReadOnlySet<string>? acceptedRunIds = null)
     {
         // Group by runId so we advance/stamp each run's state exactly once per call.
         var perRun = new Dictionary<string, (long MinSeq, long MaxSeq)>(StringComparer.Ordinal);
         foreach (var request in batch)
         {
+            if (request.Acceptance is { } acceptance)
+            {
+                if (error is not null)
+                {
+                    acceptance.TrySetException(error.SourceException);
+                }
+                else
+                {
+                    acceptance.TrySetResult(acceptedRunIds?.Contains(request.Event.RunId) ?? true);
+                }
+            }
+
             var runId = request.Event.RunId;
             if (perRun.TryGetValue(runId, out var range))
             {
@@ -416,7 +484,9 @@ internal sealed partial class BatchedEventWriter(
     private readonly record struct EventRequest(
         RunEvent Event,
         IReadOnlyList<NotificationPublish> Notifications,
-        long Sequence);
+        long Sequence,
+        bool ConditionalOnRunNonTerminal,
+        TaskCompletionSource<bool>? Acceptance);
 
     private sealed class PerRunFlushState
     {

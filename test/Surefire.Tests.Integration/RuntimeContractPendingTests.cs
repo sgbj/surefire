@@ -113,10 +113,12 @@ public sealed class RuntimeContractPendingTests
 
         var pending = RunStatusTransition.RunningToPending(
             run.Id,
-            claimed1.Attempt,
+            claimed1.LeaseEpoch,
             DateTimeOffset.UtcNow.AddMilliseconds(-1),
             "attempt 1 failed",
             claimed1.Result);
+        pending.IncrementFailureCount = true;
+        pending.IncrementAttempt = true;
         Assert.True((await store.TryTransitionRunAsync(pending, ct)).Transitioned);
 
         var claimed2 = (await store.ClaimRunsAsync("node-1", [jobName], ["default"], 1, ct)).FirstOrDefault();
@@ -144,7 +146,7 @@ public sealed class RuntimeContractPendingTests
 
         var completed = RunStatusTransition.RunningToSucceeded(
             run.Id,
-            claimed2.Attempt,
+            claimed2.LeaseEpoch,
             DateTimeOffset.UtcNow,
             claimed2.NotBefore,
             claimed2.NodeName,
@@ -196,7 +198,7 @@ public sealed class RuntimeContractPendingTests
         Assert.NotNull(claimedA);
         var completeA = RunStatusTransition.RunningToSucceeded(
             claimedA.Id,
-            claimedA.Attempt,
+            claimedA.LeaseEpoch,
             DateTimeOffset.UtcNow,
             claimedA.NotBefore,
             claimedA.NodeName,
@@ -211,7 +213,7 @@ public sealed class RuntimeContractPendingTests
         Assert.NotNull(claimedB);
         var completeB = RunStatusTransition.RunningToSucceeded(
             claimedB.Id,
-            claimedB.Attempt,
+            claimedB.LeaseEpoch,
             DateTimeOffset.UtcNow,
             claimedB.NotBefore,
             claimedB.NodeName,
@@ -280,7 +282,7 @@ public sealed class RuntimeContractPendingTests
         Assert.True((await store.TryTransitionRunAsync(
             RunStatusTransition.RunningToSucceeded(
                 runId,
-                claimed.Attempt,
+                claimed.LeaseEpoch,
                 DateTimeOffset.UtcNow,
                 claimed.NotBefore,
                 claimed.NodeName,
@@ -404,7 +406,7 @@ public sealed class RuntimeContractPendingTests
 
             var complete = RunStatusTransition.RunningToSucceeded(
                 claimed.Id,
-                claimed.Attempt,
+                claimed.LeaseEpoch,
                 DateTimeOffset.UtcNow,
                 claimed.NotBefore,
                 claimed.NodeName,
@@ -724,7 +726,7 @@ public sealed class RuntimeContractPendingTests
         var completedAt = DateTimeOffset.UtcNow;
         var transition = RunStatusTransition.RunningToSucceeded(
             child!.Id,
-            child.Attempt,
+            child.LeaseEpoch,
             completedAt,
             child.NotBefore,
             "node-1",
@@ -798,7 +800,7 @@ public sealed class RuntimeContractPendingTests
 
         var completeA = RunStatusTransition.RunningToSucceeded(
             childA.Id,
-            childA.Attempt,
+            childA.LeaseEpoch,
             DateTimeOffset.UtcNow,
             childA.NotBefore,
             childA.NodeName,
@@ -809,7 +811,7 @@ public sealed class RuntimeContractPendingTests
             childA.LastHeartbeatAt);
         var completeB = RunStatusTransition.RunningToSucceeded(
             childB.Id,
-            childB.Attempt,
+            childB.LeaseEpoch,
             DateTimeOffset.UtcNow,
             childB.NotBefore,
             childB.NodeName,
@@ -877,7 +879,7 @@ public sealed class RuntimeContractPendingTests
         {
             var complete = RunStatusTransition.RunningToSucceeded(
                 run.Id,
-                run.Attempt,
+                run.LeaseEpoch,
                 baseTime,
                 run.NotBefore,
                 run.NodeName,
@@ -935,7 +937,7 @@ public sealed class RuntimeContractPendingTests
         foreach (var c in new[] { claimedA, claimedB })
         {
             var transition = RunStatusTransition.RunningToSucceeded(
-                c.Id, c.Attempt, completedAt, c.NotBefore, c.NodeName, 1, "{}", null,
+                c.Id, c.LeaseEpoch, completedAt, c.NotBefore, c.NodeName, 1, "{}", null,
                 c.StartedAt, c.LastHeartbeatAt);
             Assert.True((await store.TryTransitionRunAsync(transition, ct)).Transitioned);
         }

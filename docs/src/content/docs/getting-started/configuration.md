@@ -23,12 +23,15 @@ builder.Services.AddSurefire(options =>
 | `PollingInterval` | 5s | Fallback polling interval when notifications are not available, and the primary wakeup signal for SQL Server and SQLite |
 | `HeartbeatInterval` | 30s | Node heartbeat interval |
 | `InactiveThreshold` | 2min | Inactivity window used for node/run recovery decisions |
-| `RetentionPeriod` | 7 days | How long completed runs are kept. Set to `null` to disable purge |
+| `RetentionPeriod` | 7 days | How long terminal runs are kept. Set to `null` to disable purge |
+| `RunExpirationPeriod` | `null` | Optional lifetime for non-terminal runs. Set this when you want Surefire to cancel runs that stay open too long |
 | `RetentionCheckInterval` | 5min | How often retention cleanup runs |
 | `ShutdownTimeout` | 15s | Time allowed for in-flight runs during host shutdown |
 | `MaxNodeConcurrency` | `min(ProcessorCount * 5, 20)` | Maximum concurrent executions on this node. Set to `null` for unlimited |
 | `AutoMigrate` | `true` | Runs store migrations at startup |
 | `SerializerOptions` | camelCase, case-insensitive, numbers from strings | JSON options for job arguments and results |
+
+`RetentionPeriod` only controls cleanup for terminal runs. It does not set a run lifetime deadline. Use `RunExpirationPeriod` if you want a default `ExpiresAt` for new runs, or set `ExpiresAt` on a specific trigger when only that run needs a deadline.
 
 For Native AOT or trimming, add your app's `JsonSerializerContext` to `SerializerOptions.TypeInfoResolverChain`. See [AOT and trimming](/surefire/guides/aot-trimming/).
 

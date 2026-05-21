@@ -76,3 +76,7 @@ public sealed class PostgreSqlTraceTests(PostgreSqlFixture fixture)
 [Collection("PostgreSql")]
 public sealed class PostgreSqlContentionTests(PostgreSqlFixture fixture)
     : FixtureBackedContentionConformanceTests<PostgreSqlFixture>(fixture);
+
+[Collection("PostgreSql")]
+public sealed class PostgreSqlDurableTests(PostgreSqlFixture fixture)
+    : FixtureBackedDurableConformanceTests<PostgreSqlFixture>(fixture);

@@ -16,9 +16,9 @@ public sealed class RunStatusTransition
     public JobStatus ExpectedStatus { get; init; }
 
     /// <summary>
-    ///     Gets or sets the attempt value that must match for the transition to apply.
+    ///     Gets or sets the lease epoch value that must match for the transition to apply.
     /// </summary>
-    public int ExpectedAttempt { get; init; }
+    public long ExpectedLeaseEpoch { get; init; }
 
     /// <summary>
     ///     Gets or sets the destination status.
@@ -78,15 +78,32 @@ public sealed class RunStatusTransition
     public IReadOnlyList<RunEvent>? Events { get; init; }
 
     /// <summary>
+    ///     When true, the store increments the run's <c>failure_count</c> column atomically with
+    ///     the CAS. Used by executor failure paths to record a real handler failure.
+    /// </summary>
+    internal bool IncrementFailureCount { get; set; }
+
+    /// <summary>
+    ///     When true, the store increments the run's logical attempt atomically with the CAS.
+    ///     Used when scheduling a retry after a retryable handler failure.
+    /// </summary>
+    internal bool IncrementAttempt { get; set; }
+
+    /// <summary>
+    ///     When true, the store increments the internal lease epoch atomically with the CAS.
+    /// </summary>
+    internal bool IncrementLeaseEpoch { get; set; }
+
+    /// <summary>
     ///     Creates a Pending -> Running transition.
     /// </summary>
-    public static RunStatusTransition PendingToRunning(string runId, int expectedAttempt, string nodeName,
+    public static RunStatusTransition PendingToRunning(string runId, long expectedLeaseEpoch, string nodeName,
         DateTimeOffset startedAt, DateTimeOffset lastHeartbeatAt, DateTimeOffset notBefore,
         double progress = 0, string? reason = null, string? result = null) => new()
     {
         RunId = runId,
         ExpectedStatus = JobStatus.Pending,
-        ExpectedAttempt = expectedAttempt,
+        ExpectedLeaseEpoch = expectedLeaseEpoch,
         NewStatus = JobStatus.Running,
         NodeName = nodeName,
         StartedAt = startedAt,
@@ -100,14 +117,14 @@ public sealed class RunStatusTransition
     /// <summary>
     ///     Creates a Running -> Pending transition (retry with delay).
     /// </summary>
-    public static RunStatusTransition RunningToPending(string runId, int expectedAttempt,
+    public static RunStatusTransition RunningToPending(string runId, long expectedLeaseEpoch,
         DateTimeOffset notBefore, string? reason = null, string? result = null,
         double progress = 0, DateTimeOffset? lastHeartbeatAt = null,
         IReadOnlyList<RunEvent>? events = null) => new()
     {
         RunId = runId,
         ExpectedStatus = JobStatus.Running,
-        ExpectedAttempt = expectedAttempt,
+        ExpectedLeaseEpoch = expectedLeaseEpoch,
         NewStatus = JobStatus.Pending,
         NotBefore = notBefore,
         NodeName = null,
@@ -121,14 +138,14 @@ public sealed class RunStatusTransition
     /// <summary>
     ///     Creates a Running -> Succeeded transition.
     /// </summary>
-    public static RunStatusTransition RunningToSucceeded(string runId, int expectedAttempt,
+    public static RunStatusTransition RunningToSucceeded(string runId, long expectedLeaseEpoch,
         DateTimeOffset completedAt, DateTimeOffset notBefore, string? nodeName = null,
         double progress = 1, string? result = null, string? reason = null,
         DateTimeOffset? startedAt = null, DateTimeOffset? lastHeartbeatAt = null) => new()
     {
         RunId = runId,
         ExpectedStatus = JobStatus.Running,
-        ExpectedAttempt = expectedAttempt,
+        ExpectedLeaseEpoch = expectedLeaseEpoch,
         NewStatus = JobStatus.Succeeded,
         CompletedAt = completedAt,
         NotBefore = notBefore,
@@ -143,7 +160,7 @@ public sealed class RunStatusTransition
     /// <summary>
     ///     Creates a Running -> Failed transition.
     /// </summary>
-    public static RunStatusTransition RunningToFailed(string runId, int expectedAttempt,
+    public static RunStatusTransition RunningToFailed(string runId, long expectedLeaseEpoch,
         DateTimeOffset completedAt, DateTimeOffset notBefore, string? nodeName = null,
         double progress = 1, string? reason = null, string? result = null,
         DateTimeOffset? startedAt = null, DateTimeOffset? lastHeartbeatAt = null,
@@ -151,7 +168,7 @@ public sealed class RunStatusTransition
     {
         RunId = runId,
         ExpectedStatus = JobStatus.Running,
-        ExpectedAttempt = expectedAttempt,
+        ExpectedLeaseEpoch = expectedLeaseEpoch,
         NewStatus = JobStatus.Failed,
         CompletedAt = completedAt,
         NotBefore = notBefore,
@@ -168,14 +185,14 @@ public sealed class RunStatusTransition
     ///     Creates a transition to Canceled from Pending or Running.
     /// </summary>
     public static RunStatusTransition ToCanceled(JobStatus expectedStatus, string runId,
-        int expectedAttempt, DateTimeOffset completedAt, DateTimeOffset canceledAt,
+        long expectedLeaseEpoch, DateTimeOffset completedAt, DateTimeOffset canceledAt,
         DateTimeOffset notBefore, string? nodeName = null, double progress = 0,
         string? reason = null, string? result = null, DateTimeOffset? startedAt = null,
         DateTimeOffset? lastHeartbeatAt = null) => new()
     {
         RunId = runId,
         ExpectedStatus = expectedStatus,
-        ExpectedAttempt = expectedAttempt,
+        ExpectedLeaseEpoch = expectedLeaseEpoch,
         NewStatus = JobStatus.Canceled,
         CompletedAt = completedAt,
         CanceledAt = canceledAt,

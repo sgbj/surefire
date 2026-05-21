@@ -76,3 +76,7 @@ public sealed class SqliteTraceTests(SqliteFixture fixture)
 [Collection("Sqlite")]
 public sealed class SqliteContentionTests(SqliteFixture fixture)
     : FixtureBackedContentionConformanceTests<SqliteFixture>(fixture);
+
+[Collection("Sqlite")]
+public sealed class SqliteDurableTests(SqliteFixture fixture)
+    : FixtureBackedDurableConformanceTests<SqliteFixture>(fixture);

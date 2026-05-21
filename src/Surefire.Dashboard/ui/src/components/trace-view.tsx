@@ -16,6 +16,7 @@ const statusColorVar: Record<number, string> = {
   [JobStatus.Pending]: "var(--status-pending)",
   [JobStatus.Running]: "var(--status-running)",
   [JobStatus.Succeeded]: "var(--status-succeeded)",
+  [JobStatus.Suspended]: "var(--status-suspended)",
   [JobStatus.Canceled]: "var(--status-canceled)",
   [JobStatus.Failed]: "var(--status-failed)",
 };
@@ -88,7 +89,9 @@ export function TraceView({
     () =>
       items.some(
         (run) =>
-          run.status === JobStatus.Pending || run.status === JobStatus.Running,
+          run.status === JobStatus.Pending
+          || run.status === JobStatus.Running
+          || run.status === JobStatus.Suspended,
       ),
     [items],
   );
@@ -304,6 +307,7 @@ export function TraceView({
             durationMs > 0 ? `· ${formatMs(durationMs)}` : null,
             run.nodeName ? `on ${run.nodeName}` : null,
             `attempt ${run.attempt}`,
+            run.replayCount > 0 ? `(${run.replayCount} replay${run.replayCount === 1 ? "" : "s"})` : null,
           ]
             .filter(Boolean)
             .join(" ");

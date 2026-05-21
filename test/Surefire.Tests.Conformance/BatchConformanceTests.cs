@@ -77,7 +77,7 @@ public abstract class BatchConformanceTests : StoreConformanceBase
             Attempt = 1
         };
 
-        await Store.CreateBatchAsync(batch, [run], [evt], ct);
+        await Store.CreateBatchAsync(batch, [run], [evt], cancellationToken: ct);
 
         var events = await Store.GetEventsAsync(run.Id, cancellationToken: ct);
         Assert.Single(events);

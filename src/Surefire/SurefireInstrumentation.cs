@@ -40,6 +40,13 @@ internal sealed class SurefireInstrumentation : IDisposable
             description: "Transient IJobStore failures the caller decided to retry.");
         LoopErrors = _meter.CreateCounter<long>("surefire.loop.errors",
             description: "Background loop tick failures, tagged by loop name.");
+        DurableSuspended = _meter.CreateCounter<long>("surefire.durable.suspended",
+            description: "Durable orchestrator attempts that yielded and parked in Suspended status.");
+        DurableInstantResume = _meter.CreateCounter<long>("surefire.durable.instant_resume",
+            description:
+                "Durable orchestrator attempts that yielded but had every awaited entity already terminal at suspend time, so the store routed them straight to Pending. A sustained rate is the fingerprint of a handler that yields without making progress.");
+        DurableStaleRecovered = _meter.CreateCounter<long>("surefire.durable.stale_recovered",
+            description: "Durable orchestrator runs that were stale-claimed (host crashed mid-execution) and re-queued by the maintenance loop for replay.");
     }
 
     public ActivitySource ActivitySource { get; }
@@ -65,6 +72,12 @@ internal sealed class SurefireInstrumentation : IDisposable
     public Counter<long> StoreRetries { get; }
 
     public Counter<long> LoopErrors { get; }
+
+    public Counter<long> DurableSuspended { get; }
+
+    public Counter<long> DurableInstantResume { get; }
+
+    public Counter<long> DurableStaleRecovered { get; }
 
     public void Dispose()
     {
@@ -147,6 +160,24 @@ internal sealed class SurefireInstrumentation : IDisposable
     {
         var tags = new TagList { { "surefire.loop", loop } };
         LoopErrors.Add(1, tags);
+    }
+
+    public void RecordDurableSuspended(string jobName)
+    {
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        DurableSuspended.Add(1, tags);
+    }
+
+    public void RecordDurableInstantResume(string jobName)
+    {
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        DurableInstantResume.Add(1, tags);
+    }
+
+    public void RecordDurableStaleRecovered(string jobName)
+    {
+        var tags = new TagList { { "surefire.job.name", jobName } };
+        DurableStaleRecovered.Add(1, tags);
     }
 }
 

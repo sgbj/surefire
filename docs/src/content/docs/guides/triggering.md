@@ -146,6 +146,7 @@ Pass `sinceEventId` to resume an event stream where you left off.
 |---|---|
 | `NotBefore` | Don't run before this time |
 | `NotAfter` | Cancel the run if it hasn't started by this time |
+| `ExpiresAt` | Cancel the run if it is still non-terminal at this time |
 | `Priority` | Higher-priority runs are claimed first |
 | `DeduplicationId` | Prevents duplicate runs with the same ID |
 
@@ -162,7 +163,7 @@ await client.TriggerAsync("Import", args, new RunOptions
 
 ## Run expiration
 
-Set `NotAfter` to give a run a deadline. If it hasn't started by that time, Surefire cancels it automatically. Useful for time-sensitive work where a late execution is worse than no execution.
+Set `NotAfter` to give a run a start deadline. If it hasn't started by that time, Surefire cancels it automatically. Useful for time-sensitive work where a late execution is worse than no execution.
 
 ```csharp
 await client.TriggerAsync("TimelyReport", args, new RunOptions
@@ -171,7 +172,16 @@ await client.TriggerAsync("TimelyReport", args, new RunOptions
 });
 ```
 
-`NotAfter` only cancels runs that haven't started yet. To stop a run that's already executing, cancel it explicitly with `CancelAsync`.
+`NotAfter` only cancels runs that haven't started yet. Set `ExpiresAt` when the whole run must be canceled if it is still pending, running, or suspended after a deadline.
+
+```csharp
+await client.TriggerAsync("LongImport", args, new RunOptions
+{
+    ExpiresAt = DateTimeOffset.UtcNow.AddHours(6)
+});
+```
+
+By default, runs do not get an `ExpiresAt` deadline. You can set `RunExpirationPeriod` in Surefire options to give every new run a default lifetime.
 
 ## Cancelling and rerunning
 

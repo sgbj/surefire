@@ -36,6 +36,42 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task Purge_PreservesTerminalRunsInOpenTree()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"PurgeOpenTreeJob_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var root = CreateRun(jobName) with
+        {
+            CreatedAt = OldTime,
+            NotBefore = OldTime
+        };
+        root = root with { RootRunId = root.Id };
+
+        var child = CreateRun(jobName, JobStatus.Succeeded) with
+        {
+            CreatedAt = OldTime,
+            NotBefore = OldTime,
+            StartedAt = OldTime,
+            CompletedAt = OldTime,
+            ParentRunId = root.Id,
+            RootRunId = root.Id
+        };
+
+        await Store.CreateRunsAsync([root, child], cancellationToken: ct);
+
+        await Store.PurgeAsync(Threshold, ct);
+
+        var loadedRoot = await Store.GetRunAsync(root.Id, ct);
+        var loadedChild = await Store.GetRunAsync(child.Id, ct);
+        Assert.NotNull(loadedRoot);
+        Assert.NotNull(loadedChild);
+        Assert.Equal(JobStatus.Pending, loadedRoot.Status);
+        Assert.Equal(JobStatus.Succeeded, loadedChild.Status);
+    }
+
+    [Fact]
     public async Task Purge_DeletesStaleJobs()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -111,7 +147,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task Purge_DeletesAbandonedPendingRuns()
+    public async Task Purge_PreservesAbandonedPendingRuns()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"AbandonedJob_{Guid.CreateVersion7():N}";
@@ -123,11 +159,12 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         await Store.PurgeAsync(Threshold, ct);
 
         var loaded = await Store.GetRunAsync(run.Id, ct);
-        Assert.Null(loaded);
+        Assert.NotNull(loaded);
+        Assert.Equal(JobStatus.Pending, loaded.Status);
     }
 
     [Fact]
-    public async Task Purge_DeletesAbandonedOldPendingRuns()
+    public async Task Purge_PreservesAbandonedOldPendingRuns()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"PurgeOldPending_{Guid.CreateVersion7():N}";
@@ -139,7 +176,8 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         await Store.PurgeAsync(Threshold, ct);
 
         var stored = await Store.GetRunAsync(run.Id, ct);
-        Assert.Null(stored);
+        Assert.NotNull(stored);
+        Assert.Equal(JobStatus.Pending, stored.Status);
     }
 
     [Fact]
@@ -318,8 +356,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         var jobName = $"OpenBatchJob_{Guid.CreateVersion7():N}";
         await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
-        // Child's NotBefore is in the future so the "abandoned pending" rule can't harvest it;
-        // this isolates the test to the batch-status purge rule.
+        // Child's NotBefore is in the future so the test is isolated to batch-status purge behavior.
         var future = DateTimeOffset.UtcNow.AddHours(1);
         var batchId = Guid.CreateVersion7().ToString("N");
         var runs = new[]
@@ -407,7 +444,7 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task Purge_FreesConcurrencyCounterForNewClaims()
+    public async Task Expiration_FreesConcurrencyCounterForNewClaims()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"ConcurrencyPurge_{Guid.CreateVersion7():N}";
@@ -415,12 +452,13 @@ public abstract class PurgeConformanceTests : StoreConformanceBase
         job.MaxConcurrency = 1;
         await Store.UpsertJobsAsync([job], ct);
 
-        // Orphan a pending run: sits at the concurrency boundary without ever being claimed.
-        var orphan = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime };
+        var orphan = CreateRun(jobName) with { CreatedAt = OldTime, NotBefore = OldTime, ExpiresAt = OldTime };
         await Store.CreateRunsAsync([orphan], cancellationToken: ct);
 
-        await Store.PurgeAsync(Threshold, ct);
-        Assert.Null(await Store.GetRunAsync(orphan.Id, ct));
+        await Store.CancelExpiredRunsWithIdsAsync(ct);
+        var expired = await Store.GetRunAsync(orphan.Id, ct);
+        Assert.NotNull(expired);
+        Assert.Equal(JobStatus.Canceled, expired.Status);
 
         // If counters leaked, the MaxConcurrency slot would stay consumed and this claim would fail.
         var fresh = CreateRun(jobName);

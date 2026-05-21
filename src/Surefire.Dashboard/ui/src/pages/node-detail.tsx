@@ -180,7 +180,7 @@ export function NodeDetailPage() {
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
                   <Input
                     aria-label="Search node runs"
-                    placeholder="filter by job name…"
+                    placeholder="Filter by job name…"
                     value={jobNameInput}
                     onChange={(e) => {
                       const next = e.target.value;
@@ -246,7 +246,7 @@ export function NodeDetailPage() {
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
                   <Input
                     aria-label="Search node jobs"
-                    placeholder="filter jobs…"
+                    placeholder="Filter jobs…"
                     value={jobSearch}
                     onChange={(e) => setJobSearch(e.target.value)}
                     className="pl-8"

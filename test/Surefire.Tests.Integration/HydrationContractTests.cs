@@ -592,8 +592,12 @@ public sealed class HydrationContractTests
 
         public Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
             DateTimeOffset? lastCronFireAt = null, IReadOnlyList<RunEvent>? initialEvents = null,
+            DurableStepRecord? durableStepRecord = null,
             CancellationToken ct = default) =>
-            inner.TryCreateRunAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, ct);
+            inner.TryCreateRunAsync(run, maxActiveForJob, lastCronFireAt, initialEvents, durableStepRecord, ct);
+
+        public Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
+            CancellationToken ct = default) => inner.CreateDurableRecordAsync(record, ct);
 
         public Task<JobRun?> GetRunAsync(string id, CancellationToken ct = default) => inner.GetRunAsync(id, ct);
 
@@ -615,12 +619,27 @@ public sealed class HydrationContractTests
 
         public Task UpdateRunAsync(JobRun run, CancellationToken ct = default) => inner.UpdateRunAsync(run, ct);
 
+        public Task<DurableSuspendOutcome> TrySuspendRunAsync(string runId, long expectedLeaseEpoch,
+            IReadOnlyCollection<string> awaitedRunIds,
+            IReadOnlyCollection<string> awaitedBatchIds,
+            DateTimeOffset now,
+            CancellationToken cancellationToken = default) =>
+            inner.TrySuspendRunAsync(runId, expectedLeaseEpoch, awaitedRunIds, awaitedBatchIds, now, cancellationToken);
+
+        public Task<DurableExecutionSnapshot> LoadExecutionSnapshotAsync(string orchestratorRunId,
+            CancellationToken cancellationToken = default) =>
+            inner.LoadExecutionSnapshotAsync(orchestratorRunId, cancellationToken);
+
+        public Task<IReadOnlyDictionary<string, InputPumpArgumentState>> GetInputPumpStateAsync(string runId,
+            CancellationToken cancellationToken = default) =>
+            inner.GetInputPumpStateAsync(runId, cancellationToken);
+
         public Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
             CancellationToken ct = default) => inner.TryTransitionRunAsync(transition, ct);
 
-        public Task<RunTransitionResult> TryCancelRunAsync(string runId, int? expectedAttempt = null,
+        public Task<RunTransitionResult> TryCancelRunAsync(string runId, long? expectedLeaseEpoch = null,
             string? reason = null, IReadOnlyList<RunEvent>? events = null, CancellationToken ct = default) =>
-            inner.TryCancelRunAsync(runId, expectedAttempt, reason, events, ct);
+            inner.TryCancelRunAsync(runId, expectedLeaseEpoch, reason, events, ct);
 
         public Task<SubtreeCancellation> CancelRunSubtreeAsync(string rootRunId, string? reason = null,
             bool includeRoot = true, CancellationToken ct = default) =>
@@ -631,8 +650,10 @@ public sealed class HydrationContractTests
             inner.ClaimRunsAsync(nodeName, jobNames, queueNames, maxCount, ct);
 
         public Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
-            IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken ct = default) =>
-            inner.CreateBatchAsync(batch, runs, initialEvents, ct);
+            IReadOnlyList<RunEvent>? initialEvents = null,
+            DurableStepRecord? durableStepRecord = null,
+            CancellationToken ct = default) =>
+            inner.CreateBatchAsync(batch, runs, initialEvents, durableStepRecord, ct);
 
         public Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken ct = default) =>
             inner.GetBatchAsync(batchId, ct);
@@ -645,6 +666,10 @@ public sealed class HydrationContractTests
 
         public Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken ct = default) =>
             inner.AppendEventsAsync(events, ct);
+
+        public Task<IReadOnlySet<string>> AppendEventsIfRunNonTerminalAsync(IReadOnlyList<RunEvent> events,
+            CancellationToken ct = default) =>
+            inner.AppendEventsIfRunNonTerminalAsync(events, ct);
 
         public Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
             RunEventType[]? types = null, int? attempt = null, int? take = null, CancellationToken ct = default) =>

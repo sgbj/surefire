@@ -29,7 +29,7 @@ file sealed class SurefireRunLogger(string categoryName, IServiceProvider servic
         }
 
         var context = JobContext.Current;
-        if (context is null)
+        if (context is null || context.IsReplaying)
         {
             return;
         }
