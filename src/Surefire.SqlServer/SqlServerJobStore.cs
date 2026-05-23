@@ -35,6 +35,7 @@ internal sealed class SqlServerJobStore(
                                            misfire_policy INT NOT NULL DEFAULT 0,
                                            fire_all_limit INT,
                                            arguments_schema NVARCHAR(MAX),
+                                           source_code NVARCHAR(MAX),
                                            last_heartbeat_at DATETIMEOFFSET,
                                            last_cron_fire_at DATETIMEOFFSET,
                                            running_count INT NOT NULL DEFAULT 0,
@@ -313,6 +314,13 @@ internal sealed class SqlServerJobStore(
                                               AND name = 'expires_at'
                                         )
                                             ALTER TABLE dbo.surefire_runs ADD expires_at DATETIMEOFFSET NULL;
+
+                                        IF NOT EXISTS (
+                                            SELECT 1 FROM sys.columns
+                                            WHERE object_id = OBJECT_ID('dbo.surefire_jobs')
+                                              AND name = 'source_code'
+                                        )
+                                            ALTER TABLE dbo.surefire_jobs ADD source_code NVARCHAR(MAX) NULL;
 
                                        UPDATE dbo.surefire_runs
                                        SET lease_epoch = CASE WHEN lease_epoch > attempt THEN lease_epoch ELSE attempt END,
@@ -652,17 +660,20 @@ internal sealed class SqlServerJobStore(
                                 is_enabled BIT,
                                 misfire_policy INT,
                                 fire_all_limit INT,
-                                arguments_schema NVARCHAR(MAX)
+                                arguments_schema NVARCHAR(MAX),
+                                source_code NVARCHAR(MAX)
                             );
 
                             INSERT INTO @input (
                                 name, description, tags, cron_expression, time_zone_id, timeout,
                                 max_concurrency, priority, retry_policy, is_continuous, queue,
-                                rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema
+                                rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
+                                source_code
                             )
                             SELECT name, description, tags, cron_expression, time_zone_id, timeout,
                                 max_concurrency, priority, retry_policy, is_continuous, queue,
-                                rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema
+                                rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
+                                source_code
                             FROM OPENJSON(@payload)
                             WITH (
                                 name NVARCHAR(450) '$.name',
@@ -680,7 +691,8 @@ internal sealed class SqlServerJobStore(
                                 is_enabled BIT '$.isEnabled',
                                 misfire_policy INT '$.misfirePolicy',
                                 fire_all_limit INT '$.fireAllLimit',
-                                arguments_schema NVARCHAR(MAX) '$.argumentsSchema'
+                                arguments_schema NVARCHAR(MAX) '$.argumentsSchema',
+                                source_code NVARCHAR(MAX) '$.sourceCode'
                             );
 
                             {{BuildSortedApplockSql("@input", "surefire_job:", "uj")}}
@@ -705,6 +717,7 @@ internal sealed class SqlServerJobStore(
                                 misfire_policy = s.misfire_policy,
                                 fire_all_limit = s.fire_all_limit,
                                 arguments_schema = s.arguments_schema,
+                                source_code = s.source_code,
                                 last_heartbeat_at = SYSUTCDATETIME()
                             FROM dbo.surefire_jobs j
                             INNER JOIN @input s ON s.name = j.name;
@@ -713,12 +726,12 @@ internal sealed class SqlServerJobStore(
                                 name, description, tags, cron_expression, time_zone_id, timeout,
                                 max_concurrency, priority, retry_policy, is_continuous, queue,
                                 rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
-                                last_heartbeat_at
+                                source_code, last_heartbeat_at
                             )
                             SELECT s.name, s.description, s.tags, s.cron_expression, s.time_zone_id, s.timeout,
                                 s.max_concurrency, s.priority, s.retry_policy, s.is_continuous, s.queue,
                                 s.rate_limit_name, s.is_enabled, s.misfire_policy, s.fire_all_limit,
-                                s.arguments_schema, SYSUTCDATETIME()
+                                s.arguments_schema, s.source_code, SYSUTCDATETIME()
                             FROM @input s
                             WHERE NOT EXISTS (SELECT 1 FROM dbo.surefire_jobs j WHERE j.name = s.name)
                             ORDER BY s.name;
@@ -3579,6 +3592,7 @@ internal sealed class SqlServerJobStore(
         var queueCol = reader.GetOrdinal("queue");
         var rateLimitCol = reader.GetOrdinal("rate_limit_name");
         var schemaCol = reader.GetOrdinal("arguments_schema");
+        var sourceCol = reader.GetOrdinal("source_code");
         var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
         var cronFireCol = reader.GetOrdinal("last_cron_fire_at");
 
@@ -3605,6 +3619,7 @@ internal sealed class SqlServerJobStore(
             Queue = reader.IsDBNull(queueCol) ? null : reader.GetString(queueCol),
             RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
             ArgumentsSchema = reader.IsDBNull(schemaCol) ? null : reader.GetString(schemaCol),
+            SourceCode = reader.IsDBNull(sourceCol) ? null : reader.GetString(sourceCol),
             LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetDateTimeOffset(heartbeatCol),
             LastCronFireAt = reader.IsDBNull(cronFireCol) ? null : reader.GetDateTimeOffset(cronFireCol)
         };

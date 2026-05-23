@@ -107,4 +107,9 @@ public sealed class JobRegistrationDescriptor
     ///     handler takes no JSON-bindable parameters.
     /// </summary>
     public string? ArgumentsSchema { get; init; }
+
+    /// <summary>
+    ///     Source code captured for the job registration, or <c>null</c> when the source is unavailable.
+    /// </summary>
+    public string? SourceCode { get; init; }
 }

@@ -371,6 +371,9 @@ public sealed class JobResponse
     /// <summary>JSON Schema describing the job's argument shape, or null if the handler takes no bindable arguments.</summary>
     public JsonElement? ArgumentsSchema { get; init; }
 
+    /// <summary>Captured source code for the job registration, or null when source capture is unavailable.</summary>
+    public string? SourceCode { get; init; }
+
     /// <summary>Maps a <see cref="JobDefinition" /> to its dashboard response shape.</summary>
     /// <param name="job">The job definition.</param>
     /// <param name="activeCutoff">Heartbeat cutoff used to compute <see cref="IsActive" />.</param>
@@ -394,7 +397,8 @@ public sealed class JobResponse
         IsActive = job.LastHeartbeatAt is { } && job.LastHeartbeatAt >= activeCutoff,
         NextRunAt = ComputeNextRun(job, now),
         MisfirePolicy = job.MisfirePolicy,
-        ArgumentsSchema = CloneElement(job.ArgumentsSchema)
+        ArgumentsSchema = CloneElement(job.ArgumentsSchema),
+        SourceCode = job.SourceCode
     };
 
     // JsonDocument.Parse is AOT-safe (it walks JSON tokens rather than reflecting over a target

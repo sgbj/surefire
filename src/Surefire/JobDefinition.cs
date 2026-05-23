@@ -96,6 +96,11 @@ public sealed class JobDefinition
     public string? ArgumentsSchema { get; set; }
 
     /// <summary>
+    ///     Gets or sets the captured source code for the job registration.
+    /// </summary>
+    public string? SourceCode { get; set; }
+
+    /// <summary>
     ///     Gets or sets the time of the last heartbeat from a node registering this job.
     /// </summary>
     public DateTimeOffset? LastHeartbeatAt { get; set; }
@@ -124,6 +129,7 @@ public sealed class JobDefinition
         MisfirePolicy = MisfirePolicy,
         FireAllLimit = FireAllLimit,
         ArgumentsSchema = ArgumentsSchema,
+        SourceCode = SourceCode,
         LastHeartbeatAt = LastHeartbeatAt,
         LastCronFireAt = LastCronFireAt
     };

@@ -117,6 +117,7 @@ internal sealed class SqliteJobStore(
                                                          misfire_policy INTEGER NOT NULL DEFAULT 0,
                                                          fire_all_limit INTEGER,
                                                          arguments_schema TEXT,
+                                                         source_code TEXT,
                                                          last_heartbeat_at TEXT,
                                                          last_cron_fire_at TEXT,
                                                          running_count INTEGER NOT NULL DEFAULT 0,
@@ -303,6 +304,13 @@ internal sealed class SqliteJobStore(
             await addExpiresAt.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        if (!await HasColumnAsync(conn, "surefire_jobs", "source_code", cancellationToken, tx))
+        {
+            await using var addSourceCode = CreateCommand(conn,
+                "ALTER TABLE surefire_jobs ADD COLUMN source_code TEXT;", tx);
+            await addSourceCode.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         if (!await HasColumnAsync(conn, "surefire_batches", "parent_run_id", cancellationToken, tx))
         {
             await using var addBatchParent = CreateCommand(conn,
@@ -400,7 +408,8 @@ internal sealed class SqliteJobStore(
                                                       name, description, tags, cron_expression, time_zone_id,
                                                       timeout_ticks, max_concurrency, priority, retry_policy,
                                                       is_continuous, queue, rate_limit_name, is_enabled,
-                                                      misfire_policy, fire_all_limit, arguments_schema, last_heartbeat_at
+                                                      misfire_policy, fire_all_limit, arguments_schema, source_code,
+                                                      last_heartbeat_at
                                                   )
                                                   SELECT
                                                       json_extract(e.value, '$.name'),
@@ -419,6 +428,7 @@ internal sealed class SqliteJobStore(
                                                       json_extract(e.value, '$.misfirePolicy'),
                                                       json_extract(e.value, '$.fireAllLimit'),
                                                       json_extract(e.value, '$.argumentsSchema'),
+                                                      json_extract(e.value, '$.sourceCode'),
                                                       @now
                                                   FROM json_each(@payload) AS e
                                                   WHERE json_type(e.value) = 'object'
@@ -437,6 +447,7 @@ internal sealed class SqliteJobStore(
                                                       misfire_policy = excluded.misfire_policy,
                                                       fire_all_limit = excluded.fire_all_limit,
                                                       arguments_schema = excluded.arguments_schema,
+                                                      source_code = excluded.source_code,
                                                       last_heartbeat_at = @now
                                                   """);
         cmd.Parameters.AddWithValue("@payload", UpsertPayloadFactory.SerializeJobs(jobs));
@@ -3352,6 +3363,7 @@ internal sealed class SqliteJobStore(
                 ? null
                 : reader.GetInt32(reader.GetOrdinal("fire_all_limit")),
             ArgumentsSchema = GetNullableString(reader, "arguments_schema"),
+            SourceCode = GetNullableString(reader, "source_code"),
             LastHeartbeatAt = GetNullableTimestamp(reader, "last_heartbeat_at"),
             LastCronFireAt = GetNullableTimestamp(reader, "last_cron_fire_at")
         };

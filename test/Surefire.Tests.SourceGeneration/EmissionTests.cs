@@ -32,6 +32,36 @@ public sealed class EmissionTests
     }
 
     [Fact]
+    public void AddJob_CapturesRegistrationSourceCode()
+    {
+        var source = """
+                     using Microsoft.Extensions.Hosting;
+
+                     internal static class Caller
+                     {
+                         public static void Wire(IHost host)
+                         {
+                             host.AddJob("Add", (int a, int b) => a + b);
+                             host.AddJob("Named", NamedHandler);
+                         }
+
+                         private static int NamedHandler(int value)
+                         {
+                             return value * 2;
+                         }
+                     }
+                     """;
+
+        var result = GeneratorDriverHarness.Run(source, out _);
+        var generated = result.GeneratedSource();
+
+        Assert.Contains("host.AddJob(\\\"Add\\\", (int a, int b) => a + b)", generated);
+        Assert.Contains("host.AddJob(\\\"Named\\\", NamedHandler)", generated);
+        Assert.Contains("private static int NamedHandler(int value)", generated);
+        Assert.Contains("return value * 2;", generated);
+    }
+
+    [Fact]
     public void AddJob_AsyncEnumerableHandler_EmitsMaterializer()
     {
         var source = """

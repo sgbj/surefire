@@ -61,6 +61,7 @@ internal sealed record UpsertJobPayload
     public int MisfirePolicy { get; init; }
     public int? FireAllLimit { get; init; }
     public string? ArgumentsSchema { get; init; }
+    public string? SourceCode { get; init; }
 }
 
 /// <summary>Bulk upsert payload for queues.</summary>

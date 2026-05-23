@@ -125,6 +125,7 @@ export interface JobResponse {
   nextRunAt?: string;
   misfirePolicy: number;
   argumentsSchema?: JsonSchema;
+  sourceCode?: string;
 }
 
 export interface JsonSchema {

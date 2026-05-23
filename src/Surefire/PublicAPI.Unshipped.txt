@@ -85,6 +85,10 @@ Surefire.JobContext.NextInt32Async(int minValue, int maxValue, System.Threading.
 Surefire.JobContext.RecordAsync<T>(string! name, System.Func<System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<T>>! valueFactory, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<T>
 Surefire.JobDefinition.IsDurable.get -> bool
 Surefire.JobDefinition.IsDurable.set -> void
+Surefire.JobDefinition.SourceCode.get -> string?
+Surefire.JobDefinition.SourceCode.set -> void
+Surefire.JobRegistrationDescriptor.SourceCode.get -> string?
+Surefire.JobRegistrationDescriptor.SourceCode.init -> void
 Surefire.BatchRunOptions.ExpiresAt.get -> System.DateTimeOffset?
 Surefire.BatchRunOptions.ExpiresAt.init -> void
 Surefire.JobRun.ExpiresAt.get -> System.DateTimeOffset?

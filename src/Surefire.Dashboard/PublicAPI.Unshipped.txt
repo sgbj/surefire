@@ -5,6 +5,8 @@ Surefire.Dashboard.RunResponse.ExpiresAt.get -> System.DateTimeOffset?
 Surefire.Dashboard.RunResponse.ExpiresAt.init -> void
 Surefire.Dashboard.RunResponse.ReplayCount.get -> int
 Surefire.Dashboard.RunResponse.ReplayCount.init -> void
+Surefire.Dashboard.JobResponse.SourceCode.get -> string?
+Surefire.Dashboard.JobResponse.SourceCode.init -> void
 Surefire.Dashboard.TriggerJobRequest.ExpiresAt.get -> System.DateTimeOffset?
 Surefire.Dashboard.TriggerJobRequest.ExpiresAt.set -> void
 Surefire.Dashboard.TimelineBucketResponse.Suspended.get -> int

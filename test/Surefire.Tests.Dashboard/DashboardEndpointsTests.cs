@@ -153,6 +153,21 @@ public sealed class DashboardEndpointsTests
     }
 
     [Fact]
+    public async Task JobDetailEndpoint_ReturnsCapturedSourceCode()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAppAsync(a => a.AddJob("tests-source", () => "ok"), ct);
+
+        using var client = app.GetTestClient();
+        var job = await client.GetFromJsonAsync<JobResponse>("/surefire/api/jobs/tests-source", ct);
+
+        Assert.NotNull(job);
+        Assert.NotNull(job.SourceCode);
+        Assert.Contains("AddJob(\"tests-source\"", job.SourceCode);
+        Assert.Contains("() => \"ok\"", job.SourceCode);
+    }
+
+    [Fact]
     public async Task JobDetailEndpoint_AutoGeneratesArgumentsSchema_FromHandlerParameters()
     {
         var ct = TestContext.Current.CancellationToken;

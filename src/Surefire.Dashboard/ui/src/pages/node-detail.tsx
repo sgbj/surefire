@@ -10,7 +10,8 @@ import {Input} from "@/components/ui/input";
 import {Skeleton} from "@/components/ui/skeleton";
 import {Tabs, TabsContent, TabsList, TabsTrigger} from "@/components/ui/tabs";
 import {formatDate, formatRelative} from "@/lib/format";
-import {DtDd, metadataGridClass} from "@/components/dt-dd";
+import {metadataGridClass} from "@/components/dt-dd";
+import {MetadataStrip, type MetadataItem} from "@/components/metadata-strip";
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
 import {buildRunColumns} from "@/components/run-columns";
 import {buildJobColumns} from "@/components/job-columns";
@@ -131,18 +132,22 @@ export function NodeDetailPage() {
         )}
       </TopBarBadge>
 
-      <dl className={metadataGridClass}>
-        <DtDd label="Started" align="mono">{formatDate(node.startedAt)}</DtDd>
-        <DtDd label="Last heartbeat" align="mono">
-          {formatRelative(node.lastHeartbeatAt)}
-        </DtDd>
-        <DtDd label="Running jobs" align="mono">{node.runningCount}</DtDd>
-        <DtDd label="Queues">
-          <span className="font-mono text-sm text-foreground/85">
-            {node.registeredQueueNames.join(", ")}
-          </span>
-        </DtDd>
-      </dl>
+      <MetadataStrip
+        items={[
+          {key: "started", label: "Started", align: "mono", children: formatDate(node.startedAt)},
+          {key: "heartbeat", label: "Last heartbeat", align: "mono", children: formatRelative(node.lastHeartbeatAt)},
+          {key: "runningJobs", label: "Running jobs", align: "mono", children: node.runningCount},
+          {
+            key: "queues",
+            label: "Queues",
+            children: (
+              <span className="font-mono text-sm text-foreground/85">
+                {node.registeredQueueNames.join(", ")}
+              </span>
+            ),
+          },
+        ] satisfies MetadataItem[]}
+      />
 
       <Tabs defaultValue="runs">
         <div className="px-6 pt-5">

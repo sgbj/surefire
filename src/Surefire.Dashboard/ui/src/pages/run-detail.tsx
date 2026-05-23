@@ -56,7 +56,8 @@ import {
 import { PageShell, PageBody } from "@/components/page-shell";
 import { PageErrorBanner } from "@/components/page-error-banner";
 import { TopBarActions, TopBarBadge } from "@/components/topbar-slot";
-import { DtDd, metadataGridClass } from "@/components/dt-dd";
+import { metadataGridClass } from "@/components/dt-dd";
+import { MetadataStrip, type MetadataItem } from "@/components/metadata-strip";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -1271,6 +1272,7 @@ function logLevelColor(level: number): string {
 }
 
 interface MetaItem {
+  key: string;
   label: string;
   value: React.ReactNode;
   mono?: boolean;
@@ -1285,6 +1287,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   const items: MetaItem[] = [];
 
   items.push({
+    key: "job",
     label: "Job",
     value: (
       <Link
@@ -1298,10 +1301,11 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   });
 
   if (run.startedAt) {
-    items.push({ label: "Duration", value: duration, mono: true });
+    items.push({ key: "duration", label: "Duration", value: duration, mono: true });
   }
 
   items.push({
+    key: "created",
     label: "Created",
     value: formatDate(run.createdAt),
     mono: true,
@@ -1309,6 +1313,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
 
   if (run.startedAt) {
     items.push({
+      key: "started",
       label: "Started",
       value: formatDate(run.startedAt),
       mono: true,
@@ -1316,6 +1321,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.completedAt) {
     items.push({
+      key: "completed",
       label: "Completed",
       value: formatDate(run.completedAt),
       mono: true,
@@ -1323,6 +1329,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.canceledAt) {
     items.push({
+      key: "canceled",
       label: "Canceled",
       value: formatDate(run.canceledAt),
       mono: true,
@@ -1331,6 +1338,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
 
   if (run.nodeName) {
     items.push({
+      key: "node",
       label: "Node",
       value: (
         <Link
@@ -1345,18 +1353,19 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
 
   if (run.attempt > 1) {
-    items.push({ label: "Attempt", value: run.attempt, mono: true });
+    items.push({ key: "attempt", label: "Attempt", value: run.attempt, mono: true });
   }
   if (run.failureCount > 0) {
-    items.push({ label: "Failures", value: run.failureCount, mono: true });
+    items.push({ key: "failures", label: "Failures", value: run.failureCount, mono: true });
   }
   if (run.replayCount > 0) {
-    items.push({ label: "Replays", value: run.replayCount, mono: true });
+    items.push({ key: "replays", label: "Replays", value: run.replayCount, mono: true });
   }
-  items.push({ label: "Priority", value: run.priority, mono: true });
+  items.push({ key: "priority", label: "Priority", value: run.priority, mono: true });
 
   if (run.parentRunId) {
     items.push({
+      key: "parent",
       label: "Parent",
       value: (
         <Link
@@ -1371,6 +1380,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.rerunOfRunId) {
     items.push({
+      key: "rerunOf",
       label: "Rerun of",
       value: (
         <Link
@@ -1385,6 +1395,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.deduplicationId) {
     items.push({
+      key: "dedup",
       label: "Dedup",
       value: (
         <span
@@ -1398,6 +1409,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.notBefore && run.notBefore !== run.createdAt) {
     items.push({
+      key: "notBefore",
       label: "Not before",
       value: formatDate(run.notBefore),
       mono: true,
@@ -1405,6 +1417,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.notAfter) {
     items.push({
+      key: "notAfter",
       label: "Not after",
       value: formatDate(run.notAfter),
       mono: true,
@@ -1412,19 +1425,19 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.expiresAt) {
     items.push({
+      key: "expiresAt",
       label: "Expires at",
       value: formatDate(run.expiresAt),
       mono: true,
     });
   }
 
-  return (
-    <dl className={metadataGridClass}>
-      {items.map((item, i) => (
-        <DtDd key={i} label={item.label} align={item.mono ? "mono" : "default"}>
-          {item.value}
-        </DtDd>
-      ))}
-    </dl>
-  );
+  const metadataItems: MetadataItem[] = items.map((item) => ({
+    key: item.key,
+    label: item.label,
+    align: item.mono ? "mono" : "default",
+    children: item.value,
+  }));
+
+  return <MetadataStrip items={metadataItems}/>;
 }

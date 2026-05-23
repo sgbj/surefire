@@ -1,15 +1,27 @@
 using System.Text;
+using Microsoft.CodeAnalysis.CSharp;
 
 namespace Surefire.SourceGeneration;
 
 internal static class DescriptorEmitter
 {
-    public static void EmitDescriptorBody(StringBuilder sb, int index, HandlerSignature handler)
+    public static void EmitDescriptorBody(
+        StringBuilder sb,
+        int index,
+        HandlerSignature handler,
+        string? sourceCode)
     {
         sb.AppendLine("        return new Surefire.JobRegistrationDescriptor");
         sb.AppendLine("        {");
         sb.AppendLine("            Name = name,");
         sb.AppendLine("            Handler = handler,");
+        if (sourceCode is { })
+        {
+            sb.Append("            SourceCode = ")
+                .Append(SyntaxFactory.Literal(sourceCode).ToString())
+                .AppendLine(",");
+        }
+
         ParameterEmissionHelper.EmitParameters(sb, handler, true);
         ParameterEmissionHelper.EmitInvoke(sb, handler);
         EmitReturnInfo(sb, handler);

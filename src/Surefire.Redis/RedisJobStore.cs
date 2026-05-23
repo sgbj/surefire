@@ -398,6 +398,7 @@ internal sealed partial class RedisJobStore(
                                                         'misfire_policy', s(j.misfirePolicy),
                                                         'fire_all_limit', s(j.fireAllLimit),
                                                         'arguments_schema', s(j.argumentsSchema),
+                                                        'source_code', s(j.sourceCode),
                                                         'last_heartbeat_at', now,
                                                         'is_enabled', is_enabled,
                                                         'last_cron_fire_at', last_cron_fire_at or '')
@@ -419,6 +420,7 @@ internal sealed partial class RedisJobStore(
                                                         'misfire_policy', s(j.misfirePolicy),
                                                         'fire_all_limit', s(j.fireAllLimit),
                                                         'arguments_schema', s(j.argumentsSchema),
+                                                        'source_code', s(j.sourceCode),
                                                         'last_heartbeat_at', now,
                                                         'last_cron_fire_at', '')
                                                     redis.call('SADD', '{surefire}:jobs', j.name)
@@ -4697,6 +4699,9 @@ internal sealed partial class RedisJobStore(
             RateLimitName = dict.TryGetValue("rate_limit_name", out var rl) && !string.IsNullOrEmpty(rl) ? rl : null,
             ArgumentsSchema = dict.TryGetValue("arguments_schema", out var schema) && !string.IsNullOrEmpty(schema)
                 ? schema
+                : null,
+            SourceCode = dict.TryGetValue("source_code", out var sourceCode) && !string.IsNullOrEmpty(sourceCode)
+                ? sourceCode
                 : null,
             LastHeartbeatAt = dict.TryGetValue("last_heartbeat_at", out var hb) && !string.IsNullOrEmpty(hb)
                 ? DateTimeOffset.FromUnixTimeMilliseconds(long.Parse(hb))

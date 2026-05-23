@@ -2521,6 +2521,7 @@ internal sealed class InMemoryJobStore : IJobStore
         MisfirePolicy = job.MisfirePolicy,
         FireAllLimit = job.FireAllLimit,
         ArgumentsSchema = job.ArgumentsSchema,
+        SourceCode = job.SourceCode,
         LastHeartbeatAt = job.LastHeartbeatAt,
         LastCronFireAt = job.LastCronFireAt
     };

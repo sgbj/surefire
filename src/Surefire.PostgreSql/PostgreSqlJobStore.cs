@@ -80,6 +80,7 @@ internal sealed class PostgreSqlJobStore(
                                   misfire_policy INT NOT NULL DEFAULT 0,
                                   fire_all_limit INT,
                                   arguments_schema TEXT,
+                                  source_code TEXT,
                                   last_heartbeat_at TIMESTAMPTZ,
                                   last_cron_fire_at TIMESTAMPTZ,
                                   running_count INT NOT NULL DEFAULT 0,
@@ -278,8 +279,9 @@ internal sealed class PostgreSqlJobStore(
                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS failure_count        INT     NOT NULL DEFAULT 0;
                                ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS replay_count         INT     NOT NULL DEFAULT 0;
                                ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS highest_recorded_step INT     NOT NULL DEFAULT 0;
-                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS is_durable            BOOLEAN NOT NULL DEFAULT FALSE;
-                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS expires_at            TIMESTAMPTZ;
+                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS is_durable            BOOLEAN NOT NULL DEFAULT FALSE;
+                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS expires_at            TIMESTAMPTZ;
+                              ALTER TABLE surefire_jobs ADD COLUMN IF NOT EXISTS source_code           TEXT;
 
                               UPDATE surefire_runs
                               SET lease_epoch = GREATEST(lease_epoch, attempt),
@@ -403,7 +405,7 @@ internal sealed class PostgreSqlJobStore(
                               name, description, tags, cron_expression, time_zone_id, timeout,
                               max_concurrency, priority, retry_policy, is_continuous, queue,
                               rate_limit_name, is_enabled, misfire_policy, fire_all_limit, arguments_schema,
-                              last_heartbeat_at
+                              source_code, last_heartbeat_at
                           )
                           SELECT
                               e->>'name',
@@ -422,6 +424,7 @@ internal sealed class PostgreSqlJobStore(
                               (e->>'misfirePolicy')::int,
                               (e->>'fireAllLimit')::int,
                               e->>'argumentsSchema',
+                              e->>'sourceCode',
                               NOW()
                           FROM jsonb_array_elements(@payload::jsonb) AS e
                           ORDER BY e->>'name'
@@ -440,6 +443,7 @@ internal sealed class PostgreSqlJobStore(
                               misfire_policy = EXCLUDED.misfire_policy,
                               fire_all_limit = EXCLUDED.fire_all_limit,
                               arguments_schema = EXCLUDED.arguments_schema,
+                              source_code = EXCLUDED.source_code,
                               last_heartbeat_at = NOW()
                           """;
         cmd.Parameters.AddWithValue("payload", UpsertPayloadFactory.SerializeJobs(jobs));
@@ -4201,6 +4205,7 @@ internal sealed class PostgreSqlJobStore(
         var queueCol = reader.GetOrdinal("queue");
         var rateLimitCol = reader.GetOrdinal("rate_limit_name");
         var schemaCol = reader.GetOrdinal("arguments_schema");
+        var sourceCol = reader.GetOrdinal("source_code");
         var heartbeatCol = reader.GetOrdinal("last_heartbeat_at");
         var cronFireCol = reader.GetOrdinal("last_cron_fire_at");
 
@@ -4226,6 +4231,7 @@ internal sealed class PostgreSqlJobStore(
             Queue = reader.IsDBNull(queueCol) ? null : reader.GetString(queueCol),
             RateLimitName = reader.IsDBNull(rateLimitCol) ? null : reader.GetString(rateLimitCol),
             ArgumentsSchema = reader.IsDBNull(schemaCol) ? null : reader.GetString(schemaCol),
+            SourceCode = reader.IsDBNull(sourceCol) ? null : reader.GetString(sourceCol),
             LastHeartbeatAt = reader.IsDBNull(heartbeatCol) ? null : reader.GetFieldValue<DateTimeOffset>(heartbeatCol),
             LastCronFireAt = reader.IsDBNull(cronFireCol) ? null : reader.GetFieldValue<DateTimeOffset>(cronFireCol)
         };
