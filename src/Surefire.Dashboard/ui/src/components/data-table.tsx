@@ -107,47 +107,51 @@ export function DataTable<TData, TValue>({
   const start = totalCount === 0 ? 0 : pagination.pageIndex * pagination.pageSize + 1;
   const end = Math.min(totalCount, (pagination.pageIndex + 1) * pagination.pageSize);
 
+  const showToolbarRow = Boolean(toolbar) || showColumnVisibility;
+
   return (
     <div>
-      <div className="flex items-center gap-2 px-6 py-5">
-        {toolbar ? (
-          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
-            {toolbar}
-          </div>
-        ) : (
-          <div className="flex-1"/>
-        )}
-        {showColumnVisibility && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="shrink-0 text-xs font-medium text-muted-foreground hover:text-foreground">
-                <Settings2 className="size-3.5"/>
-                Columns
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {table
-                .getAllColumns()
-                .filter((col) => col.getCanHide())
-                .map((col) => (
-                  <DropdownMenuCheckboxItem
-                    key={col.id}
-                    className="capitalize"
-                    checked={col.getIsVisible()}
-                    onCheckedChange={(value) => col.toggleVisibility(!!value)}
-                  >
-                    {typeof col.columnDef.header === "string"
-                      ? col.columnDef.header
-                      : col.id}
-                  </DropdownMenuCheckboxItem>
-                ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-      <div className="relative border-y border-border">
+      {showToolbarRow && (
+        <div className="flex items-center gap-2 px-6 py-5">
+          {toolbar ? (
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+              {toolbar}
+            </div>
+          ) : (
+            <div className="flex-1"/>
+          )}
+          {showColumnVisibility && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="shrink-0 text-xs font-medium text-muted-foreground hover:text-foreground">
+                  <Settings2 className="size-3.5"/>
+                  Columns
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {table
+                  .getAllColumns()
+                  .filter((col) => col.getCanHide())
+                  .map((col) => (
+                    <DropdownMenuCheckboxItem
+                      key={col.id}
+                      className="capitalize"
+                      checked={col.getIsVisible()}
+                      onCheckedChange={(value) => col.toggleVisibility(!!value)}
+                    >
+                      {typeof col.columnDef.header === "string"
+                        ? col.columnDef.header
+                        : col.id}
+                    </DropdownMenuCheckboxItem>
+                  ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
+      )}
+      <div className={cn("relative border-b border-border", showToolbarRow && "border-t")}>
         {header && (
-          <div className="sticky top-0 z-10 flex items-center px-4 py-2.5 border-b border-border bg-card/95 backdrop-blur-sm">
+          <div className="sticky top-0 z-10 flex h-[2.625rem] items-center px-4 border-b border-border bg-card/95 backdrop-blur-sm">
             {header}
           </div>
         )}
@@ -159,7 +163,7 @@ export function DataTable<TData, TValue>({
                   <TableHead
                     key={header.id}
                     className={cn(
-                      "h-9 px-3",
+                      "px-3",
                       i === 0 && "pl-6",
                       i === headerGroup.headers.length - 1 && "pr-6",
                     )}
@@ -231,11 +235,9 @@ export function DataTable<TData, TValue>({
           </TableBody>
         </Table>
       </div>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-6 py-5 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-5 text-xs text-muted-foreground">
         <div className="tnum">
-          {totalCount === 0 ? (
-            "No results"
-          ) : (
+          {totalCount > 0 && (
             <>
               <span className="text-foreground/85">{start}</span>
               <span className="px-1 text-muted-foreground/40">–</span>
@@ -285,7 +287,7 @@ export function DataTable<TData, TValue>({
                 }))
               }
             >
-              <SelectTrigger size="sm" className="h-7 w-16 px-2 font-mono text-[11px] tracking-wider text-foreground/85">
+              <SelectTrigger size="sm" className="w-16 px-2 font-mono text-[11px] tracking-wider text-foreground/85">
                 <SelectValue/>
               </SelectTrigger>
               <SelectContent position="popper" align="end">

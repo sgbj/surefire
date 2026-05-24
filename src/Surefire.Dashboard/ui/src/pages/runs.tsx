@@ -11,6 +11,7 @@ import {RUN_DATE_PRESETS} from "@/lib/run-date-presets";
 import {useDebouncedValue} from "@/hooks/use-debounced-value";
 import {PageShell} from "@/components/page-shell";
 import {PageErrorBanner} from "@/components/page-error-banner";
+import {ToolBar} from "@/components/tab-bar";
 
 const columns = buildRunColumns();
 
@@ -61,6 +62,62 @@ export function RunsPage() {
     <PageShell>
       {isError && <PageErrorBanner message="Failed to load runs" />}
 
+      <ToolBar>
+        <div className="relative max-w-sm">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
+          <Input
+            aria-label="Search runs"
+            placeholder="Filter runs…"
+            value={jobNameInput}
+            onChange={(e) => {
+              const next = e.target.value;
+              setJobNameInput(next);
+              if (pagination.pageIndex !== 0) {
+                setPagination((prev) => ({...prev, pageIndex: 0}));
+              }
+            }}
+            className="h-8 pl-8"
+          />
+        </div>
+        <Select
+          value={statusFilter}
+          onValueChange={(v) => {
+            setStatusFilter(v);
+            resetPage();
+          }}
+        >
+          <SelectTrigger size="sm" className="ml-auto w-36">
+            <SelectValue/>
+          </SelectTrigger>
+          <SelectContent position="popper">
+            <SelectItem value="all">All statuses</SelectItem>
+            {Object.entries(JobStatusLabels).map(([val, label]) => (
+              <SelectItem key={val} value={val}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={datePreset}
+          onValueChange={(v) => {
+            setDatePreset(v);
+            resetPage();
+          }}
+        >
+          <SelectTrigger size="sm" className="w-36">
+            <SelectValue/>
+          </SelectTrigger>
+          <SelectContent position="popper">
+            {RUN_DATE_PRESETS.map((p) => (
+              <SelectItem key={p.value} value={p.value}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </ToolBar>
+
       <DataTable
         columns={columns}
         data={data?.items ?? []}
@@ -72,63 +129,6 @@ export function RunsPage() {
         defaultPageSize={15}
         getRowHref={(r) => `/runs/${r.id}`}
         getRowLinkLabel={(r) => `Open run ${r.id}`}
-        toolbar={
-          <>
-            <div className="relative max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
-              <Input
-                aria-label="Search runs"
-                placeholder="Filter by job name…"
-                value={jobNameInput}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  setJobNameInput(next);
-                  if (pagination.pageIndex !== 0) {
-                    setPagination((prev) => ({...prev, pageIndex: 0}));
-                  }
-                }}
-                className="pl-8"
-              />
-            </div>
-            <Select
-              value={statusFilter}
-              onValueChange={(v) => {
-                setStatusFilter(v);
-                resetPage();
-              }}
-            >
-              <SelectTrigger size="sm" className="w-36">
-                <SelectValue/>
-              </SelectTrigger>
-              <SelectContent position="popper">
-                <SelectItem value="all">All statuses</SelectItem>
-                {Object.entries(JobStatusLabels).map(([val, label]) => (
-                  <SelectItem key={val} value={val}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={datePreset}
-              onValueChange={(v) => {
-                setDatePreset(v);
-                resetPage();
-              }}
-            >
-              <SelectTrigger size="sm" className="w-36">
-                <SelectValue/>
-              </SelectTrigger>
-              <SelectContent position="popper">
-                {RUN_DATE_PRESETS.map((p) => (
-                  <SelectItem key={p.value} value={p.value}>
-                    {p.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </>
-        }
       />
     </PageShell>
   );
