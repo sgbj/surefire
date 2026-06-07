@@ -37,6 +37,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { toast } from "sonner";
 import {
@@ -77,6 +78,11 @@ function formatJsonDisplay(json: string): string {
 }
 
 const EMPTY_LOGS: RunLogEntry[] = [];
+// useSyncExternalStore reads logs through a snapshot wrapper so the in-place
+// appended array (see logsByRunRef) can be published with an O(1) reference
+// change per flush instead of copying the whole array.
+type LogsSnapshot = { logs: RunLogEntry[] };
+const EMPTY_LOGS_SNAPSHOT: LogsSnapshot = { logs: EMPTY_LOGS };
 const EMPTY_OUTPUT_ITEMS: unknown[] = [];
 const EMPTY_INPUT_ITEMS: { param: string; value: unknown }[] = [];
 const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
@@ -226,11 +232,32 @@ export function RunDetailPage() {
   });
   // Logs are kept in a ref instead of state so flushes can append in-place
   // instead of spreading the entire array each frame (a real bottleneck on
-  // log-heavy runs). `logsVersion` is bumped to trigger consumer re-renders.
+  // log-heavy runs). The ref is exposed to render as an external store via
+  // useSyncExternalStore: each flush publishes a fresh O(1) snapshot wrapper
+  // and notifies subscribers, so we never read the ref during render.
   const logsByRunRef = useRef<Record<string, RunLogEntry[]>>({});
-  const [logsVersion, setLogsVersion] = useState(0);
+  const logsSnapshotByRunRef = useRef<Record<string, LogsSnapshot>>({});
+  const logsListenersRef = useRef<Set<() => void>>(new Set());
+  const subscribeLogs = useCallback((onChange: () => void) => {
+    const listeners = logsListenersRef.current;
+    listeners.add(onChange);
+    return () => {
+      listeners.delete(onChange);
+    };
+  }, []);
+  // Publish the current bucket as a new wrapper (O(1)) and notify subscribers.
   const bumpLogsVersion = useCallback(() => {
-    setLogsVersion((v) => v + 1);
+    for (const key of Object.keys(logsByRunRef.current)) {
+      logsSnapshotByRunRef.current[key] = { logs: logsByRunRef.current[key] };
+    }
+    for (const key of Object.keys(logsSnapshotByRunRef.current)) {
+      if (!(key in logsByRunRef.current)) {
+        delete logsSnapshotByRunRef.current[key];
+      }
+    }
+    for (const listener of logsListenersRef.current) {
+      listener();
+    }
   }, []);
   const [logFilterByRun, setLogFilterByRun] = useState<
     Record<string, number | null>
@@ -323,11 +350,11 @@ export function RunDetailPage() {
     lastSeenEventIdByRun.current = nextSeen;
   }, [allowedRunIds, bumpLogsVersion]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- ref read; logsVersion is the re-render trigger
-  const logs = useMemo(
-    () => logsByRunRef.current[runKey] ?? EMPTY_LOGS,
-    [runKey, logsVersion],
+  const getLogsSnapshot = useCallback(
+    () => logsSnapshotByRunRef.current[runKey] ?? EMPTY_LOGS_SNAPSHOT,
+    [runKey],
   );
+  const logs = useSyncExternalStore(subscribeLogs, getLogsSnapshot).logs;
   const logFilter = logFilterByRun[runKey] ?? null;
   const sseProgress = sseProgressByRun[runKey] ?? null;
   const outputItems = outputItemsByRun[runKey] ?? EMPTY_OUTPUT_ITEMS;
