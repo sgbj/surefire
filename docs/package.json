@@ -17,5 +17,8 @@
   },
   "devDependencies": {
     "sharp": "^0.34.5"
+  },
+  "overrides": {
+    "@astrojs/markdown-remark": "7.2.0"
   }
 }
