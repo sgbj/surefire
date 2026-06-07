@@ -154,10 +154,23 @@ internal sealed partial class SurefireExecutorService(
                                 // capacity slot or shutdown-drain handle. Per-run cancellation and
                                 // tracker state are removed by ExecuteClaimedRunAsync's finally
                                 // (which runs before this continuation and is likewise identity-keyed).
-                                ((ICollection<KeyValuePair<string, Task>>)_activeTasks)
+                                var wasOwner = ((ICollection<KeyValuePair<string, Task>>)_activeTasks)
                                     .Remove(new(run.Id, completed));
-                                logEventPump.DropRunState(run.Id);
-                                eventWriter.DropRunState(run.Id);
+
+                                // Only drop the per-run flush bookkeeping when no successor task has
+                                // re-claimed this run id. A durable suspend->resume registers the
+                                // successor in _activeTasks before its handler runs, so wasOwner==false
+                                // means the successor now owns the flush state and is actively enqueueing
+                                // log/events through it. Dropping it here would orphan the successor's
+                                // in-flight FlushRunAsync waiters (they'd never be signaled, blocking
+                                // until the best-effort ShutdownTimeout and aborting its terminal/retry
+                                // transition). When wasOwner==true the run is either terminal or briefly
+                                // parked with no active task, so reclaiming the memory is safe.
+                                if (wasOwner)
+                                {
+                                    logEventPump.DropRunState(run.Id);
+                                    eventWriter.DropRunState(run.Id);
+                                }
                             },
                             CancellationToken.None,
                             TaskContinuationOptions.None,
