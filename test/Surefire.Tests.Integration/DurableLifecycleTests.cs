@@ -401,6 +401,100 @@ public sealed class DurableLifecycleTests
         Assert.Equal(1, failed.FailureCount);
     }
 
+    [Fact]
+    public async Task Durable_AggregatedChildFailure_DeadLettersWithoutRetry()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(50);
+            options.RetentionPeriod = null;
+        });
+
+        // RunBatchAsync surfaces a failed child as AggregateException(JobRunException{Failed}) — the
+        // wrapped form that previously slipped past the durable dead-letter fast path and was
+        // retried. The orchestrator does not catch it, so the failure escapes uncaught.
+        harness.Host.AddJob("MaybeFail",
+            (int code) => code == 0 ? 42 : throw new InvalidOperationException("boom"));
+        harness.Host.AddJob("BatchOrchestrator", async (IJobClient client) =>
+        {
+            var results = await client.RunBatchAsync<int>("MaybeFail",
+                [new { code = 0 }, new { code = 1 }]);
+            return results.Sum();
+        }).Durable().WithRetry(p =>
+        {
+            p.MaxRetries = 3;
+            p.InitialDelay = TimeSpan.FromMilliseconds(10);
+            p.MaxDelay = TimeSpan.FromMilliseconds(10);
+            p.Jitter = false;
+        });
+
+        await harness.StartAsync(ct);
+
+        var run = await harness.Client.TriggerAsync("BatchOrchestrator", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(30));
+
+        await WaitForAsync(async () =>
+        {
+            var r = await harness.Store.GetRunAsync(run.Id, cts.Token);
+            return r?.Status == JobStatus.Failed;
+        }, cts.Token);
+
+        var failed = await harness.Store.GetRunAsync(run.Id, cts.Token);
+        Assert.NotNull(failed);
+        Assert.Equal(JobStatus.Failed, failed.Status);
+        // A recorded child's failure is deterministic across replays, so the orchestrator is
+        // dead-lettered on the first real failure rather than burning its retry budget.
+        Assert.Equal(1, failed.FailureCount);
+    }
+
+    [Fact]
+    public async Task Durable_ReplayMismatch_DeadLettersWithoutRetry()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = await CreateHarnessAsync(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(20);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(50);
+            options.RetentionPeriod = null;
+        });
+
+        var invocations = 0;
+        harness.Host.AddJob("ReplayMismatch", (JobContext context) =>
+        {
+            Interlocked.Increment(ref invocations);
+            // Stands in for JobContext detecting handler code that no longer matches recorded
+            // history. The divergence is deterministic, so every replay reproduces it: the executor
+            // must dead-letter immediately rather than retry.
+            throw new DurableReplayMismatchException(context.RunId, 1, "handler diverged from history");
+        }).Durable().WithRetry(p =>
+        {
+            p.MaxRetries = 3;
+            p.InitialDelay = TimeSpan.FromMilliseconds(10);
+            p.MaxDelay = TimeSpan.FromMilliseconds(10);
+            p.Jitter = false;
+        });
+
+        await harness.StartAsync(ct);
+
+        var run = await harness.Client.TriggerAsync("ReplayMismatch", cancellationToken: ct);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(30));
+
+        await WaitForAsync(async () =>
+        {
+            var r = await harness.Store.GetRunAsync(run.Id, cts.Token);
+            return r?.Status == JobStatus.Failed;
+        }, cts.Token);
+
+        Assert.Equal(1, Volatile.Read(ref invocations));
+        var failed = await harness.Store.GetRunAsync(run.Id, cts.Token);
+        Assert.NotNull(failed);
+        Assert.Equal(1, failed.FailureCount);
+    }
+
     private static Task<RuntimeHarness> CreateHarnessAsync(Action<SurefireOptions> configure,
         Action<IServiceCollection>? configureServices = null)
     {

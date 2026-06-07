@@ -193,6 +193,13 @@ internal enum DeadLetterReason
     /// <summary>Run reached its retry policy's <c>MaxRetries</c> ceiling and was dead-lettered.</summary>
     RetriesExhausted,
 
+    /// <summary>
+    ///     A durable orchestrator diverged from its recorded replay history (a non-deterministic
+    ///     change to handler code). Replaying reproduces the same mismatch, so it was dead-lettered
+    ///     immediately rather than retried.
+    /// </summary>
+    NonDeterministic,
+
     /// <summary>No handler was registered for the job name on the claiming node.</summary>
     NoHandlerRegistered,
 
@@ -214,6 +221,7 @@ internal static class DeadLetterReasonExtensions
     public static string ToTagValue(this DeadLetterReason reason) => reason switch
     {
         DeadLetterReason.RetriesExhausted => "retries_exhausted",
+        DeadLetterReason.NonDeterministic => "non_deterministic",
         DeadLetterReason.NoHandlerRegistered => "no_handler_registered",
         DeadLetterReason.ShutdownInterrupted => "shutdown_interrupted",
         DeadLetterReason.StaleRecovery => "stale_recovery",

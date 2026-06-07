@@ -11,6 +11,16 @@ internal sealed class ActiveRunTracker
 
     public void Remove(string runId) => _activeRuns.TryRemove(runId, out _);
 
+    /// <summary>
+    ///     Removes the run only if it is still registered to <paramref name="cts" />. A durable
+    ///     suspend->resume cycle re-claims the same run id on a fresh execution task; this
+    ///     compare-and-remove keeps the prior task's teardown from evicting the successor's
+    ///     registration (and thus its cooperative-cancellation wiring).
+    /// </summary>
+    public void Remove(string runId, CancellationTokenSource cts) =>
+        ((ICollection<KeyValuePair<string, CancellationTokenSource>>)_activeRuns)
+            .Remove(new(runId, cts));
+
     public IReadOnlyCollection<string> Snapshot() => [.. _activeRuns.Keys];
 
     /// <summary>

@@ -145,11 +145,17 @@ internal sealed partial class SurefireExecutorService(
 
                         var executionTask = ExecuteClaimedRunAsync(run, stoppingToken);
                         _activeTasks[run.Id] = executionTask;
-                        _ = executionTask.ContinueWith(_ =>
+                        _ = executionTask.ContinueWith(completed =>
                             {
-                                _activeTasks.TryRemove(run.Id, out var _);
-                                _runCancellation.TryRemove(run.Id, out var _);
-                                activeRunTracker.Remove(run.Id);
+                                // Identity-keyed: a durable suspend->resume re-claims the same run id
+                                // on a fresh execution task, which may already be registered under
+                                // this key by the time this continuation runs. Compare-and-remove so
+                                // we only evict our own entry and never strip the successor's
+                                // capacity slot or shutdown-drain handle. Per-run cancellation and
+                                // tracker state are removed by ExecuteClaimedRunAsync's finally
+                                // (which runs before this continuation and is likewise identity-keyed).
+                                ((ICollection<KeyValuePair<string, Task>>)_activeTasks)
+                                    .Remove(new(run.Id, completed));
                                 logEventPump.DropRunState(run.Id);
                                 eventWriter.DropRunState(run.Id);
                             },
@@ -431,12 +437,28 @@ internal sealed partial class SurefireExecutorService(
             // nested aggregating boundaries). Flatten-based unwrap catches every nesting depth.
             await SuspendOrResumeAsync(context, run, stoppingToken);
         }
-        catch (JobRunException jre) when (context?.IsDurable == true)
+        catch (Exception ex) when (context?.IsDurable == true && IsUncaughtChildFailure(ex))
         {
-            // A recorded child terminated Failed / Canceled and the orchestrator didn't catch the
-            // resulting JobRunException. Replay would reproduce the same outcome, so we dead-letter
-            // immediately without burning a retry.
-            await HandleRunFailureAsync(context, run, jre, stoppingToken, true);
+            // A recorded child terminated Failed and the orchestrator didn't catch the resulting
+            // JobRunException — surfaced bare (a single awaited child) or wrapped in an
+            // AggregateException (Task.WhenAll, batch waits). Replay re-derives the same child id,
+            // reads the same recorded failure, and re-throws identically, so retrying only burns the
+            // budget on a deterministic outcome. Dead-letter immediately. Canceled children are not
+            // matched here; they fall through to the owned-cancellation path below so a canceled
+            // child cancels the orchestrator rather than failing it, keeping the bare and aggregated
+            // cancellation outcomes consistent.
+            await HandleRunFailureAsync(context, run, ex, stoppingToken, true);
+        }
+        catch (DurableReplayMismatchException mismatch)
+        {
+            // The orchestrator code no longer matches its persisted replay history (steps skipped,
+            // reordered, or a different operation/name recorded at a step). This is deterministic:
+            // replaying the same handler against the same history reproduces the identical mismatch,
+            // so retrying only burns the budget. Dead-letter immediately and tag it NonDeterministic
+            // so operators can distinguish a code/history divergence (needs a code fix or rollback)
+            // from genuine retry exhaustion.
+            await HandleRunFailureAsync(context, run, mismatch, stoppingToken, true,
+                DeadLetterReason.NonDeterministic);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -511,8 +533,12 @@ internal sealed partial class SurefireExecutorService(
             jobContextScope?.Dispose();
             executionCts?.Dispose();
             timeoutCts?.Dispose();
-            _runCancellation.TryRemove(run.Id, out _);
-            activeRunTracker.Remove(run.Id);
+            // Identity-keyed: a durable suspend->resume re-claims the same run id on a fresh
+            // execution task that may have already registered its own runCts under this key. Only
+            // remove our own registration so we don't strip the successor's cancellation wiring.
+            ((ICollection<KeyValuePair<string, CancellationTokenSource>>)_runCancellation)
+                .Remove(new(run.Id, runCts));
+            activeRunTracker.Remove(run.Id, runCts);
             try
             {
                 runCts.Cancel();
@@ -524,7 +550,8 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private async Task HandleRunFailureAsync(JobContext? context, JobRun run, Exception ex,
-        CancellationToken stoppingToken, bool forceDeadLetter = false)
+        CancellationToken stoppingToken, bool forceDeadLetter = false,
+        DeadLetterReason? deadLetterReason = null)
     {
         // Top-level catch so failure-handling failures don't escape as unobserved task exceptions
         // on the fire-and-forget executionTask continuation. We deliberately do NOT retry: the
@@ -532,7 +559,8 @@ internal sealed partial class SurefireExecutorService(
         // it handles real node crashes. Catches OCE too (typically bestEffortToken expiring).
         try
         {
-            await HandleRunFailureAsyncCore(context, run, ex, stoppingToken, forceDeadLetter);
+            await HandleRunFailureAsyncCore(context, run, ex, stoppingToken, forceDeadLetter,
+                deadLetterReason);
         }
         catch (Exception handlingEx)
         {
@@ -647,7 +675,8 @@ internal sealed partial class SurefireExecutorService(
     }
 
     private async Task HandleRunFailureAsyncCore(JobContext? context, JobRun run, Exception ex,
-        CancellationToken stoppingToken, bool forceDeadLetter = false)
+        CancellationToken stoppingToken, bool forceDeadLetter = false,
+        DeadLetterReason? deadLetterReason = null)
     {
         // Activity.Current is the span StartActivity'd in ExecuteClaimedRunAsync. Mark it Error
         // so OTel backends don't show failed runs as Unset.
@@ -837,7 +866,10 @@ internal sealed partial class SurefireExecutorService(
         if (transitionResult.Transitioned)
         {
             instrumentation.RecordRunFailed(run.JobName, run.StartedAt, timeProvider.GetUtcNow(),
-                isShutdownInterruption ? DeadLetterReason.ShutdownInterrupted : DeadLetterReason.RetriesExhausted);
+                deadLetterReason
+                ?? (isShutdownInterruption
+                    ? DeadLetterReason.ShutdownInterrupted
+                    : DeadLetterReason.RetriesExhausted));
             await CancelDescendantsWithTransientRetryAsync(
                 run.Id,
                 bestEffortToken,
@@ -1616,6 +1648,7 @@ internal sealed partial class SurefireExecutorService(
     private static string GetFailureCode(Exception exception) => exception switch
     {
         ShutdownInterruptedException => "shutdown_interrupted",
+        DurableReplayMismatchException => "durable_replay_mismatch",
         OperationCanceledException => "operation_canceled",
         _ => "exception"
     };
@@ -1641,6 +1674,44 @@ internal sealed partial class SurefireExecutorService(
 
     private static string GetOperationCanceledMessage(OperationCanceledException ex) =>
         string.IsNullOrWhiteSpace(ex.Message) ? "The operation was canceled." : ex.Message;
+
+    /// <summary>
+    ///     True when <paramref name="ex" /> is an uncaught durable child failure: a
+    ///     <see cref="JobRunException" /> with <see cref="JobStatus.Failed" />, either bare (a single
+    ///     awaited child) or wrapped in an <see cref="AggregateException" /> (Task.WhenAll, batch
+    ///     waits). Uses the same all-match semantics as <see cref="TryGetOwnedCancellationReason" />:
+    ///     an aggregate qualifies only when <em>every</em> flattened inner is a Failed child, so an
+    ///     aggregate mixing a child failure with a transient or non-child exception falls through to
+    ///     the normal retryable failure path instead of being dead-lettered.
+    /// </summary>
+    private static bool IsUncaughtChildFailure(Exception ex)
+    {
+        if (ex is JobRunException { Status: JobStatus.Failed })
+        {
+            return true;
+        }
+
+        if (ex is AggregateException aggregate)
+        {
+            var flattened = aggregate.Flatten().InnerExceptions;
+            if (flattened.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var inner in flattened)
+            {
+                if (inner is not JobRunException { Status: JobStatus.Failed })
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
+    }
 
     private static bool TryGetOwnedCancellationReason(Exception ex, out string reason)
     {

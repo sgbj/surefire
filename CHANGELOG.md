@@ -24,7 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Breaking changes
 
-- `IJobStore.CreateBatchAsync` and `IJobStore.TryCreateRunAsync` now take an optional `DurableStepRecord?` parameter. Custom `IJobStore` implementations must update these signatures.
+These affect custom `IJobStore` implementations only; applications using the built-in stores are unaffected.
+
+- Run status transitions now key off a lease epoch instead of an attempt number. `RunStatusTransition.ExpectedAttempt` (`int`) is replaced by `ExpectedLeaseEpoch` (`long`), and the `RunStatusTransition` factory methods (`PendingToRunning`, `RunningToSucceeded`, `RunningToFailed`, `RunningToPending`, `ToCanceled`) take `long expectedLeaseEpoch` in place of `int expectedAttempt`.
+- `IJobStore.TryCancelRunAsync` now takes `long? expectedLeaseEpoch` instead of `int? expectedAttempt`.
+- `IJobStore.CreateBatchAsync` and `IJobStore.TryCreateRunAsync` now take an optional `DurableStepRecord?` parameter.
+- `IJobStore` gains new required members for durable orchestration: `TrySuspendRunAsync`, `CreateDurableRecordAsync`, `LoadExecutionSnapshotAsync`, `GetInputPumpStateAsync`, and `AppendEventsIfRunNonTerminalAsync`.
 
 ## [0.3.0] - 2026-05-14
 

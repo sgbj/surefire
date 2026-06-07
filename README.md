@@ -33,6 +33,7 @@ app.Run();
 - Stream values into and out of jobs with `IAsyncEnumerable<T>`. Run batches and consume their results as a list or a
   stream.
 - Call jobs from other jobs using `IJobClient`.
+- Coordinate multi-step workflows with durable jobs that suspend while waiting on child runs and replay from recorded history, surviving restarts.
 - Native AOT and trimming support.
 - OpenTelemetry traces and metrics. ASP.NET Core health checks.
 
