@@ -79,7 +79,7 @@ app.AddJob("Quote", async (JobContext context, IRateService rates, CancellationT
 
 ### Move the work into a child job
 
-`RecordAsync` runs its factory inline and records the result only *after* it returns, so a crash mid-call re-runs it on resume — and it gets no automatic retry. That's fine for small, idempotent work like a quick HTTP read. But when running twice would be a bug — charging a card, writing a row, sending mail — give the work its own job and run it as a child. The side effect runs once, with its own retries and dashboard row, and replay returns the recorded result instead of repeating it:
+`RecordAsync` runs its factory inline and records the result only *after* it returns, so a crash mid-call re-runs it on resume, with no automatic retry. That's fine for small, idempotent work like a quick HTTP read. But when running twice would be a bug (charging a card, writing a row, sending mail), give the work its own job and run it as a child. The side effect runs once, with its own retries and dashboard row, and replay returns the recorded result instead of repeating it:
 
 ```csharp
 app.AddJob("ChargeCard", async (IPaymentGateway gateway, Payment payment) => await gateway.ChargeAsync(payment));
@@ -92,7 +92,7 @@ app.AddJob("Checkout", async (IJobClient client, CancellationToken ct, Order ord
 .Durable();
 ```
 
-On replay, the orchestrator gets the recorded receipt back — the card is never charged twice.
+On replay, the orchestrator gets the recorded receipt back, so the card is never charged twice.
 
 ## Batches
 
