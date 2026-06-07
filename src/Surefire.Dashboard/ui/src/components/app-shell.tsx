@@ -356,7 +356,7 @@ function Breadcrumbs({ items }: { items: BreadcrumbItem[] }) {
             className={cn("flex items-center gap-2", last && "min-w-0")}
           >
             {i > 0 && (
-              <span className="shrink-0 text-muted-foreground/40">/</span>
+              <span className="shrink-0 text-muted-foreground/60">/</span>
             )}
             {item.to && !last ? (
               <Link
@@ -367,6 +367,7 @@ function Breadcrumbs({ items }: { items: BreadcrumbItem[] }) {
               </Link>
             ) : (
               <span
+                aria-current={last ? "page" : undefined}
                 className={cn(
                   last
                     ? "truncate font-medium text-foreground"

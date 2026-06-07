@@ -30,6 +30,7 @@ internal sealed class JobRegistry
                                          descriptor.ParameterJsonTypeInfoFactories,
                                          optionsAccessor.SerializerOptions,
                                          services);
+        definition.SourceCode = descriptor.SourceCode;
 
         return RegisterCore(descriptor.Name, descriptor, definition);
     }

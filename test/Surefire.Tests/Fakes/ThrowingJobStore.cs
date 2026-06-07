@@ -31,6 +31,10 @@ internal abstract class ThrowingJobStore : IJobStore
 
     public virtual Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null, IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
+        CancellationToken ct = default) => throw new NotImplementedException();
+
+    public virtual Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
         CancellationToken ct = default) => throw new NotImplementedException();
 
     public virtual Task<JobRun?> GetRunAsync(string id, CancellationToken ct = default) =>
@@ -48,7 +52,7 @@ internal abstract class ThrowingJobStore : IJobStore
     public virtual Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
         CancellationToken ct = default) => throw new NotImplementedException();
 
-    public virtual Task<RunTransitionResult> TryCancelRunAsync(string runId, int? expectedAttempt = null,
+    public virtual Task<RunTransitionResult> TryCancelRunAsync(string runId, long? expectedLeaseEpoch = null,
         string? reason = null, IReadOnlyList<RunEvent>? events = null, CancellationToken cancellationToken = default) =>
         throw new NotImplementedException();
 
@@ -64,7 +68,9 @@ internal abstract class ThrowingJobStore : IJobStore
         throw new NotImplementedException();
 
     public virtual Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
-        IReadOnlyList<RunEvent>? initialEvents = null, CancellationToken ct = default) =>
+        IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
+        CancellationToken ct = default) =>
         throw new NotImplementedException();
 
     public virtual Task<JobBatch?> GetBatchAsync(string batchId, CancellationToken ct = default) =>
@@ -74,6 +80,10 @@ internal abstract class ThrowingJobStore : IJobStore
         CancellationToken ct = default) => throw new NotImplementedException();
 
     public virtual Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken ct = default) =>
+        throw new NotImplementedException();
+
+    public virtual Task<IReadOnlySet<string>> AppendEventsIfRunNonTerminalAsync(IReadOnlyList<RunEvent> events,
+        CancellationToken ct = default) =>
         throw new NotImplementedException();
 
     public virtual Task<IReadOnlyList<RunEvent>> GetEventsAsync(string runId, long sinceId = 0,
@@ -140,4 +150,19 @@ internal abstract class ThrowingJobStore : IJobStore
         throw new NotImplementedException();
 
     public virtual bool IsTransientException(Exception ex) => false;
+
+    public virtual Task<DurableSuspendOutcome> TrySuspendRunAsync(string runId, long expectedLeaseEpoch,
+        IReadOnlyCollection<string> awaitedRunIds,
+        IReadOnlyCollection<string> awaitedBatchIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException();
+
+    public virtual Task<DurableExecutionSnapshot> LoadExecutionSnapshotAsync(string orchestratorRunId,
+        CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException();
+
+    public virtual Task<IReadOnlyDictionary<string, InputPumpArgumentState>> GetInputPumpStateAsync(string runId,
+        CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException();
 }

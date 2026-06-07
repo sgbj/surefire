@@ -50,8 +50,11 @@ builder.Services.AddSurefire();
 | `surefire.store.operation.ms` | Histogram | `ms` | `surefire.store.operation` | Store operation duration |
 | `surefire.store.operation.failed` | Counter | | `surefire.store.operation` | Failed store operations |
 | `surefire.store.retries` | Counter | | `surefire.service` | Transient store failure retries |
-| `surefire.loop.errors` | Counter | | `surefire.loop` | Background loop tick failures (executor, maintenance, retention, log pump) |
+| `surefire.loop.errors` | Counter | | `surefire.loop` | Background loop tick failures (executor, maintenance, scheduler, retention) |
 | `surefire.log_entries.dropped` | Counter | | `surefire.drop.reason` | Log entries dropped before store flush |
+| `surefire.durable.suspended` | Counter | | `surefire.job.name` | Durable orchestrator attempts that yielded and parked in `Suspended` |
+| `surefire.durable.instant_resume` | Counter | | `surefire.job.name` | Durable yields where every awaited entity was already terminal, so the store routed them straight back to `Pending`. A sustained rate points to a handler yielding without making progress |
+| `surefire.durable.stale_recovered` | Counter | | `surefire.job.name` | Durable runs that were re-queued for replay after a host crashed mid-execution |
 
 ## Traces
 

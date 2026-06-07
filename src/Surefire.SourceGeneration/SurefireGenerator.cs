@@ -175,7 +175,63 @@ public sealed class SurefireGenerator : IIncrementalGenerator
             return null;
         }
 
-        return new(location.GetInterceptsLocationAttributeSyntax(), handlerInfo);
+        return new(
+            location.GetInterceptsLocationAttributeSyntax(),
+            handlerInfo,
+            TryCaptureSourceCode(invocation, handlerExpression, handlerSymbol, cancellationToken));
+    }
+
+    private static string TryCaptureSourceCode(InvocationExpressionSyntax addJobInvocation,
+        ExpressionSyntax handlerExpression,
+        IMethodSymbol handlerSymbol,
+        CancellationToken cancellationToken)
+    {
+        var registrationSource = TryCaptureRegistrationSourceCode(addJobInvocation);
+        var handlerSource = handlerExpression is AnonymousFunctionExpressionSyntax
+            ? null
+            : TryCaptureHandlerSourceCode(handlerSymbol, cancellationToken);
+
+        return handlerSource is { Length: > 0 }
+            ? registrationSource + "\n\n" + handlerSource
+            : registrationSource;
+    }
+
+    private static string? TryCaptureHandlerSourceCode(IMethodSymbol handlerSymbol, CancellationToken cancellationToken)
+    {
+        foreach (var syntaxReference in handlerSymbol.DeclaringSyntaxReferences)
+        {
+            var syntax = syntaxReference.GetSyntax(cancellationToken);
+            switch (syntax)
+            {
+                case MethodDeclarationSyntax { Body: { } } method:
+                    return TrimSource(method);
+                case MethodDeclarationSyntax { ExpressionBody: { } } method:
+                    return TrimSource(method);
+                case LocalFunctionStatementSyntax { Body: { } } local:
+                    return TrimSource(local);
+                case LocalFunctionStatementSyntax { ExpressionBody: { } } local:
+                    return TrimSource(local);
+                case AnonymousFunctionExpressionSyntax anonymous:
+                    return TrimSource(anonymous);
+            }
+        }
+
+        return null;
+    }
+
+    private static string TrimSource(SyntaxNode node) => node.ToFullString().Trim();
+
+    private static string TryCaptureRegistrationSourceCode(InvocationExpressionSyntax addJobInvocation)
+    {
+        SyntaxNode current = addJobInvocation;
+        while (current.Parent is MemberAccessExpressionSyntax { Expression: { } expression } memberAccess
+               && ReferenceEquals(expression, current)
+               && memberAccess.Parent is InvocationExpressionSyntax chainedInvocation)
+        {
+            current = chainedInvocation;
+        }
+
+        return TrimSource(current);
     }
 
     private static CallbackCall? TryExtractCallbackCall(GeneratorSyntaxContext context,
@@ -343,7 +399,7 @@ public sealed class SurefireGenerator : IIncrementalGenerator
             sb.AppendLine(
                 $"    private static Surefire.JobRegistrationDescriptor BuildDescriptor_{i}(string name, {delegateType} handler)");
             sb.AppendLine("    {");
-            DescriptorEmitter.EmitDescriptorBody(sb, i, handler);
+            DescriptorEmitter.EmitDescriptorBody(sb, i, handler, call.SourceCode);
             sb.AppendLine("    }");
             sb.AppendLine();
         }

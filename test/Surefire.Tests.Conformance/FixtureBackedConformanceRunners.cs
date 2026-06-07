@@ -119,3 +119,10 @@ public abstract class FixtureBackedContentionConformanceTests<TFixture>(TFixture
     internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)fixture!).CreateStoreAsync();
     public override ValueTask DisposeAsync() => new(((IStoreTestFixture)fixture!).CleanAsync());
 }
+
+public abstract class FixtureBackedDurableConformanceTests<TFixture>(TFixture fixture)
+    : DurableConformanceTests
+{
+    internal override Task<IJobStore> CreateStoreAsync() => ((IStoreTestFixture)fixture!).CreateStoreAsync();
+    public override ValueTask DisposeAsync() => new(((IStoreTestFixture)fixture!).CleanAsync());
+}

@@ -156,18 +156,24 @@ internal sealed partial class SurefireSchedulerService(
             CreatedAt = timeProvider.GetUtcNow(),
             NotBefore = notBefore,
             NotAfter = null,
+            ExpiresAt = JobRunDefaults.GetDefaultExpiresAt(notBefore, options),
             Priority = job.Priority,
             DeduplicationId = BuildCronDeduplicationId(job.Name, cronFireAt),
             Progress = 0,
-            Attempt = 0
+            Attempt = 1
         };
 
-        var created = await store.TryCreateRunAsync(
-            run,
-            lastCronFireAt: cronFireAt,
-            cancellationToken: cancellationToken);
-
-        if (!created)
+        try
+        {
+            if (!await store.TryCreateRunAsync(
+                    run,
+                    lastCronFireAt: cronFireAt,
+                    cancellationToken: cancellationToken))
+            {
+                return;
+            }
+        }
+        catch (RunConflictException)
         {
             return;
         }

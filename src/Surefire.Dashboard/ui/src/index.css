@@ -104,6 +104,50 @@
   overflow-anchor: none;
 }
 
+.job-source .hljs {
+  color: var(--syntax-foreground);
+}
+
+.job-source .hljs-comment,
+.job-source .hljs-quote {
+  color: var(--syntax-muted);
+}
+
+.job-source .hljs-keyword,
+.job-source .hljs-selector-tag,
+.job-source .hljs-built_in {
+  color: var(--syntax-keyword);
+}
+
+.job-source .hljs-string,
+.job-source .hljs-literal {
+  color: var(--syntax-string);
+}
+
+.job-source .hljs-number,
+.job-source .hljs-symbol,
+.job-source .hljs-bullet {
+  color: var(--syntax-number);
+}
+
+.job-source .hljs-type,
+.job-source .hljs-class,
+.job-source .hljs-title.class_ {
+  color: var(--syntax-type);
+}
+
+.job-source .hljs-title,
+.job-source .hljs-function,
+.job-source .hljs-title.function_ {
+  color: var(--syntax-title);
+}
+
+.job-source .hljs-meta,
+.job-source .hljs-attr,
+.job-source .hljs-attribute {
+  color: var(--syntax-meta);
+}
+
 /* ============================================================================
    PALETTE: cool slate ivory and deep ink, with a single cobalt accent that
    echoes the Surefire logo. Status colors stay tinted-low-chroma so the
@@ -112,7 +156,7 @@
 :root {
   --radius: 0.375rem;
 
-  --background: oklch(0.985 0.003 250);
+  --background: oklch(0.98 0.004 250);
   --foreground: oklch(0.18 0.018 255);
 
   --card: oklch(1 0 0);
@@ -152,8 +196,18 @@
   --status-succeeded: oklch(0.52 0.10 160);
   --status-pending:   oklch(0.62 0.13 60);
   --status-running:   var(--accent-brand);
-  --status-canceled:  oklch(0.55 0.012 252);
+  --status-suspended: oklch(0.55 0.10 295);
+  --status-canceled:  oklch(0.55 0.06 252);
   --status-failed:    oklch(0.52 0.16 22);
+
+  --syntax-foreground: var(--foreground);
+  --syntax-muted: var(--muted-foreground);
+  --syntax-keyword: oklch(0.48 0.17 275);
+  --syntax-string: oklch(0.43 0.11 155);
+  --syntax-number: oklch(0.46 0.13 55);
+  --syntax-type: oklch(0.46 0.13 230);
+  --syntax-title: oklch(0.43 0.14 250);
+  --syntax-meta: oklch(0.46 0.10 320);
 
   --sidebar: oklch(0.97 0.008 250);
   --sidebar-foreground: oklch(0.20 0.018 255);
@@ -203,8 +257,18 @@
   --status-succeeded: oklch(0.76 0.12 160);
   --status-pending:   oklch(0.80 0.14 60);
   --status-running:   var(--accent-brand);
-  --status-canceled:  oklch(0.66 0.014 252);
+  --status-suspended: oklch(0.74 0.12 295);
+  --status-canceled:  oklch(0.66 0.06 252);
   --status-failed:    oklch(0.70 0.18 22);
+
+  --syntax-foreground: var(--foreground);
+  --syntax-muted: var(--muted-foreground);
+  --syntax-keyword: oklch(0.78 0.13 290);
+  --syntax-string: oklch(0.78 0.10 155);
+  --syntax-number: oklch(0.82 0.12 75);
+  --syntax-type: oklch(0.78 0.12 225);
+  --syntax-title: oklch(0.76 0.14 255);
+  --syntax-meta: oklch(0.78 0.11 325);
 
   --sidebar: oklch(0.115 0.012 256);
   --sidebar-foreground: oklch(0.95 0.008 250);
@@ -277,6 +341,7 @@
   --color-status-succeeded: var(--status-succeeded);
   --color-status-pending: var(--status-pending);
   --color-status-running: var(--status-running);
+  --color-status-suspended: var(--status-suspended);
   --color-status-canceled: var(--status-canceled);
   --color-status-failed: var(--status-failed);
   --color-sidebar: var(--sidebar);

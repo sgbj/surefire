@@ -32,6 +32,7 @@ interface TriggerDialogProps {
     args?: unknown;
     notBefore?: string;
     notAfter?: string;
+    expiresAt?: string;
     priority?: number;
     deduplicationId?: string;
   }) => void;
@@ -49,6 +50,7 @@ export function TriggerDialog({
   const [jsonText, setJsonText] = useState("");
   const [notBefore, setNotBefore] = useState("");
   const [notAfter, setNotAfter] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
   const [priority, setPriority] = useState("");
   const [deduplicationId, setDeduplicationId] = useState("");
 
@@ -64,6 +66,7 @@ export function TriggerDialog({
     setJsonText("");
     setNotBefore("");
     setNotAfter("");
+    setExpiresAt("");
     setPriority("");
     setDeduplicationId("");
   };
@@ -133,6 +136,7 @@ export function TriggerDialog({
       args?: unknown;
       notBefore?: string;
       notAfter?: string;
+      expiresAt?: string;
       priority?: number;
       deduplicationId?: string;
     } = {};
@@ -152,6 +156,14 @@ export function TriggerDialog({
         return;
       }
       opts.notAfter = notAfterUtc;
+    }
+    if (expiresAt) {
+      const expiresAtUtc = toUtcIsoString(expiresAt);
+      if (!expiresAtUtc) {
+        toast.error("Invalid Expires at date");
+        return;
+      }
+      opts.expiresAt = expiresAtUtc;
     }
 
     if (opts.notBefore && opts.notAfter && opts.notAfter <= opts.notBefore) {
@@ -250,6 +262,15 @@ export function TriggerDialog({
                     type="datetime-local"
                     value={notBefore}
                     onChange={(e) => setNotBefore(e.target.value)}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="trigger-expires-at">Expires at</FieldLabel>
+                  <Input
+                    id="trigger-expires-at"
+                    type="datetime-local"
+                    value={expiresAt}
+                    onChange={(e) => setExpiresAt(e.target.value)}
                   />
                 </Field>
                 <Field>

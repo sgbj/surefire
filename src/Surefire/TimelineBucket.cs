@@ -14,6 +14,9 @@ public sealed record TimelineBucket
     /// <summary>The number of in-flight runs in this bucket.</summary>
     public int Running { get; init; }
 
+    /// <summary>The number of durable orchestrator runs parked in <see cref="JobStatus.Suspended" /> in this bucket.</summary>
+    public int Suspended { get; init; }
+
     /// <summary>The number of runs that succeeded in this bucket.</summary>
     public int Succeeded { get; init; }
 

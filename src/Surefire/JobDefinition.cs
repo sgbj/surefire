@@ -56,6 +56,14 @@ public sealed class JobDefinition
     public bool IsContinuous { get; set; }
 
     /// <summary>
+    ///     Gets or sets whether this job is a durable orchestrator. Durable jobs record every
+    ///     <see cref="IJobClient" /> call in the run's event log and replay it deterministically
+    ///     on resume. Between un-completed calls the orchestrator is suspended and does not
+    ///     consume a worker, job, or queue concurrency slot.
+    /// </summary>
+    public bool IsDurable { get; set; }
+
+    /// <summary>
     ///     Gets or sets the name of the queue this job is assigned to.
     /// </summary>
     public string? Queue { get; set; }
@@ -88,6 +96,11 @@ public sealed class JobDefinition
     public string? ArgumentsSchema { get; set; }
 
     /// <summary>
+    ///     Gets or sets the captured source code for the job registration.
+    /// </summary>
+    public string? SourceCode { get; set; }
+
+    /// <summary>
     ///     Gets or sets the time of the last heartbeat from a node registering this job.
     /// </summary>
     public DateTimeOffset? LastHeartbeatAt { get; set; }
@@ -109,12 +122,14 @@ public sealed class JobDefinition
         Priority = Priority,
         RetryPolicy = RetryPolicy with { },
         IsContinuous = IsContinuous,
+        IsDurable = IsDurable,
         Queue = Queue,
         RateLimitName = RateLimitName,
         IsEnabled = IsEnabled,
         MisfirePolicy = MisfirePolicy,
         FireAllLimit = FireAllLimit,
         ArgumentsSchema = ArgumentsSchema,
+        SourceCode = SourceCode,
         LastHeartbeatAt = LastHeartbeatAt,
         LastCronFireAt = LastCronFireAt
     };

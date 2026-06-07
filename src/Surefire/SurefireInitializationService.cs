@@ -50,6 +50,7 @@ internal sealed class SurefireInitializationService(
                 store,
                 notifications,
                 timeProvider,
+                options,
                 registered.Definition,
                 cancellationToken);
         }

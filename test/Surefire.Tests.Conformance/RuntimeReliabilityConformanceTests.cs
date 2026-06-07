@@ -82,6 +82,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             LastHeartbeatAt = staleAt,
             NodeName = "dead-node",
             Attempt = 1,
+            LeaseEpoch = 1,
             Progress = 0
         };
 
@@ -126,6 +127,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             LastHeartbeatAt = staleAt,
             NodeName = "dead-node",
             Attempt = 1,
+            LeaseEpoch = 1,
             Progress = 0
         };
 
@@ -267,6 +269,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
             LastHeartbeatAt = staleAt,
             NodeName = "dead-node",
             Attempt = 1,
+            LeaseEpoch = 1,
             Progress = 0
         };
 
@@ -282,6 +285,7 @@ public abstract class RuntimeReliabilityConformanceTests : StoreConformanceBase
                 LastHeartbeatAt = now,
                 NodeName = "child-node",
                 Attempt = 1,
+                LeaseEpoch = 1,
                 Progress = 0,
                 ParentRunId = parent.Id,
                 RootRunId = parent.Id

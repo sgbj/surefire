@@ -74,7 +74,7 @@ export function CommandPalette({
       <CommandInput placeholder="Type to navigate or search…" />
       <CommandList className="max-h-105">
         <CommandEmpty>
-          <span className="text-xs text-muted-foreground">no matches</span>
+          <span className="text-xs text-muted-foreground">No matches</span>
         </CommandEmpty>
         <CommandGroup heading="Navigation">
           <CommandItem onSelect={() => go("/")}>

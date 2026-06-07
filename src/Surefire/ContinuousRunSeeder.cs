@@ -3,7 +3,8 @@ namespace Surefire;
 internal static class ContinuousRunSeeder
 {
     public static async Task EnsureCapacityAsync(IJobStore store, INotificationProvider notifications,
-        TimeProvider timeProvider, JobDefinition definition, CancellationToken cancellationToken)
+        TimeProvider timeProvider, SurefireOptions options, JobDefinition definition,
+        CancellationToken cancellationToken)
     {
         if (!definition.IsContinuous || !definition.IsEnabled)
         {
@@ -21,15 +22,25 @@ internal static class ContinuousRunSeeder
                 Status = JobStatus.Pending,
                 CreatedAt = now,
                 NotBefore = now,
+                ExpiresAt = JobRunDefaults.GetDefaultExpiresAt(now, options),
                 Priority = definition.Priority,
                 Progress = 0,
-                Attempt = 0
+                Attempt = 1
             };
 
-            var created = await store.TryCreateRunAsync(
-                run,
-                desired,
-                cancellationToken: cancellationToken);
+            bool created;
+            try
+            {
+                created = await store.TryCreateRunAsync(
+                    run,
+                    desired,
+                    cancellationToken: cancellationToken);
+            }
+            catch (RunConflictException)
+            {
+                break;
+            }
+
             if (!created)
             {
                 break;

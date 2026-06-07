@@ -11,6 +11,7 @@ import {Pause, Play, Search} from "lucide-react";
 import {toast} from "sonner";
 import {PageShell} from "@/components/page-shell";
 import {PageErrorBanner} from "@/components/page-error-banner";
+import {ToolBar} from "@/components/tab-bar";
 import {cn} from "@/lib/utils";
 
 export function QueuesPage() {
@@ -174,21 +175,22 @@ export function QueuesPage() {
     <PageShell>
       {isError && <PageErrorBanner message="Failed to load queues" />}
 
+      <ToolBar>
+        <div className="relative max-w-sm">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
+          <Input
+            placeholder="Filter queues…"
+            aria-label="Search queues"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="h-8 pl-8"
+          />
+        </div>
+      </ToolBar>
+
       <DataTable
         columns={columns}
         data={filtered}
-        toolbar={
-          <div className="relative max-w-sm">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"/>
-            <Input
-              placeholder="Filter queues…"
-              aria-label="Search queues"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              className="pl-8"
-            />
-          </div>
-        }
       />
     </PageShell>
   );

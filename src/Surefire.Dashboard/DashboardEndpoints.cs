@@ -63,17 +63,19 @@ public static class DashboardEndpoints
         var group = endpoints.MapGroup(prefix);
         var api = group.MapGroup("api");
 
-        api.MapGet("/stats", async (DateTimeOffset? since, int? bucketMinutes, IJobStore store, CancellationToken ct) =>
-        {
-            var stats = await store.GetDashboardStatsAsync(since, bucketMinutes ?? 60, ct);
-            var recentRunsPage = await store.GetRunsAsync(
-                new() { OrderBy = RunOrderBy.CreatedAt },
-                0,
-                15,
-                ct);
+        api.MapGet("/stats",
+            async (DateTimeOffset? since, int? bucketMinutes, IJobStore store, CancellationToken ct) =>
+            {
+                var stats = await store.GetDashboardStatsAsync(since, bucketMinutes ?? 60, ct);
+                var recentRunsPage = await store.GetRunsAsync(
+                    new() { OrderBy = RunOrderBy.CreatedAt },
+                    0,
+                    15,
+                    ct);
 
-            return TypedResults.Ok(DashboardStatsResponse.From(stats, recentRunsPage.Items));
-        });
+                var recentRuns = ToRunResponses(recentRunsPage.Items);
+                return TypedResults.Ok(DashboardStatsResponse.From(stats, recentRuns));
+            });
 
         api.MapGet("/jobs",
             async (string? name, string? tag, bool? isEnabled, bool? includeInactive, IJobStore store,
@@ -159,13 +161,15 @@ public static class DashboardEndpoints
                 }
 
                 RunOptions? runOptions = null;
-                if (request?.NotBefore is { } || request?.NotAfter is { } || request?.Priority is { } ||
+                if (request?.NotBefore is { } || request?.NotAfter is { } || request?.ExpiresAt is { } ||
+                    request?.Priority is { } ||
                     request?.DeduplicationId is { })
                 {
                     runOptions = new()
                     {
                         NotBefore = request.NotBefore,
                         NotAfter = request.NotAfter,
+                        ExpiresAt = request.ExpiresAt,
                         Priority = request.Priority,
                         DeduplicationId = request.DeduplicationId
                     };
@@ -202,7 +206,7 @@ public static class DashboardEndpoints
             var runsPage = await store.GetRunsAsync(filter, Math.Max(skip ?? 0, 0), requestedTake, ct);
             return TypedResults.Ok(new PagedResponse<RunResponse>
             {
-                Items = runsPage.Items.Select(r => RunResponse.From(r)).ToList(),
+                Items = ToRunResponses(runsPage.Items),
                 TotalCount = runsPage.TotalCount
             });
         });
@@ -231,7 +235,8 @@ public static class DashboardEndpoints
                 }
 
                 var runs = await store.GetRunsByIdsAsync(ids, ct);
-                return TypedResults.Ok<IReadOnlyList<RunResponse>>(runs.Select(r => RunResponse.From(r)).ToList());
+                return TypedResults.Ok<IReadOnlyList<RunResponse>>(
+                    ToRunResponses(runs));
             });
 
         api.MapGet("/runs/{id}",
@@ -241,7 +246,7 @@ public static class DashboardEndpoints
                 var run = await store.GetRunAsync(id, ct);
                 return run is null
                     ? NotFoundProblem($"Run '{id}' was not found.")
-                    : TypedResults.Ok(RunResponse.From(run));
+                    : TypedResults.Ok(ToRunResponse(run));
             });
 
         api.MapGet("/runs/{id}/tree",
@@ -743,10 +748,31 @@ public static class DashboardEndpoints
         return new()
         {
             RootId = rootId,
-            Runs = runs.Select(r => RunResponse.From(r, depths[r.Id])).ToList(),
+            Runs = ToRunResponses(runs, depths),
             Truncated = truncated,
             TotalCount = totalCount
         };
+    }
+
+    private static RunResponse ToRunResponse(JobRun run, int? depth = null)
+        => RunResponse.From(run, depth);
+
+    private static List<RunResponse> ToRunResponses(IReadOnlyList<JobRun> runs,
+        IReadOnlyDictionary<string, int>? depthsByRunId = null)
+    {
+        var responses = new List<RunResponse>(runs.Count);
+        foreach (var run in runs)
+        {
+            int? depth = null;
+            if (depthsByRunId is { } && depthsByRunId.TryGetValue(run.Id, out var d))
+            {
+                depth = d;
+            }
+
+            responses.Add(ToRunResponse(run, depth));
+        }
+
+        return responses;
     }
 
     private static ProblemHttpResult NotFoundProblem(string detail) =>

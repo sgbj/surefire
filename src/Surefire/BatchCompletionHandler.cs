@@ -60,34 +60,38 @@ internal sealed partial class BatchCompletionHandler(
 
     public async Task AppendFailureEventAsync(JobRun run, RunFailureEnvelope envelope,
         CancellationToken cancellationToken)
+        => await AppendFailureEventAsync(run.Id, run.BatchId, run.Attempt, envelope, cancellationToken);
+
+    public async Task AppendFailureEventAsync(string runId, string? batchId, int attempt,
+        RunFailureEnvelope envelope, CancellationToken cancellationToken)
     {
         try
         {
             var payload = JsonSerializer.Serialize(envelope, SurefireJsonContext.Default.RunFailureEnvelope);
 
-            BatchedEventWriter.NotificationPublish[] channels = run.BatchId is { } batchId
+            BatchedEventWriter.NotificationPublish[] channels = batchId is { }
                 ?
                 [
-                    new(NotificationChannels.RunEvent(run.Id), run.Id),
-                    new(NotificationChannels.RunEvent(batchId), run.Id)
+                    new(NotificationChannels.RunEvent(runId), runId),
+                    new(NotificationChannels.RunEvent(batchId), runId)
                 ]
-                : [new(NotificationChannels.RunEvent(run.Id), run.Id)];
+                : [new(NotificationChannels.RunEvent(runId), runId)];
 
             await eventWriter.EnqueueAsync(
                 new()
                 {
-                    RunId = run.Id,
+                    RunId = runId,
                     EventType = RunEventType.AttemptFailure,
                     Payload = payload,
                     CreatedAt = timeProvider.GetUtcNow(),
-                    Attempt = run.Attempt
+                    Attempt = attempt
                 },
                 channels,
                 cancellationToken);
         }
         catch (Exception ex)
         {
-            Log.FailedToAppendAttemptFailure(logger, ex, run.Id);
+            Log.FailedToAppendAttemptFailure(logger, ex, runId);
         }
     }
 

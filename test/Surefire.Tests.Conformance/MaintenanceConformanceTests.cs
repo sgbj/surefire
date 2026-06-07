@@ -120,6 +120,95 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     }
 
     [Fact]
+    public async Task CancelExpiredRuns_CancelsRunningPastExpiresAt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"RunningExpiresAt_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var run = CreateRun(jobName, JobStatus.Running) with
+        {
+            ExpiresAt = now.AddMinutes(-1),
+            NodeName = "node1",
+            StartedAt = now,
+            LastHeartbeatAt = now
+        };
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        var result = await Store.CancelExpiredRunsWithIdsAsync(ct);
+
+        Assert.Contains(result.Runs, r => r.RunId == run.Id);
+        var loaded = await Store.GetRunAsync(run.Id, ct);
+        Assert.NotNull(loaded);
+        Assert.Equal(JobStatus.Canceled, loaded.Status);
+    }
+
+    [Fact]
+    public async Task CancelExpiredRuns_CascadesExpiredRootToDescendantsWithStableMetadata()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"ExpireTree_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
+        var root = CreateRun(jobName) with { ExpiresAt = now.AddMinutes(-1) };
+        var child = CreateRun(jobName) with { ParentRunId = root.Id };
+        var grandchild = CreateRun(jobName) with
+        {
+            ParentRunId = child.Id,
+            ExpiresAt = now.AddMinutes(-1)
+        };
+        await Store.CreateRunsAsync([root, child, grandchild], cancellationToken: ct);
+
+        var result = await Store.CancelExpiredRunsWithIdsAsync(ct);
+        var canceledIds = result.Runs.Select(r => r.RunId).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Equal(3, canceledIds.Count);
+        Assert.Contains(root.Id, canceledIds);
+        Assert.Contains(child.Id, canceledIds);
+        Assert.Contains(grandchild.Id, canceledIds);
+
+        var expiredById = result.ExpiredRuns.ToDictionary(r => r.RunId, StringComparer.Ordinal);
+        Assert.Equal(3, expiredById.Count);
+        Assert.Equal(ExpiredCancellationKind.Expired, expiredById[root.Id].Kind);
+        Assert.Equal("Run expired past its deadline.", expiredById[root.Id].Reason);
+        Assert.Equal(ExpiredCancellationKind.AncestorExpired, expiredById[child.Id].Kind);
+        Assert.Equal($"Canceled because parent run '{root.Id}' expired.", expiredById[child.Id].Reason);
+        Assert.Equal(ExpiredCancellationKind.AncestorExpired, expiredById[grandchild.Id].Kind);
+        Assert.Equal($"Canceled because parent run '{child.Id}' expired.", expiredById[grandchild.Id].Reason);
+
+        foreach (var id in canceledIds)
+        {
+            var loaded = await Store.GetRunAsync(id, ct);
+            Assert.NotNull(loaded);
+            Assert.Equal(JobStatus.Canceled, loaded.Status);
+        }
+    }
+
+    [Fact]
+    public async Task CancelExpiredRuns_SkipsRetriedPendingRun()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"RetriedExpired_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var run = CreateRun(jobName) with
+        {
+            NotAfter = DateTimeOffset.UtcNow.AddMinutes(-1),
+            LeaseEpoch = 1
+        };
+        await Store.CreateRunsAsync([run], cancellationToken: ct);
+
+        var canceled = await Store.CancelExpiredRunsWithIdsAsync(ct);
+        Assert.DoesNotContain(canceled.Runs, r => r.RunId == run.Id);
+
+        var loaded = await Store.GetRunAsync(run.Id, ct);
+        Assert.NotNull(loaded);
+        Assert.Equal(JobStatus.Pending, loaded.Status);
+    }
+
+    [Fact]
     public async Task HeartbeatRuns_UpdatesTimestamp()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -547,7 +636,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var running = CreateRun(jobName, JobStatus.Running) with
         {
-            NodeName = "n", StartedAt = now.AddMinutes(-30), LastHeartbeatAt = now.AddMinutes(-30)
+            NodeName = "n", StartedAt = now.AddMinutes(-30), LastHeartbeatAt = now.AddMinutes(-30),
+            LeaseEpoch = 1
         };
         var pending = CreateRun(jobName);
         var futureScheduled = CreateRun(jobName) with { NotBefore = now.AddHours(1) };
@@ -628,7 +718,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.Single(first);
 
         var transition = RunStatusTransition.RunningToPending(
-            run.Id, run.Attempt, run.NotBefore, run.Reason, run.Result, run.Progress, run.LastHeartbeatAt);
+            run.Id, run.LeaseEpoch, run.NotBefore, run.Reason, run.Result, run.Progress, run.LastHeartbeatAt);
         var result = await Store.TryTransitionRunAsync(transition, ct);
         Assert.True(result.Transitioned);
 
@@ -648,18 +738,20 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
 
         var second = CreateRun(jobName);
-        Assert.False(await Store.TryCreateRunAsync(second, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(second, 1, cancellationToken: ct));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var toRunning = CreateRun(jobName, JobStatus.Running) with
         {
-            Id = first.Id, NodeName = "n", StartedAt = now, LastHeartbeatAt = now, Attempt = first.Attempt
+            Id = first.Id, NodeName = "n", StartedAt = now, LastHeartbeatAt = now,
+            Attempt = first.Attempt, LeaseEpoch = first.LeaseEpoch
         };
         Assert.True((await Store.TryTransitionRunAsync(Transition(toRunning, JobStatus.Pending), ct)).Transitioned);
 
         var toTerminal = toRunning with
         {
-            Status = JobStatus.Succeeded, CompletedAt = now, Attempt = toRunning.Attempt
+            Status = JobStatus.Succeeded, CompletedAt = now, Attempt = toRunning.Attempt,
+            LeaseEpoch = toRunning.LeaseEpoch
         };
         Assert.True((await Store.TryTransitionRunAsync(Transition(toTerminal, JobStatus.Running), ct)).Transitioned);
 
@@ -679,7 +771,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
 
         var blocked = CreateRun(jobName);
-        Assert.False(await Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
 
         Assert.True((await Store.TryCancelRunAsync(first.Id, cancellationToken: ct)).Transitioned);
 
@@ -688,7 +781,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task MaxActiveForJob_DecrementsOnPurgeOfPending()
+    public async Task MaxActiveForJob_DecrementsOnExpirationOfPending()
     {
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"NTPurgeDec_{Guid.CreateVersion7():N}";
@@ -696,13 +789,19 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
 
         var old = TruncateToMilliseconds(DateTimeOffset.UtcNow.AddHours(-2));
-        var abandoned = CreateRun(jobName) with { CreatedAt = old, NotBefore = old };
+        var abandoned = CreateRun(jobName) with
+        {
+            CreatedAt = old,
+            NotBefore = old,
+            ExpiresAt = old
+        };
         Assert.True(await Store.TryCreateRunAsync(abandoned, 1, cancellationToken: ct));
 
         var blocked = CreateRun(jobName);
-        Assert.False(await Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
 
-        await Store.PurgeAsync(DateTimeOffset.UtcNow.AddHours(-1), ct);
+        await Store.CancelExpiredRunsWithIdsAsync(ct);
 
         var fresh = CreateRun(jobName);
         Assert.True(await Store.TryCreateRunAsync(fresh, 1, cancellationToken: ct));

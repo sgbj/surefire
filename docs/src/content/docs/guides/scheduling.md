@@ -80,7 +80,7 @@ Surefire seeds enabled continuous jobs up to their configured `MaxConcurrency` o
 |---|---|
 | Job completes | Restarts |
 | Job fails, retries remaining | Normal retry behavior |
-| Job fails, retries exhausted | Restarts after a cooldown delay |
+| Job fails, retries exhausted | Restarts on the next maintenance sweep |
 | Job canceled | Restarts (unless job is disabled) |
 | Job disabled via dashboard | No restart |
 | Job re-enabled via dashboard | Restarts |

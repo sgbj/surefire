@@ -33,6 +33,7 @@ export interface TimelineBucket {
   start?: string;
   pending: number;
   running: number;
+  suspended: number;
   succeeded: number;
   canceled: number;
   failed: number;
@@ -56,6 +57,7 @@ function normalizeDashboardStats(raw: DashboardStats): DashboardStats {
       timestamp: bucket.timestamp ?? bucket.start ?? "",
       pending: bucket.pending ?? 0,
       running: bucket.running ?? 0,
+      suspended: bucket.suspended ?? 0,
       succeeded: bucket.succeeded ?? 0,
       canceled: bucket.canceled ?? 0,
       failed: bucket.failed ?? 0,
@@ -123,6 +125,7 @@ export interface JobResponse {
   nextRunAt?: string;
   misfirePolicy: number;
   argumentsSchema?: JsonSchema;
+  sourceCode?: string;
 }
 
 export interface JsonSchema {
@@ -179,6 +182,8 @@ export interface JobRun {
   canceledAt?: string;
   nodeName?: string;
   attempt: number;
+  failureCount: number;
+  replayCount: number;
   traceId?: string;
   spanId?: string;
   parentRunId?: string;
@@ -186,6 +191,7 @@ export interface JobRun {
   rerunOfRunId?: string;
   notBefore?: string;
   notAfter?: string;
+  expiresAt?: string;
   priority: number;
   queuePriority?: number;
   deduplicationId?: string;
@@ -266,6 +272,7 @@ export const JobStatus = {
   Pending: 0,
   Running: 1,
   Succeeded: 2,
+  Suspended: 3,
   Canceled: 4,
   Failed: 5,
 } as const;
@@ -275,6 +282,7 @@ export const JobStatusLabels: Record<number, string> = {
   [JobStatus.Pending]: "Pending",
   [JobStatus.Running]: "Running",
   [JobStatus.Succeeded]: "Succeeded",
+  [JobStatus.Suspended]: "Suspended",
   [JobStatus.Canceled]: "Canceled",
   [JobStatus.Failed]: "Failed",
 };
@@ -283,6 +291,7 @@ export const JobStatusColors: Record<number, string> = {
   [JobStatus.Pending]: "bg-status-pending/15 text-status-pending",
   [JobStatus.Running]: "bg-status-running/15 text-status-running",
   [JobStatus.Succeeded]: "bg-status-succeeded/15 text-status-succeeded",
+  [JobStatus.Suspended]: "bg-status-suspended/15 text-status-suspended",
   [JobStatus.Canceled]: "bg-status-canceled/15 text-status-canceled",
   [JobStatus.Failed]: "bg-status-failed/15 text-status-failed",
 };
@@ -339,6 +348,7 @@ export const api = {
       args?: unknown;
       notBefore?: string;
       notAfter?: string;
+      expiresAt?: string;
       priority?: number;
       deduplicationId?: string;
     },

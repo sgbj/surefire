@@ -55,3 +55,6 @@ public sealed class InMemoryTraceTests(InMemoryFixture fixture)
 
 public sealed class InMemoryContentionTests(InMemoryFixture fixture)
     : FixtureBackedContentionConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;
+
+public sealed class InMemoryDurableTests(InMemoryFixture fixture)
+    : FixtureBackedDurableConformanceTests<InMemoryFixture>(fixture), IClassFixture<InMemoryFixture>;

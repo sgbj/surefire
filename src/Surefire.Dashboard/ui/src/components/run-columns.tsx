@@ -117,11 +117,22 @@ export function buildRunColumns(
     columns.push({
       accessorKey: "attempt",
       header: "Attempt",
-      cell: ({row}) => (
-        <span className="font-mono text-xs tnum text-foreground/85">
-          {row.original.attempt}
-        </span>
-      ),
+      cell: ({row}) => {
+        const {attempt, replayCount} = row.original;
+        return (
+          <span className="font-mono text-xs tnum text-foreground/85">
+            {attempt}
+            {replayCount > 0 && (
+              <span
+                className="ml-1 text-foreground/55"
+                title={`${replayCount} suspend/resume replay${replayCount === 1 ? "" : "s"}`}
+              >
+                ·{replayCount}r
+              </span>
+            )}
+          </span>
+        );
+      },
     });
   }
 

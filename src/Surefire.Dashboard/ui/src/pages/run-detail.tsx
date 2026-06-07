@@ -28,16 +28,16 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { Progress } from "@/components/ui/progress";
 import { formatDate, formatLogTime } from "@/lib/format";
-import { useLiveDuration } from "@/hooks/use-live-duration";
 import { useTailFollow } from "@/hooks/use-tail-follow";
 import { Ban, ChevronDown, RotateCcw } from "lucide-react";
 import {
+  type ReactNode,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { toast } from "sonner";
 import {
@@ -53,16 +53,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { PageShell, PageBody } from "@/components/page-shell";
+import { PageShell } from "@/components/page-shell";
 import { PageErrorBanner } from "@/components/page-error-banner";
 import { TopBarActions, TopBarBadge } from "@/components/topbar-slot";
-import { DtDd, metadataGridClass } from "@/components/dt-dd";
+import { metadataGridClass } from "@/components/dt-dd";
+import { MetadataStrip, type MetadataItem } from "@/components/metadata-strip";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { TabBar, TabBarTrigger, ToolBar } from "@/components/tab-bar";
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { useLiveDuration } from "@/hooks/use-live-duration";
 import { cn } from "@/lib/utils";
 
 function formatJsonDisplay(json: string): string {
@@ -74,6 +78,11 @@ function formatJsonDisplay(json: string): string {
 }
 
 const EMPTY_LOGS: RunLogEntry[] = [];
+// useSyncExternalStore reads logs through a snapshot wrapper so the in-place
+// appended array (see logsByRunRef) can be published with an O(1) reference
+// change per flush instead of copying the whole array.
+type LogsSnapshot = { logs: RunLogEntry[] };
+const EMPTY_LOGS_SNAPSHOT: LogsSnapshot = { logs: EMPTY_LOGS };
 const EMPTY_OUTPUT_ITEMS: unknown[] = [];
 const EMPTY_INPUT_ITEMS: { param: string; value: unknown }[] = [];
 const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
@@ -82,6 +91,9 @@ const EMPTY_ATTEMPT_FAILURES: AttemptFailureItem[] = [];
 // freshness mechanism: no per-row polling, no visibility tracking.
 const TREE_REFETCH_INTERVAL_MS = 3000;
 const TREE_INVALIDATION_DEBOUNCE_MS = 1000;
+
+const LOG_ROW_HEIGHT = 24;
+const LIST_ROW_HEIGHT = 24;
 
 interface AttemptFailureItem {
   attempt: number;
@@ -188,11 +200,17 @@ export function RunDetailPage() {
     refetchInterval: (query) => {
       if (query.state.error) return false;
       const s = query.state.data?.status;
-      return s === JobStatus.Pending || s === JobStatus.Running ? 5000 : false;
+      return s === JobStatus.Pending
+          || s === JobStatus.Running
+          || s === JobStatus.Suspended
+        ? 5000
+        : false;
     },
   });
   const isActive =
-    run?.status === JobStatus.Pending || run?.status === JobStatus.Running;
+    run?.status === JobStatus.Pending
+    || run?.status === JobStatus.Running
+    || run?.status === JobStatus.Suspended;
 
   const { data: tree } = useQuery({
     queryKey: ["run-tree", id],
@@ -203,13 +221,44 @@ export function RunDetailPage() {
       const data = query.state.data;
       if (!data) return TREE_REFETCH_INTERVAL_MS;
       return data.runs.some(
-        (r) => r.status === JobStatus.Pending || r.status === JobStatus.Running,
+        (r) =>
+          r.status === JobStatus.Pending
+          || r.status === JobStatus.Running
+          || r.status === JobStatus.Suspended,
       )
         ? TREE_REFETCH_INTERVAL_MS
         : false;
     },
   });
-  const [logsByRun, setLogsByRun] = useState<Record<string, RunLogEntry[]>>({});
+  // Logs are kept in a ref instead of state so flushes can append in-place
+  // instead of spreading the entire array each frame (a real bottleneck on
+  // log-heavy runs). The ref is exposed to render as an external store via
+  // useSyncExternalStore: each flush publishes a fresh O(1) snapshot wrapper
+  // and notifies subscribers, so we never read the ref during render.
+  const logsByRunRef = useRef<Record<string, RunLogEntry[]>>({});
+  const logsSnapshotByRunRef = useRef<Record<string, LogsSnapshot>>({});
+  const logsListenersRef = useRef<Set<() => void>>(new Set());
+  const subscribeLogs = useCallback((onChange: () => void) => {
+    const listeners = logsListenersRef.current;
+    listeners.add(onChange);
+    return () => {
+      listeners.delete(onChange);
+    };
+  }, []);
+  // Publish the current bucket as a new wrapper (O(1)) and notify subscribers.
+  const bumpLogsVersion = useCallback(() => {
+    for (const key of Object.keys(logsByRunRef.current)) {
+      logsSnapshotByRunRef.current[key] = { logs: logsByRunRef.current[key] };
+    }
+    for (const key of Object.keys(logsSnapshotByRunRef.current)) {
+      if (!(key in logsByRunRef.current)) {
+        delete logsSnapshotByRunRef.current[key];
+      }
+    }
+    for (const listener of logsListenersRef.current) {
+      listener();
+    }
+  }, []);
   const [logFilterByRun, setLogFilterByRun] = useState<
     Record<string, number | null>
   >({});
@@ -280,12 +329,15 @@ export function RunDetailPage() {
   }, [runKey, traceItems]);
 
   useEffect(() => {
-    setLogsByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    /* eslint-disable react-hooks/set-state-in-effect -- accumulated SSE state is owned by setState; pruning when the tree changes is the synchronization */
+    logsByRunRef.current = pruneRunMap(logsByRunRef.current, allowedRunIds);
+    bumpLogsVersion();
     setLogFilterByRun((prev) => pruneRunMap(prev, allowedRunIds));
     setSseProgressByRun((prev) => pruneRunMap(prev, allowedRunIds));
     setOutputItemsByRun((prev) => pruneRunMap(prev, allowedRunIds));
     setInputItemsByRun((prev) => pruneRunMap(prev, allowedRunIds));
     setAttemptFailuresByRun((prev) => pruneRunMap(prev, allowedRunIds));
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     const nextSeen: Record<string, number> = {};
     for (const runId of allowedRunIds) {
@@ -296,9 +348,13 @@ export function RunDetailPage() {
     }
 
     lastSeenEventIdByRun.current = nextSeen;
-  }, [allowedRunIds]);
+  }, [allowedRunIds, bumpLogsVersion]);
 
-  const logs = logsByRun[runKey] ?? EMPTY_LOGS;
+  const getLogsSnapshot = useCallback(
+    () => logsSnapshotByRunRef.current[runKey] ?? EMPTY_LOGS_SNAPSHOT,
+    [runKey],
+  );
+  const logs = useSyncExternalStore(subscribeLogs, getLogsSnapshot).logs;
   const logFilter = logFilterByRun[runKey] ?? null;
   const sseProgress = sseProgressByRun[runKey] ?? null;
   const outputItems = outputItemsByRun[runKey] ?? EMPTY_OUTPUT_ITEMS;
@@ -339,93 +395,6 @@ export function RunDetailPage() {
     [logs, logFilter],
   );
 
-  // Math.ceil prevents sub-pixel drift from jittering getTotalSize() mid-scroll.
-  const LOG_ROW_HEIGHT = 24;
-  const LIST_ROW_HEIGHT = 24;
-  const measureRow = (el: Element) =>
-    Math.ceil(el.getBoundingClientRect().height);
-
-  // Logs / input / output share one scroll container, so each virtualizer needs
-  // scrollMargin = its host element's offset within the container, otherwise it
-  // renders the wrong range once the user scrolls past earlier sections.
-  const bodyScrollRef = useRef<HTMLDivElement>(null);
-  const bodyContentRef = useRef<HTMLDivElement>(null);
-  const inputContentRef = useRef<HTMLDivElement>(null);
-  const outputContentRef = useRef<HTMLDivElement>(null);
-  const logsContentRef = useRef<HTMLDivElement>(null);
-  const [scrollMargins, setScrollMargins] = useState({
-    input: 0,
-    output: 0,
-    logs: 0,
-  });
-
-  // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
-  const logVirtualizer = useVirtualizer({
-    count: filteredLogs.length,
-    getScrollElement: () => bodyScrollRef.current,
-    estimateSize: () => LOG_ROW_HEIGHT,
-    overscan: 20,
-    measureElement: measureRow,
-    scrollMargin: scrollMargins.logs,
-  });
-
-  const inputVirtualizer = useVirtualizer({
-    count: inputItems.length,
-    getScrollElement: () => bodyScrollRef.current,
-    estimateSize: () => LIST_ROW_HEIGHT,
-    overscan: 20,
-    measureElement: measureRow,
-    scrollMargin: scrollMargins.input,
-  });
-
-  const outputVirtualizer = useVirtualizer({
-    count: outputItems.length,
-    getScrollElement: () => bodyScrollRef.current,
-    estimateSize: () => LIST_ROW_HEIGHT,
-    overscan: 20,
-    measureElement: measureRow,
-    scrollMargin: scrollMargins.output,
-  });
-
-  // Re-read offsets every render, not via ResizeObserver: RO fires after paint, so when
-  // an earlier section grows mid-stream the next section paints one frame with a stale
-  // scrollMargin and the virtualizer drops items at its start.
-  const updateScrollMargins = useCallback(() => {
-    const panel = bodyScrollRef.current;
-    if (!panel) return;
-    const panelRect = panel.getBoundingClientRect();
-    const panelScrollTop = panel.scrollTop;
-    const compute = (el: HTMLElement | null) => {
-      if (!el) return 0;
-      return el.getBoundingClientRect().top - panelRect.top + panelScrollTop;
-    };
-    setScrollMargins((prev) => {
-      const next = {
-        input: compute(inputContentRef.current),
-        output: compute(outputContentRef.current),
-        logs: compute(logsContentRef.current),
-      };
-      if (
-        prev.input === next.input &&
-        prev.output === next.output &&
-        prev.logs === next.logs
-      ) {
-        return prev;
-      }
-      return next;
-    });
-  }, []);
-
-  useLayoutEffect(() => {
-    updateScrollMargins();
-  });
-
-  useTailFollow({
-    scrollElement: bodyScrollRef.current,
-    contentElementRef: bodyContentRef,
-    followKey: isActive ? runKey : undefined,
-  });
-
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(id!),
     onSuccess: () => {
@@ -463,6 +432,7 @@ export function RunDetailPage() {
       const current = lastSeenEventIdByRun.current[runKey] ?? 0;
       if (eventId <= current) return false;
 
+      // eslint-disable-next-line react-hooks/immutability -- ref payload is mutable bookkeeping for SSE dedup
       lastSeenEventIdByRun.current[runKey] = eventId;
       return true;
     },
@@ -476,10 +446,13 @@ export function RunDetailPage() {
       if (logBuf.current.length > 0) {
         const batch = logBuf.current;
         logBuf.current = [];
-        setLogsByRun((prev) => ({
-          ...prev,
-          [runKey]: [...(prev[runKey] ?? []), ...batch],
-        }));
+        let bucket = logsByRunRef.current[runKey];
+        if (!bucket) {
+          bucket = [];
+          logsByRunRef.current[runKey] = bucket;
+        }
+        bucket.push(...batch);
+        bumpLogsVersion();
       }
       if (outputBuf.current.length > 0) {
         const batch = outputBuf.current;
@@ -518,10 +491,11 @@ export function RunDetailPage() {
         }));
       }
     });
-  }, [runKey]);
+  }, [runKey, bumpLogsVersion]);
 
   useEffect(() => {
     if (!id) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resetting the expansion state belongs to the SSE lifecycle, not derived data
     setExpandedFailureRow(null);
     logBuf.current = [];
     outputBuf.current = [];
@@ -620,7 +594,8 @@ export function RunDetailPage() {
           .getRunLogs(id)
           .then((fetched) => {
             if (!stale && fetched.length > 0) {
-              setLogsByRun((prev) => ({ ...prev, [runKey]: fetched }));
+              logsByRunRef.current[runKey] = fetched;
+              bumpLogsVersion();
             }
           })
           .catch(() => {});
@@ -646,10 +621,8 @@ export function RunDetailPage() {
     runKey,
     scheduleFlush,
     shouldProcessEvent,
+    bumpLogsVersion,
   ]);
-
-  const inputHeader =
-    inputItems.length === 0 ? "" : `Input (${inputItems.length})`;
 
   const traceScrollRef = useRef<HTMLDivElement>(null);
   const [traceScrollElement, setTraceScrollElement] =
@@ -658,6 +631,16 @@ export function RunDetailPage() {
     traceScrollRef.current = node;
     setTraceScrollElement(node);
   }, []);
+  const mobileTraceScrollRef = useRef<HTMLDivElement>(null);
+  const [mobileTraceScrollElement, setMobileTraceScrollElement] =
+    useState<HTMLDivElement | null>(null);
+  const setMobileTraceScrollNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      mobileTraceScrollRef.current = node;
+      setMobileTraceScrollElement(node);
+    },
+    [],
+  );
   const traceScrollStateRef = useRef<TraceScrollState>({
     rootId: null,
     scrollTop: 0,
@@ -687,31 +670,59 @@ export function RunDetailPage() {
     }
   }, []);
 
-  const [collapsedSections, setCollapsedSections] = useState<
-    Record<string, boolean>
-  >(() => {
-    if (typeof window === "undefined") return {};
+  const showErrorsTab = Boolean(run?.reason) || failureRows.length > 0;
+  const showLogsTab = logs.length > 0 || isActive;
+  const showArgumentsTab = Boolean(run?.arguments);
+  const showResultTab = Boolean(run?.result) && outputItems.length === 0;
+  const showInputTab = inputItems.length > 0;
+  const showOutputTab = outputItems.length > 0;
+  const showMobileTraceTab = !isWideViewport && traceItems.length > 0;
+
+  const availableTabs = useMemo(() => {
+    const tabs: string[] = [];
+    if (showMobileTraceTab) tabs.push("trace");
+    if (showArgumentsTab) tabs.push("arguments");
+    if (showResultTab) tabs.push("result");
+    if (showErrorsTab) tabs.push("errors");
+    if (showInputTab) tabs.push("input");
+    if (showOutputTab) tabs.push("output");
+    if (showLogsTab) tabs.push("logs");
+    return tabs;
+  }, [
+    showMobileTraceTab,
+    showErrorsTab,
+    showLogsTab,
+    showArgumentsTab,
+    showResultTab,
+    showInputTab,
+    showOutputTab,
+  ]);
+
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
     try {
-      const raw = localStorage.getItem("surefire:run-detail:collapsed:v1");
-      return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+      return localStorage.getItem("surefire:run-detail:tab:v1") ?? "";
     } catch {
-      return {};
+      return "";
     }
   });
-  const toggleSection = useCallback((key: string) => {
-    setCollapsedSections((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      try {
-        localStorage.setItem(
-          "surefire:run-detail:collapsed:v1",
-          JSON.stringify(next),
-        );
-      } catch {
-        // storage quota or disabled
-      }
-      return next;
-    });
-  }, []);
+
+  // Derive the rendered tab so a stale stored value or a vanished tab does not
+  // require a setState round-trip. The user's intent (activeTab) is preserved
+  // verbatim; when it can't be honored, fall back to the first available tab
+  // (availableTabs is already in priority order).
+  const effectiveTab = useMemo(() => {
+    if (availableTabs.includes(activeTab)) return activeTab;
+    return availableTabs[0] ?? "";
+  }, [availableTabs, activeTab]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("surefire:run-detail:tab:v1", effectiveTab);
+    } catch {
+      // storage quota or disabled
+    }
+  }, [effectiveTab]);
 
   if (isError)
     return (
@@ -730,17 +741,23 @@ export function RunDetailPage() {
             </div>
           ))}
         </div>
-        <PageBody>
+        <div className="p-6">
           <Skeleton className="h-72 w-full rounded-sm" />
-        </PageBody>
+        </div>
       </PageShell>
     );
 
-  // Desktop: trace owns its own scroll container (left pane of the resizable split).
-  // Mobile (!isWideViewport branch below) inlines it into the body scroll instead.
-  const traceHeader = tree?.truncated
-    ? `Trace (${traceItems.length} of ${tree.totalCount})`
-    : `Trace (${traceItems.length})`;
+  const traceCount = tree?.truncated
+    ? `${traceItems.length} of ${tree.totalCount}`
+    : String(traceItems.length);
+  const traceHeading = (
+    <span className="flex items-baseline gap-1.5 text-sm font-medium tracking-tight text-foreground">
+      Trace
+      <span className="text-xs tnum text-muted-foreground/80">
+        {traceCount}
+      </span>
+    </span>
+  );
   const traceContentDesktop = (
     <div
       ref={setTraceScrollNode}
@@ -755,296 +772,177 @@ export function RunDetailPage() {
           rootId={tree?.rootId}
           scrollContainerRef={traceScrollRef}
           scrollStateRef={traceScrollStateRef}
-          header={
-            <span className="text-base font-semibold tracking-tight text-foreground">
-              {traceHeader}
-            </span>
-          }
+          header={traceHeading}
+          headerClassName="bg-card/95 backdrop-blur-sm"
         />
       ) : (
-        <div className="eyebrow py-8 text-center">no related runs</div>
+        <div className="eyebrow py-8 text-center">No related runs</div>
       )}
     </div>
   );
 
-  const bodyContent = (
-    <div>
-      {(run.reason || failureRows.length > 0) && (
-        <section className="border-t border-border first:border-t-0">
-          <SectionHeading
-            sectionKey="errors"
-            title={`Errors${failureRows.length > 0 ? ` (${failureRows.length})` : ""}`}
-            collapsed={collapsedSections.errors}
-            onToggle={toggleSection}
-          />
-          {!collapsedSections.errors && (
-            <div
-              style={{
-                ["--errors-cols" as string]:
-                  "minmax(0,5rem) minmax(0,14rem) minmax(0,1fr) auto",
-              }}
-            >
-              <div className="min-w-3xl">
-                {run.reason && (
-                  <div
-                    className={cn(
-                      "px-6 py-3 text-sm whitespace-pre-wrap wrap-break-word",
-                      failureRows.length > 0 && "border-b border-border",
-                    )}
-                  >
-                    {run.reason}
-                  </div>
-                )}
-                {failureRows.map(({ failure, key }, index) => {
-                  const isExpanded = expandedFailureRow === key;
-                  const hasStackTrace = Boolean(failure.stackTrace);
-                  const headline = [failure.exceptionType, failure.message]
-                    .filter(Boolean)
-                    .join(": ");
-                  return (
-                    <div
-                      key={key}
-                      className={
-                        index < failureRows.length - 1
-                          ? "border-b border-border"
-                          : ""
-                      }
-                    >
-                      <button
-                        type="button"
-                        onClick={
-                          hasStackTrace
-                            ? () =>
-                                setExpandedFailureRow((prev) =>
-                                  prev === key ? null : key,
-                                )
-                            : undefined
-                        }
-                        disabled={!hasStackTrace}
-                        className={cn(
-                          "w-full grid items-start text-left text-sm transition-colors",
-                          hasStackTrace
-                            ? "hover:bg-muted/40 cursor-pointer"
-                            : "cursor-default",
-                        )}
-                        style={{ gridTemplateColumns: "var(--errors-cols)" }}
-                      >
-                        <div className="px-2 pl-6 py-2.5 text-muted-foreground tnum truncate">
-                          #{failure.attempt}
-                        </div>
-                        <div className="px-2 py-2.5 text-muted-foreground tnum truncate">
-                          {failure.occurredAt
-                            ? formatDate(failure.occurredAt)
-                            : ""}
-                        </div>
-                        <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap wrap-break-word">
-                          {headline}
-                        </div>
-                        <div className="px-2 pr-6 py-2.5">
-                          {hasStackTrace && (
-                            <ChevronDown
-                              className={cn(
-                                "size-4 text-muted-foreground transition-transform",
-                                isExpanded && "rotate-180",
-                              )}
-                            />
-                          )}
-                        </div>
-                      </button>
-                      {isExpanded && failure.stackTrace && (
-                        <pre className="text-xs px-6 py-3 whitespace-pre-wrap break-all font-mono text-muted-foreground border-t border-border">
-                          {failure.stackTrace}
-                        </pre>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
+  const logFilterSelect = (
+    <Select
+      value={logFilter === null ? "all" : String(logFilter)}
+      onValueChange={(v) =>
+        setCurrentLogFilter(v === "all" ? null : Number(v))
+      }
+    >
+      <SelectTrigger size="sm" className="w-32">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent position="popper" align="end">
+        <SelectItem value="all">All levels</SelectItem>
+        <SelectItem value="0">Trace</SelectItem>
+        <SelectItem value="1">Debug</SelectItem>
+        <SelectItem value="2">Info</SelectItem>
+        <SelectItem value="3">Warning</SelectItem>
+        <SelectItem value="4">Error</SelectItem>
+        <SelectItem value="5">Critical</SelectItem>
+      </SelectContent>
+    </Select>
+  );
 
-      {run.arguments && (
-        <section className="border-t border-border first:border-t-0">
-          <SectionHeading
-            sectionKey="arguments"
-            title="Arguments"
-            collapsed={collapsedSections.arguments}
-            onToggle={toggleSection}
-          />
-          {!collapsedSections.arguments && (
-            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap wrap-break-word font-mono">
-              {formatJsonDisplay(run.arguments)}
-            </pre>
-          )}
-        </section>
-      )}
-
-      {run.result && outputItems.length === 0 && (
-        <section className="border-t border-border first:border-t-0">
-          <SectionHeading
-            sectionKey="result"
-            title="Result"
-            collapsed={collapsedSections.result}
-            onToggle={toggleSection}
-          />
-          {!collapsedSections.result && (
-            <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap wrap-break-word font-mono">
-              {formatJsonDisplay(run.result)}
-            </pre>
-          )}
-        </section>
-      )}
-
-      {inputItems.length > 0 && (
-        <section className="border-t border-border first:border-t-0">
-          <SectionHeading
-            sectionKey="input"
-            title={inputHeader}
-            collapsed={collapsedSections.input}
-            onToggle={toggleSection}
-          />
-          {!collapsedSections.input && (
-            <div className="py-2 font-mono text-xs">
-              <div
-                ref={inputContentRef}
-                className="relative"
-                style={{ height: `${inputVirtualizer.getTotalSize()}px` }}
-              >
-                {inputVirtualizer.getVirtualItems().map((virtualItem) => {
-                  const item = inputItems[virtualItem.index];
-                  return (
-                    <div
-                      key={virtualItem.index}
-                      ref={inputVirtualizer.measureElement}
-                      data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
-                      style={{
-                        transform: `translateY(${virtualItem.start - scrollMargins.input}px)`,
-                      }}
-                    >
-                      <span className="text-muted-foreground">
-                        {item.param}:
-                      </span>{" "}
-                      {JSON.stringify(item.value)}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
-      {outputItems.length > 0 && (
-        <section className="border-t border-border first:border-t-0">
-          <SectionHeading
-            sectionKey="output"
-            title={`Output (${outputItems.length})`}
-            collapsed={collapsedSections.output}
-            onToggle={toggleSection}
-          />
-          {!collapsedSections.output && (
-            <div className="py-2 font-mono text-xs">
-              <div
-                ref={outputContentRef}
-                className="relative"
-                style={{ height: `${outputVirtualizer.getTotalSize()}px` }}
-              >
-                {outputVirtualizer.getVirtualItems().map((virtualItem) => {
-                  const item = outputItems[virtualItem.index];
-                  return (
-                    <div
-                      key={virtualItem.index}
-                      ref={outputVirtualizer.measureElement}
-                      data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
-                      style={{
-                        transform: `translateY(${virtualItem.start - scrollMargins.output}px)`,
-                      }}
-                    >
-                      {JSON.stringify(item)}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
-      {logs.length > 0 && (
-        <section className="border-t border-border first:border-t-0">
-          <SectionHeading
-            sectionKey="logs"
-            title={`Logs (${logFilter !== null ? `${filteredLogs.length} / ${logs.length}` : logs.length})`}
-            collapsed={collapsedSections.logs}
-            onToggle={toggleSection}
-            extras={
-              !collapsedSections.logs && (
-                <Select
-                  value={logFilter === null ? "all" : String(logFilter)}
-                  onValueChange={(v) =>
-                    setCurrentLogFilter(v === "all" ? null : Number(v))
-                  }
-                >
-                  <SelectTrigger className="h-auto! border-0 bg-transparent! shadow-none px-1 py-0 text-sm text-muted-foreground gap-0.5 [&_svg]:size-3">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All</SelectItem>
-                    <SelectItem value="0">Trace</SelectItem>
-                    <SelectItem value="1">Debug</SelectItem>
-                    <SelectItem value="2">Info</SelectItem>
-                    <SelectItem value="3">Warning</SelectItem>
-                    <SelectItem value="4">Error</SelectItem>
-                    <SelectItem value="5">Critical</SelectItem>
-                  </SelectContent>
-                </Select>
-              )
+  const tabsContent = (
+    <Tabs
+      value={effectiveTab}
+      onValueChange={setActiveTab}
+      className="flex h-full min-h-0 flex-col gap-0"
+    >
+      <TabBar>
+        {showMobileTraceTab && (
+          <TabBarTrigger value="trace" count={traceItems.length}>
+            Trace
+          </TabBarTrigger>
+        )}
+        {showArgumentsTab && (
+          <TabBarTrigger value="arguments">Arguments</TabBarTrigger>
+        )}
+        {showResultTab && (
+          <TabBarTrigger value="result">Result</TabBarTrigger>
+        )}
+        {showErrorsTab && (
+          <TabBarTrigger
+            value="errors"
+            count={failureRows.length > 0 ? failureRows.length : undefined}
+          >
+            Errors
+          </TabBarTrigger>
+        )}
+        {showInputTab && (
+          <TabBarTrigger value="input" count={inputItems.length}>
+            Input
+          </TabBarTrigger>
+        )}
+        {showOutputTab && (
+          <TabBarTrigger value="output" count={outputItems.length}>
+            Output
+          </TabBarTrigger>
+        )}
+        {showLogsTab && (
+          <TabBarTrigger
+            value="logs"
+            count={
+              logFilter !== null && logFilter > 0
+                ? `${filteredLogs.length}/${logs.length}`
+                : logs.length
             }
-          />
-          {!collapsedSections.logs && (
-            <div className="py-2 font-mono text-xs">
-              <div
-                ref={logsContentRef}
-                className="relative"
-                style={{ height: `${logVirtualizer.getTotalSize()}px` }}
-              >
-                {logVirtualizer.getVirtualItems().map((virtualItem) => {
-                  const log = filteredLogs[virtualItem.index];
-                  return (
-                    <div
-                      key={virtualItem.index}
-                      ref={logVirtualizer.measureElement}
-                      data-index={virtualItem.index}
-                      className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
-                      style={{
-                        transform: `translateY(${virtualItem.start - scrollMargins.logs}px)`,
-                      }}
-                    >
-                      <span className="text-muted-foreground tnum">
-                        {formatLogTime(log.timestamp)}
-                      </span>{" "}
-                      <span className={logLevelColor(log.level)}>
-                        [{LogLevelLabels[log.level] ?? "?"}]
-                      </span>{" "}
-                      <span>{log.message}</span>
-                      {log.exception && (
-                        <pre className="mt-1 whitespace-pre-wrap wrap-break-word text-muted-foreground">
-                          {log.exception}
-                        </pre>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </section>
+          >
+            Logs
+          </TabBarTrigger>
+        )}
+      </TabBar>
+
+      {effectiveTab === "logs" && <ToolBar>{logFilterSelect}</ToolBar>}
+
+      {showMobileTraceTab && (
+        <TabsContent
+          value="trace"
+          className="mt-0 flex-1 min-h-0 outline-none"
+        >
+          <div
+            ref={setMobileTraceScrollNode}
+            className="h-full overflow-auto"
+            style={{ scrollPaddingTop: "3rem" }}
+          >
+            <TraceView
+              key={
+                mobileTraceScrollElement ? "mobile-trace-ready" : "mobile-trace"
+              }
+              items={traceItems}
+              currentRunId={id!}
+              rootId={tree?.rootId}
+              scrollContainerRef={mobileTraceScrollRef}
+              scrollStateRef={traceScrollStateRef}
+            />
+          </div>
+        </TabsContent>
       )}
-    </div>
+
+      {showErrorsTab && (
+        <TabsContent value="errors" className="mt-0 flex-1 min-h-0 outline-none">
+          <ErrorsPanel
+            run={run}
+            failureRows={failureRows}
+            expandedFailureRow={expandedFailureRow}
+            setExpandedFailureRow={setExpandedFailureRow}
+          />
+        </TabsContent>
+      )}
+
+      <TabsContent value="logs" className="mt-0 flex-1 min-h-0 outline-none">
+        <LogsPanel
+          logs={filteredLogs}
+          isActive={isActive}
+          followKey={`${runKey}:logs`}
+        />
+      </TabsContent>
+
+      {showArgumentsTab && (
+        <TabsContent
+          value="arguments"
+          className="mt-0 flex-1 min-h-0 outline-none"
+        >
+          <JsonPanel json={run.arguments!} />
+        </TabsContent>
+      )}
+
+      {showResultTab && (
+        <TabsContent value="result" className="mt-0 flex-1 min-h-0 outline-none">
+          <JsonPanel json={run.result!} />
+        </TabsContent>
+      )}
+
+      {showInputTab && (
+        <TabsContent value="input" className="mt-0 flex-1 min-h-0 outline-none">
+          <StreamPanel
+            items={inputItems}
+            isActive={isActive}
+            followKey={`${runKey}:input`}
+            renderItem={(item) => (
+              <>
+                <span className="text-muted-foreground">{item.param}:</span>{" "}
+                {JSON.stringify(item.value)}
+              </>
+            )}
+          />
+        </TabsContent>
+      )}
+
+      {showOutputTab && (
+        <TabsContent
+          value="output"
+          className="mt-0 flex-1 min-h-0 outline-none"
+        >
+          <StreamPanel
+            items={outputItems}
+            isActive={isActive}
+            followKey={`${runKey}:output`}
+            renderItem={(item) => JSON.stringify(item)}
+          />
+        </TabsContent>
+      )}
+    </Tabs>
   );
 
   return (
@@ -1114,134 +1012,296 @@ export function RunDetailPage() {
       {run.status === JobStatus.Running && (
         <Progress
           value={progress > 0 ? progress * 100 : null}
-          className="h-0.5 rounded-none"
+          className="h-1 rounded-none"
         />
       )}
 
+      <RunMetaStrip run={run} duration={duration} />
+
       {isWideViewport ? (
-        <>
-          <RunMetaStrip run={run} duration={duration} />
-          <ResizablePanelGroup
-            orientation="horizontal"
-            defaultLayout={persistedSplit}
-            onLayoutChanged={persistSplit}
-            className="flex-1"
-          >
-            <ResizablePanel
-              id="trace"
-              defaultSize="36%"
-              minSize="20%"
-              maxSize="70%"
-            >
-              {traceContentDesktop}
-            </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel id="content" defaultSize="64%" minSize="30%">
-              <div
-                ref={bodyScrollRef}
-                className="h-full overflow-auto"
-                style={{ overflowAnchor: "none" }}
-              >
-                <div ref={bodyContentRef}>{bodyContent}</div>
-              </div>
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </>
-      ) : (
-        <div
-          ref={bodyScrollRef}
-          className="flex-1 overflow-auto min-h-0"
-          style={{ overflowAnchor: "none" }}
+        <ResizablePanelGroup
+          orientation="horizontal"
+          defaultLayout={persistedSplit}
+          onLayoutChanged={persistSplit}
+          className="flex-1"
         >
-          <div ref={bodyContentRef}>
-            <RunMetaStrip run={run} duration={duration} />
-            <section className="border-b border-border">
-              {!collapsedSections.trace && traceItems.length > 0 ? (
-                <TraceView
-                  key="mobile-trace"
-                  items={traceItems}
-                  currentRunId={id!}
-                  rootId={tree?.rootId}
-                  scrollContainerRef={bodyScrollRef}
-                  manageFocusScroll={false}
-                  onHeaderClick={() => toggleSection("trace")}
-                  header={
-                    <span className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
-                      <ChevronDown className="size-3.5 text-muted-foreground" />
-                      {traceHeader}
-                    </span>
-                  }
-                />
-              ) : (
-                <>
-                  <SectionHeading
-                    sectionKey="trace"
-                    title={traceHeader}
-                    collapsed={collapsedSections.trace}
-                    onToggle={toggleSection}
-                  />
-                  {!collapsedSections.trace && (
-                    <div className="eyebrow py-8 text-center">
-                      no related runs
-                    </div>
-                  )}
-                </>
-              )}
-            </section>
-            {bodyContent}
-          </div>
-        </div>
+          <ResizablePanel
+            id="trace"
+            defaultSize="36%"
+            minSize="20%"
+            maxSize="70%"
+          >
+            {traceContentDesktop}
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel id="content" defaultSize="64%" minSize="30%">
+            {tabsContent}
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        <div className="flex-1 min-h-0">{tabsContent}</div>
       )}
     </PageShell>
   );
 }
 
-function SectionHeading({
-  sectionKey,
-  title,
-  collapsed,
-  onToggle,
-  extras,
+function LogsPanel({
+  logs,
+  isActive,
+  followKey,
 }: {
-  sectionKey: string;
-  title: React.ReactNode;
-  collapsed: boolean | undefined;
-  onToggle: (key: string) => void;
-  extras?: React.ReactNode;
+  logs: RunLogEntry[];
+  isActive: boolean;
+  followKey: string;
 }) {
-  const handleToggle = () => onToggle(sectionKey);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const setScrollNode = useCallback((node: HTMLDivElement | null) => {
+    scrollRef.current = node;
+    setScrollElement(node);
+  }, []);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
+  const virtualizer = useVirtualizer({
+    count: logs.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => LOG_ROW_HEIGHT,
+    overscan: 20,
+    measureElement: (el) => Math.ceil(el.getBoundingClientRect().height),
+  });
+
+  useTailFollow({
+    scrollElement,
+    contentElementRef: contentRef,
+    followKey: isActive ? followKey : undefined,
+  });
+
+  if (logs.length === 0) {
+    return <div className="eyebrow py-10 text-center">No logs yet</div>;
+  }
+
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={handleToggle}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          handleToggle();
-        }
-      }}
-      aria-expanded={!collapsed}
-      className="sticky top-0 z-10 flex items-center gap-2 px-6 py-2 border-b border-border bg-card/95 backdrop-blur-sm cursor-pointer hover:bg-card transition-colors"
+      ref={setScrollNode}
+      className="h-full overflow-auto"
+      style={{ overflowAnchor: "none" }}
     >
-      <ChevronDown
-        className={cn(
-          "size-3.5 text-muted-foreground transition-transform",
-          collapsed && "-rotate-90",
-        )}
-      />
-      <span className="text-base font-semibold tracking-tight text-foreground">
-        {title}
-      </span>
-      {extras && (
-        <span
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => e.stopPropagation()}
-          className="contents"
+      <div ref={contentRef} className="py-2 font-mono text-xs">
+        <div
+          className="relative"
+          style={{ height: `${virtualizer.getTotalSize()}px` }}
         >
-          {extras}
-        </span>
-      )}
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const log = logs[virtualItem.index];
+            return (
+              <div
+                key={virtualItem.index}
+                ref={virtualizer.measureElement}
+                data-index={virtualItem.index}
+                className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
+                style={{ transform: `translateY(${virtualItem.start}px)` }}
+              >
+                <span className="text-muted-foreground tnum">
+                  {formatLogTime(log.timestamp)}
+                </span>{" "}
+                <span className={logLevelColor(log.level)}>
+                  [{LogLevelLabels[log.level] ?? "?"}]
+                </span>{" "}
+                <span>{log.message}</span>
+                {log.exception && (
+                  <pre className="mt-1 whitespace-pre-wrap wrap-break-word text-muted-foreground">
+                    {log.exception}
+                  </pre>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StreamPanel<T>({
+  items,
+  renderItem,
+  isActive,
+  followKey,
+}: {
+  items: T[];
+  renderItem: (item: T, index: number) => ReactNode;
+  isActive: boolean;
+  followKey: string;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const setScrollNode = useCallback((node: HTMLDivElement | null) => {
+    scrollRef.current = node;
+    setScrollElement(node);
+  }, []);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // eslint-disable-next-line react-hooks/incompatible-library -- useVirtualizer manages its own state; React Compiler memoization is unnecessary.
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => LIST_ROW_HEIGHT,
+    overscan: 20,
+    measureElement: (el) => Math.ceil(el.getBoundingClientRect().height),
+  });
+
+  useTailFollow({
+    scrollElement,
+    contentElementRef: contentRef,
+    followKey: isActive ? followKey : undefined,
+  });
+
+  if (items.length === 0) {
+    return <div className="eyebrow py-10 text-center">No items yet</div>;
+  }
+
+  return (
+    <div
+      ref={setScrollNode}
+      className="h-full overflow-auto"
+      style={{ overflowAnchor: "none" }}
+    >
+      <div ref={contentRef} className="py-2 font-mono text-xs">
+        <div
+          className="relative"
+          style={{ height: `${virtualizer.getTotalSize()}px` }}
+        >
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const item = items[virtualItem.index];
+            return (
+              <div
+                key={virtualItem.index}
+                ref={virtualizer.measureElement}
+                data-index={virtualItem.index}
+                className="absolute top-0 left-0 w-full px-6 py-0.5 whitespace-pre-wrap wrap-break-word"
+                style={{ transform: `translateY(${virtualItem.start}px)` }}
+              >
+                {renderItem(item, virtualItem.index)}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ErrorsPanel({
+  run,
+  failureRows,
+  expandedFailureRow,
+  setExpandedFailureRow,
+}: {
+  run: JobRun;
+  failureRows: { failure: AttemptFailureItem; key: string }[];
+  expandedFailureRow: string | null;
+  setExpandedFailureRow: (value: string | null | ((prev: string | null) => string | null)) => void;
+}) {
+  return (
+    <div className="h-full overflow-auto">
+      <div
+        style={{
+          ["--errors-cols" as string]:
+            "minmax(0,5rem) minmax(0,14rem) minmax(0,1fr) auto",
+        }}
+      >
+        <div className="min-w-3xl">
+          {run.reason && (
+            <div
+              className={cn(
+                "px-6 py-3 text-sm whitespace-pre-wrap wrap-break-word",
+                failureRows.length > 0 && "border-b border-border",
+              )}
+            >
+              {run.reason}
+            </div>
+          )}
+          {failureRows.map(({ failure, key }, index) => {
+            const isExpanded = expandedFailureRow === key;
+            const hasStackTrace = Boolean(failure.stackTrace);
+            const headline = [failure.exceptionType, failure.message]
+              .filter(Boolean)
+              .join(": ");
+            return (
+              <div
+                key={key}
+                className={
+                  index < failureRows.length - 1
+                    ? "border-b border-border"
+                    : ""
+                }
+              >
+                <button
+                  type="button"
+                  onClick={
+                    hasStackTrace
+                      ? () =>
+                          setExpandedFailureRow((prev) =>
+                            prev === key ? null : key,
+                          )
+                      : undefined
+                  }
+                  disabled={!hasStackTrace}
+                  className={cn(
+                    "w-full grid items-start text-left text-sm transition-colors",
+                    hasStackTrace
+                      ? "hover:bg-muted/40 cursor-pointer"
+                      : "cursor-default",
+                  )}
+                  style={{ gridTemplateColumns: "var(--errors-cols)" }}
+                >
+                  <div className="px-2 pl-6 py-2.5 text-muted-foreground tnum truncate">
+                    #{failure.attempt}
+                  </div>
+                  <div className="px-2 py-2.5 text-muted-foreground tnum truncate">
+                    {failure.occurredAt
+                      ? formatDate(failure.occurredAt)
+                      : ""}
+                  </div>
+                  <div className="px-2 py-2.5 min-w-0 whitespace-pre-wrap wrap-break-word">
+                    {headline}
+                  </div>
+                  <div className="px-2 pr-6 py-2.5">
+                    {hasStackTrace && (
+                      <ChevronDown
+                        className={cn(
+                          "size-4 text-muted-foreground transition-transform",
+                          isExpanded && "rotate-180",
+                        )}
+                      />
+                    )}
+                  </div>
+                </button>
+                {isExpanded && failure.stackTrace && (
+                  <pre className="text-xs px-6 py-3 whitespace-pre-wrap break-all font-mono text-muted-foreground border-t border-border">
+                    {failure.stackTrace}
+                  </pre>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function JsonPanel({ json }: { json: string }) {
+  return (
+    <div className="h-full overflow-auto">
+      <pre className="text-xs leading-[1.55] px-6 py-4 whitespace-pre-wrap wrap-break-word font-mono">
+        {formatJsonDisplay(json)}
+      </pre>
     </div>
   );
 }
@@ -1262,6 +1322,7 @@ function logLevelColor(level: number): string {
 }
 
 interface MetaItem {
+  key: string;
   label: string;
   value: React.ReactNode;
   mono?: boolean;
@@ -1276,6 +1337,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   const items: MetaItem[] = [];
 
   items.push({
+    key: "job",
     label: "Job",
     value: (
       <Link
@@ -1289,10 +1351,11 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   });
 
   if (run.startedAt) {
-    items.push({ label: "Duration", value: duration, mono: true });
+    items.push({ key: "duration", label: "Duration", value: duration, mono: true });
   }
 
   items.push({
+    key: "created",
     label: "Created",
     value: formatDate(run.createdAt),
     mono: true,
@@ -1300,6 +1363,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
 
   if (run.startedAt) {
     items.push({
+      key: "started",
       label: "Started",
       value: formatDate(run.startedAt),
       mono: true,
@@ -1307,6 +1371,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.completedAt) {
     items.push({
+      key: "completed",
       label: "Completed",
       value: formatDate(run.completedAt),
       mono: true,
@@ -1314,6 +1379,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.canceledAt) {
     items.push({
+      key: "canceled",
       label: "Canceled",
       value: formatDate(run.canceledAt),
       mono: true,
@@ -1322,6 +1388,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
 
   if (run.nodeName) {
     items.push({
+      key: "node",
       label: "Node",
       value: (
         <Link
@@ -1336,12 +1403,19 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
 
   if (run.attempt > 1) {
-    items.push({ label: "Attempt", value: run.attempt, mono: true });
+    items.push({ key: "attempt", label: "Attempt", value: run.attempt, mono: true });
   }
-  items.push({ label: "Priority", value: run.priority, mono: true });
+  if (run.failureCount > 0) {
+    items.push({ key: "failures", label: "Failures", value: run.failureCount, mono: true });
+  }
+  if (run.replayCount > 0) {
+    items.push({ key: "replays", label: "Replays", value: run.replayCount, mono: true });
+  }
+  items.push({ key: "priority", label: "Priority", value: run.priority, mono: true });
 
   if (run.parentRunId) {
     items.push({
+      key: "parent",
       label: "Parent",
       value: (
         <Link
@@ -1356,6 +1430,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.rerunOfRunId) {
     items.push({
+      key: "rerunOf",
       label: "Rerun of",
       value: (
         <Link
@@ -1370,6 +1445,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.deduplicationId) {
     items.push({
+      key: "dedup",
       label: "Dedup",
       value: (
         <span
@@ -1383,6 +1459,7 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.notBefore && run.notBefore !== run.createdAt) {
     items.push({
+      key: "notBefore",
       label: "Not before",
       value: formatDate(run.notBefore),
       mono: true,
@@ -1390,19 +1467,27 @@ function RunMetaStrip({ run, duration }: RunMetaStripProps) {
   }
   if (run.notAfter) {
     items.push({
+      key: "notAfter",
       label: "Not after",
       value: formatDate(run.notAfter),
       mono: true,
     });
   }
+  if (run.expiresAt) {
+    items.push({
+      key: "expiresAt",
+      label: "Expires at",
+      value: formatDate(run.expiresAt),
+      mono: true,
+    });
+  }
 
-  return (
-    <dl className={metadataGridClass}>
-      {items.map((item, i) => (
-        <DtDd key={i} label={item.label} align={item.mono ? "mono" : "default"}>
-          {item.value}
-        </DtDd>
-      ))}
-    </dl>
-  );
+  const metadataItems: MetadataItem[] = items.map((item) => ({
+    key: item.key,
+    label: item.label,
+    align: item.mono ? "mono" : "default",
+    children: item.value,
+  }));
+
+  return <MetadataStrip items={metadataItems}/>;
 }

@@ -120,6 +120,27 @@ public sealed class SurefireOptions
     } = TimeSpan.FromDays(7);
 
     /// <summary>
+    ///     Gets or sets how long newly-created runs may remain non-terminal before maintenance
+    ///     cancels them. Null means newly-created runs do not receive a default lifetime deadline.
+    /// </summary>
+    public TimeSpan? RunExpirationPeriod
+    {
+        get;
+        set
+        {
+            if (value is { } expiration && expiration < TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value),
+                    "RunExpirationPeriod must be greater than or equal to zero when specified.");
+            }
+
+            field = value;
+        }
+    }
+
+    internal TimeSpan? EffectiveRunExpirationPeriod => RunExpirationPeriod;
+
+    /// <summary>
     ///     Gets or sets the interval between retention purge checks.
     /// </summary>
     public TimeSpan RetentionCheckInterval
@@ -384,6 +405,7 @@ public sealed class SurefireOptions
             HeartbeatInterval = HeartbeatInterval,
             InactiveThreshold = InactiveThreshold,
             RetentionPeriod = RetentionPeriod,
+            RunExpirationPeriod = RunExpirationPeriod,
             RetentionCheckInterval = RetentionCheckInterval,
             ShutdownTimeout = ShutdownTimeout,
             SerializerOptions = serializerClone,

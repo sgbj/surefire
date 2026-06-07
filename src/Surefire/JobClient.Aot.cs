@@ -17,17 +17,74 @@ internal sealed partial class JobClient
         CancellationToken cancellationToken = default)
     {
         var runOptions = options ?? new();
-        var requestedPriority = await ResolveRequestedPriorityAsync(job, runOptions.Priority, cancellationToken);
+        string? derivedId = null;
+        var durableStep = 0;
+        string? orchestratorRunId = null;
+        if (JobContext.Current is { OrchestratorRunId: { } orchId } ctx)
+        {
+            var (step, isReplay) = ctx.AllocateStep();
+            orchestratorRunId = orchId;
+            durableStep = step;
+            derivedId = DurableIds.DerivedRunId(orchId, durableStep);
+            if (isReplay)
+            {
+                ctx.ValidateReplayChildRun(durableStep, derivedId);
+            }
+
+            // Claim-time snapshot serves the existence check from memory during replay; only fall
+            // through to the store for runs that aren't in the orchestrator's recorded set (rare
+            // case: handler made a change to the derived id strategy across replays, won't happen
+            // for deterministic handlers, but the store remains the source of truth).
+            var existing = ctx.DurableSnapshot is { } snap
+                           && snap.Children.TryGetValue(derivedId, out var snapChild)
+                ? snapChild
+                : await store.GetRunAsync(derivedId, cancellationToken);
+            if (existing is { })
+            {
+                // If the run's input pump never wrote InputComplete for one or more declared
+                // streams (host crashed mid-pump), advance the source past the already-recorded
+                // sequence and restart the pump. Without this, the child awaits an InputComplete
+                // that nobody will ever write.
+                if ((args?.Streams.Count ?? 0) > 0)
+                {
+                    await ResumeAotInputPumpIfNeededAsync(existing.Id, args!.Streams, cancellationToken);
+                }
+
+                return existing;
+            }
+
+            runOptions = runOptions with
+            {
+                DeduplicationId = runOptions.DeduplicationId
+                                  ?? DurableIds.DedupId(orchId, durableStep)
+            };
+        }
+
+        var (requestedPriority, isDurable) =
+            await ResolveTriggerMetadataAsync(job, runOptions.Priority, cancellationToken);
         var resolvedArgs = args ?? RunArguments.Empty;
         var argumentsJson = MaterializeJson(resolvedArgs);
         var run = CreateRun(job, argumentsJson, runOptions, timeProvider.GetUtcNow(),
-            requestedPriority ?? 0);
+            requestedPriority ?? 0, derivedId, isDurable: isDurable);
         var initialEvents = BuildInitialEventsFromAot(run.Id, resolvedArgs.Streams);
-        var created = await store.TryCreateRunAsync(run, initialEvents: initialEvents,
-            cancellationToken: cancellationToken);
-        if (!created)
+
+        // Atomically update the orchestrator's highest_recorded_step alongside the child run
+        // insert, so a crash between the two leaves no inconsistent state. The replay reads
+        // HighestRecordedStep from the orchestrator row at claim time.
+        DurableStepRecord? stepRecord = orchestratorRunId is { } recordingOrchId
+            ? new DurableStepRecord(recordingOrchId, durableStep)
+            : null;
+
+        if (!await store.TryCreateRunAsync(run, initialEvents: initialEvents,
+                durableStepRecord: stepRecord, cancellationToken: cancellationToken))
         {
-            throw new RunConflictException(run.Id, $"Run creation for job '{job}' was rejected.");
+            var existing = await store.GetRunAsync(run.Id, cancellationToken);
+            if (existing is { })
+            {
+                return existing;
+            }
+
+            throw new RunConflictException(run.Id, $"Run '{run.Id}' already exists.");
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
@@ -91,19 +148,37 @@ internal sealed partial class JobClient
         var run = await TriggerAsync(job, args, options, cancellationToken);
         await using var enumerator = StreamRunHydratedAotAsync(run.Id, elementTypeInfo, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
-        var completed = false;
+        var completedOrYielded = false;
         try
         {
-            while (await enumerator.MoveNextAsync())
+            while (true)
             {
+                bool hasNext;
+                try
+                {
+                    hasNext = await enumerator.MoveNextAsync();
+                }
+                catch (DurableYieldException)
+                {
+                    // Durable yield is a suspend signal from the executor, not consumer
+                    // abandonment. Don't cancel the run we just created - the orchestrator will
+                    // resume and re-enter this iterator with the recorded result available.
+                    completedOrYielded = true;
+                    throw;
+                }
+
+                if (!hasNext)
+                {
+                    completedOrYielded = true;
+                    yield break;
+                }
+
                 yield return enumerator.Current;
             }
-
-            completed = true;
         }
         finally
         {
-            if (!completed)
+            if (!completedOrYielded)
             {
                 await TryCancelOwnedRunAsync(run.Id);
             }
@@ -177,19 +252,37 @@ internal sealed partial class JobClient
         var batch = await TriggerBatchAsync(job, args, options, cancellationToken);
         await using var enumerator = WaitEachAsync<T>(batch.Id, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
-        var completed = false;
+        var completedOrYielded = false;
         try
         {
-            while (await enumerator.MoveNextAsync())
+            while (true)
             {
+                bool hasNext;
+                try
+                {
+                    hasNext = await enumerator.MoveNextAsync();
+                }
+                catch (DurableYieldException)
+                {
+                    // Durable yield is a suspend signal from the executor, not consumer
+                    // abandonment. Don't cancel the batch we just created - the orchestrator will
+                    // resume and re-enter this iterator with the recorded children terminal.
+                    completedOrYielded = true;
+                    throw;
+                }
+
+                if (!hasNext)
+                {
+                    completedOrYielded = true;
+                    yield break;
+                }
+
                 yield return enumerator.Current;
             }
-
-            completed = true;
         }
         finally
         {
-            if (!completed)
+            if (!completedOrYielded)
             {
                 await TryCancelOwnedBatchAsync(batch.Id);
             }
@@ -289,6 +382,67 @@ internal sealed partial class JobClient
         _ = MonitorAotInputPumpAsync(runId, streams, pumpCts);
     }
 
+    // Inspect pump state for a replayed durable run: if any declared stream is missing its
+    // InputComplete event, advance the corresponding caller source past the already-recorded
+    // Sequence and restart only that stream's pump. Skips work entirely when the previous
+    // pump finished cleanly (all InputComplete events present), which is the common case.
+    private async Task ResumeAotInputPumpIfNeededAsync(string runId,
+        IReadOnlyList<RunArgumentStream> streams, CancellationToken cancellationToken)
+    {
+        var pumpState = await store.GetInputPumpStateAsync(runId, cancellationToken);
+        if (pumpState.Count > 0 && pumpState.Values.All(s => s.InputComplete))
+        {
+            return;
+        }
+
+        var resumeStreams = new List<RunArgumentStream>(streams.Count);
+        foreach (var stream in streams)
+        {
+            if (pumpState.TryGetValue(stream.ArgumentName, out var state) && state.InputComplete)
+            {
+                continue;
+            }
+
+            resumeStreams.Add(new()
+            {
+                ArgumentName = stream.ArgumentName,
+                SerializeItems = stream.SerializeItems,
+                ResumeFromSequence = state.LastSequence
+            });
+        }
+
+        if (resumeStreams.Count == 0)
+        {
+            return;
+        }
+
+        // _inputPumpTokens is a per-runId guard: if a pump is somehow already active for this
+        // run on this process (it shouldn't be on replay), the existing pump owns the streams.
+        if (_inputPumpTokens.ContainsKey(runId))
+        {
+            return;
+        }
+
+        StartAotInputPump(runId, resumeStreams);
+    }
+
+    private async Task ResumeBatchInputPumpsIfNeededAsync(string batchId,
+        IReadOnlyList<(string JobName, RunArguments Args, BatchRunOptions? Options)> items,
+        CancellationToken cancellationToken)
+    {
+        for (var i = 0; i < items.Count; i++)
+        {
+            var streams = items[i].Args.Streams;
+            if (streams.Count == 0)
+            {
+                continue;
+            }
+
+            var childId = DurableIds.DerivedBatchChildRunId(batchId, i);
+            await ResumeAotInputPumpIfNeededAsync(childId, streams, cancellationToken);
+        }
+    }
+
     private async Task MonitorAotInputPumpAsync(string runId, IReadOnlyList<RunArgumentStream> streams,
         CancellationTokenSource pumpCts)
     {
@@ -348,21 +502,34 @@ internal sealed partial class JobClient
     private async Task PumpAotStreamAsync(string runId, RunArgumentStream stream,
         CancellationToken cancellationToken)
     {
-        long sequence = 0;
+        // On replay (ResumeFromSequence > 0), skip items the prior attempt already wrote and
+        // continue numbering past LastSequence so the event log stays monotonic.
+        var skip = stream.ResumeFromSequence;
+        var sequence = skip;
+        long emitted = 0;
         try
         {
             await foreach (var serialized in stream.SerializeItems(_serializerOptions)
                                .WithCancellation(cancellationToken))
             {
-                sequence++;
-                await AppendInputEventAsync(runId, RunEventType.Input, new()
+                emitted++;
+                if (emitted <= skip)
                 {
-                    Argument = stream.ArgumentName,
-                    Sequence = sequence,
-                    Payload = serialized,
-                    IsComplete = false,
-                    Error = null
-                }, cancellationToken);
+                    continue;
+                }
+
+                sequence++;
+                if (!await AppendInputEventAsync(runId, RunEventType.Input, new()
+                    {
+                        Argument = stream.ArgumentName,
+                        Sequence = sequence,
+                        Payload = serialized,
+                        IsComplete = false,
+                        Error = null
+                    }, cancellationToken))
+                {
+                    return;
+                }
             }
 
             await AppendInputEventAsync(runId, RunEventType.InputComplete, new()
@@ -541,10 +708,11 @@ internal sealed partial class JobClient
     private async Task<JobBatch> TriggerBatchAsyncAotCore(string job, IEnumerable<RunArguments?> args,
         BatchRunOptions? options, CancellationToken cancellationToken)
     {
-        var priority = await LookupJobPriorityAsync(job, cancellationToken);
-        var priorityByJob = new Dictionary<string, int?>(StringComparer.Ordinal) { [job] = priority };
+        var meta = await LookupJobMetadataAsync(job, cancellationToken);
+        var priorityByJob = new Dictionary<string, int?>(StringComparer.Ordinal) { [job] = meta.Priority };
+        var durableByJob = new Dictionary<string, bool>(StringComparer.Ordinal) { [job] = meta.IsDurable };
         var normalized = args.Select(a => (job, a ?? RunArguments.Empty, options)).ToList();
-        return await TriggerBatchCoreAsync(normalized, priorityByJob, cancellationToken);
+        return await TriggerBatchCoreAsync(normalized, priorityByJob, durableByJob, cancellationToken);
     }
 
     /// <summary>

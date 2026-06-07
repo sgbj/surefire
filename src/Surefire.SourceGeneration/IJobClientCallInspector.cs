@@ -6,8 +6,8 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace Surefire.SourceGeneration;
 
 /// <summary>
-///     Maps the names of <see cref="Surefire.IJobClient" /> methods we intercept and the position
-///     of their <c>args</c> parameter (if any). The position is used to find the args argument by
+///     Maps the names of <see cref="Surefire.IJobClient" /> methods we intercept and the name
+///     of their <c>args</c> parameter (if any). That name is used to find the args argument by
 ///     name or positionally on the call site syntax.
 /// </summary>
 internal static class IJobClientCallInspector

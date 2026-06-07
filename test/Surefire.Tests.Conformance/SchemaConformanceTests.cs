@@ -20,4 +20,20 @@ public abstract class SchemaConformanceTests : StoreConformanceBase
         var loadedRun = await Store.GetRunAsync(run.Id, ct);
         Assert.NotNull(loadedRun);
     }
+
+    [Fact]
+    public async Task UpsertJobsAsync_RoundTripsSourceCode()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"SourceJob_{Guid.CreateVersion7():N}";
+        const string sourceCode = "static string Handler() => \"ok\";";
+        var job = CreateJob(jobName);
+        job.SourceCode = sourceCode;
+
+        await Store.UpsertJobsAsync([job], ct);
+
+        var loaded = await Store.GetJobAsync(jobName, ct);
+        Assert.NotNull(loaded);
+        Assert.Equal(sourceCode, loaded.SourceCode);
+    }
 }

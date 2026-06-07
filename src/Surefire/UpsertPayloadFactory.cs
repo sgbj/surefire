@@ -40,7 +40,8 @@ internal static class UpsertPayloadFactory
                 IsEnabled = job.IsEnabled,
                 MisfirePolicy = (int)job.MisfirePolicy,
                 FireAllLimit = job.FireAllLimit,
-                ArgumentsSchema = job.ArgumentsSchema
+                ArgumentsSchema = job.ArgumentsSchema,
+                SourceCode = job.SourceCode
             };
         }
 

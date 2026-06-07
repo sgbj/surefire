@@ -33,7 +33,7 @@ public sealed class DashboardStatsResponse
     /// <summary>Most recent runs across all jobs, newest first.</summary>
     public IReadOnlyList<RunResponse> RecentRuns { get; init; } = [];
 
-    internal static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<JobRun> recentRuns) => new()
+    internal static DashboardStatsResponse From(DashboardStats stats, IReadOnlyList<RunResponse> recentRuns) => new()
     {
         TotalJobs = stats.TotalJobs,
         TotalRuns = stats.TotalRuns,
@@ -42,7 +42,7 @@ public sealed class DashboardStatsResponse
         NodeCount = stats.NodeCount,
         RunsByStatus = stats.RunsByStatus,
         Timeline = stats.Timeline.Select(TimelineBucketResponse.From).ToList(),
-        RecentRuns = recentRuns.Select(r => RunResponse.From(r)).ToList()
+        RecentRuns = recentRuns
     };
 }
 
@@ -93,8 +93,22 @@ public sealed class RunResponse
     /// <summary>Name of the node currently or most recently executing this run.</summary>
     public string? NodeName { get; init; }
 
-    /// <summary>Current attempt number; starts at 1 and increments on each retry.</summary>
+    /// <summary>
+    ///     Failure-aware attempt number; starts at 1 and increments on each real handler retry.
+    ///     For durable orchestrators this excludes suspend/resume replay cycles
+    ///     (use <see cref="ReplayCount" /> for those).
+    /// </summary>
     public int Attempt { get; init; }
+
+    /// <summary>Number of real handler failures recorded for this run.</summary>
+    public int FailureCount { get; init; }
+
+    /// <summary>
+    ///     Number of suspend/resume replay cycles this run has been through. Always <c>0</c> for
+    ///     non-durable jobs. For durable orchestrators awaiting N children, this can be up to N as
+    ///     each child terminal triggers a replay.
+    /// </summary>
+    public int ReplayCount { get; init; }
 
     /// <summary>OpenTelemetry trace ID for this run, or null when tracing is unavailable.</summary>
     public string? TraceId { get; init; }
@@ -123,6 +137,9 @@ public sealed class RunResponse
     /// <summary>Deadline after which a still-pending run is automatically canceled.</summary>
     public DateTimeOffset? NotAfter { get; init; }
 
+    /// <summary>Deadline after which a non-terminal run is automatically canceled.</summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
+
     /// <summary>Run priority. Higher values are claimed first.</summary>
     public int Priority { get; init; }
 
@@ -135,36 +152,40 @@ public sealed class RunResponse
     /// <summary>Identifier of the batch this run belongs to, or null if the run was triggered standalone.</summary>
     public string? BatchId { get; init; }
 
-    internal static RunResponse From(JobRun run, int? depth = null) => new()
-    {
-        Id = run.Id,
-        JobName = run.JobName,
-        Status = run.Status,
-        Arguments = run.Arguments,
-        Result = run.Result,
-        Reason = run.Reason,
-        Progress = run.Progress,
-        CreatedAt = run.CreatedAt,
-        StartedAt = run.StartedAt,
-        CompletedAt = run.CompletedAt,
-        CanceledAt = run.CanceledAt,
-        NodeName = run.NodeName,
-        Attempt = run.Attempt,
-        TraceId = run.TraceId,
-        SpanId = run.SpanId,
-        ParentTraceId = run.ParentTraceId,
-        ParentSpanId = run.ParentSpanId,
-        ParentRunId = run.ParentRunId,
-        RootRunId = run.RootRunId,
-        RerunOfRunId = run.RerunOfRunId,
-        NotBefore = run.NotBefore,
-        NotAfter = run.NotAfter,
-        Priority = run.Priority,
-        DeduplicationId = run.DeduplicationId,
-        LastHeartbeatAt = run.LastHeartbeatAt,
-        BatchId = run.BatchId,
-        Depth = depth
-    };
+    internal static RunResponse From(JobRun run, int? depth = null) =>
+        new()
+        {
+            Id = run.Id,
+            JobName = run.JobName,
+            Status = run.Status,
+            Arguments = run.Arguments,
+            Result = run.Result,
+            Reason = run.Reason,
+            Progress = run.Progress,
+            CreatedAt = run.CreatedAt,
+            StartedAt = run.StartedAt,
+            CompletedAt = run.CompletedAt,
+            CanceledAt = run.CanceledAt,
+            NodeName = run.NodeName,
+            Attempt = run.Attempt,
+            FailureCount = run.FailureCount,
+            ReplayCount = run.ReplayCount,
+            TraceId = run.TraceId,
+            SpanId = run.SpanId,
+            ParentTraceId = run.ParentTraceId,
+            ParentSpanId = run.ParentSpanId,
+            ParentRunId = run.ParentRunId,
+            RootRunId = run.RootRunId,
+            RerunOfRunId = run.RerunOfRunId,
+            NotBefore = run.NotBefore,
+            NotAfter = run.NotAfter,
+            ExpiresAt = run.ExpiresAt,
+            Priority = run.Priority,
+            DeduplicationId = run.DeduplicationId,
+            LastHeartbeatAt = run.LastHeartbeatAt,
+            BatchId = run.BatchId,
+            Depth = depth
+        };
 }
 
 /// <summary>Request body for bulk refreshing run rows by ID.</summary>
@@ -263,6 +284,9 @@ public sealed class TimelineBucketResponse
     /// <summary>Running runs in this bucket.</summary>
     public int Running { get; init; }
 
+    /// <summary>Suspended durable orchestrator runs in this bucket.</summary>
+    public int Suspended { get; init; }
+
     /// <summary>Successfully completed runs in this bucket.</summary>
     public int Succeeded { get; init; }
 
@@ -278,6 +302,7 @@ public sealed class TimelineBucketResponse
         Timestamp = bucket.Start,
         Pending = bucket.Pending,
         Running = bucket.Running,
+        Suspended = bucket.Suspended,
         Succeeded = bucket.Succeeded,
         Canceled = bucket.Canceled,
         Failed = bucket.Failed
@@ -344,6 +369,9 @@ public sealed class JobResponse
     /// <summary>JSON Schema describing the job's argument shape, or null if the handler takes no bindable arguments.</summary>
     public JsonElement? ArgumentsSchema { get; init; }
 
+    /// <summary>Captured source code for the job registration, or null when source capture is unavailable.</summary>
+    public string? SourceCode { get; init; }
+
     /// <summary>Maps a <see cref="JobDefinition" /> to its dashboard response shape.</summary>
     /// <param name="job">The job definition.</param>
     /// <param name="activeCutoff">Heartbeat cutoff used to compute <see cref="IsActive" />.</param>
@@ -367,7 +395,8 @@ public sealed class JobResponse
         IsActive = job.LastHeartbeatAt is { } && job.LastHeartbeatAt >= activeCutoff,
         NextRunAt = ComputeNextRun(job, now),
         MisfirePolicy = job.MisfirePolicy,
-        ArgumentsSchema = CloneElement(job.ArgumentsSchema)
+        ArgumentsSchema = CloneElement(job.ArgumentsSchema),
+        SourceCode = job.SourceCode
     };
 
     // JsonDocument.Parse is AOT-safe (it walks JSON tokens rather than reflecting over a target
@@ -486,6 +515,9 @@ public sealed class TriggerJobRequest
 
     /// <summary>Deadline after which a still-pending run is automatically canceled.</summary>
     public DateTimeOffset? NotAfter { get; set; }
+
+    /// <summary>Deadline after which a non-terminal run is automatically canceled.</summary>
+    public DateTimeOffset? ExpiresAt { get; set; }
 
     /// <summary>Run priority. Higher values are claimed first.</summary>
     public int? Priority { get; set; }

@@ -11,6 +11,13 @@ public sealed record JobBatch
     /// <summary>Gets when the batch was created.</summary>
     public DateTimeOffset CreatedAt { get; init; }
 
+    /// <summary>
+    ///     Gets the run id that triggered this batch, captured from <see cref="JobContext.Current" />
+    ///     when the batch is created inside a running job (durable or not). Null only when triggered
+    ///     outside any run scope (HTTP request, <c>IHostedService</c> startup, dashboard).
+    /// </summary>
+    public string? ParentRunId { get; init; }
+
     /// <summary>Gets the total number of runs in the batch.</summary>
     public int Total { get; init; }
 

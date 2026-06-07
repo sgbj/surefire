@@ -11,6 +11,12 @@ public sealed record BatchRunOptions
     /// <summary>Automatically cancels the run if it has not started by this time.</summary>
     public DateTimeOffset? NotAfter { get; init; }
 
+    /// <summary>
+    ///     Automatically cancels the run if it has not reached a terminal status by this time.
+    ///     Null uses the configured <see cref="SurefireOptions.RunExpirationPeriod" />, if set.
+    /// </summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
+
     /// <summary>The priority of the run. Higher values are dequeued first.</summary>
     public int? Priority { get; init; }
 }

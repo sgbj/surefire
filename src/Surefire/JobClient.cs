@@ -20,6 +20,7 @@ internal sealed partial class JobClient(
     ILogger<JobClient> logger) : IJobClient
 {
     private const int BatchFetchWindowSize = 64;
+    private const int BatchEventPageSize = 200;
     private const string ClientCancellationReason = "Canceled by client request.";
     private const string OwnedOperationCancellationReason = "Canceled because the owning operation was canceled.";
     private static readonly TimeSpan BatchFetchWindowDelay = TimeSpan.FromMilliseconds(10);
@@ -119,24 +120,63 @@ internal sealed partial class JobClient(
                 $"'{runId}' is a batch ID. To rerun a batch, retrieve the runs with GetRunsAsync and call TriggerBatchAsync.");
         }
 
+        string? derivedId = null;
+        string? derivedDedup = null;
+        string? orchestratorRunId = null;
+        var durableStep = 0;
+        if (JobContext.Current is { OrchestratorRunId: { } orchId } ctx)
+        {
+            // AllocateStep returns (step, isReplay) so concurrent client calls in a
+            // Task.WhenAll fan-out each capture their own replay flag before any await -
+            // the shared IsReplaying read would race against peer increments.
+            var (step, isReplay) = ctx.AllocateStep();
+            orchestratorRunId = orchId;
+            durableStep = step;
+            derivedId = DurableIds.DerivedRunId(orchId, durableStep);
+            derivedDedup = DurableIds.DedupId(orchId, durableStep);
+            if (isReplay)
+            {
+                ctx.ValidateReplayChildRun(durableStep, derivedId);
+            }
+
+            var existing = await store.GetRunAsync(derivedId, cancellationToken);
+            if (existing is { })
+            {
+                return existing;
+            }
+        }
+
         var requestedPriority = await ResolveRequestedPriorityAsync(run.JobName, null, cancellationToken);
         var rerun = CreateRun(
             run.JobName,
             run.Arguments,
-            new(),
+            derivedDedup is { } d ? new() { DeduplicationId = d } : new(),
             timeProvider.GetUtcNow(),
             requestedPriority ?? 0,
-            rerunOfRunId: run.Id);
+            derivedId,
+            run.Id,
+            run.IsDurable);
 
         var clonedInputEvents = await BuildClonedRunScopedInputEventsAsync(runId, rerun.Id, cancellationToken);
 
-        var created = await store.TryCreateRunAsync(
-            rerun,
-            initialEvents: clonedInputEvents,
-            cancellationToken: cancellationToken);
-        if (!created)
+        // Atomically update the orchestrator's highest_recorded_step alongside the rerun insert.
+        DurableStepRecord? stepRecord = orchestratorRunId is { } recordingOrchId
+            ? new DurableStepRecord(recordingOrchId, durableStep)
+            : null;
+
+        if (!await store.TryCreateRunAsync(
+                rerun,
+                initialEvents: clonedInputEvents,
+                durableStepRecord: stepRecord,
+                cancellationToken: cancellationToken))
         {
-            throw new RunConflictException(runId, $"Run creation for rerun of '{runId}' was rejected.");
+            var existing = await store.GetRunAsync(rerun.Id, cancellationToken);
+            if (existing is { })
+            {
+                return existing;
+            }
+
+            throw new RunConflictException(rerun.Id, $"Run '{rerun.Id}' already exists.");
         }
 
         await notifications.PublishAsync(NotificationChannels.RunCreated, null, cancellationToken);
@@ -146,6 +186,16 @@ internal sealed partial class JobClient(
     public async IAsyncEnumerable<RunEvent> ObserveRunEventsAsync(string runId, long sinceEventId = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (JobContext.Current is { OrchestratorRunId: { } })
+        {
+            await foreach (var @event in DurableObserveRunEventsAsync(runId, sinceEventId, cancellationToken))
+            {
+                yield return @event;
+            }
+
+            yield break;
+        }
+
         using var wakeup = new SemaphoreSlim(0, 1);
         await using var eventSub = await notifications.SubscribeAsync(
             NotificationChannels.RunEvent(runId),
@@ -192,6 +242,16 @@ internal sealed partial class JobClient(
     public async IAsyncEnumerable<RunEvent> ObserveBatchEventsAsync(string batchId, long sinceEventId = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (JobContext.Current is { OrchestratorRunId: { } })
+        {
+            await foreach (var @event in DurableObserveBatchEventsAsync(batchId, sinceEventId, cancellationToken))
+            {
+                yield return @event;
+            }
+
+            yield break;
+        }
+
         using var wakeup = new SemaphoreSlim(0, 1);
         await using var batchEventSub = await notifications.SubscribeAsync(
             NotificationChannels.RunEvent(batchId),
@@ -212,7 +272,8 @@ internal sealed partial class JobClient(
 
             while (true)
             {
-                var events = await store.GetBatchEventsAsync(batchId, sinceEventId, 200, cancellationToken);
+                var events =
+                    await store.GetBatchEventsAsync(batchId, sinceEventId, BatchEventPageSize, cancellationToken);
                 if (events.Count == 0)
                 {
                     break;
@@ -236,6 +297,11 @@ internal sealed partial class JobClient(
 
     public async Task<JobRun> WaitAsync(string runId, CancellationToken cancellationToken = default)
     {
+        if (JobContext.Current is { OrchestratorRunId: { } })
+        {
+            return await DurableWaitRunAsync(runId, cancellationToken);
+        }
+
         await foreach (var _ in ObserveRunEventsAsync(runId, 0, cancellationToken))
         {
         }
@@ -269,6 +335,11 @@ internal sealed partial class JobClient(
 
     public async Task<JobBatch> WaitBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
+        if (JobContext.Current is { OrchestratorRunId: { } })
+        {
+            return await DurableWaitBatchAsync(batchId, cancellationToken);
+        }
+
         using var wakeup = new SemaphoreSlim(0, 1);
         await using var subscription = await notifications.SubscribeAsync(
             NotificationChannels.BatchTerminated(batchId),
@@ -422,6 +493,121 @@ internal sealed partial class JobClient(
         }
     }
 
+    private async IAsyncEnumerable<RunEvent> DurableObserveRunEventsAsync(string runId, long sinceEventId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        if (!run.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddRun(runId);
+            throw new DurableYieldException();
+        }
+
+        while (true)
+        {
+            var events = await store.GetEventsAsync(runId, sinceEventId,
+                cancellationToken: cancellationToken);
+            if (events.Count == 0)
+            {
+                yield break;
+            }
+
+            foreach (var @event in events)
+            {
+                sinceEventId = @event.Id;
+                yield return @event;
+            }
+        }
+    }
+
+    private async IAsyncEnumerable<RunEvent> DurableObserveBatchEventsAsync(string batchId, long sinceEventId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null)
+        {
+            throw new BatchNotFoundException(batchId);
+        }
+
+        if (!batch.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddBatch(batchId);
+            throw new DurableYieldException();
+        }
+
+        while (true)
+        {
+            var events = await store.GetBatchEventsAsync(batchId, sinceEventId, BatchEventPageSize, cancellationToken);
+            if (events.Count == 0)
+            {
+                yield break;
+            }
+
+            foreach (var @event in events)
+            {
+                sinceEventId = @event.Id;
+                yield return @event;
+            }
+        }
+    }
+
+    private async Task<JobRun> DurableWaitRunAsync(string runId, CancellationToken cancellationToken)
+    {
+        // Claim-time snapshot served the orchestrator's recorded children in one bulk read.
+        // Most replay paths satisfy themselves from the dictionary; the store fetch is only
+        // for runs created outside the orchestrator's scope (external WaitAsync).
+        if (JobContext.Current?.DurableSnapshot is { } snap
+            && snap.Children.TryGetValue(runId, out var cached)
+            && cached.Status.IsTerminal)
+        {
+            return cached;
+        }
+
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        if (!run.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddRun(runId);
+            throw new DurableYieldException();
+        }
+
+        return run;
+    }
+
+    private async Task<JobBatch> DurableWaitBatchAsync(string batchId, CancellationToken cancellationToken)
+    {
+        // Claim-time snapshot served orchestrator-owned batches in one bulk read.
+        if (JobContext.Current?.DurableSnapshot is { } snap
+            && snap.ChildBatches.TryGetValue(batchId, out var cached)
+            && cached.Status.IsTerminal)
+        {
+            return cached;
+        }
+
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null)
+        {
+            throw new BatchNotFoundException(batchId);
+        }
+
+        if (!batch.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddBatch(batchId);
+            throw new DurableYieldException();
+        }
+
+        return batch;
+    }
+
     private RunArguments? AsRunArguments(object? args) => args switch
     {
         null => null,
@@ -440,26 +626,37 @@ internal sealed partial class JobClient(
     {
         await using var enumerator = WaitEachAsync<T>(batchId, cancellationToken)
             .GetAsyncEnumerator(cancellationToken);
-        var completed = false;
+        var completedOrYielded = false;
         try
         {
             while (true)
             {
-                T item;
-                if (!await enumerator.MoveNextAsync())
+                bool hasNext;
+                try
                 {
-                    completed = true;
+                    hasNext = await enumerator.MoveNextAsync();
+                }
+                catch (DurableYieldException)
+                {
+                    // Durable yield is a suspend signal from the executor, not consumer
+                    // abandonment. Don't cancel the batch we just created - the orchestrator will
+                    // resume and re-enter with the recorded children terminal.
+                    completedOrYielded = true;
+                    throw;
+                }
+
+                if (!hasNext)
+                {
+                    completedOrYielded = true;
                     yield break;
                 }
 
-                item = enumerator.Current;
-
-                yield return item;
+                yield return enumerator.Current;
             }
         }
         finally
         {
-            if (!completed)
+            if (!completedOrYielded)
             {
                 await TryCancelOwnedBatchAsync(batchId);
             }
@@ -506,17 +703,20 @@ internal sealed partial class JobClient(
         var priorityByJob = new Dictionary<string, int?>(StringComparer.Ordinal);
 
         // One GetJobAsync per distinct jobName; homogeneous batches collapse to a single lookup.
+        var durableByJob = new Dictionary<string, bool>(StringComparer.Ordinal);
         foreach (var item in itemsList)
         {
             if (!priorityByJob.ContainsKey(item.JobName))
             {
-                priorityByJob[item.JobName] = await LookupJobPriorityAsync(item.JobName, cancellationToken);
+                var meta = await LookupJobMetadataAsync(item.JobName, cancellationToken);
+                priorityByJob[item.JobName] = meta.Priority;
+                durableByJob[item.JobName] = meta.IsDurable;
             }
 
             normalized.Add((item.JobName, item.Args ?? RunArguments.Empty, item.Options));
         }
 
-        return await TriggerBatchCoreAsync(normalized, priorityByJob, cancellationToken);
+        return await TriggerBatchCoreAsync(normalized, priorityByJob, durableByJob, cancellationToken);
     }
 
     private async Task<int?> LookupJobPriorityAsync(string jobName, CancellationToken cancellationToken)
@@ -530,27 +730,86 @@ internal sealed partial class JobClient(
         return priority;
     }
 
+    private async Task<(int? Priority, bool IsDurable)> LookupJobMetadataAsync(string jobName,
+        CancellationToken cancellationToken)
+    {
+        var job = await store.GetJobAsync(jobName, cancellationToken);
+        if (job is null)
+        {
+            Log.TriggerRequestedForUnknownJob(logger, jobName);
+        }
+
+        return (job?.Priority, job?.IsDurable ?? false);
+    }
+
     private async Task<JobBatch> TriggerBatchCoreAsync(
         IReadOnlyList<(string JobName, RunArguments Args, BatchRunOptions? Options)> items,
         IReadOnlyDictionary<string, int?> priorityByJob,
+        IReadOnlyDictionary<string, bool> durableByJob,
         CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
-        var batchId = CreateRunId();
+        string batchId;
+        string? orchestratorRunId = null;
+        var durableStep = 0;
+        if (JobContext.Current is { OrchestratorRunId: { } orchId } ctx)
+        {
+            var (step, isReplay) = ctx.AllocateStep();
+            orchestratorRunId = orchId;
+            durableStep = step;
+            batchId = DurableIds.DerivedBatchId(orchId, durableStep);
+            if (isReplay)
+            {
+                ctx.ValidateReplayChildBatch(durableStep, batchId);
+            }
+
+            // Claim-time snapshot serves the existence check from memory during replay.
+            var existing = ctx.DurableSnapshot is { } snap
+                           && snap.ChildBatches.TryGetValue(batchId, out var snapBatch)
+                ? snapBatch
+                : await store.GetBatchAsync(batchId, cancellationToken);
+            if (existing is { })
+            {
+                // Crash-and-replay: if any child's input pump never wrote InputComplete for one
+                // or more declared streams, advance the source past the recorded sequence and
+                // restart the pump. Without this, the child awaits an InputComplete that nobody
+                // will ever write.
+                await ResumeBatchInputPumpsIfNeededAsync(existing.Id, items, cancellationToken);
+                return existing;
+            }
+        }
+        else
+        {
+            batchId = CreateRunId();
+        }
+
         var batch = new JobBatch
         {
-            Id = batchId, Status = JobStatus.Pending, Total = items.Count, CreatedAt = now
+            Id = batchId,
+            Status = JobStatus.Pending,
+            Total = items.Count,
+            CreatedAt = now,
+            ParentRunId = orchestratorRunId ?? JobContext.Current?.RunId
         };
 
         var runs = new List<JobRun>(items.Count);
         var streamPumps = new List<(string RunId, IReadOnlyList<RunArgumentStream> Streams)>();
         var initialEvents = new List<RunEvent>();
 
-        foreach (var (jobName, args, itemOptions) in items)
+        for (var index = 0; index < items.Count; index++)
         {
+            var (jobName, args, itemOptions) = items[index];
             var requestedPriority = itemOptions?.Priority ?? priorityByJob[jobName];
             var argumentsJson = MaterializeJson(args);
-            var child = CreateRun(jobName, argumentsJson, FromBatch(itemOptions), now, requestedPriority ?? 0);
+            string? childId = null;
+            if (orchestratorRunId is { })
+            {
+                childId = DurableIds.DerivedBatchChildRunId(batchId, index);
+            }
+
+            var child = CreateRun(jobName, argumentsJson, FromBatch(itemOptions), now, requestedPriority ?? 0,
+                childId,
+                isDurable: durableByJob.TryGetValue(jobName, out var dur) && dur);
             child = child with { BatchId = batchId, RootRunId = child.RootRunId ?? batchId };
             runs.Add(child);
 
@@ -561,7 +820,29 @@ internal sealed partial class JobClient(
             }
         }
 
-        await store.CreateBatchAsync(batch, runs, initialEvents, cancellationToken);
+        // Atomically update the orchestrator's highest_recorded_step alongside the batch insert.
+        DurableStepRecord? batchStepRecord = orchestratorRunId is { } batchRecordingOrchId
+            ? new DurableStepRecord(batchRecordingOrchId, durableStep)
+            : null;
+
+        try
+        {
+            await store.CreateBatchAsync(batch, runs, initialEvents,
+                batchStepRecord, cancellationToken);
+        }
+        catch (RunConflictException) when (orchestratorRunId is { })
+        {
+            // Durable replay re-derived the same batch id. Surface the existing batch instead of
+            // failing the replay. Narrow to RunConflictException so genuine errors (transient
+            // store failures, cancellation, serialization bugs) still bubble up.
+            var existing = await store.GetBatchAsync(batchId, cancellationToken);
+            if (existing is { })
+            {
+                return existing;
+            }
+
+            throw;
+        }
 
         if (items.Count == 0)
         {
@@ -587,7 +868,13 @@ internal sealed partial class JobClient(
     private static RunOptions FromBatch(BatchRunOptions? batch) =>
         batch is null
             ? new()
-            : new() { NotBefore = batch.NotBefore, NotAfter = batch.NotAfter, Priority = batch.Priority };
+            : new()
+            {
+                NotBefore = batch.NotBefore,
+                NotAfter = batch.NotAfter,
+                ExpiresAt = batch.ExpiresAt,
+                Priority = batch.Priority
+            };
 
     private async Task<bool> HasOutputCompleteForAttemptAsync(string runId, int attempt,
         CancellationToken cancellationToken)
@@ -689,8 +976,13 @@ internal sealed partial class JobClient(
     }
 
     private JobRun CreateRun(string jobName, string? serializedArguments, RunOptions runOptions,
-        DateTimeOffset now, int priority, string? runId = null, string? rerunOfRunId = null)
+        DateTimeOffset now, int priority, string? runId = null, string? rerunOfRunId = null,
+        bool isDurable = false)
     {
+        var notBefore = runOptions.NotBefore ?? now;
+        var expiresAt = runOptions.ExpiresAt
+                        ?? JobRunDefaults.GetDefaultExpiresAt(notBefore, options);
+
         var run = new JobRun
         {
             Id = runId ?? CreateRunId(),
@@ -698,13 +990,15 @@ internal sealed partial class JobClient(
             Status = JobStatus.Pending,
             Arguments = serializedArguments,
             CreatedAt = now,
-            NotBefore = runOptions.NotBefore ?? now,
+            NotBefore = notBefore,
             NotAfter = runOptions.NotAfter,
+            ExpiresAt = expiresAt,
             Priority = priority,
             DeduplicationId = runOptions.DeduplicationId,
             RerunOfRunId = rerunOfRunId,
             Progress = 0,
-            Attempt = 0,
+            Attempt = 1,
+            IsDurable = isDurable,
             ParentTraceId = Activity.Current?.TraceId.ToString(),
             ParentSpanId = Activity.Current?.SpanId.ToString()
         };
@@ -741,6 +1035,18 @@ internal sealed partial class JobClient(
         return explicitPriority ?? job?.Priority;
     }
 
+    private async Task<(int? Priority, bool IsDurable)> ResolveTriggerMetadataAsync(string jobName,
+        int? explicitPriority, CancellationToken cancellationToken)
+    {
+        var job = await store.GetJobAsync(jobName, cancellationToken);
+        if (job is null)
+        {
+            Log.TriggerRequestedForUnknownJob(logger, jobName);
+        }
+
+        return (explicitPriority ?? job?.Priority, job?.IsDurable ?? false);
+    }
+
     private async Task<IReadOnlyList<RunEvent>> BuildClonedRunScopedInputEventsAsync(string sourceRunId,
         string destinationRunId,
         CancellationToken cancellationToken)
@@ -774,10 +1080,9 @@ internal sealed partial class JobClient(
     }
 
 
-    private async Task AppendInputEventAsync(string runId, RunEventType eventType, InputEnvelope payload,
-        CancellationToken cancellationToken)
-    {
-        await eventWriter.EnqueueAsync(
+    private async Task<bool> AppendInputEventAsync(string runId, RunEventType eventType, InputEnvelope payload,
+        CancellationToken cancellationToken) =>
+        await eventWriter.EnqueueIfRunNonTerminalAsync(
             new()
             {
                 RunId = runId,
@@ -788,7 +1093,6 @@ internal sealed partial class JobClient(
             },
             [new(NotificationChannels.RunInput(runId), runId)],
             cancellationToken);
-    }
 
     // Fresh CTS bounded by ShutdownTimeout: a caller's already-canceled token must not
     // short-circuit cleanup, but cleanup must not block host shutdown indefinitely either.

@@ -5,6 +5,7 @@ const statusColor: Record<number, string> = {
   [JobStatus.Pending]: "var(--status-pending)",
   [JobStatus.Running]: "var(--status-running)",
   [JobStatus.Succeeded]: "var(--status-succeeded)",
+  [JobStatus.Suspended]: "var(--status-suspended)",
   [JobStatus.Canceled]: "var(--status-canceled)",
   [JobStatus.Failed]: "var(--status-failed)",
 };

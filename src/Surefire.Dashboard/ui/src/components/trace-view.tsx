@@ -16,6 +16,7 @@ const statusColorVar: Record<number, string> = {
   [JobStatus.Pending]: "var(--status-pending)",
   [JobStatus.Running]: "var(--status-running)",
   [JobStatus.Succeeded]: "var(--status-succeeded)",
+  [JobStatus.Suspended]: "var(--status-suspended)",
   [JobStatus.Canceled]: "var(--status-canceled)",
   [JobStatus.Failed]: "var(--status-failed)",
 };
@@ -40,8 +41,24 @@ function computeTicks(rangeMs: number): number[] {
 // duration labels.
 const SCALE = 0.9;
 
-export const TRACE_ROW_HEIGHT = 32;
+export const TRACE_ROW_HEIGHT = 36;
 const ROW_HEIGHT = TRACE_ROW_HEIGHT;
+
+// Canvas-based text measurement. Single shared canvas, font set per call.
+// Used to size the trace name column to fit the widest indented name exactly.
+let measureCanvas: HTMLCanvasElement | null = null;
+let measureCtx: CanvasRenderingContext2D | null = null;
+
+function measureNameWidth(name: string, weight: number): number {
+  if (typeof document === "undefined") return name.length * 8;
+  if (!measureCanvas) {
+    measureCanvas = document.createElement("canvas");
+    measureCtx = measureCanvas.getContext("2d");
+  }
+  if (!measureCtx) return name.length * 8;
+  measureCtx.font = `${weight} 14px "Geist Sans", ui-sans-serif, system-ui, sans-serif`;
+  return measureCtx.measureText(name).width;
+}
 
 export type TraceItem = { kind: "run" } & JobRun;
 
@@ -60,6 +77,7 @@ export function TraceView({
   manageFocusScroll = true,
   header,
   onHeaderClick,
+  headerClassName,
 }: {
   items: TraceItem[];
   currentRunId: string;
@@ -82,13 +100,16 @@ export function TraceView({
   /** When provided, the entire header bar (title cell + time ticks) becomes a
    *  clickable region, used to collapse/expand the trace section. */
   onHeaderClick?: () => void;
+  headerClassName?: string;
 }) {
   const navigate = useNavigate();
   const hasActiveRuns = useMemo(
     () =>
       items.some(
         (run) =>
-          run.status === JobStatus.Pending || run.status === JobStatus.Running,
+          run.status === JobStatus.Pending
+          || run.status === JobStatus.Running
+          || run.status === JobStatus.Suspended,
       ),
     [items],
   );
@@ -224,12 +245,36 @@ export function TraceView({
     };
   }, [rootId, manageFocusScroll, scrollContainerRef, scrollStateRef]);
 
+  // Size the name column to exactly fit the widest (depth-indented) job name.
+  // Always measured at weight 600 (the bolder current-run weight) so the column
+  // stays stable when the current run changes within the same trace, at the
+  // cost of a few px of over-estimation for non-current rows. Capped at a
+  // ceiling so an absurd outlier name doesn't blow out the timeline area.
+  const nameColPx = useMemo(() => {
+    const BASE_PX = 24;     // pl-6 base padding
+    const INDENT_PX = 20;   // per-depth indent (1.25rem)
+    const RIGHT_PX = 12;    // pr-3 trailing padding
+    const EXTRA_PX = 16;    // breathing room between name and bar column
+    const MAX_PX = 448;     // 28rem ceiling
+
+    let maxPx = 0;
+    for (const item of items) {
+      const depth = item.depth ?? 0;
+      const nameWidth = measureNameWidth(item.jobName, 600);
+      const total = BASE_PX + depth * INDENT_PX + nameWidth + RIGHT_PX + EXTRA_PX;
+      if (total > maxPx) maxPx = total;
+    }
+    return Math.min(maxPx, MAX_PX);
+  }, [items]);
+
   if (items.length === 0) return null;
 
   const pct = (ms: number) => (ms / timeRange) * 100 * SCALE;
 
+  const traceHeaderClassName = headerClassName ?? "bg-background";
+
   return (
-    <div className="[--trace-name-col:13rem]">
+    <div style={{ ["--trace-name-col" as string]: `${nameColPx}px` }}>
       <div
         role={onHeaderClick ? "button" : undefined}
         tabIndex={onHeaderClick ? 0 : undefined}
@@ -245,25 +290,28 @@ export function TraceView({
               }
             : undefined
         }
-        className={`${headerSticky ? "sticky top-0 z-10 " : ""}h-10 border-b border-border bg-card/95 backdrop-blur-sm${onHeaderClick ? " cursor-pointer hover:bg-card transition-colors" : ""}`}
-        style={{
-          display: "grid",
-          gridTemplateColumns: "var(--trace-name-col) 1fr 1.5rem",
-        }}
+        className={`${headerSticky ? "sticky top-0 z-10 " : ""}border-b border-border ${traceHeaderClassName}${onHeaderClick ? " cursor-pointer hover:bg-accent/30 transition-colors" : ""}`}
       >
-        <div className="flex items-center gap-2 pl-6 pr-3 text-xs text-muted-foreground">
-          {header}
-        </div>
-        <div className="relative h-full overflow-hidden">
-          {ticks.map((t, i) => (
-            <span
-              key={i}
-              className="absolute top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground/70 tnum"
-              style={{ left: `${pct(t)}%` }}
-            >
-              {formatMs(t)}
-            </span>
-          ))}
+        <div
+          className="grid h-[2.625rem]"
+          style={{
+            gridTemplateColumns: "var(--trace-name-col) 1fr 1.5rem",
+          }}
+        >
+          <div className="flex items-center gap-2 pl-6 pr-3 text-xs text-muted-foreground">
+            {header}
+          </div>
+          <div className="relative h-full overflow-hidden">
+            {ticks.map((t, i) => (
+              <span
+                key={i}
+                className="absolute top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground/70 tnum"
+                style={{ left: `${pct(t)}%` }}
+              >
+                {formatMs(t)}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -304,6 +352,7 @@ export function TraceView({
             durationMs > 0 ? `· ${formatMs(durationMs)}` : null,
             run.nodeName ? `on ${run.nodeName}` : null,
             `attempt ${run.attempt}`,
+            run.replayCount > 0 ? `(${run.replayCount} replay${run.replayCount === 1 ? "" : "s"})` : null,
           ]
             .filter(Boolean)
             .join(" ");

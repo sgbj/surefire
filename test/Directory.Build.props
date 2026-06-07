@@ -6,6 +6,8 @@
         <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
         <EnableAotAnalyzer>false</EnableAotAnalyzer>
         <InterceptorsNamespaces>$(InterceptorsNamespaces);Surefire.Generated</InterceptorsNamespaces>
+        <!-- Run xunit.v3 tests on Microsoft.Testing.Platform instead of VSTest. -->
+        <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
     </PropertyGroup>
 
     <ItemGroup>

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Surefire;
 
 /// <summary>
@@ -82,12 +84,11 @@ public interface IJobStore
     /// <summary>
     ///     Attempts to create a single run with optional deduplication, concurrency checks,
     ///     and cron fire tracking. All checks, the insert, and optional initial event append
-    ///     are a single atomic operation. Returns false when validation fails (for example,
-    ///     duplicate active deduplication ID or concurrency limit reached).
+    ///     are a single atomic operation.
     /// </summary>
     /// <param name="run">The run to create.</param>
     /// <param name="maxActiveForJob">
-    ///     When non-null, the run is rejected if the number of non-terminal runs for the same job
+    ///     When non-null, the create is refused if the number of non-terminal runs for the same job
     ///     is already at or above this value. Used for continuous job seeding.
     /// </param>
     /// <param name="lastCronFireAt">
@@ -96,11 +97,42 @@ public interface IJobStore
     ///     to prevent duplicate fires across restarts and multi-node deployments.
     /// </param>
     /// <param name="initialEvents">Optional events to append atomically with run creation.</param>
+    /// <param name="durableStepRecord">
+    ///     When non-null, the store updates the named orchestrator's <c>highest_recorded_step</c>
+    ///     column to <c>GREATEST(highest_recorded_step, Step)</c> atomically with the run insert.
+    ///     Used by durable orchestrators to record child-run-creation step boundaries without a
+    ///     separate event write.
+    /// </param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>True if the run was created; false if it was rejected.</returns>
+    /// <returns>
+    ///     <c>true</c> when the row was inserted; <c>false</c> when a row with the same id already
+    ///     exists (the caller can fetch via <see cref="GetRunAsync" /> for durable replay idempotency).
+    /// </returns>
+    /// <exception cref="RunConflictException">
+    ///     Thrown when the create is refused for a non-id-collision reason: an active deduplication
+    ///     id collision, or the per-job concurrency limit <paramref name="maxActiveForJob" /> has
+    ///     been reached.
+    /// </exception>
     Task<bool> TryCreateRunAsync(JobRun run, int? maxActiveForJob = null,
         DateTimeOffset? lastCronFireAt = null,
         IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Inserts a durable recorded value and atomically advances the owning orchestrator's
+    ///     <c>highest_recorded_step</c> to at least <see cref="DurableRecord.Step" />.
+    /// </summary>
+    /// <param name="record">The durable record to create.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>
+    ///     The inserted record, or the already-existing identical record for idempotent crash
+    ///     replay of the same durable step.
+    /// </returns>
+    /// <exception cref="DurableReplayMismatchException">
+    ///     Thrown when the durable step already contains a different record.
+    /// </exception>
+    Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -170,8 +202,8 @@ public interface IJobStore
     /// <summary>
     ///     Atomically cancels a run by transitioning it directly to <see cref="JobStatus.Canceled" />.
     ///     Any non-terminal run (Pending or Running) is Canceled in a single atomic operation.
-    ///     When <paramref name="expectedAttempt" /> is provided, the cancellation only applies if the
-    ///     run's attempt matches (executor scoping). When null, any non-terminal run is Canceled.
+    ///     When <paramref name="expectedLeaseEpoch" /> is provided, the cancellation only applies if the
+    ///     run's lease epoch matches (executor scoping). When null, any non-terminal run is Canceled.
     ///     <para>
     ///         The operation atomically inserts status events, caller-provided events, and updates
     ///         batch counters, all in the same transaction. Returns <see cref="RunTransitionResult" />
@@ -179,13 +211,13 @@ public interface IJobStore
     ///     </para>
     /// </summary>
     /// <param name="runId">The run ID to cancel.</param>
-    /// <param name="expectedAttempt">When non-null, only cancel if the run's attempt matches.</param>
+    /// <param name="expectedLeaseEpoch">When non-null, only cancel if the run's lease epoch matches.</param>
     /// <param name="reason">Optional termination reason to set on the run.</param>
     /// <param name="events">Optional events to append atomically with the cancellation.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A <see cref="RunTransitionResult" /> indicating whether the run was canceled and batch completion info.</returns>
     Task<RunTransitionResult> TryCancelRunAsync(string runId,
-        int? expectedAttempt = null,
+        long? expectedLeaseEpoch = null,
         string? reason = null,
         IReadOnlyList<RunEvent>? events = null,
         CancellationToken cancellationToken = default);
@@ -226,7 +258,8 @@ public interface IJobStore
     ///     Atomically finds and claims up to <paramref name="maxCount" /> highest-priority pending runs
     ///     that match the node's registered jobs and queues. The claim operation verifies max concurrency
     ///     (job and queue), rate limits, and queue pause status in a single atomic operation. Each
-    ///     claimed run's attempt is incremented as part of the claim.
+    ///     claimed run's <see cref="JobRun.StartedAt" /> is set only on the first claim so it
+    ///     represents the logical run start, and the lease epoch is incremented as part of the claim.
     /// </summary>
     /// <param name="nodeName">The name of the claiming node.</param>
     /// <param name="jobNames">The job names this node is registered to process.</param>
@@ -244,9 +277,16 @@ public interface IJobStore
     /// <param name="batch">The batch record to create.</param>
     /// <param name="runs">The child runs belonging to the batch.</param>
     /// <param name="initialEvents">Optional events to append atomically with batch and run creation.</param>
+    /// <param name="durableStepRecord">
+    ///     When non-null, the store updates the named orchestrator's <c>highest_recorded_step</c>
+    ///     column to <c>GREATEST(highest_recorded_step, Step)</c> atomically with the batch
+    ///     insert. Used by durable orchestrators to record batch-creation step boundaries
+    ///     without a separate event write.
+    /// </param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     Task CreateBatchAsync(JobBatch batch, IReadOnlyList<JobRun> runs,
         IReadOnlyList<RunEvent>? initialEvents = null,
+        DurableStepRecord? durableStepRecord = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -356,6 +396,18 @@ public interface IJobStore
     /// <param name="events">The events to append.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Appends events only for runs that are still non-terminal, atomically checking each
+    ///     target run's current status in the same store operation as the append. Returns the run
+    ///     ids whose events were accepted.
+    /// </summary>
+    /// <param name="events">The events to append.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>Run ids that were non-terminal and accepted their events.</returns>
+    Task<IReadOnlySet<string>> AppendEventsIfRunNonTerminalAsync(
+        IReadOnlyList<RunEvent> events,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     ///     Returns events for a run, optionally filtered by cursor position, event type, and attempt.
@@ -498,22 +550,26 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Cancels all pending runs whose <c>NotAfter</c> deadline has passed.
-    ///     Atomically updates batch counters and transitions any batch whose remaining non-terminal
-    ///     runs are cancelled by this sweep.
+    ///     Cancels all open runs whose lifecycle deadline has passed. <c>NotAfter</c> is a
+    ///     start deadline and applies only to unstarted Pending runs. <c>ExpiresAt</c> is a
+    ///     lifetime deadline and applies to any non-terminal run. Each expired seed cancels its
+    ///     non-terminal descendants atomically with the seed, updates batch counters once per
+    ///     canceled run, and transitions any batch whose remaining non-terminal runs are canceled.
     /// </summary>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>
-    ///     The runs that transitioned to <see cref="JobStatus.Canceled" /> and any batches that
-    ///     reached a terminal status as a side effect. <see cref="SubtreeCancellation.Found" /> is
-    ///     always <c>true</c> for sweeps; the field is meaningful only on entity-addressed cancels.
+    ///     The expired seed runs and cascaded descendants that transitioned to
+    ///     <see cref="JobStatus.Canceled" />, plus any batches that reached a terminal status as a
+    ///     side effect. <see cref="SubtreeCancellation.Found" /> is always <c>true</c> for sweeps;
+    ///     the field is meaningful only on entity-addressed cancels.
     /// </returns>
     Task<SubtreeCancellation> CancelExpiredRunsWithIdsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    ///     Purges all data older than the specified threshold: terminal runs (by <c>CompletedAt</c>)
-    ///     and their events, abandoned pending/retrying runs (by <c>NotBefore</c>),
-    ///     and stale jobs, queues, rate limits, and nodes (by <c>LastHeartbeatAt</c>).
+    ///     Purges terminal history older than the specified threshold and stale jobs, queues,
+    ///     rate limits, and nodes. Non-terminal runs are never purged directly; they must be
+    ///     canceled by lifecycle expiration first. Terminal runs in a tree or batch with
+    ///     non-terminal work are retained until the owning tree or batch is terminal.
     /// </summary>
     /// <param name="threshold">The cutoff time. Items older than this are purged.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
@@ -560,4 +616,135 @@ public interface IJobStore
     ///     exceptions (constraint violations, schema errors, auth failures) return false.
     /// </summary>
     bool IsTransientException(Exception ex);
+
+    /// <summary>
+    ///     Atomically transitions a durable orchestrator from <see cref="JobStatus.Running" /> to
+    ///     either <see cref="JobStatus.Suspended" /> or <see cref="JobStatus.Pending" />, in a
+    ///     single store operation, while persisting the entity set the orchestrator is waiting on.
+    ///     <para>
+    ///         The destination is decided inside the transaction:
+    ///     </para>
+    ///     <list type="bullet">
+    ///         <item>
+    ///             If at least one entity in (<paramref name="awaitedRunIds" /> or <paramref name="awaitedBatchIds" />)
+    ///             is still non-terminal, the run becomes <see cref="JobStatus.Suspended" />, one
+    ///             row per awaited entity is inserted into <c>surefire_durable_waits</c>, and the
+    ///             run reclaims only when its wait set drains to empty as the side effect of those
+    ///             entities terminating (see the contract below).
+    ///         </item>
+    ///         <item>
+    ///             If every awaited entity is already terminal at the moment of suspend, the run
+    ///             becomes <see cref="JobStatus.Pending" /> with <c>NotBefore = now</c> so the next
+    ///             claim sweep picks it up immediately. No wait rows are written.
+    ///         </item>
+    ///     </list>
+    ///     The transition is CAS-fenced on <paramref name="runId" /> + <paramref name="expectedLeaseEpoch" />
+    ///     and returns <see cref="DurableSuspendOutcome.NotTransitioned" /> on mismatch.
+    ///     <para>
+    ///         The store takes a per-row exclusive lock on the orchestrator and every awaited
+    ///         entity in sorted-id order, so a concurrent terminal transition on an awaited entity
+    ///         serializes against the suspend, so the "child terminated between EXISTS-check and
+    ///         wait-row insert" race is impossible by construction.
+    ///     </para>
+    /// </summary>
+    /// <param name="runId">The orchestrator run id.</param>
+    /// <param name="expectedLeaseEpoch">The lease epoch the executor observed; transition rejects on mismatch.</param>
+    /// <param name="awaitedRunIds">Run ids the orchestrator is waiting on. May be empty.</param>
+    /// <param name="awaitedBatchIds">Batch ids the orchestrator is waiting on. May be empty.</param>
+    /// <param name="now">The current wall-clock time, used for <c>NotBefore</c> when the run goes straight to Pending.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>
+    ///     A <see cref="DurableSuspendOutcome" /> indicating whether the CAS matched and, if so,
+    ///     which destination status (<see cref="JobStatus.Suspended" /> vs
+    ///     <see cref="JobStatus.Pending" />) the orchestrator landed in.
+    /// </returns>
+    /// <remarks>
+    ///     Implementations of <see cref="TryTransitionRunAsync" />, <see cref="TryCancelRunAsync" />,
+    ///     <see cref="CancelRunSubtreeAsync" />, <see cref="CancelBatchSubtreeAsync" />,
+    ///     <see cref="CancelExpiredRunsWithIdsAsync" />, and <see cref="TryCompleteBatchAsync" /> must,
+    ///     when a run or batch reaches a terminal status, perform a three-step wake inside the same
+    ///     transaction:
+    ///     <list type="number">
+    ///         <item>Delete any outgoing wait rows owned by the just-terminated run (no-op for non-Suspended runs).</item>
+    ///         <item>
+    ///             Delete incoming wait rows referencing the just-terminated entity and lock the affected orchestrators in
+    ///             sorted-id order.
+    ///         </item>
+    ///         <item>
+    ///             Wake (transition to <see cref="JobStatus.Pending" />) any locked orchestrator whose wait set is now
+    ///             empty.
+    ///         </item>
+    ///     </list>
+    ///     This is the correctness path that wakes durable orchestrators; no external notification
+    ///     is required for the wake to occur.
+    /// </remarks>
+    Task<DurableSuspendOutcome> TrySuspendRunAsync(string runId, long expectedLeaseEpoch,
+        IReadOnlyCollection<string> awaitedRunIds,
+        IReadOnlyCollection<string> awaitedBatchIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Loads, in a single round trip, every piece of state the executor needs to drive a
+    ///     durable orchestrator's replay: the orchestrator's recorded child runs, child batches,
+    ///     recorded values, and the on-row replay boundary (<c>HighestRecordedStep</c>).
+    ///     Called once at claim time so subsequent in-handler <c>IJobClient</c> calls satisfy
+    ///     themselves from in-memory state rather than per-call store reads.
+    /// </summary>
+    /// <param name="orchestratorRunId">The orchestrator run id.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The execution snapshot for the orchestrator.</returns>
+    Task<DurableExecutionSnapshot> LoadExecutionSnapshotAsync(string orchestratorRunId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    ///     Returns the per-argument input pump state for <paramref name="runId" />: for each input
+    ///     argument the orchestrator declared, the highest <c>Input</c> event sequence and whether
+    ///     an <c>InputComplete</c> has been recorded. Used by the AOT and reflection job clients
+    ///     to resume an interrupted stream pump after a host crash without re-emitting items the
+    ///     child already received. Returns an empty dictionary when the run has no input streams.
+    /// </summary>
+    /// <param name="runId">The run id whose input pump state is requested.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>Per-argument <c>(LastSequence, InputComplete)</c>, keyed by argument name.</returns>
+    async Task<IReadOnlyDictionary<string, InputPumpArgumentState>> GetInputPumpStateAsync(string runId,
+        CancellationToken cancellationToken = default)
+    {
+        var events = await GetEventsAsync(runId, 0,
+            [RunEventType.Input, RunEventType.InputComplete],
+            cancellationToken: cancellationToken);
+        if (events.Count == 0)
+        {
+            return new Dictionary<string, InputPumpArgumentState>(StringComparer.Ordinal);
+        }
+
+        var result = new Dictionary<string, InputPumpArgumentState>(StringComparer.Ordinal);
+        foreach (var ev in events)
+        {
+            InputEnvelope? env;
+            try
+            {
+                env = JsonSerializer.Deserialize(ev.Payload ?? "{}",
+                    SurefireJsonContext.Default.InputEnvelope);
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidInputHistoryException(runId, ev.Id, ev.EventType,
+                    "Input event payload is not valid JSON.", ex);
+            }
+
+            if (env is null || string.IsNullOrEmpty(env.Argument))
+            {
+                throw new InvalidInputHistoryException(runId, ev.Id, ev.EventType,
+                    "Input event payload is missing an input argument name.");
+            }
+
+            var existing = result.TryGetValue(env.Argument, out var prior) ? prior : default;
+            var lastSeq = Math.Max(existing.LastSequence, env.Sequence);
+            var complete = existing.InputComplete || ev.EventType == RunEventType.InputComplete;
+            result[env.Argument] = new(lastSeq, complete);
+        }
+
+        return result;
+    }
 }

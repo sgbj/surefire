@@ -62,14 +62,23 @@ export function useTailFollow({
     };
     scrollEl.addEventListener("scroll", onScroll, {passive: true});
 
+    // Heavy streams fire ResizeObserver multiple times per frame as the
+    // virtualizer remeasures rows. Coalesce to one scroll-to-bottom per frame.
+    let scrollRafId: number | null = null;
     const ro = new ResizeObserver(() => {
-      if (pinnedRef.current) scrollToBottom();
+      if (!pinnedRef.current) return;
+      if (scrollRafId !== null) return;
+      scrollRafId = requestAnimationFrame(() => {
+        scrollRafId = null;
+        if (pinnedRef.current) scrollToBottom();
+      });
     });
     ro.observe(contentEl);
 
     return () => {
       scrollEl.removeEventListener("scroll", onScroll);
       ro.disconnect();
+      if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
     };
   }, [scrollElement, contentElementRef, followKey, thresholdPx]);
 }

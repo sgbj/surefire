@@ -132,8 +132,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(result1);
 
         var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
-        var result2 = await Store.TryCreateRunAsync(run2, cancellationToken: ct);
-        Assert.False(result2);
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, cancellationToken: ct));
     }
 
     [Fact]
@@ -179,8 +178,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
             Attempt = 0
         };
 
-        var created = await Store.TryCreateRunAsync(run2, initialEvents: [evt], cancellationToken: ct);
-        Assert.False(created);
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(run2, initialEvents: [evt], cancellationToken: ct));
 
         var loaded = await Store.GetRunAsync(run2.Id, ct);
         Assert.Null(loaded);
@@ -243,8 +242,10 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
     }
 
     [Fact]
-    public async Task TryCreateRun_MaxActive_RespectsIsEnabled()
+    public async Task TryCreateRun_DisabledJob_StillAcceptsRun()
     {
+        // Disabled jobs are gated on claim, not creation. A trigger fired while the job is
+        // disabled produces a Pending run that sits idle until the job is re-enabled.
         var ct = TestContext.Current.CancellationToken;
         var jobName = $"DisabledJob_{Guid.CreateVersion7():N}";
         var job = CreateJob(jobName);
@@ -252,8 +253,11 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         await Store.SetJobEnabledAsync(jobName, false, ct);
 
         var run = CreateRun(jobName);
-        var result = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
-        Assert.False(result);
+        Assert.True(await Store.TryCreateRunAsync(run, 1, cancellationToken: ct));
+
+        var stored = await Store.GetRunAsync(run.Id, ct);
+        Assert.NotNull(stored);
+        Assert.Equal(JobStatus.Pending, stored.Status);
     }
 
     [Fact]
@@ -282,8 +286,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(result1);
 
         var run2 = CreateRun(jobName);
-        var result2 = await Store.TryCreateRunAsync(run2, 1, cancellationToken: ct);
-        Assert.False(result2);
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, 1, cancellationToken: ct));
     }
 
     [Fact]
@@ -1149,8 +1152,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(created1);
 
         var run2 = CreateRun(jobName) with { DeduplicationId = "unique-1" };
-        var created2 = await Store.TryCreateRunAsync(run2, 5, cancellationToken: ct);
-        Assert.False(created2);
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, 5, cancellationToken: ct));
     }
 
     [Fact]
@@ -1167,7 +1169,14 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
                 {
                     await Task.Delay(1);
                     var run = CreateRun("TestJob") with { DeduplicationId = dedupId };
-                    return await Store.TryCreateRunAsync(run);
+                    try
+                    {
+                        return await Store.TryCreateRunAsync(run);
+                    }
+                    catch (RunConflictException)
+                    {
+                        return false;
+                    }
                 })));
 
             Assert.Equal(1, results.Count(r => r));
@@ -1188,7 +1197,14 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
                 Enumerable.Range(0, 10).Select(_ => Task.Run(async () =>
                 {
                     await Task.Delay(1);
-                    return await Store.TryCreateRunAsync(CreateRun("TestJob"), 1);
+                    try
+                    {
+                        return await Store.TryCreateRunAsync(CreateRun("TestJob"), 1);
+                    }
+                    catch (RunConflictException)
+                    {
+                        return false;
+                    }
                 })));
 
             Assert.Equal(1, results.Count(r => r));
@@ -1242,6 +1258,39 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var duplicate = CreateRun(jobName, id: run1.Id);
         var created = await Store.TryCreateRunAsync(duplicate, cancellationToken: ct);
+
+        Assert.False(created);
+    }
+
+    [Fact]
+    public async Task TryCreateRun_DuplicateId_TakesPrecedenceOverDedupConflict()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"TryCreateDupDedup_{Guid.CreateVersion7():N}";
+        var dedupId = Guid.CreateVersion7().ToString("N");
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var run1 = CreateRun(jobName) with { DeduplicationId = dedupId };
+        Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
+
+        var duplicate = CreateRun(jobName, id: run1.Id) with { DeduplicationId = dedupId };
+        var created = await Store.TryCreateRunAsync(duplicate, cancellationToken: ct);
+
+        Assert.False(created);
+    }
+
+    [Fact]
+    public async Task TryCreateRun_DuplicateId_TakesPrecedenceOverMaxActiveConflict()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var jobName = $"TryCreateDupCapacity_{Guid.CreateVersion7():N}";
+        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
+
+        var run1 = CreateRun(jobName);
+        Assert.True(await Store.TryCreateRunAsync(run1, 1, cancellationToken: ct));
+
+        var duplicate = CreateRun(jobName, id: run1.Id);
+        var created = await Store.TryCreateRunAsync(duplicate, 1, cancellationToken: ct);
 
         Assert.False(created);
     }
@@ -1399,7 +1448,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
 
         var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
-        Assert.False(await Store.TryCreateRunAsync(run2, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, cancellationToken: ct));
     }
 
     [Fact]
@@ -1435,7 +1484,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var run2 = CreateRun(jobName) with { DeduplicationId = "same" };
         var laterFireAt = DateTimeOffset.UtcNow;
-        Assert.False(await Store.TryCreateRunAsync(run2, lastCronFireAt: laterFireAt, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(run2, lastCronFireAt: laterFireAt, cancellationToken: ct));
 
         var job = await Store.GetJobAsync(jobName, ct);
         Assert.NotNull(job);
@@ -1508,20 +1558,5 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.NotNull(storedB);
         Assert.Equal(3, storedA.Priority);
         Assert.Equal(11, storedB.Priority);
-    }
-
-    [Fact]
-    public async Task TryCreateRunAsync_RejectsRunForDisabledJob()
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var jobName = $"Disabled_{Guid.CreateVersion7():N}";
-        await Store.UpsertJobsAsync([CreateJob(jobName)], ct);
-        await Store.SetJobEnabledAsync(jobName, false, ct);
-        await Store.UpsertQueuesAsync([new() { Name = "default" }], ct);
-
-        var run = CreateRun(jobName);
-        var created = await Store.TryCreateRunAsync(run, 1, cancellationToken: ct);
-
-        Assert.False(created);
     }
 }

@@ -70,10 +70,10 @@ public sealed class SurefireDiagnosticSuppressor : DiagnosticSuppressor
 
         var semanticModel = context.GetSemanticModel(tree);
         var symbol = semanticModel.GetSymbolInfo(invocation, cancellationToken).Symbol as IMethodSymbol;
-        return symbol is not null
-               && (IsGeneratedAddJobCall(semanticModel, invocation, symbol, cancellationToken)
-                   || IsGeneratedCallbackCall(semanticModel, invocation, symbol, cancellationToken)
-                   || IsGeneratedClientOrBatchItemCall(semanticModel, invocation, symbol, cancellationToken));
+        return symbol is { } && (IsGeneratedAddJobCall(semanticModel, invocation, symbol, cancellationToken)
+                                 || IsGeneratedCallbackCall(semanticModel, invocation, symbol, cancellationToken)
+                                 || IsGeneratedClientOrBatchItemCall(semanticModel, invocation, symbol,
+                                     cancellationToken));
     }
 
     private static bool IsSourceGenerationEnabled(SuppressionAnalysisContext context) =>
@@ -148,7 +148,7 @@ public sealed class SurefireDiagnosticSuppressor : DiagnosticSuppressor
         IMethodSymbol symbol,
         CancellationToken cancellationToken)
         => IJobClientCallInspector.Inspect(invocation, semanticModel, symbol, cancellationToken,
-            requireInterceptableLocation: false) is not null;
+            false) is { };
 
     private static IMethodSymbol? GetHandlerMethodSymbol(SemanticModel model, ExpressionSyntax expression,
         CancellationToken cancellationToken)

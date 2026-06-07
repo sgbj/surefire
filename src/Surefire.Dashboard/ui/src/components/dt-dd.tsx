@@ -10,17 +10,18 @@ export function DtDd({
                        align = "default",
                        className,
                      }: {
-  label: string;
+  label?: string;
   children: ReactNode;
   align?: "default" | "mono";
   className?: string;
 }) {
   return (
     <div className={cn("min-w-0", className)}>
-      <dt className="eyebrow">{label}</dt>
+      {label && <dt className="eyebrow">{label}</dt>}
       <dd
         className={cn(
-          "mt-1 text-sm text-foreground",
+          "text-sm text-foreground",
+          label && "mt-1",
           align === "mono" ? "font-mono tnum" : "",
         )}
       >

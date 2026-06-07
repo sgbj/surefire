@@ -76,3 +76,7 @@ public sealed class RedisTraceTests(RedisFixture fixture)
 [Collection("Redis")]
 public sealed class RedisContentionTests(RedisFixture fixture)
     : FixtureBackedContentionConformanceTests<RedisFixture>(fixture);
+
+[Collection("Redis")]
+public sealed class RedisDurableTests(RedisFixture fixture)
+    : FixtureBackedDurableConformanceTests<RedisFixture>(fixture);
