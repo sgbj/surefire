@@ -58,6 +58,8 @@ Surefire.Dashboard.JobResponse.RateLimitName.get -> string?
 Surefire.Dashboard.JobResponse.RateLimitName.init -> void
 Surefire.Dashboard.JobResponse.RetryPolicy.get -> Surefire.RetryPolicy!
 Surefire.Dashboard.JobResponse.RetryPolicy.init -> void
+Surefire.Dashboard.JobResponse.SourceCode.get -> string?
+Surefire.Dashboard.JobResponse.SourceCode.init -> void
 Surefire.Dashboard.JobResponse.Tags.get -> string![]!
 Surefire.Dashboard.JobResponse.Tags.init -> void
 Surefire.Dashboard.JobResponse.Timeout.get -> System.TimeSpan?
@@ -149,6 +151,10 @@ Surefire.Dashboard.RunResponse.DeduplicationId.get -> string?
 Surefire.Dashboard.RunResponse.DeduplicationId.init -> void
 Surefire.Dashboard.RunResponse.Depth.get -> int?
 Surefire.Dashboard.RunResponse.Depth.init -> void
+Surefire.Dashboard.RunResponse.ExpiresAt.get -> System.DateTimeOffset?
+Surefire.Dashboard.RunResponse.ExpiresAt.init -> void
+Surefire.Dashboard.RunResponse.FailureCount.get -> int
+Surefire.Dashboard.RunResponse.FailureCount.init -> void
 Surefire.Dashboard.RunResponse.Id.get -> string!
 Surefire.Dashboard.RunResponse.Id.init -> void
 Surefire.Dashboard.RunResponse.JobName.get -> string!
@@ -173,6 +179,8 @@ Surefire.Dashboard.RunResponse.Progress.get -> double
 Surefire.Dashboard.RunResponse.Progress.init -> void
 Surefire.Dashboard.RunResponse.Reason.get -> string?
 Surefire.Dashboard.RunResponse.Reason.init -> void
+Surefire.Dashboard.RunResponse.ReplayCount.get -> int
+Surefire.Dashboard.RunResponse.ReplayCount.init -> void
 Surefire.Dashboard.RunResponse.RerunOfRunId.get -> string?
 Surefire.Dashboard.RunResponse.RerunOfRunId.init -> void
 Surefire.Dashboard.RunResponse.Result.get -> string?
@@ -213,6 +221,8 @@ Surefire.Dashboard.TimelineBucketResponse.Running.get -> int
 Surefire.Dashboard.TimelineBucketResponse.Running.init -> void
 Surefire.Dashboard.TimelineBucketResponse.Succeeded.get -> int
 Surefire.Dashboard.TimelineBucketResponse.Succeeded.init -> void
+Surefire.Dashboard.TimelineBucketResponse.Suspended.get -> int
+Surefire.Dashboard.TimelineBucketResponse.Suspended.init -> void
 Surefire.Dashboard.TimelineBucketResponse.TimelineBucketResponse() -> void
 Surefire.Dashboard.TimelineBucketResponse.Timestamp.get -> System.DateTimeOffset
 Surefire.Dashboard.TimelineBucketResponse.Timestamp.init -> void
@@ -221,6 +231,8 @@ Surefire.Dashboard.TriggerJobRequest.Args.get -> System.Text.Json.JsonElement?
 Surefire.Dashboard.TriggerJobRequest.Args.set -> void
 Surefire.Dashboard.TriggerJobRequest.DeduplicationId.get -> string?
 Surefire.Dashboard.TriggerJobRequest.DeduplicationId.set -> void
+Surefire.Dashboard.TriggerJobRequest.ExpiresAt.get -> System.DateTimeOffset?
+Surefire.Dashboard.TriggerJobRequest.ExpiresAt.set -> void
 Surefire.Dashboard.TriggerJobRequest.NotAfter.get -> System.DateTimeOffset?
 Surefire.Dashboard.TriggerJobRequest.NotAfter.set -> void
 Surefire.Dashboard.TriggerJobRequest.NotBefore.get -> System.DateTimeOffset?

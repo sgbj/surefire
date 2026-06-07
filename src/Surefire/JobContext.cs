@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
@@ -20,6 +19,8 @@ public sealed class JobContext
     private bool _hasReportedProgress;
     private Task? _inFlightTrailingFlush;
     private long _lastFlushedTicksUtc;
+
+    private int _nextStep;
     private ITimer? _pendingTimer;
     private double? _pendingValue;
 
@@ -57,8 +58,7 @@ public sealed class JobContext
     ///     metrics; use durable APIs such as <see cref="RecordAsync{T}" /> for non-deterministic
     ///     values or external side effects that must participate in replay.
     /// </summary>
-    public bool IsReplaying => OrchestratorRunId is not null
-                               && Volatile.Read(ref _nextStep) < HighestRecordedStep;
+    public bool IsReplaying => OrchestratorRunId is { } && Volatile.Read(ref _nextStep) < HighestRecordedStep;
 
     /// <summary>
     ///     Gets the batch ID if this run is part of a batch.
@@ -97,7 +97,7 @@ public sealed class JobContext
     ///     <see cref="IsReplaying" /> to distinguish non-durable code, durable-but-new-territory,
     ///     and durable-but-replaying.
     /// </summary>
-    public bool IsDurable => OrchestratorRunId is not null;
+    public bool IsDurable => OrchestratorRunId is { };
 
     /// <summary>
     ///     When non-null, identifies the durable orchestrator owning this execution. Used by
@@ -129,8 +129,6 @@ public sealed class JobContext
     /// </summary>
     internal PendingAwaitSet? PendingAwaits { get; init; }
 
-    private int _nextStep;
-
     /// <summary>
     ///     Allocates a step index and captures the replay flag in the same call so concurrent
     ///     <see cref="IJobClient" /> calls inside a <c>Task.WhenAll</c> never observe one another's
@@ -150,55 +148,39 @@ public sealed class JobContext
     /// <param name="name">A non-empty diagnostic name for the recorded value. It does not need to be unique.</param>
     /// <param name="valueFactory">The factory invoked only when recording new durable history.</param>
     /// <param name="cancellationToken">
-    ///     A token to cancel the factory and store write. When omitted, the job cancellation token is used.
+    ///     A token to cancel the store write. When omitted, the job cancellation token is used.
     /// </param>
     /// <returns>The newly recorded value, or the stored value during replay.</returns>
     /// <exception cref="InvalidOperationException">Thrown when called outside a durable orchestrator.</exception>
     /// <exception cref="ArgumentException">Thrown when <paramref name="name" /> is empty.</exception>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="valueFactory" /> is null.</exception>
     /// <exception cref="DurableReplayMismatchException">Thrown when code no longer matches replay history.</exception>
-    [RequiresUnreferencedCode("Uses JSON serialization for recorded values.")]
-    [RequiresDynamicCode("Uses JSON serialization for recorded values.")]
-    public async ValueTask<T> RecordAsync<T>(string name, Func<CancellationToken, ValueTask<T>> valueFactory,
+    public ValueTask<T> RecordAsync<T>(string name, Func<ValueTask<T>> valueFactory,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(valueFactory);
 
-        var effectiveToken = cancellationToken.CanBeCanceled ? cancellationToken : CancellationToken;
-        var (step, isReplay) = AllocateDurableStep();
-        if (isReplay)
-        {
-            var replayRecord = GetReplayRecord(step, DurableRecordKinds.Record, name);
-            return JsonSerializer.Deserialize<T>(replayRecord.Payload, SerializerOptions)!;
-        }
-
-        var value = await valueFactory(effectiveToken);
-        var payload = JsonSerializer.Serialize(value, SerializerOptions);
-        var record = new DurableRecord(
-            OrchestratorRunId!,
-            step,
-            DurableRecordKinds.Record,
-            name,
-            payload,
-            TimeProvider.GetUtcNow());
-        await Store.CreateDurableRecordAsync(record, effectiveToken);
-        return value;
+        // Resolve T through the configured serializer options, the same AOT-safe path job
+        // arguments and results use.
+        var jsonTypeInfo = (JsonTypeInfo<T>)SerializerOptions.GetTypeInfo(typeof(T));
+        return RecordValueAsync(DurableRecordKinds.Record, name, valueFactory, jsonTypeInfo, cancellationToken);
     }
 
     /// <summary>Records and returns a replay-safe equivalent of <see cref="Guid.NewGuid" />.</summary>
     public ValueTask<Guid> NewGuidAsync(CancellationToken cancellationToken = default) =>
-        RecordBuiltInAsync(DurableRecordKinds.GuidV4, () => Guid.NewGuid(),
+        RecordValueAsync(DurableRecordKinds.GuidV4, null, () => new ValueTask<Guid>(Guid.NewGuid()),
             SurefireJsonContext.Default.Guid, cancellationToken);
 
     /// <summary>Records and returns a replay-safe version 7 GUID.</summary>
     public ValueTask<Guid> NewGuidV7Async(CancellationToken cancellationToken = default) =>
-        RecordBuiltInAsync(DurableRecordKinds.GuidV7, () => Guid.CreateVersion7(TimeProvider.GetUtcNow()),
+        RecordValueAsync(DurableRecordKinds.GuidV7, null,
+            () => new ValueTask<Guid>(Guid.CreateVersion7(TimeProvider.GetUtcNow())),
             SurefireJsonContext.Default.Guid, cancellationToken);
 
     /// <summary>Records and returns a replay-safe equivalent of <see cref="TimeProvider.GetUtcNow" />.</summary>
     public ValueTask<DateTimeOffset> GetUtcNowAsync(CancellationToken cancellationToken = default) =>
-        RecordBuiltInAsync(DurableRecordKinds.UtcNow, () => TimeProvider.GetUtcNow(),
+        RecordValueAsync(DurableRecordKinds.UtcNow, null, () => new ValueTask<DateTimeOffset>(TimeProvider.GetUtcNow()),
             SurefireJsonContext.Default.DateTimeOffset, cancellationToken);
 
     /// <summary>Records and returns a replay-safe non-negative random integer.</summary>
@@ -223,18 +205,20 @@ public sealed class JobContext
             throw new ArgumentOutOfRangeException(nameof(minValue), "minValue must be less than or equal to maxValue.");
         }
 
-        return RecordRandomInt32Async(() => Random.Shared.Next(minValue, maxValue), minValue, maxValue, cancellationToken);
+        return RecordRandomInt32Async(() => Random.Shared.Next(minValue, maxValue), minValue, maxValue,
+            cancellationToken);
     }
 
     /// <summary>Records and returns a replay-safe random double greater than or equal to 0.0 and less than 1.0.</summary>
     public ValueTask<double> NextDoubleAsync(CancellationToken cancellationToken = default) =>
-        RecordBuiltInAsync(DurableRecordKinds.RandomDouble, () => Random.Shared.NextDouble(),
+        RecordValueAsync(DurableRecordKinds.RandomDouble, null, () => new ValueTask<double>(Random.Shared.NextDouble()),
             SurefireJsonContext.Default.Double, cancellationToken);
 
     internal void ValidateReplayChildRun(int step, string runId)
     {
         var operation = GetRecordedOperation(step, out var record, out var recordedId);
-        if (operation != DurableRecordedOperation.ChildRun || !string.Equals(recordedId, runId, StringComparison.Ordinal))
+        if (operation != DurableRecordedOperation.ChildRun ||
+            !string.Equals(recordedId, runId, StringComparison.Ordinal))
         {
             throw BuildReplayMismatch(step, DescribeOperation(DurableRecordedOperation.ChildRun, runId),
                 DescribeOperation(operation, recordedId, record));
@@ -275,8 +259,8 @@ public sealed class JobContext
         return new Scope(previous);
     }
 
-    private async ValueTask<T> RecordBuiltInAsync<T>(string kind, Func<T> valueFactory,
-        JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken, string? name = null)
+    private async ValueTask<T> RecordValueAsync<T>(string kind, string? name, Func<ValueTask<T>> valueFactory,
+        JsonTypeInfo<T> jsonTypeInfo, CancellationToken cancellationToken)
     {
         var effectiveToken = cancellationToken.CanBeCanceled ? cancellationToken : CancellationToken;
         var (step, isReplay) = AllocateDurableStep();
@@ -286,7 +270,7 @@ public sealed class JobContext
             return JsonSerializer.Deserialize(replayRecord.Payload, jsonTypeInfo)!;
         }
 
-        var value = valueFactory();
+        var value = await valueFactory();
         var payload = JsonSerializer.Serialize(value, jsonTypeInfo);
         var record = new DurableRecord(
             OrchestratorRunId!,
@@ -331,7 +315,7 @@ public sealed class JobContext
 
         var value = valueFactory();
         var payload = JsonSerializer.Serialize(
-            new DurableRandomInt32Payload
+            new()
             {
                 Value = value,
                 MinValue = minValue,
@@ -380,7 +364,8 @@ public sealed class JobContext
         var operation = GetRecordedOperation(step, out var record, out var recordedId);
         if (operation != DurableRecordedOperation.Record || record is null)
         {
-            throw BuildReplayMismatch(step, DescribeRecord(kind, name), DescribeOperation(operation, recordedId, record));
+            throw BuildReplayMismatch(step, DescribeRecord(kind, name),
+                DescribeOperation(operation, recordedId, record));
         }
 
         if (!string.Equals(record.Kind, kind, StringComparison.Ordinal)
@@ -433,7 +418,7 @@ public sealed class JobContext
     {
         if (existing is { } prior)
         {
-            throw BuildReplayMismatch(step, DescribeOperation(next, null, null),
+            throw BuildReplayMismatch(step, DescribeOperation(next, null),
                 $"ambiguous history containing both {prior} and {next}");
         }
     }

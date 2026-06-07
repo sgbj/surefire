@@ -203,13 +203,13 @@ public sealed class SurefireGenerator : IIncrementalGenerator
             var syntax = syntaxReference.GetSyntax(cancellationToken);
             switch (syntax)
             {
-                case MethodDeclarationSyntax { Body: not null } method:
+                case MethodDeclarationSyntax { Body: { } } method:
                     return TrimSource(method);
-                case MethodDeclarationSyntax { ExpressionBody: not null } method:
+                case MethodDeclarationSyntax { ExpressionBody: { } } method:
                     return TrimSource(method);
-                case LocalFunctionStatementSyntax { Body: not null } local:
+                case LocalFunctionStatementSyntax { Body: { } } local:
                     return TrimSource(local);
-                case LocalFunctionStatementSyntax { ExpressionBody: not null } local:
+                case LocalFunctionStatementSyntax { ExpressionBody: { } } local:
                     return TrimSource(local);
                 case AnonymousFunctionExpressionSyntax anonymous:
                     return TrimSource(anonymous);

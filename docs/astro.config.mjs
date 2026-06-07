@@ -48,6 +48,7 @@ export default defineConfig({
             { label: "Scheduling", slug: "guides/scheduling" },
             { label: "Triggering and running", slug: "guides/triggering" },
             { label: "Streaming", slug: "guides/streaming" },
+            { label: "Durable orchestration", slug: "guides/durable" },
             { label: "Rate limiting", slug: "guides/rate-limiting" },
             { label: "Cancellation", slug: "guides/cancellation" },
             { label: "Filters", slug: "guides/filters" },

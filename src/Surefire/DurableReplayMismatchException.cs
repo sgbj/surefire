@@ -22,4 +22,3 @@ public sealed class DurableReplayMismatchException : Exception
     /// <summary>The durable step where the mismatch was detected.</summary>
     public int Step { get; }
 }
-

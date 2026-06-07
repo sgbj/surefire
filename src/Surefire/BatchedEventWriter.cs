@@ -372,7 +372,7 @@ internal sealed partial class BatchedEventWriter(
         HashSet<string>? published = null;
         foreach (var request in batch)
         {
-            if (acceptedRunIds is not null && !acceptedRunIds.Contains(request.Event.RunId))
+            if (acceptedRunIds is { } && !acceptedRunIds.Contains(request.Event.RunId))
             {
                 continue;
             }
@@ -413,7 +413,7 @@ internal sealed partial class BatchedEventWriter(
         {
             if (request.Acceptance is { } acceptance)
             {
-                if (error is not null)
+                if (error is { })
                 {
                     acceptance.TrySetException(error.SourceException);
                 }

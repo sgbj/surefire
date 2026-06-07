@@ -86,7 +86,7 @@ export function RunsPage() {
             resetPage();
           }}
         >
-          <SelectTrigger size="sm" className="ml-auto w-36">
+          <SelectTrigger size="sm" className="w-36">
             <SelectValue/>
           </SelectTrigger>
           <SelectContent position="popper">

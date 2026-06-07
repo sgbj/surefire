@@ -80,7 +80,7 @@ public sealed class SchedulerServiceTests
         await service.ScheduleDueJobsAsync(CancellationToken.None);
 
         Assert.Empty(store.CreatedRuns);
-        Assert.Equal(new DateTimeOffset(2025, 1, 1, 12, 0, 0, TimeSpan.Zero),
+        Assert.Equal(new(2025, 1, 1, 12, 0, 0, TimeSpan.Zero),
             store.LastCronFireAtUpdates["TestJob"]);
     }
 

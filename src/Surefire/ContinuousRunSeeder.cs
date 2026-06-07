@@ -3,7 +3,8 @@ namespace Surefire;
 internal static class ContinuousRunSeeder
 {
     public static async Task EnsureCapacityAsync(IJobStore store, INotificationProvider notifications,
-        TimeProvider timeProvider, SurefireOptions options, JobDefinition definition, CancellationToken cancellationToken)
+        TimeProvider timeProvider, SurefireOptions options, JobDefinition definition,
+        CancellationToken cancellationToken)
     {
         if (!definition.IsContinuous || !definition.IsEnabled)
         {

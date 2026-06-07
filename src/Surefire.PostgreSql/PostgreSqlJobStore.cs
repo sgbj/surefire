@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text;
 using System.Text.Json;
 using Npgsql;
@@ -257,127 +258,6 @@ internal sealed class PostgreSqlJobStore(
         }
 
         await ReleaseMigrationLockAsync(conn);
-    }
-
-    private async Task ApplyV2MigrationAsync(NpgsqlConnection conn, CancellationToken cancellationToken)
-    {
-        // Single transactional V2 covering every durable-orchestrator schema add: the new run
-        // columns (lease_epoch, failure_count, replay_count, highest_recorded_step, is_durable, expires_at),
-        // the parent_run_id link on batches, the expiration indexes, running-count backfill, and the wait
-        // table that backs the wake-on-all suspend / resume protocol.
-        //
-        // The wait table's column naming is symmetric: awaiter_run_id is the orchestrator that
-        // is waiting; awaited_run_id / awaited_batch_id name the entity being waited on. The
-        // CHECK constraint enforces exactly-one-of-(run, batch); two partial unique indexes
-        // forbid duplicate-wait per dimension; two lookup indexes back the wake path.
-        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
-        await using (var cmd = CreateCommand(conn))
-        {
-            cmd.Transaction = tx;
-            cmd.CommandText = """
-                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS lease_epoch          BIGINT  NOT NULL DEFAULT 0;
-                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS failure_count        INT     NOT NULL DEFAULT 0;
-                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS replay_count         INT     NOT NULL DEFAULT 0;
-                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS highest_recorded_step INT     NOT NULL DEFAULT 0;
-                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS is_durable            BOOLEAN NOT NULL DEFAULT FALSE;
-                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS expires_at            TIMESTAMPTZ;
-                              ALTER TABLE surefire_jobs ADD COLUMN IF NOT EXISTS source_code           TEXT;
-
-                              UPDATE surefire_runs
-                              SET lease_epoch = GREATEST(lease_epoch, attempt),
-                                  failure_count = GREATEST(failure_count,
-                                      CASE WHEN status = 5 THEN attempt
-                                           ELSE GREATEST(attempt - 1, 0) END),
-                                  attempt = GREATEST(attempt, 1);
-
-                              ALTER TABLE surefire_batches ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
-                              CREATE INDEX IF NOT EXISTS ix_batches_parent_run_id
-                                  ON surefire_batches (parent_run_id) WHERE parent_run_id IS NOT NULL;
-
-                               DROP INDEX IF EXISTS ix_surefire_runs_expiring;
-                                CREATE INDEX ix_surefire_runs_expiring
-                                    ON surefire_runs (not_after)
-                                    WHERE status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL;
-                                CREATE INDEX IF NOT EXISTS ix_surefire_runs_expires_at
-                                    ON surefire_runs (expires_at)
-                                    WHERE status NOT IN (2, 4, 5) AND expires_at IS NOT NULL;
-
-                              CREATE TABLE IF NOT EXISTS surefire_durable_waits (
-                                  awaiter_run_id   TEXT        NOT NULL,
-                                  awaited_run_id   TEXT        NULL,
-                                  awaited_batch_id TEXT        NULL,
-                                  suspended_at     TIMESTAMPTZ NOT NULL,
-                                  FOREIGN KEY (awaiter_run_id)   REFERENCES surefire_runs(id)    ON DELETE CASCADE,
-                                  FOREIGN KEY (awaited_run_id)   REFERENCES surefire_runs(id)    ON DELETE CASCADE,
-                                  FOREIGN KEY (awaited_batch_id) REFERENCES surefire_batches(id) ON DELETE CASCADE,
-                                  CONSTRAINT exactly_one_awaited
-                                      CHECK ((awaited_run_id IS NOT NULL) <> (awaited_batch_id IS NOT NULL))
-                              );
-                              CREATE UNIQUE INDEX IF NOT EXISTS ix_durable_waits_run_uniq
-                                  ON surefire_durable_waits (awaiter_run_id, awaited_run_id)
-                                  WHERE awaited_run_id IS NOT NULL;
-                              CREATE UNIQUE INDEX IF NOT EXISTS ix_durable_waits_batch_uniq
-                                  ON surefire_durable_waits (awaiter_run_id, awaited_batch_id)
-                                  WHERE awaited_batch_id IS NOT NULL;
-                               CREATE INDEX IF NOT EXISTS ix_durable_waits_by_awaited_run
-                                   ON surefire_durable_waits (awaited_run_id) WHERE awaited_run_id IS NOT NULL;
-                                CREATE INDEX IF NOT EXISTS ix_durable_waits_by_awaited_batch
-                                    ON surefire_durable_waits (awaited_batch_id) WHERE awaited_batch_id IS NOT NULL;
-                                CREATE TABLE IF NOT EXISTS surefire_durable_records (
-                                    orchestrator_run_id TEXT        NOT NULL,
-                                    step                INT         NOT NULL,
-                                    kind                TEXT        NOT NULL,
-                                    name                TEXT        NULL,
-                                    payload             TEXT        NOT NULL,
-                                    created_at          TIMESTAMPTZ NOT NULL,
-                                    PRIMARY KEY (orchestrator_run_id, step),
-                                    FOREIGN KEY (orchestrator_run_id) REFERENCES surefire_runs(id) ON DELETE CASCADE
-                                );
-
-                                UPDATE surefire_jobs j
-                               SET running_count = COALESCE(r.cnt, 0)
-                               FROM (
-                                   SELECT job_name, COUNT(*)::int AS cnt
-                                   FROM surefire_runs
-                                   WHERE status = 1
-                                   GROUP BY job_name
-                               ) r
-                               WHERE j.name = r.job_name;
-
-                               UPDATE surefire_jobs j
-                               SET running_count = 0
-                               WHERE NOT EXISTS (
-                                   SELECT 1 FROM surefire_runs r
-                                   WHERE r.job_name = j.name AND r.status = 1
-                               );
-
-                               UPDATE surefire_queues q
-                               SET running_count = COALESCE(r.cnt, 0)
-                               FROM (
-                                   SELECT COALESCE(NULLIF(j.queue, ''), 'default') AS queue_name, COUNT(*)::int AS cnt
-                                   FROM surefire_runs r
-                                   JOIN surefire_jobs j ON j.name = r.job_name
-                                   WHERE r.status = 1
-                                   GROUP BY COALESCE(NULLIF(j.queue, ''), 'default')
-                               ) r
-                               WHERE q.name = r.queue_name;
-
-                               UPDATE surefire_queues q
-                               SET running_count = 0
-                               WHERE NOT EXISTS (
-                                   SELECT 1
-                                   FROM surefire_runs r
-                                   JOIN surefire_jobs j ON j.name = r.job_name
-                                   WHERE r.status = 1
-                                     AND COALESCE(NULLIF(j.queue, ''), 'default') = q.name
-                               );
-
-                               INSERT INTO surefire_schema_migrations (version) VALUES (2) ON CONFLICT DO NOTHING;
-                              """;
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await tx.CommitAsync(cancellationToken);
     }
 
     public async Task PingAsync(CancellationToken cancellationToken = default)
@@ -1003,9 +883,9 @@ internal sealed class PostgreSqlJobStore(
         // could see a torn state if a child terminal commits between reads, surfacing a
         // child as non-terminal in `children` whose batch has already counted it.
         await using var tx = await conn.BeginTransactionAsync(
-            System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+            IsolationLevel.RepeatableRead, cancellationToken);
 
-        int highestRecordedStep = 0;
+        var highestRecordedStep = 0;
         var children = new Dictionary<string, JobRun>(StringComparer.Ordinal);
         var childBatches = new Dictionary<string, JobBatch>(StringComparer.Ordinal);
         var records = new Dictionary<int, DurableRecord>();
@@ -1014,11 +894,11 @@ internal sealed class PostgreSqlJobStore(
         {
             cmd.Transaction = tx;
             cmd.CommandText = """
-                               SELECT highest_recorded_step FROM surefire_runs WHERE id = @id;
-                               SELECT * FROM surefire_runs WHERE parent_run_id = @id;
-                               SELECT * FROM surefire_batches WHERE parent_run_id = @id;
-                               SELECT * FROM surefire_durable_records WHERE orchestrator_run_id = @id;
-                               """;
+                              SELECT highest_recorded_step FROM surefire_runs WHERE id = @id;
+                              SELECT * FROM surefire_runs WHERE parent_run_id = @id;
+                              SELECT * FROM surefire_batches WHERE parent_run_id = @id;
+                              SELECT * FROM surefire_durable_records WHERE orchestrator_run_id = @id;
+                              """;
             cmd.Parameters.AddWithValue("id", orchestratorRunId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -1049,7 +929,7 @@ internal sealed class PostgreSqlJobStore(
         }
 
         await tx.CommitAsync(cancellationToken);
-        return new DurableExecutionSnapshot(children, childBatches, records, highestRecordedStep);
+        return new(children, childBatches, records, highestRecordedStep);
     }
 
     public async Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
@@ -1108,189 +988,6 @@ internal sealed class PostgreSqlJobStore(
         await tx.CommitAsync(cancellationToken);
         throw new DurableReplayMismatchException(record.OrchestratorRunId, record.Step,
             $"Expected {DescribeRecord(record)}; saw {(existing is null ? "no recorded operation" : DescribeRecord(existing))}.");
-    }
-
-    /// <summary>
-    ///     The unified 3-step wake performed inside every terminal transition transaction for a
-    ///     just-terminated run id.
-    ///     <list type="number">
-    ///         <item>Delete the terminated run's outgoing waits (cleanup for Suspended -> Canceled).</item>
-    ///         <item>Delete incoming waits referencing the terminated run, capturing affected orchestrator ids and locking them in sorted-id order via FOR UPDATE.</item>
-    ///         <item>For each affected orchestrator whose wait set is now empty, transition Suspended -> Pending.</item>
-    ///     </list>
-    /// </summary>
-    private async Task WakeForTerminatedRunAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        string terminatedRunId, DateTimeOffset now, bool priorWasSuspended,
-        CancellationToken cancellationToken)
-    {
-        // Step 1: outgoing cleanup. Only Suspended runs ever owned outgoing waits, so skip the
-        // round trip when the run was Running or Pending.
-        if (priorWasSuspended)
-        {
-            await using var deleteOutgoing = CreateCommand(conn);
-            deleteOutgoing.Transaction = tx;
-            deleteOutgoing.CommandText = "DELETE FROM surefire_durable_waits WHERE awaiter_run_id = @id";
-            deleteOutgoing.Parameters.AddWithValue("id", terminatedRunId);
-            await deleteOutgoing.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        // Step 2a: pre-discover affected orchestrator ids so we can take per-orchestrator
-        // advisory locks in sorted order BEFORE row work. Pairs with TrySuspendRunAsync
-        // to guarantee suspend/wake never interleave on the same orchestrator.
-        var affected = new List<string>();
-        await using (var discoverCmd = CreateCommand(conn))
-        {
-            discoverCmd.Transaction = tx;
-            discoverCmd.CommandText = """
-                                      SELECT DISTINCT awaiter_run_id FROM surefire_durable_waits
-                                      WHERE awaited_run_id = @id
-                                      ORDER BY awaiter_run_id
-                                      """;
-            discoverCmd.Parameters.AddWithValue("id", terminatedRunId);
-            await using var reader = await discoverCmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                affected.Add(reader.GetString(0));
-            }
-        }
-
-        if (affected.Count == 0)
-        {
-            return;
-        }
-
-        await TakeOrchestratorAdvisoryLocksAsync(conn, tx, affected, cancellationToken);
-
-        // Step 2b: delete incoming waits and FOR-UPDATE-lock affected orchestrator rows.
-        await using (var deleteIncoming = CreateCommand(conn))
-        {
-            deleteIncoming.Transaction = tx;
-            deleteIncoming.CommandText = """
-                                         WITH _del AS (
-                                             DELETE FROM surefire_durable_waits
-                                             WHERE awaited_run_id = @id
-                                             RETURNING awaiter_run_id
-                                         )
-                                         SELECT r.id FROM surefire_runs r
-                                         WHERE r.id = ANY(@orchs)
-                                         ORDER BY r.id
-                                         FOR UPDATE OF r
-                                         """;
-            deleteIncoming.Parameters.AddWithValue("id", terminatedRunId);
-            deleteIncoming.Parameters.AddWithValue("orchs", affected.ToArray());
-            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        // Step 3: wake each affected orchestrator whose combined wait set is now empty.
-        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
-    }
-
-    /// <summary>
-    ///     Three-step wake for a just-terminated batch id. Batches don't have outgoing waits,
-    ///     so step 1 is skipped.
-    /// </summary>
-    private async Task WakeForTerminatedBatchAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        string terminatedBatchId, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        // Pre-discover affected orchestrator ids so we can take per-orchestrator advisory
-        // locks in sorted order before any row work. Same pattern as WakeForTerminatedRunAsync.
-        var affected = new List<string>();
-        await using (var discoverCmd = CreateCommand(conn))
-        {
-            discoverCmd.Transaction = tx;
-            discoverCmd.CommandText = """
-                                      SELECT DISTINCT awaiter_run_id FROM surefire_durable_waits
-                                      WHERE awaited_batch_id = @id
-                                      ORDER BY awaiter_run_id
-                                      """;
-            discoverCmd.Parameters.AddWithValue("id", terminatedBatchId);
-            await using var reader = await discoverCmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                affected.Add(reader.GetString(0));
-            }
-        }
-
-        if (affected.Count == 0)
-        {
-            return;
-        }
-
-        await TakeOrchestratorAdvisoryLocksAsync(conn, tx, affected, cancellationToken);
-
-        await using (var deleteIncoming = CreateCommand(conn))
-        {
-            deleteIncoming.Transaction = tx;
-            deleteIncoming.CommandText = """
-                                         WITH _del AS (
-                                             DELETE FROM surefire_durable_waits
-                                             WHERE awaited_batch_id = @id
-                                             RETURNING awaiter_run_id
-                                         )
-                                         SELECT r.id FROM surefire_runs r
-                                         WHERE r.id = ANY(@orchs)
-                                         ORDER BY r.id
-                                         FOR UPDATE OF r
-                                         """;
-            deleteIncoming.Parameters.AddWithValue("id", terminatedBatchId);
-            deleteIncoming.Parameters.AddWithValue("orchs", affected.ToArray());
-            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
-    }
-
-    /// <summary>
-    ///     For each orchestrator id whose combined wait set is now empty, transitions Suspended
-    ///     -> Pending. Suspended orchestrators already released their execution slot when they
-    ///     parked, so waking only appends the Pending status event.
-    /// </summary>
-    private async Task WakeIfWaitSetEmptyAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
-        IReadOnlyList<string> orchestratorIds, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        if (orchestratorIds.Count == 0)
-        {
-            return;
-        }
-
-        await using var cmd = CreateCommand(conn);
-        cmd.Transaction = tx;
-        // Wake every passed orchestrator whose wait set is now empty in one statement. The
-        // orchestrators were locked in sorted-id order by the caller (step 2) so this UPDATE
-        // doesn't introduce a deadlock cycle.
-        cmd.CommandText = """
-                          WITH waked AS (
-                              UPDATE surefire_runs
-                              SET status = 0,
-                                  not_before = @nb,
-                                  last_heartbeat_at = @nb,
-                                  replay_count = replay_count + 1
-                              WHERE id = ANY(@ids) AND status = 3
-                                AND NOT EXISTS (
-                                    SELECT 1 FROM surefire_durable_waits w
-                                    WHERE w.awaiter_run_id = surefire_runs.id
-                                )
-                              RETURNING id, attempt
-                          )
-                          SELECT id, attempt FROM waked
-                          """;
-        cmd.Parameters.AddWithValue("ids", orchestratorIds.ToArray());
-        cmd.Parameters.AddWithValue("nb", now);
-
-        var statusEvents = new List<RunEvent>();
-        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                statusEvents.Add(RunStatusEvents.Create(
-                    reader.GetString(0), reader.GetInt32(1), JobStatus.Pending, now));
-            }
-        }
-
-        if (statusEvents.Count > 0)
-        {
-            await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
-        }
     }
 
     public async Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
@@ -1569,7 +1266,7 @@ internal sealed class PostgreSqlJobStore(
 
         int? attempt = null;
         string? batchId = null;
-        bool priorWasSuspended = false;
+        var priorWasSuspended = false;
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
@@ -1821,7 +1518,8 @@ internal sealed class PostgreSqlJobStore(
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
-        var runIds = events.Select(e => e.RunId).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var runIds = events.Select(e => e.RunId).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)
+            .ToArray();
         var accepted = new HashSet<string>(StringComparer.Ordinal);
         await using (var lockCmd = CreateCommand(conn))
         {
@@ -1842,7 +1540,8 @@ internal sealed class PostgreSqlJobStore(
 
         if (accepted.Count > 0)
         {
-            await InsertEventsAsync(conn, tx, events.Where(e => accepted.Contains(e.RunId)).ToList(), cancellationToken);
+            await InsertEventsAsync(conn, tx, events.Where(e => accepted.Contains(e.RunId)).ToList(),
+                cancellationToken);
         }
 
         await tx.CommitAsync(cancellationToken);
@@ -2228,9 +1927,9 @@ internal sealed class PostgreSqlJobStore(
                 SubtreeSeed.Run,
                 seed,
                 "Run expired past its deadline.",
-                includeRoot: true,
+                true,
                 cancellationToken,
-                expirationCancellation: true);
+                true);
             canceledRuns.AddRange(result.Runs);
             expiredRuns.AddRange(result.ExpiredRuns);
             completedBatches.AddRange(result.CompletedBatches);
@@ -2238,49 +1937,7 @@ internal sealed class PostgreSqlJobStore(
 
         return canceledRuns.Count == 0 && completedBatches.Count == 0
             ? SubtreeCancellation.Empty
-            : new SubtreeCancellation(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns };
-    }
-
-    private async Task<IReadOnlyList<string>> GetRootmostExpiredRunIdsAsync(CancellationToken cancellationToken)
-    {
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var cmd = CreateCommand(conn);
-        cmd.CommandText = """
-                          WITH RECURSIVE expired(id) AS (
-                              SELECT id
-                              FROM surefire_runs
-                              WHERE status NOT IN (2, 4, 5)
-                                AND ((status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL AND not_after < NOW())
-                                  OR (expires_at IS NOT NULL AND expires_at < NOW()))
-                          ),
-                          ancestors(candidate_id, parent_id) AS (
-                              SELECT e.id, r.parent_run_id
-                              FROM expired e
-                              JOIN surefire_runs r ON r.id = e.id
-                              UNION ALL
-                              SELECT a.candidate_id, p.parent_run_id
-                              FROM ancestors a
-                              JOIN surefire_runs p ON p.id = a.parent_id
-                              WHERE a.parent_id IS NOT NULL
-                          )
-                          SELECT e.id
-                          FROM expired e
-                          WHERE NOT EXISTS (
-                              SELECT 1
-                              FROM ancestors a
-                              JOIN expired ancestor ON ancestor.id = a.parent_id
-                              WHERE a.candidate_id = e.id
-                          )
-                          ORDER BY e.id
-                          """;
-        var roots = new List<string>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            roots.Add(reader.GetString(0));
-        }
-
-        return roots;
+            : new(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns };
     }
 
     public async Task PurgeAsync(DateTimeOffset threshold, CancellationToken cancellationToken = default)
@@ -2336,10 +1993,10 @@ internal sealed class PostgreSqlJobStore(
 
         await using var batchCmd = CreateCommand(conn);
         batchCmd.CommandText = """
-            DELETE FROM surefire_batches
-            WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold
-                AND NOT EXISTS (SELECT 1 FROM surefire_runs r WHERE r.batch_id = surefire_batches.id)
-            """;
+                               DELETE FROM surefire_batches
+                               WHERE status IN (2, 4, 5) AND completed_at IS NOT NULL AND completed_at < @threshold
+                                   AND NOT EXISTS (SELECT 1 FROM surefire_runs r WHERE r.batch_id = surefire_batches.id)
+                               """;
         batchCmd.Parameters.AddWithValue("threshold", threshold);
         await batchCmd.ExecuteNonQueryAsync(cancellationToken);
 
@@ -2638,6 +2295,355 @@ internal sealed class PostgreSqlJobStore(
         ex is NpgsqlException { IsTransient: true }
         || ex is PostgresException { SqlState: "40P01" or "40001" };
 
+    private async Task ApplyV2MigrationAsync(NpgsqlConnection conn, CancellationToken cancellationToken)
+    {
+        // Single transactional V2 covering every durable-orchestrator schema add: the new run
+        // columns (lease_epoch, failure_count, replay_count, highest_recorded_step, is_durable, expires_at),
+        // the parent_run_id link on batches, the expiration indexes, running-count backfill, and the wait
+        // table that backs the wake-on-all suspend / resume protocol.
+        //
+        // The wait table's column naming is symmetric: awaiter_run_id is the orchestrator that
+        // is waiting; awaited_run_id / awaited_batch_id name the entity being waited on. The
+        // CHECK constraint enforces exactly-one-of-(run, batch); two partial unique indexes
+        // forbid duplicate-wait per dimension; two lookup indexes back the wake path.
+        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+        await using (var cmd = CreateCommand(conn))
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS lease_epoch          BIGINT  NOT NULL DEFAULT 0;
+                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS failure_count        INT     NOT NULL DEFAULT 0;
+                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS replay_count         INT     NOT NULL DEFAULT 0;
+                               ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS highest_recorded_step INT     NOT NULL DEFAULT 0;
+                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS is_durable            BOOLEAN NOT NULL DEFAULT FALSE;
+                              ALTER TABLE surefire_runs ADD COLUMN IF NOT EXISTS expires_at            TIMESTAMPTZ;
+                              ALTER TABLE surefire_jobs ADD COLUMN IF NOT EXISTS source_code           TEXT;
+
+                              UPDATE surefire_runs
+                              SET lease_epoch = GREATEST(lease_epoch, attempt),
+                                  failure_count = GREATEST(failure_count,
+                                      CASE WHEN status = 5 THEN attempt
+                                           ELSE GREATEST(attempt - 1, 0) END),
+                                  attempt = GREATEST(attempt, 1);
+
+                              ALTER TABLE surefire_batches ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
+                              CREATE INDEX IF NOT EXISTS ix_batches_parent_run_id
+                                  ON surefire_batches (parent_run_id) WHERE parent_run_id IS NOT NULL;
+
+                               DROP INDEX IF EXISTS ix_surefire_runs_expiring;
+                                CREATE INDEX ix_surefire_runs_expiring
+                                    ON surefire_runs (not_after)
+                                    WHERE status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL;
+                                CREATE INDEX IF NOT EXISTS ix_surefire_runs_expires_at
+                                    ON surefire_runs (expires_at)
+                                    WHERE status NOT IN (2, 4, 5) AND expires_at IS NOT NULL;
+
+                              CREATE TABLE IF NOT EXISTS surefire_durable_waits (
+                                  awaiter_run_id   TEXT        NOT NULL,
+                                  awaited_run_id   TEXT        NULL,
+                                  awaited_batch_id TEXT        NULL,
+                                  suspended_at     TIMESTAMPTZ NOT NULL,
+                                  FOREIGN KEY (awaiter_run_id)   REFERENCES surefire_runs(id)    ON DELETE CASCADE,
+                                  FOREIGN KEY (awaited_run_id)   REFERENCES surefire_runs(id)    ON DELETE CASCADE,
+                                  FOREIGN KEY (awaited_batch_id) REFERENCES surefire_batches(id) ON DELETE CASCADE,
+                                  CONSTRAINT exactly_one_awaited
+                                      CHECK ((awaited_run_id IS NOT NULL) <> (awaited_batch_id IS NOT NULL))
+                              );
+                              CREATE UNIQUE INDEX IF NOT EXISTS ix_durable_waits_run_uniq
+                                  ON surefire_durable_waits (awaiter_run_id, awaited_run_id)
+                                  WHERE awaited_run_id IS NOT NULL;
+                              CREATE UNIQUE INDEX IF NOT EXISTS ix_durable_waits_batch_uniq
+                                  ON surefire_durable_waits (awaiter_run_id, awaited_batch_id)
+                                  WHERE awaited_batch_id IS NOT NULL;
+                               CREATE INDEX IF NOT EXISTS ix_durable_waits_by_awaited_run
+                                   ON surefire_durable_waits (awaited_run_id) WHERE awaited_run_id IS NOT NULL;
+                                CREATE INDEX IF NOT EXISTS ix_durable_waits_by_awaited_batch
+                                    ON surefire_durable_waits (awaited_batch_id) WHERE awaited_batch_id IS NOT NULL;
+                                CREATE TABLE IF NOT EXISTS surefire_durable_records (
+                                    orchestrator_run_id TEXT        NOT NULL,
+                                    step                INT         NOT NULL,
+                                    kind                TEXT        NOT NULL,
+                                    name                TEXT        NULL,
+                                    payload             TEXT        NOT NULL,
+                                    created_at          TIMESTAMPTZ NOT NULL,
+                                    PRIMARY KEY (orchestrator_run_id, step),
+                                    FOREIGN KEY (orchestrator_run_id) REFERENCES surefire_runs(id) ON DELETE CASCADE
+                                );
+
+                                UPDATE surefire_jobs j
+                               SET running_count = COALESCE(r.cnt, 0)
+                               FROM (
+                                   SELECT job_name, COUNT(*)::int AS cnt
+                                   FROM surefire_runs
+                                   WHERE status = 1
+                                   GROUP BY job_name
+                               ) r
+                               WHERE j.name = r.job_name;
+
+                               UPDATE surefire_jobs j
+                               SET running_count = 0
+                               WHERE NOT EXISTS (
+                                   SELECT 1 FROM surefire_runs r
+                                   WHERE r.job_name = j.name AND r.status = 1
+                               );
+
+                               UPDATE surefire_queues q
+                               SET running_count = COALESCE(r.cnt, 0)
+                               FROM (
+                                   SELECT COALESCE(NULLIF(j.queue, ''), 'default') AS queue_name, COUNT(*)::int AS cnt
+                                   FROM surefire_runs r
+                                   JOIN surefire_jobs j ON j.name = r.job_name
+                                   WHERE r.status = 1
+                                   GROUP BY COALESCE(NULLIF(j.queue, ''), 'default')
+                               ) r
+                               WHERE q.name = r.queue_name;
+
+                               UPDATE surefire_queues q
+                               SET running_count = 0
+                               WHERE NOT EXISTS (
+                                   SELECT 1
+                                   FROM surefire_runs r
+                                   JOIN surefire_jobs j ON j.name = r.job_name
+                                   WHERE r.status = 1
+                                     AND COALESCE(NULLIF(j.queue, ''), 'default') = q.name
+                               );
+
+                               INSERT INTO surefire_schema_migrations (version) VALUES (2) ON CONFLICT DO NOTHING;
+                              """;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await tx.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    ///     The unified 3-step wake performed inside every terminal transition transaction for a
+    ///     just-terminated run id.
+    ///     <list type="number">
+    ///         <item>Delete the terminated run's outgoing waits (cleanup for Suspended -> Canceled).</item>
+    ///         <item>
+    ///             Delete incoming waits referencing the terminated run, capturing affected orchestrator ids and locking
+    ///             them in sorted-id order via FOR UPDATE.
+    ///         </item>
+    ///         <item>For each affected orchestrator whose wait set is now empty, transition Suspended -> Pending.</item>
+    ///     </list>
+    /// </summary>
+    private async Task WakeForTerminatedRunAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
+        string terminatedRunId, DateTimeOffset now, bool priorWasSuspended,
+        CancellationToken cancellationToken)
+    {
+        // Step 1: outgoing cleanup. Only Suspended runs ever owned outgoing waits, so skip the
+        // round trip when the run was Running or Pending.
+        if (priorWasSuspended)
+        {
+            await using var deleteOutgoing = CreateCommand(conn);
+            deleteOutgoing.Transaction = tx;
+            deleteOutgoing.CommandText = "DELETE FROM surefire_durable_waits WHERE awaiter_run_id = @id";
+            deleteOutgoing.Parameters.AddWithValue("id", terminatedRunId);
+            await deleteOutgoing.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Step 2a: pre-discover affected orchestrator ids so we can take per-orchestrator
+        // advisory locks in sorted order BEFORE row work. Pairs with TrySuspendRunAsync
+        // to guarantee suspend/wake never interleave on the same orchestrator.
+        var affected = new List<string>();
+        await using (var discoverCmd = CreateCommand(conn))
+        {
+            discoverCmd.Transaction = tx;
+            discoverCmd.CommandText = """
+                                      SELECT DISTINCT awaiter_run_id FROM surefire_durable_waits
+                                      WHERE awaited_run_id = @id
+                                      ORDER BY awaiter_run_id
+                                      """;
+            discoverCmd.Parameters.AddWithValue("id", terminatedRunId);
+            await using var reader = await discoverCmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                affected.Add(reader.GetString(0));
+            }
+        }
+
+        if (affected.Count == 0)
+        {
+            return;
+        }
+
+        await TakeOrchestratorAdvisoryLocksAsync(conn, tx, affected, cancellationToken);
+
+        // Step 2b: delete incoming waits and FOR-UPDATE-lock affected orchestrator rows.
+        await using (var deleteIncoming = CreateCommand(conn))
+        {
+            deleteIncoming.Transaction = tx;
+            deleteIncoming.CommandText = """
+                                         WITH _del AS (
+                                             DELETE FROM surefire_durable_waits
+                                             WHERE awaited_run_id = @id
+                                             RETURNING awaiter_run_id
+                                         )
+                                         SELECT r.id FROM surefire_runs r
+                                         WHERE r.id = ANY(@orchs)
+                                         ORDER BY r.id
+                                         FOR UPDATE OF r
+                                         """;
+            deleteIncoming.Parameters.AddWithValue("id", terminatedRunId);
+            deleteIncoming.Parameters.AddWithValue("orchs", affected.ToArray());
+            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Step 3: wake each affected orchestrator whose combined wait set is now empty.
+        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Three-step wake for a just-terminated batch id. Batches don't have outgoing waits,
+    ///     so step 1 is skipped.
+    /// </summary>
+    private async Task WakeForTerminatedBatchAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
+        string terminatedBatchId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // Pre-discover affected orchestrator ids so we can take per-orchestrator advisory
+        // locks in sorted order before any row work. Same pattern as WakeForTerminatedRunAsync.
+        var affected = new List<string>();
+        await using (var discoverCmd = CreateCommand(conn))
+        {
+            discoverCmd.Transaction = tx;
+            discoverCmd.CommandText = """
+                                      SELECT DISTINCT awaiter_run_id FROM surefire_durable_waits
+                                      WHERE awaited_batch_id = @id
+                                      ORDER BY awaiter_run_id
+                                      """;
+            discoverCmd.Parameters.AddWithValue("id", terminatedBatchId);
+            await using var reader = await discoverCmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                affected.Add(reader.GetString(0));
+            }
+        }
+
+        if (affected.Count == 0)
+        {
+            return;
+        }
+
+        await TakeOrchestratorAdvisoryLocksAsync(conn, tx, affected, cancellationToken);
+
+        await using (var deleteIncoming = CreateCommand(conn))
+        {
+            deleteIncoming.Transaction = tx;
+            deleteIncoming.CommandText = """
+                                         WITH _del AS (
+                                             DELETE FROM surefire_durable_waits
+                                             WHERE awaited_batch_id = @id
+                                             RETURNING awaiter_run_id
+                                         )
+                                         SELECT r.id FROM surefire_runs r
+                                         WHERE r.id = ANY(@orchs)
+                                         ORDER BY r.id
+                                         FOR UPDATE OF r
+                                         """;
+            deleteIncoming.Parameters.AddWithValue("id", terminatedBatchId);
+            deleteIncoming.Parameters.AddWithValue("orchs", affected.ToArray());
+            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
+    }
+
+    /// <summary>
+    ///     For each orchestrator id whose combined wait set is now empty, transitions Suspended
+    ///     -> Pending. Suspended orchestrators already released their execution slot when they
+    ///     parked, so waking only appends the Pending status event.
+    /// </summary>
+    private async Task WakeIfWaitSetEmptyAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
+        IReadOnlyList<string> orchestratorIds, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (orchestratorIds.Count == 0)
+        {
+            return;
+        }
+
+        await using var cmd = CreateCommand(conn);
+        cmd.Transaction = tx;
+        // Wake every passed orchestrator whose wait set is now empty in one statement. The
+        // orchestrators were locked in sorted-id order by the caller (step 2) so this UPDATE
+        // doesn't introduce a deadlock cycle.
+        cmd.CommandText = """
+                          WITH waked AS (
+                              UPDATE surefire_runs
+                              SET status = 0,
+                                  not_before = @nb,
+                                  last_heartbeat_at = @nb,
+                                  replay_count = replay_count + 1
+                              WHERE id = ANY(@ids) AND status = 3
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM surefire_durable_waits w
+                                    WHERE w.awaiter_run_id = surefire_runs.id
+                                )
+                              RETURNING id, attempt
+                          )
+                          SELECT id, attempt FROM waked
+                          """;
+        cmd.Parameters.AddWithValue("ids", orchestratorIds.ToArray());
+        cmd.Parameters.AddWithValue("nb", now);
+
+        var statusEvents = new List<RunEvent>();
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                statusEvents.Add(RunStatusEvents.Create(
+                    reader.GetString(0), reader.GetInt32(1), JobStatus.Pending, now));
+            }
+        }
+
+        if (statusEvents.Count > 0)
+        {
+            await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> GetRootmostExpiredRunIdsAsync(CancellationToken cancellationToken)
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          WITH RECURSIVE expired(id) AS (
+                              SELECT id
+                              FROM surefire_runs
+                              WHERE status NOT IN (2, 4, 5)
+                                AND ((status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL AND not_after < NOW())
+                                  OR (expires_at IS NOT NULL AND expires_at < NOW()))
+                          ),
+                          ancestors(candidate_id, parent_id) AS (
+                              SELECT e.id, r.parent_run_id
+                              FROM expired e
+                              JOIN surefire_runs r ON r.id = e.id
+                              UNION ALL
+                              SELECT a.candidate_id, p.parent_run_id
+                              FROM ancestors a
+                              JOIN surefire_runs p ON p.id = a.parent_id
+                              WHERE a.parent_id IS NOT NULL
+                          )
+                          SELECT e.id
+                          FROM expired e
+                          WHERE NOT EXISTS (
+                              SELECT 1
+                              FROM ancestors a
+                              JOIN expired ancestor ON ancestor.id = a.parent_id
+                              WHERE a.candidate_id = e.id
+                          )
+                          ORDER BY e.id
+                          """;
+        var roots = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            roots.Add(reader.GetString(0));
+        }
+
+        return roots;
+    }
+
     // Per-tree advisory lock (taken via the leading SELECT in lockJobCmd) serialises this
     // cancel with concurrent run creation under the same tree; combined with the canonical
     // pre-lock pass it makes the subtree snapshot stable from job pre-lock through to the
@@ -2855,6 +2861,7 @@ internal sealed class PostgreSqlJobStore(
                             ? ExpiredCancellationKind.Expired
                             : ExpiredCancellationKind.AncestorExpired));
                 }
+
                 statusEvents.Add(RunStatusEvents.Create(runId, attempt, JobStatus.Canceled,
                     timeProvider.GetUtcNow()));
                 if (batchId is { })
@@ -2887,10 +2894,9 @@ internal sealed class PostgreSqlJobStore(
         await InsertEventsAsync(conn, tx, statusEvents, cancellationToken);
 
         // Three-step wake for every just-canceled run, in sorted-id order to match the FOR
-        // UPDATE locking order used elsewhere. Runs inside the canceled subtree no longer have
-        // Bulk wake: one combined pass for every canceled run instead of N round trips.
-        // The parents' job/queue rows were pre-locked above so the row updates inside
-        // WakeIfWaitSetEmptyAsync cannot deadlock with concurrent writers.
+        // UPDATE locking order used elsewhere. Bulk wake: one combined pass for every canceled
+        // run instead of N round trips. The parents' job/queue rows were pre-locked above so the
+        // row updates inside WakeIfWaitSetEmptyAsync cannot deadlock with concurrent writers.
         var nowWake = timeProvider.GetUtcNow();
         await WakeForTerminatedRunsBulkAsync(conn, tx, canceledIds, nowWake, cancellationToken);
 
@@ -2968,11 +2974,6 @@ internal sealed class PostgreSqlJobStore(
         return cmd;
     }
 
-    // Pre-locks the run's job + queue AND the parent's job + queue (if any) using
-    // ORDER BY ... FOR UPDATE, the PG-documented pattern for deterministic multi-row lock
-    // acquisition. This guards the atomic parent-wake path in TryTransitionRunAsync,
-    // TryCancelRunAsync, and SuspendDurableRunAsync against deadlocks on the parent's
-    // surefire_jobs / surefire_queues rows when those differ from the run's own.
     // Lock only the run's own job + queue rows in canonical order. Used by transactions
     // that mutate the run's own counters but not its parent's (suspend's Pending fallback).
     private async Task LockRunResourcesAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
@@ -3002,6 +3003,11 @@ internal sealed class PostgreSqlJobStore(
         await lockQueueCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    // Pre-locks the run's job + queue AND the parent's job + queue (if any) using
+    // ORDER BY ... FOR UPDATE, the PG-documented pattern for deterministic multi-row lock
+    // acquisition. This guards the atomic parent-wake path in TryTransitionRunAsync,
+    // TryCancelRunAsync, and SuspendDurableRunAsync against deadlocks on the parent's
+    // surefire_jobs / surefire_queues rows when those differ from the run's own.
     private async Task LockRunAndParentResourcesAsync(NpgsqlConnection conn, NpgsqlTransaction tx,
         string runId, CancellationToken cancellationToken)
     {
@@ -3889,7 +3895,7 @@ internal sealed class PostgreSqlJobStore(
             idCheck.Transaction = tx;
             idCheck.CommandText = "SELECT 1 FROM surefire_runs WHERE id = @id LIMIT 1";
             idCheck.Parameters.AddWithValue("id", run.Id);
-            if (await idCheck.ExecuteScalarAsync(cancellationToken) is not null)
+            if (await idCheck.ExecuteScalarAsync(cancellationToken) is { })
             {
                 await tx.CommitAsync(cancellationToken);
                 return false;
@@ -3908,7 +3914,7 @@ internal sealed class PostgreSqlJobStore(
                                      """;
             dedupCheck.Parameters.AddWithValue("job_name", run.JobName);
             dedupCheck.Parameters.AddWithValue("dedup_id", dedup);
-            if (await dedupCheck.ExecuteScalarAsync(cancellationToken) is not null)
+            if (await dedupCheck.ExecuteScalarAsync(cancellationToken) is { })
             {
                 await tx.CommitAsync(cancellationToken);
                 throw new RunConflictException(run.Id,

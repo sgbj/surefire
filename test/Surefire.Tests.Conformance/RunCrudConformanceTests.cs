@@ -132,8 +132,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(result1);
 
         var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(run2, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, cancellationToken: ct));
     }
 
     [Fact]
@@ -179,8 +178,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
             Attempt = 0
         };
 
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(run2, initialEvents: [evt], cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(run2, initialEvents: [evt], cancellationToken: ct));
 
         var loaded = await Store.GetRunAsync(run2.Id, ct);
         Assert.Null(loaded);
@@ -287,8 +286,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(result1);
 
         var run2 = CreateRun(jobName);
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(run2, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, 1, cancellationToken: ct));
     }
 
     [Fact]
@@ -1154,8 +1152,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(created1);
 
         var run2 = CreateRun(jobName) with { DeduplicationId = "unique-1" };
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(run2, 5, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, 5, cancellationToken: ct));
     }
 
     [Fact]
@@ -1451,8 +1448,7 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(run1, cancellationToken: ct));
 
         var run2 = CreateRun(jobName) with { DeduplicationId = dedupId };
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(run2, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(run2, cancellationToken: ct));
     }
 
     [Fact]
@@ -1488,8 +1484,8 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
 
         var run2 = CreateRun(jobName) with { DeduplicationId = "same" };
         var laterFireAt = DateTimeOffset.UtcNow;
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(run2, lastCronFireAt: laterFireAt, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(run2, lastCronFireAt: laterFireAt, cancellationToken: ct));
 
         var job = await Store.GetJobAsync(jobName, ct);
         Assert.NotNull(job);
@@ -1563,5 +1559,4 @@ public abstract class RunCrudConformanceTests : StoreConformanceBase
         Assert.Equal(3, storedA.Priority);
         Assert.Equal(11, storedB.Priority);
     }
-
 }

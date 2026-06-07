@@ -3,7 +3,6 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Surefire.Tests.Conformance;
 using Surefire.Tests.Testing;
 using static Surefire.Tests.Testing.TestConcurrency;
 
@@ -222,7 +221,7 @@ public sealed class DurableOrchestratorTests
         harness.Host.AddJob("One", () => 1);
         harness.Host.AddJob("RecordOrch", async (IJobClient client, JobContext ctx) =>
         {
-            var value = await ctx.RecordAsync("external-value", _ =>
+            var value = await ctx.RecordAsync("external-value", () =>
             {
                 Interlocked.Increment(ref factoryCalls);
                 return ValueTask.FromResult(Guid.CreateVersion7().ToString("N"));
@@ -261,7 +260,7 @@ public sealed class DurableOrchestratorTests
         harness.Host.AddJob("One", () => 1);
         harness.Host.AddJob("NullRecordOrch", async (IJobClient client, JobContext ctx) =>
         {
-            var value = await ctx.RecordAsync<string?>("nullable", _ =>
+            var value = await ctx.RecordAsync<string?>("nullable", () =>
             {
                 Interlocked.Increment(ref factoryCalls);
                 return ValueTask.FromResult<string?>(null);
@@ -405,17 +404,17 @@ public sealed class DurableOrchestratorTests
             {
                 [2] = new(orchId, 2, DurableRecordKinds.Record, "second", "200", DateTimeOffset.UtcNow)
             },
-            HighestRecordedStep: 2);
+            2);
         var context = CreateDirectContext(store, orchId, options, snapshot);
 
         var firstFactoryCalls = 0;
-        var first = await context.RecordAsync("first", _ =>
+        var first = await context.RecordAsync("first", () =>
         {
             firstFactoryCalls++;
             return ValueTask.FromResult(100);
         }, ct);
         var secondFactoryCalls = 0;
-        var second = await context.RecordAsync("second", _ =>
+        var second = await context.RecordAsync("second", () =>
         {
             secondFactoryCalls++;
             return ValueTask.FromResult(999);
@@ -440,7 +439,7 @@ public sealed class DurableOrchestratorTests
             new Dictionary<int, DurableRecord>
             {
                 [1] = new(orchId, 1, DurableRecordKinds.RandomInt32, null,
-                    JsonSerializer.Serialize(new DurableRandomInt32Payload
+                    JsonSerializer.Serialize(new()
                     {
                         Value = 73,
                         MinValue = 0,
@@ -448,7 +447,7 @@ public sealed class DurableOrchestratorTests
                     }, SurefireJsonContext.Default.DurableRandomInt32Payload),
                     DateTimeOffset.UtcNow)
             },
-            HighestRecordedStep: 1);
+            1);
 
         var sameRangeContext = CreateDirectContext(store, orchId, options, snapshot);
         Assert.Equal(73, await sameRangeContext.NextInt32Async(100, ct));

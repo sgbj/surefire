@@ -326,7 +326,7 @@ export function JobDetailPage() {
                 resetPage();
               }}
             >
-              <SelectTrigger size="sm" className="ml-auto w-32">
+              <SelectTrigger size="sm" className="w-32">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">

@@ -20,4 +20,3 @@ public sealed record DurableRecord(
     string? Name,
     string Payload,
     DateTimeOffset CreatedAt);
-

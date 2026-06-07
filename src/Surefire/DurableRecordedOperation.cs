@@ -6,4 +6,3 @@ internal enum DurableRecordedOperation
     ChildBatch,
     Record
 }
-

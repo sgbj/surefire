@@ -19,7 +19,7 @@ public abstract class DurableConformanceTests : StoreConformanceBase
         var suspended = await Store.GetRunAsync(suspendedRunId, ct);
         Assert.NotNull(suspended);
         var suspend = await Store.TrySuspendRunAsync(suspendedRunId, suspended.LeaseEpoch, [childId], [],
-            DateTimeOffset.UtcNow, cancellationToken: ct);
+            DateTimeOffset.UtcNow, ct);
         Assert.Equal(DurableSuspendOutcome.Suspended, suspend);
 
         var nextRun = CreateRun(jobName) with { IsDurable = true };
@@ -48,7 +48,7 @@ public abstract class DurableConformanceTests : StoreConformanceBase
         var orch = await Store.GetRunAsync(orchId, ct);
         Assert.NotNull(orch);
         var suspend = await Store.TrySuspendRunAsync(orchId, orch.LeaseEpoch, [childId], [], DateTimeOffset.UtcNow,
-            cancellationToken: ct);
+            ct);
         Assert.Equal(DurableSuspendOutcome.Suspended, suspend);
 
         await TerminateChildrenAsync([childId], ct);
@@ -82,7 +82,7 @@ public abstract class DurableConformanceTests : StoreConformanceBase
         Assert.NotNull(orch);
 
         var suspend = await Store.TrySuspendRunAsync(orchId, orch.LeaseEpoch, [childId], [], DateTimeOffset.UtcNow,
-            cancellationToken: ct);
+            ct);
         Assert.Equal(DurableSuspendOutcome.Suspended, suspend);
 
         var canceled = await Store.CancelExpiredRunsWithIdsAsync(ct);
@@ -112,7 +112,7 @@ public abstract class DurableConformanceTests : StoreConformanceBase
         Assert.NotNull(orch);
 
         var suspend = await Store.TrySuspendRunAsync(orchId, orch.LeaseEpoch, [childId], [], DateTimeOffset.UtcNow,
-            cancellationToken: ct);
+            ct);
         Assert.Equal(DurableSuspendOutcome.Suspended, suspend);
 
         var canceled = await Store.CancelExpiredRunsWithIdsAsync(ct);
@@ -150,9 +150,9 @@ public abstract class DurableConformanceTests : StoreConformanceBase
         Assert.NotNull(orchARun);
         Assert.NotNull(orchBRun);
         await Store.TrySuspendRunAsync(orchA, orchARun.LeaseEpoch, children, [], DateTimeOffset.UtcNow,
-            cancellationToken: ct);
+            ct);
         await Store.TrySuspendRunAsync(orchB, orchBRun.LeaseEpoch, children, [], DateTimeOffset.UtcNow,
-            cancellationToken: ct);
+            ct);
 
         // Two threads each cancel half the children concurrently. With wrong global lock
         // order across run-and-batch terminals the wakes would deadlock.
@@ -265,8 +265,7 @@ public abstract class DurableConformanceTests : StoreConformanceBase
         Assert.Equal(record, stored);
 
         var mismatch = record with { Payload = "8" };
-        await Assert.ThrowsAsync<DurableReplayMismatchException>(
-            () => Store.CreateDurableRecordAsync(mismatch, ct));
+        await Assert.ThrowsAsync<DurableReplayMismatchException>(() => Store.CreateDurableRecordAsync(mismatch, ct));
     }
 
     [Fact]

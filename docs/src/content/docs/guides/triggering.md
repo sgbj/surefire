@@ -49,7 +49,7 @@ await client.RunAsync("Cleanup");
 
 ## Composing jobs
 
-When a job triggers another, the child carries the parent's `ParentRunId` so the dashboard can render the trace tree. Cancelling the parent cascades to its descendants.
+When a job triggers another, the child carries the parent's run ID as its `ParentRunId` so the dashboard can render the trace tree. Cancelling the parent cascades to its descendants.
 
 ```csharp
 app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>

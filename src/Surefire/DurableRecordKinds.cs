@@ -9,4 +9,3 @@ internal static class DurableRecordKinds
     public const string RandomInt32 = "random-int32";
     public const string RandomDouble = "random-double";
 }
-

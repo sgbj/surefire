@@ -746,6 +746,7 @@ export function RunDetailPage() {
           scrollContainerRef={traceScrollRef}
           scrollStateRef={traceScrollStateRef}
           header={traceHeading}
+          headerClassName="bg-card/95 backdrop-blur-sm"
         />
       ) : (
         <div className="eyebrow py-8 text-center">No related runs</div>
@@ -760,7 +761,7 @@ export function RunDetailPage() {
         setCurrentLogFilter(v === "all" ? null : Number(v))
       }
     >
-      <SelectTrigger size="sm" className="ml-auto w-32">
+      <SelectTrigger size="sm" className="w-32">
         <SelectValue />
       </SelectTrigger>
       <SelectContent position="popper" align="end">
@@ -984,7 +985,7 @@ export function RunDetailPage() {
       {run.status === JobStatus.Running && (
         <Progress
           value={progress > 0 ? progress * 100 : null}
-          className="h-0.5 rounded-none"
+          className="h-1 rounded-none"
         />
       )}
 

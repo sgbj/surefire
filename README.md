@@ -55,7 +55,8 @@ dotnet add package Surefire.Redis
 
 ## Defining jobs
 
-You can register a job by calling `AddJob` and passing it a name and delegate. Their parameters resolve from DI and the arguments passed in when triggering a run.
+You can register a job by calling `AddJob` and passing it a name and delegate. Their parameters resolve from DI and the
+arguments passed in when triggering a run.
 
 `AddJob` returns a builder that can be used to configure cron, retries, timeouts, rate limits, callbacks, etc.
 
@@ -108,7 +109,8 @@ await foreach (var result in client.StreamBatchAsync<Result>("Process", inputs))
 }
 ```
 
-You can inject `IJobClient` inside of jobs to run other jobs. Those runs are automatically linked so you can view them together on the dashboard.
+You can inject `IJobClient` inside of jobs to run other jobs. Those runs are automatically linked so you can view them
+together on the dashboard.
 
 ```csharp
 app.AddJob("AddRandom", async (IJobClient client, CancellationToken ct) =>

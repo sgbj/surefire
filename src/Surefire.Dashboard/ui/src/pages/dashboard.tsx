@@ -352,7 +352,7 @@ function ThroughputPanel({ stats, timeline, period }: ThroughputPanelProps) {
             </ChartContainer>
           ) : (
             <div className="flex h-65 items-center justify-center text-xs text-muted-foreground">
-              no telemetry for this window
+              No telemetry for this time period
             </div>
           )}
         </div>

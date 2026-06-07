@@ -44,9 +44,10 @@ internal sealed class SurefireInstrumentation : IDisposable
             description: "Durable orchestrator attempts that yielded and parked in Suspended status.");
         DurableInstantResume = _meter.CreateCounter<long>("surefire.durable.instant_resume",
             description:
-                "Durable orchestrator attempts that yielded but had every awaited entity already terminal at suspend time, so the store routed them straight to Pending. A sustained rate is the fingerprint of a handler that yields without making progress.");
+            "Durable orchestrator attempts that yielded but had every awaited entity already terminal at suspend time, so the store routed them straight to Pending. A sustained rate is the fingerprint of a handler that yields without making progress.");
         DurableStaleRecovered = _meter.CreateCounter<long>("surefire.durable.stale_recovered",
-            description: "Durable orchestrator runs that were stale-claimed (host crashed mid-execution) and re-queued by the maintenance loop for replay.");
+            description:
+            "Durable orchestrator runs that were stale-claimed (host crashed mid-execution) and re-queued by the maintenance loop for replay.");
     }
 
     public ActivitySource ActivitySource { get; }

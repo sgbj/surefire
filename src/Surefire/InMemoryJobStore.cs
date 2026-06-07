@@ -13,13 +13,21 @@ internal sealed class InMemoryJobStore : IJobStore
 {
     private readonly Dictionary<string, JobBatch> _batches = new();
 
+    private readonly Dictionary<string, List<string>> _batchesByParentRun =
+        new(StringComparer.Ordinal);
+
     private readonly Dictionary<string, List<RunEvent>> _batchEventsByBatchId = new();
     private readonly Dictionary<string, List<RunEvent>> _batchOutputEventsByBatchId = new();
 
     private readonly Dictionary<string, List<string>> _childrenByParent =
         new(StringComparer.Ordinal);
 
-    private readonly Dictionary<string, List<string>> _batchesByParentRun =
+    // (JobName, DeduplicationId) of non-terminal runs.
+    private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
+
+    private readonly Dictionary<(string OrchestratorRunId, int Step), DurableRecord> _durableRecords = new();
+
+    private readonly Dictionary<string, HashSet<string>> _durableWaitsByOrchestratorBatch =
         new(StringComparer.Ordinal);
 
     // Wait table modeled as in-process: outgoing (orchestrator -> awaited entities) and incoming
@@ -29,24 +37,17 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, HashSet<string>> _durableWaitsByOrchestratorRun =
         new(StringComparer.Ordinal);
 
-    private readonly Dictionary<string, HashSet<string>> _durableWaitsByOrchestratorBatch =
-        new(StringComparer.Ordinal);
-
-    private readonly Dictionary<string, HashSet<string>> _orchestratorsAwaitingRun =
-        new(StringComparer.Ordinal);
-
-    private readonly Dictionary<string, HashSet<string>> _orchestratorsAwaitingBatch =
-        new(StringComparer.Ordinal);
-
-    private readonly Dictionary<(string OrchestratorRunId, int Step), DurableRecord> _durableRecords = new();
-
-    // (JobName, DeduplicationId) of non-terminal runs.
-    private readonly HashSet<(string JobName, string DeduplicationId)> _dedupIndex = [];
     private readonly Dictionary<string, List<RunEvent>> _eventsByRunId = new();
     private readonly Lock _gate = new();
     private readonly Dictionary<string, JobDefinition> _jobs = new();
     private readonly Dictionary<string, NodeInfo> _nodes = new();
     private readonly Dictionary<string, int> _nonTerminalCountByJob = new();
+
+    private readonly Dictionary<string, HashSet<string>> _orchestratorsAwaitingBatch =
+        new(StringComparer.Ordinal);
+
+    private readonly Dictionary<string, HashSet<string>> _orchestratorsAwaitingRun =
+        new(StringComparer.Ordinal);
 
     // Per-run pending entries keyed by runId. Sorted globally at claim time using
     // the live queue priority from _queues, so queue priority changes take effect on
@@ -536,179 +537,6 @@ internal sealed class InMemoryJobStore : IJobStore
 
             return Task.FromResult(record);
         }
-    }
-
-    private void AdvanceHighestRecordedStep(string orchestratorRunId, int step)
-    {
-        if (_runs.TryGetValue(orchestratorRunId, out var orchestrator)
-            && step > orchestrator.HighestRecordedStep)
-        {
-            _runs[orchestratorRunId] = orchestrator with { HighestRecordedStep = step };
-        }
-    }
-
-
-    // --- Durable wait table (in-process model) ---
-
-    private void AddDurableWaitForRun(string orchestratorId, string awaitedRunId)
-    {
-        if (!_durableWaitsByOrchestratorRun.TryGetValue(orchestratorId, out var outgoing))
-        {
-            outgoing = new(StringComparer.Ordinal);
-            _durableWaitsByOrchestratorRun[orchestratorId] = outgoing;
-        }
-
-        outgoing.Add(awaitedRunId);
-
-        if (!_orchestratorsAwaitingRun.TryGetValue(awaitedRunId, out var incoming))
-        {
-            incoming = new(StringComparer.Ordinal);
-            _orchestratorsAwaitingRun[awaitedRunId] = incoming;
-        }
-
-        incoming.Add(orchestratorId);
-    }
-
-    private void AddDurableWaitForBatch(string orchestratorId, string awaitedBatchId)
-    {
-        if (!_durableWaitsByOrchestratorBatch.TryGetValue(orchestratorId, out var outgoing))
-        {
-            outgoing = new(StringComparer.Ordinal);
-            _durableWaitsByOrchestratorBatch[orchestratorId] = outgoing;
-        }
-
-        outgoing.Add(awaitedBatchId);
-
-        if (!_orchestratorsAwaitingBatch.TryGetValue(awaitedBatchId, out var incoming))
-        {
-            incoming = new(StringComparer.Ordinal);
-            _orchestratorsAwaitingBatch[awaitedBatchId] = incoming;
-        }
-
-        incoming.Add(orchestratorId);
-    }
-
-    /// <summary>
-    ///     Removes every wait row owned by <paramref name="orchestratorId" /> (step 1 of the wake
-    ///     mechanism: outgoing cleanup). No-op for non-Suspended runs; required for cancel paths
-    ///     where a Suspended -> Canceled run still has outgoing wait rows.
-    /// </summary>
-    private void RemoveOutgoingDurableWaits(string orchestratorId)
-    {
-        if (_durableWaitsByOrchestratorRun.Remove(orchestratorId, out var outgoingRuns))
-        {
-            foreach (var awaitedRunId in outgoingRuns)
-            {
-                if (_orchestratorsAwaitingRun.TryGetValue(awaitedRunId, out var incoming))
-                {
-                    incoming.Remove(orchestratorId);
-                    if (incoming.Count == 0)
-                    {
-                        _orchestratorsAwaitingRun.Remove(awaitedRunId);
-                    }
-                }
-            }
-        }
-
-        if (_durableWaitsByOrchestratorBatch.Remove(orchestratorId, out var outgoingBatches))
-        {
-            foreach (var awaitedBatchId in outgoingBatches)
-            {
-                if (_orchestratorsAwaitingBatch.TryGetValue(awaitedBatchId, out var incoming))
-                {
-                    incoming.Remove(orchestratorId);
-                    if (incoming.Count == 0)
-                    {
-                        _orchestratorsAwaitingBatch.Remove(awaitedBatchId);
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    ///     Step 2 + 3 of the wake mechanism. Deletes every incoming wait row referencing
-    ///     <paramref name="terminatedId" /> (interpreted as a run id or batch id per
-    ///     <paramref name="kind" />), and for each affected orchestrator whose wait set is now
-    ///     empty, transitions <see cref="JobStatus.Suspended" /> -> <see cref="JobStatus.Pending" />.
-    /// </summary>
-    private void WakeOrchestratorsAwaiting(string terminatedId, DurableWaitKind kind, DateTimeOffset now)
-    {
-        var incomingIndex = kind == DurableWaitKind.Run ? _orchestratorsAwaitingRun : _orchestratorsAwaitingBatch;
-        if (!incomingIndex.Remove(terminatedId, out var affectedOrchestrators) ||
-            affectedOrchestrators.Count == 0)
-        {
-            return;
-        }
-
-        // Deterministic id order matches the SQL stores' sorted-id locking discipline; the
-        // in-process gate already serializes here, but ordered iteration keeps debug traces
-        // stable across stores.
-        var orderedAffected = affectedOrchestrators.ToArray();
-        Array.Sort(orderedAffected, StringComparer.Ordinal);
-
-        foreach (var orchestratorId in orderedAffected)
-        {
-            // Step 2: clean the orchestrator's outgoing edge for this awaited entity.
-            var outgoingIndex = kind == DurableWaitKind.Run
-                ? _durableWaitsByOrchestratorRun
-                : _durableWaitsByOrchestratorBatch;
-            if (outgoingIndex.TryGetValue(orchestratorId, out var outgoing))
-            {
-                outgoing.Remove(terminatedId);
-                if (outgoing.Count == 0)
-                {
-                    outgoingIndex.Remove(orchestratorId);
-                }
-            }
-
-            // Step 3: wake if the orchestrator's combined wait set is now empty.
-            var runsRemain = _durableWaitsByOrchestratorRun.TryGetValue(orchestratorId, out var rem1) &&
-                             rem1.Count > 0;
-            var batchesRemain = _durableWaitsByOrchestratorBatch.TryGetValue(orchestratorId, out var rem2) &&
-                                rem2.Count > 0;
-            if (runsRemain || batchesRemain)
-            {
-                continue;
-            }
-
-            if (!_runs.TryGetValue(orchestratorId, out var orchestrator) ||
-                orchestrator.Status != JobStatus.Suspended)
-            {
-                continue;
-            }
-
-            var waked = orchestrator with
-            {
-                Status = JobStatus.Pending,
-                NotBefore = now,
-                LastHeartbeatAt = now,
-                ReplayCount = orchestrator.ReplayCount + 1
-            };
-            _runs[orchestratorId] = waked;
-            UpdateIndexes(waked, JobStatus.Suspended, JobStatus.Pending);
-            AppendStatusEventCore(orchestratorId, waked.Attempt, JobStatus.Pending);
-        }
-    }
-
-    /// <summary>
-    ///     Convenience: runs all three wake steps for a just-terminated run id. Step 1 clears the
-    ///     terminated run's outgoing waits (matters when a Suspended run is canceled mid-wait);
-    ///     steps 2 + 3 wake any orchestrator awaiting this run id whose wait set is now empty.
-    /// </summary>
-    private void WakeForTerminatedRun(string terminatedRunId, DateTimeOffset now)
-    {
-        RemoveOutgoingDurableWaits(terminatedRunId);
-        WakeOrchestratorsAwaiting(terminatedRunId, DurableWaitKind.Run, now);
-    }
-
-    private void WakeForTerminatedBatch(string terminatedBatchId, DateTimeOffset now) =>
-        WakeOrchestratorsAwaiting(terminatedBatchId, DurableWaitKind.Batch, now);
-
-    private enum DurableWaitKind
-    {
-        Run,
-        Batch
     }
 
     public Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
@@ -1513,7 +1341,7 @@ internal sealed class InMemoryJobStore : IJobStore
 
         return Task.FromResult(canceledRuns.Count == 0 && completedBatches.Count == 0
             ? SubtreeCancellation.Empty
-            : new SubtreeCancellation(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns });
+            : new(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns });
 
         static bool IsExpired(JobRun run, DateTimeOffset now)
         {
@@ -1964,6 +1792,173 @@ internal sealed class InMemoryJobStore : IJobStore
             return Task.FromResult<IReadOnlyList<string>>(ids);
         }
     }
+
+    private void AdvanceHighestRecordedStep(string orchestratorRunId, int step)
+    {
+        if (_runs.TryGetValue(orchestratorRunId, out var orchestrator)
+            && step > orchestrator.HighestRecordedStep)
+        {
+            _runs[orchestratorRunId] = orchestrator with { HighestRecordedStep = step };
+        }
+    }
+
+
+    // --- Durable wait table (in-process model) ---
+
+    private void AddDurableWaitForRun(string orchestratorId, string awaitedRunId)
+    {
+        if (!_durableWaitsByOrchestratorRun.TryGetValue(orchestratorId, out var outgoing))
+        {
+            outgoing = new(StringComparer.Ordinal);
+            _durableWaitsByOrchestratorRun[orchestratorId] = outgoing;
+        }
+
+        outgoing.Add(awaitedRunId);
+
+        if (!_orchestratorsAwaitingRun.TryGetValue(awaitedRunId, out var incoming))
+        {
+            incoming = new(StringComparer.Ordinal);
+            _orchestratorsAwaitingRun[awaitedRunId] = incoming;
+        }
+
+        incoming.Add(orchestratorId);
+    }
+
+    private void AddDurableWaitForBatch(string orchestratorId, string awaitedBatchId)
+    {
+        if (!_durableWaitsByOrchestratorBatch.TryGetValue(orchestratorId, out var outgoing))
+        {
+            outgoing = new(StringComparer.Ordinal);
+            _durableWaitsByOrchestratorBatch[orchestratorId] = outgoing;
+        }
+
+        outgoing.Add(awaitedBatchId);
+
+        if (!_orchestratorsAwaitingBatch.TryGetValue(awaitedBatchId, out var incoming))
+        {
+            incoming = new(StringComparer.Ordinal);
+            _orchestratorsAwaitingBatch[awaitedBatchId] = incoming;
+        }
+
+        incoming.Add(orchestratorId);
+    }
+
+    /// <summary>
+    ///     Removes every wait row owned by <paramref name="orchestratorId" /> (step 1 of the wake
+    ///     mechanism: outgoing cleanup). No-op for non-Suspended runs; required for cancel paths
+    ///     where a Suspended -> Canceled run still has outgoing wait rows.
+    /// </summary>
+    private void RemoveOutgoingDurableWaits(string orchestratorId)
+    {
+        if (_durableWaitsByOrchestratorRun.Remove(orchestratorId, out var outgoingRuns))
+        {
+            foreach (var awaitedRunId in outgoingRuns)
+            {
+                if (_orchestratorsAwaitingRun.TryGetValue(awaitedRunId, out var incoming))
+                {
+                    incoming.Remove(orchestratorId);
+                    if (incoming.Count == 0)
+                    {
+                        _orchestratorsAwaitingRun.Remove(awaitedRunId);
+                    }
+                }
+            }
+        }
+
+        if (_durableWaitsByOrchestratorBatch.Remove(orchestratorId, out var outgoingBatches))
+        {
+            foreach (var awaitedBatchId in outgoingBatches)
+            {
+                if (_orchestratorsAwaitingBatch.TryGetValue(awaitedBatchId, out var incoming))
+                {
+                    incoming.Remove(orchestratorId);
+                    if (incoming.Count == 0)
+                    {
+                        _orchestratorsAwaitingBatch.Remove(awaitedBatchId);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Step 2 + 3 of the wake mechanism. Deletes every incoming wait row referencing
+    ///     <paramref name="terminatedId" /> (interpreted as a run id or batch id per
+    ///     <paramref name="kind" />), and for each affected orchestrator whose wait set is now
+    ///     empty, transitions <see cref="JobStatus.Suspended" /> -> <see cref="JobStatus.Pending" />.
+    /// </summary>
+    private void WakeOrchestratorsAwaiting(string terminatedId, DurableWaitKind kind, DateTimeOffset now)
+    {
+        var incomingIndex = kind == DurableWaitKind.Run ? _orchestratorsAwaitingRun : _orchestratorsAwaitingBatch;
+        if (!incomingIndex.Remove(terminatedId, out var affectedOrchestrators) ||
+            affectedOrchestrators.Count == 0)
+        {
+            return;
+        }
+
+        // Deterministic id order matches the SQL stores' sorted-id locking discipline; the
+        // in-process gate already serializes here, but ordered iteration keeps debug traces
+        // stable across stores.
+        var orderedAffected = affectedOrchestrators.ToArray();
+        Array.Sort(orderedAffected, StringComparer.Ordinal);
+
+        foreach (var orchestratorId in orderedAffected)
+        {
+            // Step 2: clean the orchestrator's outgoing edge for this awaited entity.
+            var outgoingIndex = kind == DurableWaitKind.Run
+                ? _durableWaitsByOrchestratorRun
+                : _durableWaitsByOrchestratorBatch;
+            if (outgoingIndex.TryGetValue(orchestratorId, out var outgoing))
+            {
+                outgoing.Remove(terminatedId);
+                if (outgoing.Count == 0)
+                {
+                    outgoingIndex.Remove(orchestratorId);
+                }
+            }
+
+            // Step 3: wake if the orchestrator's combined wait set is now empty.
+            var runsRemain = _durableWaitsByOrchestratorRun.TryGetValue(orchestratorId, out var rem1) &&
+                             rem1.Count > 0;
+            var batchesRemain = _durableWaitsByOrchestratorBatch.TryGetValue(orchestratorId, out var rem2) &&
+                                rem2.Count > 0;
+            if (runsRemain || batchesRemain)
+            {
+                continue;
+            }
+
+            if (!_runs.TryGetValue(orchestratorId, out var orchestrator) ||
+                orchestrator.Status != JobStatus.Suspended)
+            {
+                continue;
+            }
+
+            var waked = orchestrator with
+            {
+                Status = JobStatus.Pending,
+                NotBefore = now,
+                LastHeartbeatAt = now,
+                ReplayCount = orchestrator.ReplayCount + 1
+            };
+            _runs[orchestratorId] = waked;
+            UpdateIndexes(waked, JobStatus.Suspended, JobStatus.Pending);
+            AppendStatusEventCore(orchestratorId, waked.Attempt, JobStatus.Pending);
+        }
+    }
+
+    /// <summary>
+    ///     Convenience: runs all three wake steps for a just-terminated run id. Step 1 clears the
+    ///     terminated run's outgoing waits (matters when a Suspended run is canceled mid-wait);
+    ///     steps 2 + 3 wake any orchestrator awaiting this run id whose wait set is now empty.
+    /// </summary>
+    private void WakeForTerminatedRun(string terminatedRunId, DateTimeOffset now)
+    {
+        RemoveOutgoingDurableWaits(terminatedRunId);
+        WakeOrchestratorsAwaiting(terminatedRunId, DurableWaitKind.Run, now);
+    }
+
+    private void WakeForTerminatedBatch(string terminatedBatchId, DateTimeOffset now) =>
+        WakeOrchestratorsAwaiting(terminatedBatchId, DurableWaitKind.Batch, now);
 
     private SubtreeCancellation CancelSubtreeCore(SubtreeSeed seed, string seedId, string? reason,
         bool includeRoot)
@@ -2619,6 +2614,12 @@ internal sealed class InMemoryJobStore : IJobStore
         {
             index.Remove(batchId);
         }
+    }
+
+    private enum DurableWaitKind
+    {
+        Run,
+        Batch
     }
 
     private enum SubtreeSeed

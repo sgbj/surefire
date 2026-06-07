@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+
 namespace Surefire;
 
 /// <summary>
@@ -122,7 +123,7 @@ internal sealed partial class JobClient(
         string? derivedId = null;
         string? derivedDedup = null;
         string? orchestratorRunId = null;
-        int durableStep = 0;
+        var durableStep = 0;
         if (JobContext.Current is { OrchestratorRunId: { } orchId } ctx)
         {
             // AllocateStep returns (step, isReplay) so concurrent client calls in a
@@ -152,9 +153,9 @@ internal sealed partial class JobClient(
             derivedDedup is { } d ? new() { DeduplicationId = d } : new(),
             timeProvider.GetUtcNow(),
             requestedPriority ?? 0,
-            runId: derivedId,
-            rerunOfRunId: run.Id,
-            isDurable: run.IsDurable);
+            derivedId,
+            run.Id,
+            run.IsDurable);
 
         var clonedInputEvents = await BuildClonedRunScopedInputEventsAsync(runId, rerun.Id, cancellationToken);
 
@@ -185,7 +186,7 @@ internal sealed partial class JobClient(
     public async IAsyncEnumerable<RunEvent> ObserveRunEventsAsync(string runId, long sinceEventId = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        if (JobContext.Current is { OrchestratorRunId: not null })
+        if (JobContext.Current is { OrchestratorRunId: { } })
         {
             await foreach (var @event in DurableObserveRunEventsAsync(runId, sinceEventId, cancellationToken))
             {
@@ -238,42 +239,10 @@ internal sealed partial class JobClient(
         }
     }
 
-    private async IAsyncEnumerable<RunEvent> DurableObserveRunEventsAsync(string runId, long sinceEventId,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
-        {
-            throw new RunNotFoundException(runId);
-        }
-
-        if (!run.Status.IsTerminal)
-        {
-            JobContext.Current?.PendingAwaits?.AddRun(runId);
-            throw new DurableYieldException();
-        }
-
-        while (true)
-        {
-            var events = await store.GetEventsAsync(runId, sinceEventId,
-                cancellationToken: cancellationToken);
-            if (events.Count == 0)
-            {
-                yield break;
-            }
-
-            foreach (var @event in events)
-            {
-                sinceEventId = @event.Id;
-                yield return @event;
-            }
-        }
-    }
-
     public async IAsyncEnumerable<RunEvent> ObserveBatchEventsAsync(string batchId, long sinceEventId = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        if (JobContext.Current is { OrchestratorRunId: not null })
+        if (JobContext.Current is { OrchestratorRunId: { } })
         {
             await foreach (var @event in DurableObserveBatchEventsAsync(batchId, sinceEventId, cancellationToken))
             {
@@ -303,7 +272,8 @@ internal sealed partial class JobClient(
 
             while (true)
             {
-                var events = await store.GetBatchEventsAsync(batchId, sinceEventId, BatchEventPageSize, cancellationToken);
+                var events =
+                    await store.GetBatchEventsAsync(batchId, sinceEventId, BatchEventPageSize, cancellationToken);
                 if (events.Count == 0)
                 {
                     break;
@@ -325,40 +295,9 @@ internal sealed partial class JobClient(
         }
     }
 
-    private async IAsyncEnumerable<RunEvent> DurableObserveBatchEventsAsync(string batchId, long sinceEventId,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var batch = await store.GetBatchAsync(batchId, cancellationToken);
-        if (batch is null)
-        {
-            throw new BatchNotFoundException(batchId);
-        }
-
-        if (!batch.Status.IsTerminal)
-        {
-            JobContext.Current?.PendingAwaits?.AddBatch(batchId);
-            throw new DurableYieldException();
-        }
-
-        while (true)
-        {
-            var events = await store.GetBatchEventsAsync(batchId, sinceEventId, BatchEventPageSize, cancellationToken);
-            if (events.Count == 0)
-            {
-                yield break;
-            }
-
-            foreach (var @event in events)
-            {
-                sinceEventId = @event.Id;
-                yield return @event;
-            }
-        }
-    }
-
     public async Task<JobRun> WaitAsync(string runId, CancellationToken cancellationToken = default)
     {
-        if (JobContext.Current is { OrchestratorRunId: not null })
+        if (JobContext.Current is { OrchestratorRunId: { } })
         {
             return await DurableWaitRunAsync(runId, cancellationToken);
         }
@@ -371,33 +310,6 @@ internal sealed partial class JobClient(
         if (run is null)
         {
             throw new RunNotFoundException(runId);
-        }
-
-        return run;
-    }
-
-    private async Task<JobRun> DurableWaitRunAsync(string runId, CancellationToken cancellationToken)
-    {
-        // Claim-time snapshot served the orchestrator's recorded children in one bulk read.
-        // Most replay paths satisfy themselves from the dictionary; the store fetch is only
-        // for runs created outside the orchestrator's scope (external WaitAsync).
-        if (JobContext.Current?.DurableSnapshot is { } snap
-            && snap.Children.TryGetValue(runId, out var cached)
-            && cached.Status.IsTerminal)
-        {
-            return cached;
-        }
-
-        var run = await store.GetRunAsync(runId, cancellationToken);
-        if (run is null)
-        {
-            throw new RunNotFoundException(runId);
-        }
-
-        if (!run.Status.IsTerminal)
-        {
-            JobContext.Current?.PendingAwaits?.AddRun(runId);
-            throw new DurableYieldException();
         }
 
         return run;
@@ -423,7 +335,7 @@ internal sealed partial class JobClient(
 
     public async Task<JobBatch> WaitBatchAsync(string batchId, CancellationToken cancellationToken = default)
     {
-        if (JobContext.Current is { OrchestratorRunId: not null })
+        if (JobContext.Current is { OrchestratorRunId: { } })
         {
             return await DurableWaitBatchAsync(batchId, cancellationToken);
         }
@@ -449,31 +361,6 @@ internal sealed partial class JobClient(
 
             await WaitForWakeupAsync(wakeup, cancellationToken);
         }
-    }
-
-    private async Task<JobBatch> DurableWaitBatchAsync(string batchId, CancellationToken cancellationToken)
-    {
-        // Claim-time snapshot served orchestrator-owned batches in one bulk read.
-        if (JobContext.Current?.DurableSnapshot is { } snap
-            && snap.ChildBatches.TryGetValue(batchId, out var cached)
-            && cached.Status.IsTerminal)
-        {
-            return cached;
-        }
-
-        var batch = await store.GetBatchAsync(batchId, cancellationToken);
-        if (batch is null)
-        {
-            throw new BatchNotFoundException(batchId);
-        }
-
-        if (!batch.Status.IsTerminal)
-        {
-            JobContext.Current?.PendingAwaits?.AddBatch(batchId);
-            throw new DurableYieldException();
-        }
-
-        return batch;
     }
 
     public async IAsyncEnumerable<JobRun> WaitEachAsync(string batchId,
@@ -604,6 +491,121 @@ internal sealed partial class JobClient(
         {
             yield return item;
         }
+    }
+
+    private async IAsyncEnumerable<RunEvent> DurableObserveRunEventsAsync(string runId, long sinceEventId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        if (!run.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddRun(runId);
+            throw new DurableYieldException();
+        }
+
+        while (true)
+        {
+            var events = await store.GetEventsAsync(runId, sinceEventId,
+                cancellationToken: cancellationToken);
+            if (events.Count == 0)
+            {
+                yield break;
+            }
+
+            foreach (var @event in events)
+            {
+                sinceEventId = @event.Id;
+                yield return @event;
+            }
+        }
+    }
+
+    private async IAsyncEnumerable<RunEvent> DurableObserveBatchEventsAsync(string batchId, long sinceEventId,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null)
+        {
+            throw new BatchNotFoundException(batchId);
+        }
+
+        if (!batch.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddBatch(batchId);
+            throw new DurableYieldException();
+        }
+
+        while (true)
+        {
+            var events = await store.GetBatchEventsAsync(batchId, sinceEventId, BatchEventPageSize, cancellationToken);
+            if (events.Count == 0)
+            {
+                yield break;
+            }
+
+            foreach (var @event in events)
+            {
+                sinceEventId = @event.Id;
+                yield return @event;
+            }
+        }
+    }
+
+    private async Task<JobRun> DurableWaitRunAsync(string runId, CancellationToken cancellationToken)
+    {
+        // Claim-time snapshot served the orchestrator's recorded children in one bulk read.
+        // Most replay paths satisfy themselves from the dictionary; the store fetch is only
+        // for runs created outside the orchestrator's scope (external WaitAsync).
+        if (JobContext.Current?.DurableSnapshot is { } snap
+            && snap.Children.TryGetValue(runId, out var cached)
+            && cached.Status.IsTerminal)
+        {
+            return cached;
+        }
+
+        var run = await store.GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            throw new RunNotFoundException(runId);
+        }
+
+        if (!run.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddRun(runId);
+            throw new DurableYieldException();
+        }
+
+        return run;
+    }
+
+    private async Task<JobBatch> DurableWaitBatchAsync(string batchId, CancellationToken cancellationToken)
+    {
+        // Claim-time snapshot served orchestrator-owned batches in one bulk read.
+        if (JobContext.Current?.DurableSnapshot is { } snap
+            && snap.ChildBatches.TryGetValue(batchId, out var cached)
+            && cached.Status.IsTerminal)
+        {
+            return cached;
+        }
+
+        var batch = await store.GetBatchAsync(batchId, cancellationToken);
+        if (batch is null)
+        {
+            throw new BatchNotFoundException(batchId);
+        }
+
+        if (!batch.Status.IsTerminal)
+        {
+            JobContext.Current?.PendingAwaits?.AddBatch(batchId);
+            throw new DurableYieldException();
+        }
+
+        return batch;
     }
 
     private RunArguments? AsRunArguments(object? args) => args switch
@@ -749,7 +751,7 @@ internal sealed partial class JobClient(
         var now = timeProvider.GetUtcNow();
         string batchId;
         string? orchestratorRunId = null;
-        int durableStep = 0;
+        var durableStep = 0;
         if (JobContext.Current is { OrchestratorRunId: { } orchId } ctx)
         {
             var (step, isReplay) = ctx.AllocateStep();
@@ -800,13 +802,13 @@ internal sealed partial class JobClient(
             var requestedPriority = itemOptions?.Priority ?? priorityByJob[jobName];
             var argumentsJson = MaterializeJson(args);
             string? childId = null;
-            if (orchestratorRunId is not null)
+            if (orchestratorRunId is { })
             {
                 childId = DurableIds.DerivedBatchChildRunId(batchId, index);
             }
 
             var child = CreateRun(jobName, argumentsJson, FromBatch(itemOptions), now, requestedPriority ?? 0,
-                runId: childId,
+                childId,
                 isDurable: durableByJob.TryGetValue(jobName, out var dur) && dur);
             child = child with { BatchId = batchId, RootRunId = child.RootRunId ?? batchId };
             runs.Add(child);
@@ -826,9 +828,9 @@ internal sealed partial class JobClient(
         try
         {
             await store.CreateBatchAsync(batch, runs, initialEvents,
-                durableStepRecord: batchStepRecord, cancellationToken: cancellationToken);
+                batchStepRecord, cancellationToken);
         }
-        catch (RunConflictException) when (orchestratorRunId is not null)
+        catch (RunConflictException) when (orchestratorRunId is { })
         {
             // Durable replay re-derived the same batch id. Surface the existing batch instead of
             // failing the replay. Narrow to RunConflictException so genuine errors (transient
@@ -1079,9 +1081,8 @@ internal sealed partial class JobClient(
 
 
     private async Task<bool> AppendInputEventAsync(string runId, RunEventType eventType, InputEnvelope payload,
-        CancellationToken cancellationToken)
-    {
-        return await eventWriter.EnqueueIfRunNonTerminalAsync(
+        CancellationToken cancellationToken) =>
+        await eventWriter.EnqueueIfRunNonTerminalAsync(
             new()
             {
                 RunId = runId,
@@ -1092,7 +1093,6 @@ internal sealed partial class JobClient(
             },
             [new(NotificationChannels.RunInput(runId), runId)],
             cancellationToken);
-    }
 
     // Fresh CTS bounded by ShutdownTimeout: a caller's already-canceled token must not
     // short-circuit cleanup, but cleanup must not block host shutdown indefinitely either.

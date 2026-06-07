@@ -77,6 +77,7 @@ export function TraceView({
   manageFocusScroll = true,
   header,
   onHeaderClick,
+  headerClassName,
 }: {
   items: TraceItem[];
   currentRunId: string;
@@ -99,6 +100,7 @@ export function TraceView({
   /** When provided, the entire header bar (title cell + time ticks) becomes a
    *  clickable region, used to collapse/expand the trace section. */
   onHeaderClick?: () => void;
+  headerClassName?: string;
 }) {
   const navigate = useNavigate();
   const hasActiveRuns = useMemo(
@@ -269,6 +271,8 @@ export function TraceView({
 
   const pct = (ms: number) => (ms / timeRange) * 100 * SCALE;
 
+  const traceHeaderClassName = headerClassName ?? "bg-background";
+
   return (
     <div style={{ ["--trace-name-col" as string]: `${nameColPx}px` }}>
       <div
@@ -286,7 +290,7 @@ export function TraceView({
               }
             : undefined
         }
-        className={`${headerSticky ? "sticky top-0 z-10 " : ""}border-b border-border bg-card/95 backdrop-blur-sm${onHeaderClick ? " cursor-pointer hover:bg-card transition-colors" : ""}`}
+        className={`${headerSticky ? "sticky top-0 z-10 " : ""}border-b border-border ${traceHeaderClassName}${onHeaderClick ? " cursor-pointer hover:bg-accent/30 transition-colors" : ""}`}
       >
         <div
           className="grid h-[2.625rem]"

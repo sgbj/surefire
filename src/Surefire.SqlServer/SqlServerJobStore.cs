@@ -591,7 +591,6 @@ internal sealed class SqlServerJobStore(
                 cmd.CommandText = SchemaV2Sql;
                 await cmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
             }
-
         }
         catch
         {
@@ -1447,7 +1446,7 @@ internal sealed class SqlServerJobStore(
             .BeginTransactionAsync(IsolationLevel.Snapshot, cancellationToken)
             .WithSqlCancellation(cancellationToken);
 
-        int highestRecordedStep = 0;
+        var highestRecordedStep = 0;
         var children = new Dictionary<string, JobRun>(StringComparer.Ordinal);
         var childBatches = new Dictionary<string, JobBatch>(StringComparer.Ordinal);
         var records = new Dictionary<int, DurableRecord>();
@@ -1496,7 +1495,7 @@ internal sealed class SqlServerJobStore(
         }
 
         await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-        return new DurableExecutionSnapshot(children, childBatches, records, highestRecordedStep);
+        return new(children, childBatches, records, highestRecordedStep);
     }
 
     public async Task<DurableRecord> CreateDurableRecordAsync(DurableRecord record,
@@ -1590,245 +1589,6 @@ internal sealed class SqlServerJobStore(
             $"Expected {DescribeRecord(record)}; saw {(existing is null ? "no recorded operation" : DescribeRecord(existing))}.");
     }
 
-    /// <summary>
-    ///     The unified 3-step wake performed inside every terminal transition transaction. Driven
-    ///     by the persistent <c>surefire_durable_waits</c> table so wake is wake-on-all (every
-    ///     awaited entity must terminate) rather than wake-on-any.
-    ///     <list type="number">
-    ///         <item>Delete the just-terminated run's outgoing waits (cleanup for Suspended -> Canceled).</item>
-    ///         <item>Capture affected orchestrator ids and delete incoming waits referencing the terminated entity.</item>
-    ///         <item>For each captured orchestrator whose wait set is now empty, transition Suspended -> Pending.</item>
-    ///     </list>
-    /// </summary>
-    // Unified wake for a set of terminated runs + batches. Collects the combined affected
-    // orchestrator set ONCE, applocks every orchestrator in sorted-id order, then performs
-    // the per-cascade cleanup. This breaks the cross-helper lock-order inversion that can
-    // arise when two transactions each call WakeForTerminatedRunAsync + WakeForTerminatedBatchAsync
-    // in sequence on overlapping orchestrator sets - per-helper sorts are not enough because
-    // the two helpers' affected sets differ. Locking the union under one canonical order is
-    // the only construction that's deadlock-free for all interleavings.
-    private async Task WakeForTerminatedEntitiesAsync(SqlConnection conn, SqlTransaction tx,
-        IReadOnlyCollection<string> runIds,
-        IReadOnlyCollection<string> batchIds,
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        if (runIds.Count == 0 && batchIds.Count == 0)
-        {
-            return;
-        }
-
-        // One round trip with two SELECTs collects affected orchestrators across runs + batches.
-        // Fast-skip: if the wait table has no rows referencing any of the terminated ids, the
-        // helper returns immediately without the per-orch applock prelude or the second pass.
-        var affected = new SortedSet<string>(StringComparer.Ordinal);
-        await using (var collectCmd = CreateCommand(conn))
-        {
-            collectCmd.Transaction = tx;
-            var sb = new StringBuilder("SET NOCOUNT ON;\n");
-            if (runIds.Count > 0)
-            {
-                sb.Append("""
-                          SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
-                          WHERE awaited_run_id IN (SELECT name FROM @rids);
-
-                          """);
-                collectCmd.Parameters.Add(CreateTvpParameter("@rids", "dbo.surefire_name_list", NamesToTvp(runIds)));
-            }
-            if (batchIds.Count > 0)
-            {
-                sb.Append("""
-                          SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
-                          WHERE awaited_batch_id IN (SELECT name FROM @bids);
-
-                          """);
-                collectCmd.Parameters.Add(CreateTvpParameter("@bids", "dbo.surefire_name_list", NamesToTvp(batchIds)));
-            }
-
-            collectCmd.CommandText = sb.ToString();
-            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-            do
-            {
-                while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
-                {
-                    affected.Add(reader.GetString(0));
-                }
-            } while (await reader.NextResultAsync(cancellationToken).WithSqlCancellation(cancellationToken));
-        }
-
-        // Prelock every affected orchestrator in canonical sorted order. WakeIfWaitSetEmptyAsync's
-        // internal per-orch applock is reentrant, so its no-op repeat doesn't matter; what matters
-        // is that this ordered acquisition happens before any cascade-driven write.
-        if (affected.Count > 0)
-        {
-            await using var prelockCmd = CreateCommand(conn);
-            prelockCmd.Transaction = tx;
-            var sb = new StringBuilder("SET NOCOUNT ON; SET XACT_ABORT ON;\nDECLARE @lr INT;\n");
-            var i = 0;
-            foreach (var orch in affected)
-            {
-                var paramName = $"@__orch_{i}";
-                sb.Append("EXEC @lr = sp_getapplock @Resource = ").Append(paramName)
-                    .Append(", @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;\n")
-                    .Append("IF @lr < 0 THROW 50006, 'Failed to prelock orchestrator for wake', 1;\n");
-                prelockCmd.Parameters.Add(CreateParameter(paramName, "surefire_run:" + orch));
-                i++;
-            }
-
-            prelockCmd.CommandText = sb.ToString();
-            await prelockCmd.ExecuteNonQueryAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-        }
-
-        foreach (var runId in runIds)
-        {
-            await WakeForTerminatedRunAsync(conn, tx, runId, now, cancellationToken);
-        }
-
-        foreach (var batchId in batchIds)
-        {
-            await WakeForTerminatedBatchAsync(conn, tx, batchId, now, cancellationToken);
-        }
-    }
-
-    private async Task WakeForTerminatedRunAsync(SqlConnection conn, SqlTransaction tx,
-        string terminatedRunId, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        // Step 1: outgoing cleanup (no-op when the terminated run wasn't Suspended).
-        await using (var deleteOutgoing = CreateCommand(conn))
-        {
-            deleteOutgoing.Transaction = tx;
-            deleteOutgoing.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaiter_run_id = @id;";
-            deleteOutgoing.Parameters.Add(CreateParameter("@id", terminatedRunId));
-            await deleteOutgoing.ExecuteNonQueryAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-        }
-
-        // Step 2: collect affected orchestrators in sorted-id order, then delete the incoming
-        // wait rows. Sorted ordering matches the row-lock acquisition order in step 3.
-        var affected = new List<string>();
-        await using (var collectCmd = CreateCommand(conn))
-        {
-            collectCmd.Transaction = tx;
-            collectCmd.CommandText = """
-                                     SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
-                                     WHERE awaited_run_id = @id ORDER BY awaiter_run_id;
-                                     """;
-            collectCmd.Parameters.Add(CreateParameter("@id", terminatedRunId));
-            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
-            {
-                affected.Add(reader.GetString(0));
-            }
-        }
-
-        if (affected.Count == 0)
-        {
-            return;
-        }
-
-        await using (var deleteIncoming = CreateCommand(conn))
-        {
-            deleteIncoming.Transaction = tx;
-            deleteIncoming.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaited_run_id = @id;";
-            deleteIncoming.Parameters.Add(CreateParameter("@id", terminatedRunId));
-            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-        }
-
-        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
-    }
-
-    private async Task WakeForTerminatedBatchAsync(SqlConnection conn, SqlTransaction tx,
-        string terminatedBatchId, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        var affected = new List<string>();
-        await using (var collectCmd = CreateCommand(conn))
-        {
-            collectCmd.Transaction = tx;
-            collectCmd.CommandText = """
-                                     SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
-                                     WHERE awaited_batch_id = @id ORDER BY awaiter_run_id;
-                                     """;
-            collectCmd.Parameters.Add(CreateParameter("@id", terminatedBatchId));
-            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
-            {
-                affected.Add(reader.GetString(0));
-            }
-        }
-
-        if (affected.Count == 0)
-        {
-            return;
-        }
-
-        await using (var deleteIncoming = CreateCommand(conn))
-        {
-            deleteIncoming.Transaction = tx;
-            deleteIncoming.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaited_batch_id = @id;";
-            deleteIncoming.Parameters.Add(CreateParameter("@id", terminatedBatchId));
-            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken)
-                .WithSqlCancellation(cancellationToken);
-        }
-
-        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
-    }
-
-    /// <summary>
-    ///     Wakes each orchestrator whose wait set is now empty, in sorted-id order so concurrent
-    ///     wakes acquire row locks deterministically. Each wake transitions Suspended -> Pending
-    ///     and appends the Pending status event. The CAS on <c>status = 3</c> plus the <c>NOT EXISTS</c> on residual
-    ///     waits keep wakes idempotent under sibling-race conditions.
-    /// </summary>
-    private async Task WakeIfWaitSetEmptyAsync(SqlConnection conn, SqlTransaction tx,
-        IReadOnlyList<string> orchestratorIds, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        if (orchestratorIds.Count == 0)
-        {
-            return;
-        }
-
-        // Bulk wake under a single TVP-driven UPDATE. Per-orch applocks were already taken by
-        // WakeForTerminatedEntitiesAsync's prelock in canonical sorted order, so the wake's own
-        // applock chain is redundant. Job / queue UPDLOCK hints in sorted order keep this safe
-        // against concurrent claim / transition writers. The wake row update is CAS-fenced on
-        // status = 3 and emptiness of the wait set; both filters keep it idempotent.
-        await using var wakeCmd = CreateCommand(conn);
-        wakeCmd.Transaction = tx;
-        wakeCmd.CommandText = """
-                              SET NOCOUNT ON; SET XACT_ABORT ON;
-
-                              DECLARE @woken TABLE (
-                                  id NVARCHAR(450) NOT NULL PRIMARY KEY,
-                                  attempt INT NOT NULL,
-                                  job_name NVARCHAR(450) NOT NULL
-                              );
-
-                               UPDATE dbo.surefire_runs SET
-                                   status = 0,
-                                   not_before = @now,
-                                   last_heartbeat_at = @now,
-                                   replay_count = replay_count + 1
-                              OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.job_name
-                                  INTO @woken (id, attempt, job_name)
-                              WHERE id IN (SELECT name FROM @ids) AND status = 3
-                                AND NOT EXISTS (
-                                    SELECT 1 FROM dbo.surefire_durable_waits w WHERE w.awaiter_run_id = surefire_runs.id
-                                );
-
-                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                              SELECT w.id, 0, N'0', @now, w.attempt FROM @woken w;
-                              """;
-        wakeCmd.Parameters.Add(CreateTvpParameter("@ids", "dbo.surefire_name_list",
-            NamesToTvp(orchestratorIds)));
-        wakeCmd.Parameters.Add(CreateParameter("@now", now));
-        await wakeCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-    }
-
     public async Task<RunTransitionResult> TryTransitionRunAsync(RunStatusTransition transition,
         CancellationToken cancellationToken = default)
     {
@@ -1854,134 +1614,134 @@ internal sealed class SqlServerJobStore(
         cmd.Transaction = tx;
 
         cmd.CommandText = $$"""
-                          SET NOCOUNT ON; SET XACT_ABORT ON;
+                            SET NOCOUNT ON; SET XACT_ABORT ON;
 
-                          -- Per-run applock serializes concurrent ops on the same run; SQL Server's
-                          -- U/X conversion otherwise produces deadlocks under single-row contention.
-                          DECLARE @run_lock_r INT;
-                          EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
-                              @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
-                          IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
+                            -- Per-run applock serializes concurrent ops on the same run; SQL Server's
+                            -- U/X conversion otherwise produces deadlocks under single-row contention.
+                            DECLARE @run_lock_r INT;
+                            EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
+                                @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
+                            IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
 
-                          -- Resolve the canonical lock keys via snapshot reads (RCSI). The terminal
-                          -- transition decrements this run's job/queue running_count, so those rows
-                          -- must be locked in the same alphabetical order as any other writer that
-                          -- touches them. Wake of any Suspended orchestrator awaiting this run is
-                          -- handled by WakeForTerminatedRunAsync after this statement commits its
-                          -- read-set, in a sequence of per-orchestrator transactions that take
-                          -- their own job/queue applocks.
-                          DECLARE @run_job_name NVARCHAR(450);
-                          SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
-                          DECLARE @run_queue_name NVARCHAR(450) = N'default';
-                          SELECT @run_queue_name = COALESCE(queue, N'default')
-                              FROM dbo.surefire_jobs WHERE name = @run_job_name;
+                            -- Resolve the canonical lock keys via snapshot reads (RCSI). The terminal
+                            -- transition decrements this run's job/queue running_count, so those rows
+                            -- must be locked in the same alphabetical order as any other writer that
+                            -- touches them. Wake of any Suspended orchestrator awaiting this run is
+                            -- handled by WakeForTerminatedRunAsync after this statement commits its
+                            -- read-set, in a sequence of per-orchestrator transactions that take
+                            -- their own job/queue applocks.
+                            DECLARE @run_job_name NVARCHAR(450);
+                            SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
+                            DECLARE @run_queue_name NVARCHAR(450) = N'default';
+                            SELECT @run_queue_name = COALESCE(queue, N'default')
+                                FROM dbo.surefire_jobs WHERE name = @run_job_name;
 
-                          DECLARE @lock_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
-                          DECLARE @lock_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
-                          IF @run_job_name IS NOT NULL
-                          BEGIN
-                              INSERT INTO @lock_jobs (name) VALUES (@run_job_name);
-                              INSERT INTO @lock_queues (name) VALUES (@run_queue_name);
-                          END
+                            DECLARE @lock_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                            DECLARE @lock_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                            IF @run_job_name IS NOT NULL
+                            BEGIN
+                                INSERT INTO @lock_jobs (name) VALUES (@run_job_name);
+                                INSERT INTO @lock_queues (name) VALUES (@run_queue_name);
+                            END
 
-                          {{BuildSortedApplockSql("@lock_jobs", "surefire_job:", "ttj")}}
-                          {{BuildSortedApplockSql("@lock_queues", "surefire_queue:", "ttq")}}
+                            {{BuildSortedApplockSql("@lock_jobs", "surefire_job:", "ttj")}}
+                            {{BuildSortedApplockSql("@lock_queues", "surefire_queue:", "ttq")}}
 
-                          DECLARE @lock_sink NVARCHAR(450);
-                          SELECT @lock_sink = j.name FROM @lock_jobs lj
-                              INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = lj.name
-                              ORDER BY lj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
-                          SELECT @lock_sink = q.name FROM @lock_queues lq
-                              INNER JOIN dbo.surefire_queues q WITH (UPDLOCK, ROWLOCK) ON q.name = lq.name
-                              ORDER BY lq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                            DECLARE @lock_sink NVARCHAR(450);
+                            SELECT @lock_sink = j.name FROM @lock_jobs lj
+                                INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = lj.name
+                                ORDER BY lj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                            SELECT @lock_sink = q.name FROM @lock_queues lq
+                                INNER JOIN dbo.surefire_queues q WITH (UPDLOCK, ROWLOCK) ON q.name = lq.name
+                                ORDER BY lq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
 
-                           DECLARE @upd TABLE (job_name NVARCHAR(450) NOT NULL, batch_id NVARCHAR(450), attempt INT NOT NULL);
+                             DECLARE @upd TABLE (job_name NVARCHAR(450) NOT NULL, batch_id NVARCHAR(450), attempt INT NOT NULL);
 
-                          UPDATE dbo.surefire_runs SET
-                              status = @new_status,
-                              node_name = @node_name,
-                              started_at = COALESCE(@started_at, started_at),
-                              completed_at = COALESCE(@completed_at, completed_at),
-                              canceled_at = COALESCE(@canceled_at, canceled_at),
-                              reason = @reason,
-                              result = @result,
-                              progress = @progress,
-                              not_before = @not_before,
-                              last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at),
-                              lease_epoch = lease_epoch + @lease_epoch_increment,
-                              attempt = attempt + @attempt_increment,
-                              failure_count = failure_count + @failure_count_increment
-                           OUTPUT INSERTED.job_name, INSERTED.batch_id, INSERTED.attempt
-                               INTO @upd (job_name, batch_id, attempt)
-                           WHERE id = @id
-                               AND status = @expected_status
-                               AND lease_epoch = @expected_lease_epoch
-                              AND status NOT IN (2, 4, 5);
+                            UPDATE dbo.surefire_runs SET
+                                status = @new_status,
+                                node_name = @node_name,
+                                started_at = COALESCE(@started_at, started_at),
+                                completed_at = COALESCE(@completed_at, completed_at),
+                                canceled_at = COALESCE(@canceled_at, canceled_at),
+                                reason = @reason,
+                                result = @result,
+                                progress = @progress,
+                                not_before = @not_before,
+                                last_heartbeat_at = COALESCE(@last_heartbeat_at, last_heartbeat_at),
+                                lease_epoch = lease_epoch + @lease_epoch_increment,
+                                attempt = attempt + @attempt_increment,
+                                failure_count = failure_count + @failure_count_increment
+                             OUTPUT INSERTED.job_name, INSERTED.batch_id, INSERTED.attempt
+                                 INTO @upd (job_name, batch_id, attempt)
+                             WHERE id = @id
+                                 AND status = @expected_status
+                                 AND lease_epoch = @expected_lease_epoch
+                                AND status NOT IN (2, 4, 5);
 
-                          DECLARE @updated INT = (SELECT COUNT(*) FROM @upd);
-                          DECLARE @batch_id NVARCHAR(450) = NULL;
-                          DECLARE @batch_status SMALLINT = NULL;
-                          DECLARE @batch_completed_at DATETIMEOFFSET(7) = NULL;
+                            DECLARE @updated INT = (SELECT COUNT(*) FROM @upd);
+                            DECLARE @batch_id NVARCHAR(450) = NULL;
+                            DECLARE @batch_status SMALLINT = NULL;
+                            DECLARE @batch_completed_at DATETIMEOFFSET(7) = NULL;
 
-                          IF @updated > 0
-                          BEGIN
-                              -- Running is the only active slot holder. Decrement only when
-                              -- transitioning from Running to a non-active status.
-                              UPDATE dbo.surefire_jobs SET
-                                  running_count = CASE WHEN @expected_status = 1 AND @new_status <> 1
-                                      THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
-                                      ELSE running_count END,
-                                  non_terminal_count = CASE WHEN @new_status IN (2, 4, 5)
-                                      THEN CASE WHEN non_terminal_count > 0 THEN non_terminal_count - 1 ELSE 0 END
-                                      ELSE non_terminal_count END
-                              WHERE name = @run_job_name;
+                            IF @updated > 0
+                            BEGIN
+                                -- Running is the only active slot holder. Decrement only when
+                                -- transitioning from Running to a non-active status.
+                                UPDATE dbo.surefire_jobs SET
+                                    running_count = CASE WHEN @expected_status = 1 AND @new_status <> 1
+                                        THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                                        ELSE running_count END,
+                                    non_terminal_count = CASE WHEN @new_status IN (2, 4, 5)
+                                        THEN CASE WHEN non_terminal_count > 0 THEN non_terminal_count - 1 ELSE 0 END
+                                        ELSE non_terminal_count END
+                                WHERE name = @run_job_name;
 
-                              IF @expected_status = 1 AND @new_status <> 1
-                                  UPDATE dbo.surefire_queues SET running_count =
-                                      CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
-                                  WHERE name = @run_queue_name;
+                                IF @expected_status = 1 AND @new_status <> 1
+                                    UPDATE dbo.surefire_queues SET running_count =
+                                        CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                                    WHERE name = @run_queue_name;
 
-                               INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                               SELECT @id, 0, CONVERT(NVARCHAR(MAX), @new_status), @now, attempt FROM @upd;
+                                 INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                                 SELECT @id, 0, CONVERT(NVARCHAR(MAX), @new_status), @now, attempt FROM @upd;
 
-                               INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                               SELECT run_id, event_type, payload, created_at, attempt FROM @events;
+                                 INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                                 SELECT run_id, event_type, payload, created_at, attempt FROM @events;
 
-                              IF @new_status IN (2, 4, 5)
-                              BEGIN
-                                  SET @batch_id = (SELECT TOP (1) batch_id FROM @upd WHERE batch_id IS NOT NULL);
-                                  IF @batch_id IS NOT NULL
-                                  BEGIN
-                                      DECLARE @bc TABLE (total INT, succeeded INT, failed INT, canceled INT);
-                                      UPDATE dbo.surefire_batches
-                                      SET succeeded = succeeded + CASE WHEN @new_status = 2 THEN 1 ELSE 0 END,
-                                          failed    = failed    + CASE WHEN @new_status = 5 THEN 1 ELSE 0 END,
-                                          canceled  = canceled  + CASE WHEN @new_status = 4 THEN 1 ELSE 0 END
-                                      OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
-                                          INTO @bc (total, succeeded, failed, canceled)
-                                      WHERE id = @batch_id AND status NOT IN (2, 4, 5);
+                                IF @new_status IN (2, 4, 5)
+                                BEGIN
+                                    SET @batch_id = (SELECT TOP (1) batch_id FROM @upd WHERE batch_id IS NOT NULL);
+                                    IF @batch_id IS NOT NULL
+                                    BEGIN
+                                        DECLARE @bc TABLE (total INT, succeeded INT, failed INT, canceled INT);
+                                        UPDATE dbo.surefire_batches
+                                        SET succeeded = succeeded + CASE WHEN @new_status = 2 THEN 1 ELSE 0 END,
+                                            failed    = failed    + CASE WHEN @new_status = 5 THEN 1 ELSE 0 END,
+                                            canceled  = canceled  + CASE WHEN @new_status = 4 THEN 1 ELSE 0 END
+                                        OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
+                                            INTO @bc (total, succeeded, failed, canceled)
+                                        WHERE id = @batch_id AND status NOT IN (2, 4, 5);
 
-                                      IF EXISTS (SELECT 1 FROM @bc WHERE succeeded + failed + canceled >= total)
-                                      BEGIN
-                                          SET @batch_completed_at = SYSUTCDATETIME();
-                                          SELECT @batch_status =
-                                              CASE WHEN failed > 0 THEN 5
-                                                   WHEN canceled > 0 THEN 4
-                                                   ELSE 2 END
-                                          FROM @bc;
-                                          UPDATE dbo.surefire_batches
-                                          SET status = @batch_status, completed_at = @batch_completed_at
-                                          WHERE id = @batch_id AND status NOT IN (2, 4, 5);
-                                      END
-                                      ELSE
-                                          SET @batch_id = NULL;
-                                  END
-                              END
-                          END
+                                        IF EXISTS (SELECT 1 FROM @bc WHERE succeeded + failed + canceled >= total)
+                                        BEGIN
+                                            SET @batch_completed_at = SYSUTCDATETIME();
+                                            SELECT @batch_status =
+                                                CASE WHEN failed > 0 THEN 5
+                                                     WHEN canceled > 0 THEN 4
+                                                     ELSE 2 END
+                                            FROM @bc;
+                                            UPDATE dbo.surefire_batches
+                                            SET status = @batch_status, completed_at = @batch_completed_at
+                                            WHERE id = @batch_id AND status NOT IN (2, 4, 5);
+                                        END
+                                        ELSE
+                                            SET @batch_id = NULL;
+                                    END
+                                END
+                            END
 
-                          SELECT @updated AS updated, @batch_id AS batch_id,
-                                 @batch_status AS batch_status, @batch_completed_at AS completed_at;
-                          """;
+                            SELECT @updated AS updated, @batch_id AS batch_id,
+                                   @batch_status AS batch_status, @batch_completed_at AS completed_at;
+                            """;
 
         cmd.Parameters.Add(CreateParameter("@id", transition.RunId));
         cmd.Parameters.Add(CreateParameter("@now", timeProvider.GetUtcNow()));
@@ -2056,126 +1816,126 @@ internal sealed class SqlServerJobStore(
         await using var cmd = CreateCommand(conn);
         cmd.Transaction = tx;
         cmd.CommandText = $$"""
-                          SET NOCOUNT ON; SET XACT_ABORT ON;
+                            SET NOCOUNT ON; SET XACT_ABORT ON;
 
-                          -- See TryTransitionRunAsync for the per-run applock + sorted-applock
-                          -- pattern. Wake of any Suspended orchestrator awaiting this run is
-                          -- performed by WakeForTerminatedRunAsync after this statement, in a
-                          -- sequence of per-orchestrator transactions that take their own
-                          -- job/queue applocks.
-                          DECLARE @run_lock_r INT;
-                          EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
-                              @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
-                          IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
+                            -- See TryTransitionRunAsync for the per-run applock + sorted-applock
+                            -- pattern. Wake of any Suspended orchestrator awaiting this run is
+                            -- performed by WakeForTerminatedRunAsync after this statement, in a
+                            -- sequence of per-orchestrator transactions that take their own
+                            -- job/queue applocks.
+                            DECLARE @run_lock_r INT;
+                            EXEC @run_lock_r = sp_getapplock @Resource = @run_lock_key,
+                                @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
+                            IF @run_lock_r < 0 THROW 50004, 'Failed to acquire run lock', 1;
 
-                          DECLARE @run_job_name NVARCHAR(450);
-                          SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
-                          DECLARE @run_queue_name NVARCHAR(450) = N'default';
-                          SELECT @run_queue_name = COALESCE(queue, N'default')
-                              FROM dbo.surefire_jobs WHERE name = @run_job_name;
+                            DECLARE @run_job_name NVARCHAR(450);
+                            SELECT @run_job_name = job_name FROM dbo.surefire_runs WHERE id = @id;
+                            DECLARE @run_queue_name NVARCHAR(450) = N'default';
+                            SELECT @run_queue_name = COALESCE(queue, N'default')
+                                FROM dbo.surefire_jobs WHERE name = @run_job_name;
 
-                          DECLARE @lock_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
-                          DECLARE @lock_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
-                          IF @run_job_name IS NOT NULL
-                          BEGIN
-                              INSERT INTO @lock_jobs (name) VALUES (@run_job_name);
-                              INSERT INTO @lock_queues (name) VALUES (@run_queue_name);
-                          END
+                            DECLARE @lock_jobs TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                            DECLARE @lock_queues TABLE (name NVARCHAR(450) NOT NULL PRIMARY KEY);
+                            IF @run_job_name IS NOT NULL
+                            BEGIN
+                                INSERT INTO @lock_jobs (name) VALUES (@run_job_name);
+                                INSERT INTO @lock_queues (name) VALUES (@run_queue_name);
+                            END
 
-                          {{BuildSortedApplockSql("@lock_jobs", "surefire_job:", "ctj")}}
-                          {{BuildSortedApplockSql("@lock_queues", "surefire_queue:", "ctq")}}
+                            {{BuildSortedApplockSql("@lock_jobs", "surefire_job:", "ctj")}}
+                            {{BuildSortedApplockSql("@lock_queues", "surefire_queue:", "ctq")}}
 
-                          DECLARE @lock_sink NVARCHAR(450);
-                          SELECT @lock_sink = j.name FROM @lock_jobs lj
-                              INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = lj.name
-                              ORDER BY lj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
-                          SELECT @lock_sink = q.name FROM @lock_queues lq
-                              INNER JOIN dbo.surefire_queues q WITH (UPDLOCK, ROWLOCK) ON q.name = lq.name
-                              ORDER BY lq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                            DECLARE @lock_sink NVARCHAR(450);
+                            SELECT @lock_sink = j.name FROM @lock_jobs lj
+                                INNER JOIN dbo.surefire_jobs j WITH (UPDLOCK, ROWLOCK) ON j.name = lj.name
+                                ORDER BY lj.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
+                            SELECT @lock_sink = q.name FROM @lock_queues lq
+                                INNER JOIN dbo.surefire_queues q WITH (UPDLOCK, ROWLOCK) ON q.name = lq.name
+                                ORDER BY lq.name OPTION (FORCE ORDER, LOOP JOIN, MAXDOP 1);
 
-                          DECLARE @now DATETIMEOFFSET(7) = SYSUTCDATETIME();
-                          DECLARE @upd TABLE (
-                              id NVARCHAR(450) NOT NULL,
-                              attempt INT NOT NULL,
-                              batch_id NVARCHAR(450),
-                              prior_status INT NOT NULL,
-                              job_name NVARCHAR(450) NOT NULL
-                          );
+                            DECLARE @now DATETIMEOFFSET(7) = SYSUTCDATETIME();
+                            DECLARE @upd TABLE (
+                                id NVARCHAR(450) NOT NULL,
+                                attempt INT NOT NULL,
+                                batch_id NVARCHAR(450),
+                                prior_status INT NOT NULL,
+                                job_name NVARCHAR(450) NOT NULL
+                            );
 
-                          UPDATE dbo.surefire_runs SET
-                              status = 4,
-                              canceled_at = @now,
-                              completed_at = @now,
-                              reason = COALESCE(@reason, reason)
-                          OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status,
-                                 INSERTED.job_name
-                              INTO @upd (id, attempt, batch_id, prior_status, job_name)
-                          WHERE id = @id
-                              AND status NOT IN (2, 4, 5)
-                              AND (@expected_lease_epoch IS NULL OR lease_epoch = @expected_lease_epoch);
+                            UPDATE dbo.surefire_runs SET
+                                status = 4,
+                                canceled_at = @now,
+                                completed_at = @now,
+                                reason = COALESCE(@reason, reason)
+                            OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.batch_id, DELETED.status,
+                                   INSERTED.job_name
+                                INTO @upd (id, attempt, batch_id, prior_status, job_name)
+                            WHERE id = @id
+                                AND status NOT IN (2, 4, 5)
+                                AND (@expected_lease_epoch IS NULL OR lease_epoch = @expected_lease_epoch);
 
-                          DECLARE @transitioned INT = (SELECT COUNT(*) FROM @upd);
-                          DECLARE @attempt INT = (SELECT TOP (1) attempt FROM @upd);
-                          DECLARE @prior_status INT = (SELECT TOP (1) prior_status FROM @upd);
-                          DECLARE @batch_id NVARCHAR(450) = NULL;
-                          DECLARE @batch_status SMALLINT = NULL;
-                          DECLARE @batch_completed_at DATETIMEOFFSET(7) = NULL;
+                            DECLARE @transitioned INT = (SELECT COUNT(*) FROM @upd);
+                            DECLARE @attempt INT = (SELECT TOP (1) attempt FROM @upd);
+                            DECLARE @prior_status INT = (SELECT TOP (1) prior_status FROM @upd);
+                            DECLARE @batch_id NVARCHAR(450) = NULL;
+                            DECLARE @batch_status SMALLINT = NULL;
+                            DECLARE @batch_completed_at DATETIMEOFFSET(7) = NULL;
 
-                          IF @transitioned > 0
-                          BEGIN
-                              -- Running (1) is the only active slot holder.
-                              UPDATE dbo.surefire_jobs SET
-                                  running_count = CASE WHEN @prior_status = 1
-                                      THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
-                                      ELSE running_count END,
-                                  non_terminal_count =
-                                      CASE WHEN non_terminal_count > 0 THEN non_terminal_count - 1 ELSE 0 END
-                              WHERE name = @run_job_name;
+                            IF @transitioned > 0
+                            BEGIN
+                                -- Running (1) is the only active slot holder.
+                                UPDATE dbo.surefire_jobs SET
+                                    running_count = CASE WHEN @prior_status = 1
+                                        THEN CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                                        ELSE running_count END,
+                                    non_terminal_count =
+                                        CASE WHEN non_terminal_count > 0 THEN non_terminal_count - 1 ELSE 0 END
+                                WHERE name = @run_job_name;
 
-                              IF @prior_status = 1
-                                  UPDATE dbo.surefire_queues SET running_count =
-                                      CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
-                                  WHERE name = @run_queue_name;
+                                IF @prior_status = 1
+                                    UPDATE dbo.surefire_queues SET running_count =
+                                        CASE WHEN running_count > 0 THEN running_count - 1 ELSE 0 END
+                                    WHERE name = @run_queue_name;
 
-                              -- Auto-emitted status event derived from @upd (carries the actual attempt).
-                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                              SELECT u.id, 0, CONVERT(NVARCHAR(10), 4), @now, u.attempt FROM @upd u;
+                                -- Auto-emitted status event derived from @upd (carries the actual attempt).
+                                INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                                SELECT u.id, 0, CONVERT(NVARCHAR(10), 4), @now, u.attempt FROM @upd u;
 
-                              -- Caller-provided extras (may be empty).
-                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
-                              SELECT run_id, event_type, payload, created_at, attempt FROM @events;
+                                -- Caller-provided extras (may be empty).
+                                INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                                SELECT run_id, event_type, payload, created_at, attempt FROM @events;
 
-                              SET @batch_id = (SELECT TOP (1) batch_id FROM @upd WHERE batch_id IS NOT NULL);
-                              IF @batch_id IS NOT NULL
-                              BEGIN
-                                  DECLARE @bc TABLE (total INT, succeeded INT, failed INT, canceled INT);
-                                  UPDATE dbo.surefire_batches
-                                  SET canceled = canceled + 1
-                                  OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
-                                      INTO @bc (total, succeeded, failed, canceled)
-                                  WHERE id = @batch_id AND status NOT IN (2, 4, 5);
+                                SET @batch_id = (SELECT TOP (1) batch_id FROM @upd WHERE batch_id IS NOT NULL);
+                                IF @batch_id IS NOT NULL
+                                BEGIN
+                                    DECLARE @bc TABLE (total INT, succeeded INT, failed INT, canceled INT);
+                                    UPDATE dbo.surefire_batches
+                                    SET canceled = canceled + 1
+                                    OUTPUT INSERTED.total, INSERTED.succeeded, INSERTED.failed, INSERTED.canceled
+                                        INTO @bc (total, succeeded, failed, canceled)
+                                    WHERE id = @batch_id AND status NOT IN (2, 4, 5);
 
-                                  IF EXISTS (SELECT 1 FROM @bc WHERE succeeded + failed + canceled >= total)
-                                  BEGIN
-                                      SET @batch_completed_at = SYSUTCDATETIME();
-                                      SELECT @batch_status =
-                                          CASE WHEN failed > 0 THEN 5
-                                               WHEN canceled > 0 THEN 4
-                                               ELSE 2 END
-                                      FROM @bc;
-                                      UPDATE dbo.surefire_batches
-                                      SET status = @batch_status, completed_at = @batch_completed_at
-                                      WHERE id = @batch_id AND status NOT IN (2, 4, 5);
-                                  END
-                                  ELSE
-                                      SET @batch_id = NULL;
-                              END
-                          END
+                                    IF EXISTS (SELECT 1 FROM @bc WHERE succeeded + failed + canceled >= total)
+                                    BEGIN
+                                        SET @batch_completed_at = SYSUTCDATETIME();
+                                        SELECT @batch_status =
+                                            CASE WHEN failed > 0 THEN 5
+                                                 WHEN canceled > 0 THEN 4
+                                                 ELSE 2 END
+                                        FROM @bc;
+                                        UPDATE dbo.surefire_batches
+                                        SET status = @batch_status, completed_at = @batch_completed_at
+                                        WHERE id = @batch_id AND status NOT IN (2, 4, 5);
+                                    END
+                                    ELSE
+                                        SET @batch_id = NULL;
+                                END
+                            END
 
-                          SELECT @transitioned AS transitioned, @attempt AS attempt,
-                                 @batch_id AS batch_id, @batch_status AS batch_status,
-                                 @batch_completed_at AS completed_at;
-                          """;
+                            SELECT @transitioned AS transitioned, @attempt AS attempt,
+                                   @batch_id AS batch_id, @batch_status AS batch_status,
+                                   @batch_completed_at AS completed_at;
+                            """;
 
         cmd.Parameters.Add(CreateParameter("@id", runId));
         cmd.Parameters.Add(CreateParameter("@run_lock_key", "surefire_run:" + runId));
@@ -2419,9 +2179,9 @@ internal sealed class SqlServerJobStore(
                 SubtreeSeed.Run,
                 seed,
                 "Run expired past its deadline.",
-                includeRoot: true,
+                true,
                 cancellationToken,
-                expirationCancellation: true);
+                true);
             canceledRuns.AddRange(result.Runs);
             expiredRuns.AddRange(result.ExpiredRuns);
             completedBatches.AddRange(result.CompletedBatches);
@@ -2429,53 +2189,7 @@ internal sealed class SqlServerJobStore(
 
         return canceledRuns.Count == 0 && completedBatches.Count == 0
             ? SubtreeCancellation.Empty
-            : new SubtreeCancellation(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns };
-    }
-
-    private async Task<IReadOnlyList<string>> GetRootmostExpiredRunIdsAsync(CancellationToken cancellationToken)
-    {
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
-        await using var cmd = CreateCommand(conn);
-        cmd.CommandText = """
-                          ;WITH expired AS (
-                              SELECT id
-                              FROM dbo.surefire_runs
-                              WHERE status NOT IN (2, 4, 5)
-                                  AND ((status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL AND not_after < SYSUTCDATETIME())
-                                    OR (expires_at IS NOT NULL AND expires_at < SYSUTCDATETIME()))
-                          ),
-                          ancestors AS (
-                              SELECT e.id AS candidate_id, r.parent_run_id AS parent_id
-                              FROM expired e
-                              INNER JOIN dbo.surefire_runs r ON r.id = e.id
-                              UNION ALL
-                              SELECT a.candidate_id, p.parent_run_id
-                              FROM ancestors a
-                              INNER JOIN dbo.surefire_runs p ON p.id = a.parent_id
-                              WHERE a.parent_id IS NOT NULL
-                          )
-                          SELECT e.id
-                          FROM expired e
-                          WHERE NOT EXISTS (
-                              SELECT 1
-                              FROM ancestors a
-                              INNER JOIN expired ancestor ON ancestor.id = a.parent_id
-                              WHERE a.candidate_id = e.id
-                          )
-                          ORDER BY e.id
-                          OPTION (MAXRECURSION 0)
-                          """;
-
-        var roots = new List<string>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken)
-            .WithSqlCancellation(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
-        {
-            roots.Add(reader.GetString(0));
-        }
-
-        return roots;
+            : new(canceledRuns, completedBatches) { ExpiredRuns = expiredRuns };
     }
 
     public async Task AppendEventsAsync(IReadOnlyList<RunEvent> events, CancellationToken cancellationToken = default)
@@ -2533,7 +2247,8 @@ internal sealed class SqlServerJobStore(
         cmd.Parameters.Add(CreateTvpParameter("@events", "dbo.surefire_events_input", EventsToTvp(events)));
 
         var accepted = new HashSet<string>(StringComparer.Ordinal);
-        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+        await using (var reader =
+                     await cmd.ExecuteReaderAsync(cancellationToken).WithSqlCancellation(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
             {
@@ -2863,59 +2578,59 @@ internal sealed class SqlServerJobStore(
             {
                 cmd.Transaction = tx;
                 cmd.CommandText = """
-                                    SET NOCOUNT ON; SET XACT_ABORT ON;
+                                  SET NOCOUNT ON; SET XACT_ABORT ON;
 
-                                    DECLARE @candidate TABLE (
-                                        id NVARCHAR(450) NOT NULL PRIMARY KEY
-                                    );
+                                  DECLARE @candidate TABLE (
+                                      id NVARCHAR(450) NOT NULL PRIMARY KEY
+                                  );
 
-                                    INSERT INTO @candidate (id)
-                                    SELECT TOP (1000) r.id
-                                    FROM dbo.surefire_runs r
-                                    WHERE r.status IN (2, 4, 5)
-                                        AND r.completed_at < @threshold
-                                        AND NOT EXISTS (
-                                            SELECT 1
-                                            FROM dbo.surefire_runs open_run
-                                            WHERE ISNULL(open_run.root_run_id, open_run.id) = ISNULL(r.root_run_id, r.id)
-                                                AND open_run.status NOT IN (2, 4, 5)
-                                        )
-                                        AND (r.batch_id IS NULL OR EXISTS (
-                                            SELECT 1 FROM dbo.surefire_batches b
-                                            WHERE b.id = r.batch_id
-                                                AND b.status IN (2, 4, 5)
-                                                AND b.completed_at IS NOT NULL
-                                                AND b.completed_at < @threshold
-                                        ))
-                                    ORDER BY r.id;
+                                  INSERT INTO @candidate (id)
+                                  SELECT TOP (1000) r.id
+                                  FROM dbo.surefire_runs r
+                                  WHERE r.status IN (2, 4, 5)
+                                      AND r.completed_at < @threshold
+                                      AND NOT EXISTS (
+                                          SELECT 1
+                                          FROM dbo.surefire_runs open_run
+                                          WHERE ISNULL(open_run.root_run_id, open_run.id) = ISNULL(r.root_run_id, r.id)
+                                              AND open_run.status NOT IN (2, 4, 5)
+                                      )
+                                      AND (r.batch_id IS NULL OR EXISTS (
+                                          SELECT 1 FROM dbo.surefire_batches b
+                                          WHERE b.id = r.batch_id
+                                              AND b.status IN (2, 4, 5)
+                                              AND b.completed_at IS NOT NULL
+                                              AND b.completed_at < @threshold
+                                      ))
+                                  ORDER BY r.id;
 
-                                    IF NOT EXISTS (SELECT 1 FROM @candidate)
-                                    BEGIN
-                                        SELECT 0 AS deleted;
-                                        RETURN;
-                                    END
+                                  IF NOT EXISTS (SELECT 1 FROM @candidate)
+                                  BEGIN
+                                      SELECT 0 AS deleted;
+                                      RETURN;
+                                  END
 
-                                    DELETE r FROM dbo.surefire_runs r
-                                    INNER JOIN @candidate c ON c.id = r.id
-                                    WHERE r.status IN (2, 4, 5)
-                                        AND r.completed_at < @threshold
-                                        AND NOT EXISTS (
-                                            SELECT 1
-                                            FROM dbo.surefire_runs open_run
-                                            WHERE ISNULL(open_run.root_run_id, open_run.id) = ISNULL(r.root_run_id, r.id)
-                                                AND open_run.status NOT IN (2, 4, 5)
-                                        )
-                                        AND (r.batch_id IS NULL OR EXISTS (
-                                            SELECT 1 FROM dbo.surefire_batches b
-                                            WHERE b.id = r.batch_id
-                                                AND b.status IN (2, 4, 5)
-                                                AND b.completed_at IS NOT NULL
-                                                AND b.completed_at < @threshold
-                                        ));
+                                  DELETE r FROM dbo.surefire_runs r
+                                  INNER JOIN @candidate c ON c.id = r.id
+                                  WHERE r.status IN (2, 4, 5)
+                                      AND r.completed_at < @threshold
+                                      AND NOT EXISTS (
+                                          SELECT 1
+                                          FROM dbo.surefire_runs open_run
+                                          WHERE ISNULL(open_run.root_run_id, open_run.id) = ISNULL(r.root_run_id, r.id)
+                                              AND open_run.status NOT IN (2, 4, 5)
+                                      )
+                                      AND (r.batch_id IS NULL OR EXISTS (
+                                          SELECT 1 FROM dbo.surefire_batches b
+                                          WHERE b.id = r.batch_id
+                                              AND b.status IN (2, 4, 5)
+                                              AND b.completed_at IS NOT NULL
+                                              AND b.completed_at < @threshold
+                                      ));
 
-                                    DECLARE @deleted INT = @@ROWCOUNT;
-                                    SELECT @deleted AS deleted;
-                                    """;
+                                  DECLARE @deleted INT = @@ROWCOUNT;
+                                  SELECT @deleted AS deleted;
+                                  """;
                 cmd.Parameters.Add(CreateParameter("@threshold", threshold));
 
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken)
@@ -2925,7 +2640,6 @@ internal sealed class SqlServerJobStore(
                 {
                     deleted = reader.GetInt32(0);
                 }
-
             }
 
             await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
@@ -3217,6 +2931,292 @@ internal sealed class SqlServerJobStore(
         }
 
         return results;
+    }
+
+    /// <summary>
+    ///     The unified 3-step wake performed inside every terminal transition transaction. Driven
+    ///     by the persistent <c>surefire_durable_waits</c> table so wake is wake-on-all (every
+    ///     awaited entity must terminate) rather than wake-on-any.
+    ///     <list type="number">
+    ///         <item>Delete the just-terminated run's outgoing waits (cleanup for Suspended -> Canceled).</item>
+    ///         <item>Capture affected orchestrator ids and delete incoming waits referencing the terminated entity.</item>
+    ///         <item>For each captured orchestrator whose wait set is now empty, transition Suspended -> Pending.</item>
+    ///     </list>
+    /// </summary>
+    // Unified wake for a set of terminated runs + batches. Collects the combined affected
+    // orchestrator set ONCE, applocks every orchestrator in sorted-id order, then performs
+    // the per-cascade cleanup. This breaks the cross-helper lock-order inversion that can
+    // arise when two transactions each call WakeForTerminatedRunAsync + WakeForTerminatedBatchAsync
+    // in sequence on overlapping orchestrator sets - per-helper sorts are not enough because
+    // the two helpers' affected sets differ. Locking the union under one canonical order is
+    // the only construction that's deadlock-free for all interleavings.
+    private async Task WakeForTerminatedEntitiesAsync(SqlConnection conn, SqlTransaction tx,
+        IReadOnlyCollection<string> runIds,
+        IReadOnlyCollection<string> batchIds,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0 && batchIds.Count == 0)
+        {
+            return;
+        }
+
+        // One round trip with two SELECTs collects affected orchestrators across runs + batches.
+        // Fast-skip: if the wait table has no rows referencing any of the terminated ids, the
+        // helper returns immediately without the per-orch applock prelude or the second pass.
+        var affected = new SortedSet<string>(StringComparer.Ordinal);
+        await using (var collectCmd = CreateCommand(conn))
+        {
+            collectCmd.Transaction = tx;
+            var sb = new StringBuilder("SET NOCOUNT ON;\n");
+            if (runIds.Count > 0)
+            {
+                sb.Append("""
+                          SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                          WHERE awaited_run_id IN (SELECT name FROM @rids);
+
+                          """);
+                collectCmd.Parameters.Add(CreateTvpParameter("@rids", "dbo.surefire_name_list", NamesToTvp(runIds)));
+            }
+
+            if (batchIds.Count > 0)
+            {
+                sb.Append("""
+                          SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                          WHERE awaited_batch_id IN (SELECT name FROM @bids);
+
+                          """);
+                collectCmd.Parameters.Add(CreateTvpParameter("@bids", "dbo.surefire_name_list", NamesToTvp(batchIds)));
+            }
+
+            collectCmd.CommandText = sb.ToString();
+            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            do
+            {
+                while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+                {
+                    affected.Add(reader.GetString(0));
+                }
+            } while (await reader.NextResultAsync(cancellationToken).WithSqlCancellation(cancellationToken));
+        }
+
+        // Prelock every affected orchestrator in canonical sorted order. WakeIfWaitSetEmptyAsync's
+        // internal per-orch applock is reentrant, so its no-op repeat doesn't matter; what matters
+        // is that this ordered acquisition happens before any cascade-driven write.
+        if (affected.Count > 0)
+        {
+            await using var prelockCmd = CreateCommand(conn);
+            prelockCmd.Transaction = tx;
+            var sb = new StringBuilder("SET NOCOUNT ON; SET XACT_ABORT ON;\nDECLARE @lr INT;\n");
+            var i = 0;
+            foreach (var orch in affected)
+            {
+                var paramName = $"@__orch_{i}";
+                sb.Append("EXEC @lr = sp_getapplock @Resource = ").Append(paramName)
+                    .Append(", @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;\n")
+                    .Append("IF @lr < 0 THROW 50006, 'Failed to prelock orchestrator for wake', 1;\n");
+                prelockCmd.Parameters.Add(CreateParameter(paramName, "surefire_run:" + orch));
+                i++;
+            }
+
+            prelockCmd.CommandText = sb.ToString();
+            await prelockCmd.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        foreach (var runId in runIds)
+        {
+            await WakeForTerminatedRunAsync(conn, tx, runId, now, cancellationToken);
+        }
+
+        foreach (var batchId in batchIds)
+        {
+            await WakeForTerminatedBatchAsync(conn, tx, batchId, now, cancellationToken);
+        }
+    }
+
+    private async Task WakeForTerminatedRunAsync(SqlConnection conn, SqlTransaction tx,
+        string terminatedRunId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // Step 1: outgoing cleanup (no-op when the terminated run wasn't Suspended).
+        await using (var deleteOutgoing = CreateCommand(conn))
+        {
+            deleteOutgoing.Transaction = tx;
+            deleteOutgoing.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaiter_run_id = @id;";
+            deleteOutgoing.Parameters.Add(CreateParameter("@id", terminatedRunId));
+            await deleteOutgoing.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        // Step 2: collect affected orchestrators in sorted-id order, then delete the incoming
+        // wait rows. Sorted ordering matches the row-lock acquisition order in step 3.
+        var affected = new List<string>();
+        await using (var collectCmd = CreateCommand(conn))
+        {
+            collectCmd.Transaction = tx;
+            collectCmd.CommandText = """
+                                     SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                                     WHERE awaited_run_id = @id ORDER BY awaiter_run_id;
+                                     """;
+            collectCmd.Parameters.Add(CreateParameter("@id", terminatedRunId));
+            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                affected.Add(reader.GetString(0));
+            }
+        }
+
+        if (affected.Count == 0)
+        {
+            return;
+        }
+
+        await using (var deleteIncoming = CreateCommand(conn))
+        {
+            deleteIncoming.Transaction = tx;
+            deleteIncoming.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaited_run_id = @id;";
+            deleteIncoming.Parameters.Add(CreateParameter("@id", terminatedRunId));
+            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
+    }
+
+    private async Task WakeForTerminatedBatchAsync(SqlConnection conn, SqlTransaction tx,
+        string terminatedBatchId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var affected = new List<string>();
+        await using (var collectCmd = CreateCommand(conn))
+        {
+            collectCmd.Transaction = tx;
+            collectCmd.CommandText = """
+                                     SELECT DISTINCT awaiter_run_id FROM dbo.surefire_durable_waits
+                                     WHERE awaited_batch_id = @id ORDER BY awaiter_run_id;
+                                     """;
+            collectCmd.Parameters.Add(CreateParameter("@id", terminatedBatchId));
+            await using var reader = await collectCmd.ExecuteReaderAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+            {
+                affected.Add(reader.GetString(0));
+            }
+        }
+
+        if (affected.Count == 0)
+        {
+            return;
+        }
+
+        await using (var deleteIncoming = CreateCommand(conn))
+        {
+            deleteIncoming.Transaction = tx;
+            deleteIncoming.CommandText = "DELETE FROM dbo.surefire_durable_waits WHERE awaited_batch_id = @id;";
+            deleteIncoming.Parameters.Add(CreateParameter("@id", terminatedBatchId));
+            await deleteIncoming.ExecuteNonQueryAsync(cancellationToken)
+                .WithSqlCancellation(cancellationToken);
+        }
+
+        await WakeIfWaitSetEmptyAsync(conn, tx, affected, now, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Wakes each orchestrator whose wait set is now empty, in sorted-id order so concurrent
+    ///     wakes acquire row locks deterministically. Each wake transitions Suspended -> Pending
+    ///     and appends the Pending status event. The CAS on <c>status = 3</c> plus the <c>NOT EXISTS</c> on residual
+    ///     waits keep wakes idempotent under sibling-race conditions.
+    /// </summary>
+    private async Task WakeIfWaitSetEmptyAsync(SqlConnection conn, SqlTransaction tx,
+        IReadOnlyList<string> orchestratorIds, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (orchestratorIds.Count == 0)
+        {
+            return;
+        }
+
+        // Bulk wake under a single TVP-driven UPDATE. Per-orch applocks were already taken by
+        // WakeForTerminatedEntitiesAsync's prelock in canonical sorted order, so the wake's own
+        // applock chain is redundant. Job / queue UPDLOCK hints in sorted order keep this safe
+        // against concurrent claim / transition writers. The wake row update is CAS-fenced on
+        // status = 3 and emptiness of the wait set; both filters keep it idempotent.
+        await using var wakeCmd = CreateCommand(conn);
+        wakeCmd.Transaction = tx;
+        wakeCmd.CommandText = """
+                              SET NOCOUNT ON; SET XACT_ABORT ON;
+
+                              DECLARE @woken TABLE (
+                                  id NVARCHAR(450) NOT NULL PRIMARY KEY,
+                                  attempt INT NOT NULL,
+                                  job_name NVARCHAR(450) NOT NULL
+                              );
+
+                               UPDATE dbo.surefire_runs SET
+                                   status = 0,
+                                   not_before = @now,
+                                   last_heartbeat_at = @now,
+                                   replay_count = replay_count + 1
+                              OUTPUT INSERTED.id, INSERTED.attempt, INSERTED.job_name
+                                  INTO @woken (id, attempt, job_name)
+                              WHERE id IN (SELECT name FROM @ids) AND status = 3
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM dbo.surefire_durable_waits w WHERE w.awaiter_run_id = surefire_runs.id
+                                );
+
+                              INSERT INTO dbo.surefire_events (run_id, event_type, payload, created_at, attempt)
+                              SELECT w.id, 0, N'0', @now, w.attempt FROM @woken w;
+                              """;
+        wakeCmd.Parameters.Add(CreateTvpParameter("@ids", "dbo.surefire_name_list",
+            NamesToTvp(orchestratorIds)));
+        wakeCmd.Parameters.Add(CreateParameter("@now", now));
+        await wakeCmd.ExecuteNonQueryAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<string>> GetRootmostExpiredRunIdsAsync(CancellationToken cancellationToken)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken).WithSqlCancellation(cancellationToken);
+        await using var cmd = CreateCommand(conn);
+        cmd.CommandText = """
+                          ;WITH expired AS (
+                              SELECT id
+                              FROM dbo.surefire_runs
+                              WHERE status NOT IN (2, 4, 5)
+                                  AND ((status = 0 AND lease_epoch = 0 AND not_after IS NOT NULL AND not_after < SYSUTCDATETIME())
+                                    OR (expires_at IS NOT NULL AND expires_at < SYSUTCDATETIME()))
+                          ),
+                          ancestors AS (
+                              SELECT e.id AS candidate_id, r.parent_run_id AS parent_id
+                              FROM expired e
+                              INNER JOIN dbo.surefire_runs r ON r.id = e.id
+                              UNION ALL
+                              SELECT a.candidate_id, p.parent_run_id
+                              FROM ancestors a
+                              INNER JOIN dbo.surefire_runs p ON p.id = a.parent_id
+                              WHERE a.parent_id IS NOT NULL
+                          )
+                          SELECT e.id
+                          FROM expired e
+                          WHERE NOT EXISTS (
+                              SELECT 1
+                              FROM ancestors a
+                              INNER JOIN expired ancestor ON ancestor.id = a.parent_id
+                              WHERE a.candidate_id = e.id
+                          )
+                          ORDER BY e.id
+                          OPTION (MAXRECURSION 0)
+                          """;
+
+        var roots = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken)
+            .WithSqlCancellation(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken).WithSqlCancellation(cancellationToken))
+        {
+            roots.Add(reader.GetString(0));
+        }
+
+        return roots;
     }
 
     private async Task ReleaseMigrationLockAsync(SqlConnection conn)
@@ -4056,7 +4056,7 @@ internal sealed class SqlServerJobStore(
                 idCheck.Transaction = tx;
                 idCheck.CommandText = "SELECT TOP 1 1 FROM dbo.surefire_runs WHERE id = @id";
                 idCheck.Parameters.Add(CreateParameter("@id", run.Id));
-                if (await idCheck.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken) is not null)
+                if (await idCheck.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken) is { })
                 {
                     await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
                     return false;
@@ -4074,7 +4074,8 @@ internal sealed class SqlServerJobStore(
                                          """;
                 dedupCheck.Parameters.Add(CreateParameter("@job_name", run.JobName));
                 dedupCheck.Parameters.Add(CreateParameter("@dedup_id", dedup));
-                if (await dedupCheck.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken) is not null)
+                if (await dedupCheck.ExecuteScalarAsync(cancellationToken).WithSqlCancellation(cancellationToken) is
+                    { })
                 {
                     await tx.CommitAsync(cancellationToken).WithSqlCancellation(cancellationToken);
                     throw new RunConflictException(run.Id,
@@ -4093,7 +4094,8 @@ internal sealed class SqlServerJobStore(
             if (ex.Message.Contains("ix_surefire_runs_dedup", StringComparison.OrdinalIgnoreCase))
             {
                 throw new RunConflictException(run.Id,
-                    $"Run with deduplication id '{run.DeduplicationId}' is already active for job '{run.JobName}'.", ex);
+                    $"Run with deduplication id '{run.DeduplicationId}' is already active for job '{run.JobName}'.",
+                    ex);
             }
 
             return false;
@@ -4595,6 +4597,7 @@ internal sealed class SqlServerJobStore(
                         : ExpiredCancellationKind.AncestorExpired;
                     expiredRuns.Add(new(runId, batchId, attempt, runReason, kind));
                 }
+
                 if (batchId is { })
                 {
                     batchCounts[batchId] = batchCounts.GetValueOrDefault(batchId) + 1;

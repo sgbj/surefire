@@ -48,7 +48,7 @@ export function JobsPage() {
             className="h-8 pl-8"
           />
         </div>
-        <label className="ml-auto flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none">
+        <label className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none">
           <Switch
             size="sm"
             checked={showInactive}

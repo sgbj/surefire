@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Surefire;
 
 /// <summary>
@@ -134,8 +136,8 @@ public interface IJobStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-     ///     Returns the run with the specified ID, or null if not found.
-     /// </summary>
+    ///     Returns the run with the specified ID, or null if not found.
+    /// </summary>
     /// <param name="id">The run ID.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>The matching run, or null.</returns>
@@ -624,7 +626,7 @@ public interface IJobStore
     ///     </para>
     ///     <list type="bullet">
     ///         <item>
-    ///             If at least one entity in (<paramref name="awaitedRunIds" /> ∪ <paramref name="awaitedBatchIds" />)
+    ///             If at least one entity in (<paramref name="awaitedRunIds" /> or <paramref name="awaitedBatchIds" />)
     ///             is still non-terminal, the run becomes <see cref="JobStatus.Suspended" />, one
     ///             row per awaited entity is inserted into <c>surefire_durable_waits</c>, and the
     ///             run reclaims only when its wait set drains to empty as the side effect of those
@@ -664,8 +666,14 @@ public interface IJobStore
     ///     transaction:
     ///     <list type="number">
     ///         <item>Delete any outgoing wait rows owned by the just-terminated run (no-op for non-Suspended runs).</item>
-    ///         <item>Delete incoming wait rows referencing the just-terminated entity and lock the affected orchestrators in sorted-id order.</item>
-    ///         <item>Wake (transition to <see cref="JobStatus.Pending" />) any locked orchestrator whose wait set is now empty.</item>
+    ///         <item>
+    ///             Delete incoming wait rows referencing the just-terminated entity and lock the affected orchestrators in
+    ///             sorted-id order.
+    ///         </item>
+    ///         <item>
+    ///             Wake (transition to <see cref="JobStatus.Pending" />) any locked orchestrator whose wait set is now
+    ///             empty.
+    ///         </item>
     ///     </list>
     ///     This is the correctness path that wakes durable orchestrators; no external notification
     ///     is required for the wake to occur.
@@ -716,10 +724,10 @@ public interface IJobStore
             InputEnvelope? env;
             try
             {
-                env = System.Text.Json.JsonSerializer.Deserialize(ev.Payload ?? "{}",
+                env = JsonSerializer.Deserialize(ev.Payload ?? "{}",
                     SurefireJsonContext.Default.InputEnvelope);
             }
-            catch (System.Text.Json.JsonException ex)
+            catch (JsonException ex)
             {
                 throw new InvalidInputHistoryException(runId, ev.Id, ev.EventType,
                     "Input event payload is not valid JSON.", ex);

@@ -25,6 +25,8 @@ switch (storeProvider)
         var store = builder.AddSqlServer("sqlserver")
             .AddDatabase("store")
             .WithCreationScript("""
+                                IF DB_ID('store') IS NULL
+                                    CREATE DATABASE [store];
                                 ALTER DATABASE [store] SET ALLOW_SNAPSHOT_ISOLATION ON;
                                 ALTER DATABASE [store] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
                                 """);

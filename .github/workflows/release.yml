@@ -44,7 +44,7 @@ jobs:
         run: dotnet build surefire.slnx --configuration Release --no-restore -p:ContinuousIntegrationBuild=true
 
       - name: Run tests
-        run: dotnet test surefire.slnx --configuration Release --no-build --verbosity normal
+        run: dotnet test --solution surefire.slnx --configuration Release --no-build --verbosity normal
 
       - name: Pack
         run: dotnet pack surefire.slnx --configuration Release --no-build --output ./artifacts -p:ContinuousIntegrationBuild=true

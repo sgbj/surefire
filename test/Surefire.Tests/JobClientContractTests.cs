@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -1713,10 +1715,11 @@ public sealed class JobClientContractTests
         Assert.True(await store.TryCreateRunAsync(child, initialEvents: [inputDeclared], cancellationToken: ct));
 
         var snapshot = new DurableExecutionSnapshot(
-            new Dictionary<string, JobRun>(StringComparer.Ordinal) { [childId] = (await store.GetRunAsync(childId, ct))! },
+            new Dictionary<string, JobRun>(StringComparer.Ordinal)
+                { [childId] = (await store.GetRunAsync(childId, ct))! },
             new Dictionary<string, JobBatch>(StringComparer.Ordinal),
             new Dictionary<int, DurableRecord>(),
-            HighestRecordedStep: 1);
+            1);
 
         var context = new JobContext
         {
@@ -1829,7 +1832,7 @@ public sealed class JobClientContractTests
                 [batchId] = (await store.GetBatchAsync(batchId, ct))!
             },
             new Dictionary<int, DurableRecord>(),
-            HighestRecordedStep: 1);
+            1);
 
         var context = new JobContext
         {
@@ -1900,12 +1903,12 @@ public sealed class JobClientContractTests
     }
 
     private static async IAsyncEnumerable<string> SerializeAsync(IEnumerable<int> values,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct)
     {
         foreach (var value in values)
         {
             ct.ThrowIfCancellationRequested();
-            yield return value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            yield return value.ToString(CultureInfo.InvariantCulture);
             await Task.Yield();
         }
     }

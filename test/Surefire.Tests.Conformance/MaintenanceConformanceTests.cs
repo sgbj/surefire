@@ -738,8 +738,7 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
 
         var second = CreateRun(jobName);
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(second, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() => Store.TryCreateRunAsync(second, 1, cancellationToken: ct));
 
         var now = TruncateToMilliseconds(DateTimeOffset.UtcNow);
         var toRunning = CreateRun(jobName, JobStatus.Running) with
@@ -772,8 +771,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(first, 1, cancellationToken: ct));
 
         var blocked = CreateRun(jobName);
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
 
         Assert.True((await Store.TryCancelRunAsync(first.Id, cancellationToken: ct)).Transitioned);
 
@@ -799,8 +798,8 @@ public abstract class MaintenanceConformanceTests : StoreConformanceBase
         Assert.True(await Store.TryCreateRunAsync(abandoned, 1, cancellationToken: ct));
 
         var blocked = CreateRun(jobName);
-        await Assert.ThrowsAsync<RunConflictException>(
-            () => Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
+        await Assert.ThrowsAsync<RunConflictException>(() =>
+            Store.TryCreateRunAsync(blocked, 1, cancellationToken: ct));
 
         await Store.CancelExpiredRunsWithIdsAsync(ct);
 

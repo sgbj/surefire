@@ -152,9 +152,8 @@ public sealed class RunResponse
     /// <summary>Identifier of the batch this run belongs to, or null if the run was triggered standalone.</summary>
     public string? BatchId { get; init; }
 
-    internal static RunResponse From(JobRun run, int? depth = null)
-    {
-        return new()
+    internal static RunResponse From(JobRun run, int? depth = null) =>
+        new()
         {
             Id = run.Id,
             JobName = run.JobName,
@@ -187,7 +186,6 @@ public sealed class RunResponse
             BatchId = run.BatchId,
             Depth = depth
         };
-    }
 }
 
 /// <summary>Request body for bulk refreshing run rows by ID.</summary>

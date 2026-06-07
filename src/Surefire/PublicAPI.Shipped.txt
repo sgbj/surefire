@@ -22,6 +22,11 @@ static Surefire.NotificationChannels.RunInput(string! runId) -> string!
 static Surefire.NotificationChannels.RunTerminated(string! runId) -> string!
 static Surefire.NotificationChannels.ValidateChannel(string! channel) -> void
 static Surefire.RunArguments.Empty.get -> Surefire.RunArguments!
+static Surefire.RunStatusTransition.PendingToRunning(string! runId, long expectedLeaseEpoch, string! nodeName, System.DateTimeOffset startedAt, System.DateTimeOffset lastHeartbeatAt, System.DateTimeOffset notBefore, double progress = 0, string? reason = null, string? result = null) -> Surefire.RunStatusTransition!
+static Surefire.RunStatusTransition.RunningToFailed(string! runId, long expectedLeaseEpoch, System.DateTimeOffset completedAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 1, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null) -> Surefire.RunStatusTransition!
+static Surefire.RunStatusTransition.RunningToPending(string! runId, long expectedLeaseEpoch, System.DateTimeOffset notBefore, string? reason = null, string? result = null, double progress = 0, System.DateTimeOffset? lastHeartbeatAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null) -> Surefire.RunStatusTransition!
+static Surefire.RunStatusTransition.RunningToSucceeded(string! runId, long expectedLeaseEpoch, System.DateTimeOffset completedAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 1, string? result = null, string? reason = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
+static Surefire.RunStatusTransition.ToCanceled(Surefire.JobStatus expectedStatus, string! runId, long expectedLeaseEpoch, System.DateTimeOffset completedAt, System.DateTimeOffset canceledAt, System.DateTimeOffset notBefore, string? nodeName = null, double progress = 0, string? reason = null, string? result = null, System.DateTimeOffset? startedAt = null, System.DateTimeOffset? lastHeartbeatAt = null) -> Surefire.RunStatusTransition!
 Surefire.BackoffType
 Surefire.BackoffType.Exponential = 1 -> Surefire.BackoffType
 Surefire.BackoffType.Fixed = 0 -> Surefire.BackoffType
@@ -56,6 +61,8 @@ Surefire.BatchNotFoundException
 Surefire.BatchNotFoundException.BatchId.get -> string!
 Surefire.BatchNotFoundException.BatchNotFoundException(string! batchId) -> void
 Surefire.BatchRunOptions
+Surefire.BatchRunOptions.ExpiresAt.get -> System.DateTimeOffset?
+Surefire.BatchRunOptions.ExpiresAt.init -> void
 Surefire.BatchRunOptions.NotAfter.get -> System.DateTimeOffset?
 Surefire.BatchRunOptions.NotAfter.init -> void
 Surefire.BatchRunOptions.NotBefore.get -> System.DateTimeOffset?
@@ -102,6 +109,45 @@ Surefire.DirectChildrenPage.Items.get -> System.Collections.Generic.IReadOnlyLis
 Surefire.DirectChildrenPage.Items.init -> void
 Surefire.DirectChildrenPage.NextCursor.get -> string?
 Surefire.DirectChildrenPage.NextCursor.init -> void
+Surefire.DurableExecutionSnapshot
+Surefire.DurableExecutionSnapshot.ChildBatches.get -> System.Collections.Generic.IReadOnlyDictionary<string!, Surefire.JobBatch!>!
+Surefire.DurableExecutionSnapshot.ChildBatches.init -> void
+Surefire.DurableExecutionSnapshot.Children.get -> System.Collections.Generic.IReadOnlyDictionary<string!, Surefire.JobRun!>!
+Surefire.DurableExecutionSnapshot.Children.init -> void
+Surefire.DurableExecutionSnapshot.DurableExecutionSnapshot(System.Collections.Generic.IReadOnlyDictionary<string!, Surefire.JobRun!>! Children, System.Collections.Generic.IReadOnlyDictionary<string!, Surefire.JobBatch!>! ChildBatches, System.Collections.Generic.IReadOnlyDictionary<int, Surefire.DurableRecord!>! Records, int HighestRecordedStep) -> void
+Surefire.DurableExecutionSnapshot.HighestRecordedStep.get -> int
+Surefire.DurableExecutionSnapshot.HighestRecordedStep.init -> void
+Surefire.DurableExecutionSnapshot.Records.get -> System.Collections.Generic.IReadOnlyDictionary<int, Surefire.DurableRecord!>!
+Surefire.DurableExecutionSnapshot.Records.init -> void
+Surefire.DurableRecord
+Surefire.DurableRecord.CreatedAt.get -> System.DateTimeOffset
+Surefire.DurableRecord.CreatedAt.init -> void
+Surefire.DurableRecord.DurableRecord(string! OrchestratorRunId, int Step, string! Kind, string? Name, string! Payload, System.DateTimeOffset CreatedAt) -> void
+Surefire.DurableRecord.Kind.get -> string!
+Surefire.DurableRecord.Kind.init -> void
+Surefire.DurableRecord.Name.get -> string?
+Surefire.DurableRecord.Name.init -> void
+Surefire.DurableRecord.OrchestratorRunId.get -> string!
+Surefire.DurableRecord.OrchestratorRunId.init -> void
+Surefire.DurableRecord.Payload.get -> string!
+Surefire.DurableRecord.Payload.init -> void
+Surefire.DurableRecord.Step.get -> int
+Surefire.DurableRecord.Step.init -> void
+Surefire.DurableReplayMismatchException
+Surefire.DurableReplayMismatchException.DurableReplayMismatchException(string! orchestratorRunId, int step, string! message) -> void
+Surefire.DurableReplayMismatchException.OrchestratorRunId.get -> string!
+Surefire.DurableReplayMismatchException.Step.get -> int
+Surefire.DurableStepRecord
+Surefire.DurableStepRecord.DurableStepRecord() -> void
+Surefire.DurableStepRecord.DurableStepRecord(string! OrchestratorRunId, int Step) -> void
+Surefire.DurableStepRecord.OrchestratorRunId.get -> string!
+Surefire.DurableStepRecord.OrchestratorRunId.init -> void
+Surefire.DurableStepRecord.Step.get -> int
+Surefire.DurableStepRecord.Step.init -> void
+Surefire.DurableSuspendOutcome
+Surefire.DurableSuspendOutcome.ImmediatePending = 2 -> Surefire.DurableSuspendOutcome
+Surefire.DurableSuspendOutcome.NotTransitioned = 0 -> Surefire.DurableSuspendOutcome
+Surefire.DurableSuspendOutcome.Suspended = 1 -> Surefire.DurableSuspendOutcome
 Surefire.IJobClient
 Surefire.IJobClient.CancelAsync(string! runId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobClient.CancelBatchAsync(string! batchId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
@@ -145,11 +191,13 @@ Surefire.IJobRunPipe.ReadInputStreamAsync<T>(Surefire.JobRun! run, string! argum
 Surefire.IJobRunPipe.WriteOutputStreamAsync<T>(System.Collections.Generic.IAsyncEnumerable<T>! stream, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T>! typeInfo, Surefire.JobRun! run, System.Threading.CancellationToken cancellationToken) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<string!>!>!
 Surefire.IJobStore
 Surefire.IJobStore.AppendEventsAsync(System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>! events, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Surefire.IJobStore.AppendEventsIfRunNonTerminalAsync(System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>! events, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlySet<string!>!>!
 Surefire.IJobStore.CancelBatchSubtreeAsync(string! batchId, string? reason = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.SubtreeCancellation!>!
 Surefire.IJobStore.CancelExpiredRunsWithIdsAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.SubtreeCancellation!>!
 Surefire.IJobStore.CancelRunSubtreeAsync(string! rootRunId, string? reason = null, bool includeRoot = true, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.SubtreeCancellation!>!
 Surefire.IJobStore.ClaimRunsAsync(string! nodeName, System.Collections.Generic.IReadOnlyCollection<string!>! jobNames, System.Collections.Generic.IReadOnlyCollection<string!>! queueNames, int maxCount, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<Surefire.JobRun!>!>!
-Surefire.IJobStore.CreateBatchAsync(Surefire.JobBatch! batch, System.Collections.Generic.IReadOnlyList<Surefire.JobRun!>! runs, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? initialEvents = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Surefire.IJobStore.CreateBatchAsync(Surefire.JobBatch! batch, System.Collections.Generic.IReadOnlyList<Surefire.JobRun!>! runs, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? initialEvents = null, Surefire.DurableStepRecord? durableStepRecord = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Surefire.IJobStore.CreateDurableRecordAsync(Surefire.DurableRecord! record, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.DurableRecord!>!
 Surefire.IJobStore.CreateRunsAsync(System.Collections.Generic.IReadOnlyList<Surefire.JobRun!>! runs, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? initialEvents = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.GetAncestorChainAsync(string! runId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<Surefire.JobRun!>!>!
 Surefire.IJobStore.GetBatchAsync(string! batchId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.JobBatch?>!
@@ -160,6 +208,7 @@ Surefire.IJobStore.GetDashboardStatsAsync(System.DateTimeOffset? since = null, i
 Surefire.IJobStore.GetDirectChildrenAsync(string! parentRunId, string? afterCursor = null, string? beforeCursor = null, int take = 50, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.DirectChildrenPage!>!
 Surefire.IJobStore.GetEventsAsync(string! runId, long sinceId = 0, Surefire.RunEventType[]? types = null, int? attempt = null, int? take = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>!>!
 Surefire.IJobStore.GetExternallyStoppedRunIdsAsync(System.Collections.Generic.IReadOnlyCollection<string!>! runIds, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<string!>!>!
+Surefire.IJobStore.GetInputPumpStateAsync(string! runId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyDictionary<string!, Surefire.InputPumpArgumentState>!>!
 Surefire.IJobStore.GetJobAsync(string! name, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.JobDefinition?>!
 Surefire.IJobStore.GetJobsAsync(Surefire.JobListFilter? filter = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<Surefire.JobDefinition!>!>!
 Surefire.IJobStore.GetJobStatsAsync(string! jobName, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.JobStats!>!
@@ -173,13 +222,16 @@ Surefire.IJobStore.GetRunsByIdsAsync(System.Collections.Generic.IReadOnlyList<st
 Surefire.IJobStore.GetStaleRunningRunIdsAsync(System.DateTimeOffset staleBefore, int take, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<string!>!>!
 Surefire.IJobStore.HeartbeatAsync(string! nodeName, System.Collections.Generic.IReadOnlyCollection<string!>! jobNames, System.Collections.Generic.IReadOnlyCollection<string!>! queueNames, System.Collections.Generic.IReadOnlyCollection<string!>! activeRunIds, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.IsTransientException(System.Exception! ex) -> bool
+Surefire.IJobStore.LoadExecutionSnapshotAsync(string! orchestratorRunId, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.DurableExecutionSnapshot!>!
 Surefire.IJobStore.MigrateAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.PingAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.PurgeAsync(System.DateTimeOffset threshold, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.SetJobEnabledAsync(string! name, bool enabled, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.SetQueuePausedAsync(string! name, bool isPaused, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
+Surefire.IJobStore.TryCancelRunAsync(string! runId, long? expectedLeaseEpoch = null, string? reason = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? events = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.RunTransitionResult>!
 Surefire.IJobStore.TryCompleteBatchAsync(string! batchId, Surefire.JobStatus status, System.DateTimeOffset completedAt, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
-Surefire.IJobStore.TryCreateRunAsync(Surefire.JobRun! run, int? maxActiveForJob = null, System.DateTimeOffset? lastCronFireAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? initialEvents = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
+Surefire.IJobStore.TryCreateRunAsync(Surefire.JobRun! run, int? maxActiveForJob = null, System.DateTimeOffset? lastCronFireAt = null, System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>? initialEvents = null, Surefire.DurableStepRecord? durableStepRecord = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<bool>!
+Surefire.IJobStore.TrySuspendRunAsync(string! runId, long expectedLeaseEpoch, System.Collections.Generic.IReadOnlyCollection<string!>! awaitedRunIds, System.Collections.Generic.IReadOnlyCollection<string!>! awaitedBatchIds, System.DateTimeOffset now, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.DurableSuspendOutcome>!
 Surefire.IJobStore.TryTransitionRunAsync(Surefire.RunStatusTransition! transition, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Surefire.RunTransitionResult>!
 Surefire.IJobStore.UpdateLastCronFireAtAsync(string! jobName, System.DateTimeOffset fireAt, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.IJobStore.UpdateRunAsync(Surefire.JobRun! run, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
@@ -192,7 +244,20 @@ Surefire.INotificationProvider.InitializeAsync(System.Threading.CancellationToke
 Surefire.INotificationProvider.PingAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.INotificationProvider.PublishAsync(string! channel, string? message = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
 Surefire.INotificationProvider.SubscribeAsync(string! channel, System.Func<string?, System.Threading.Tasks.Task!>! handler, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IAsyncDisposable!>!
+Surefire.InputPumpArgumentState
+Surefire.InputPumpArgumentState.InputComplete.get -> bool
+Surefire.InputPumpArgumentState.InputComplete.init -> void
+Surefire.InputPumpArgumentState.InputPumpArgumentState() -> void
+Surefire.InputPumpArgumentState.InputPumpArgumentState(long LastSequence, bool InputComplete) -> void
+Surefire.InputPumpArgumentState.LastSequence.get -> long
+Surefire.InputPumpArgumentState.LastSequence.init -> void
 Surefire.InputStreamBinder
+Surefire.InvalidInputHistoryException
+Surefire.InvalidInputHistoryException.EventId.get -> long
+Surefire.InvalidInputHistoryException.EventType.get -> Surefire.RunEventType
+Surefire.InvalidInputHistoryException.InvalidInputHistoryException(string! runId, long eventId, Surefire.RunEventType eventType, string! message) -> void
+Surefire.InvalidInputHistoryException.InvalidInputHistoryException(string! runId, long eventId, Surefire.RunEventType eventType, string! message, System.Exception! innerException) -> void
+Surefire.InvalidInputHistoryException.RunId.get -> string!
 Surefire.JobBatch
 Surefire.JobBatch.Canceled.get -> int
 Surefire.JobBatch.Canceled.init -> void
@@ -206,6 +271,8 @@ Surefire.JobBatch.Id.get -> string!
 Surefire.JobBatch.Id.init -> void
 Surefire.JobBatch.IsSuccess.get -> bool
 Surefire.JobBatch.IsTerminal.get -> bool
+Surefire.JobBatch.ParentRunId.get -> string?
+Surefire.JobBatch.ParentRunId.init -> void
 Surefire.JobBatch.Status.get -> Surefire.JobStatus
 Surefire.JobBatch.Status.init -> void
 Surefire.JobBatch.Succeeded.get -> int
@@ -214,6 +281,7 @@ Surefire.JobBatch.Total.get -> int
 Surefire.JobBatch.Total.init -> void
 Surefire.JobBuilder
 Surefire.JobBuilder.Continuous() -> Surefire.JobBuilder!
+Surefire.JobBuilder.Durable() -> Surefire.JobBuilder!
 Surefire.JobBuilder.OnDeadLetter(Surefire.CallbackDescriptor! descriptor) -> Surefire.JobBuilder!
 Surefire.JobBuilder.OnDeadLetter(System.Delegate! callback) -> Surefire.JobBuilder!
 Surefire.JobBuilder.OnRetry(Surefire.CallbackDescriptor! descriptor) -> Surefire.JobBuilder!
@@ -240,10 +308,20 @@ Surefire.JobContext.BatchId.init -> void
 Surefire.JobContext.CancellationToken.get -> System.Threading.CancellationToken
 Surefire.JobContext.CancellationToken.init -> void
 Surefire.JobContext.Exception.get -> System.Exception?
+Surefire.JobContext.GetUtcNowAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.DateTimeOffset>
+Surefire.JobContext.IsDurable.get -> bool
+Surefire.JobContext.IsReplaying.get -> bool
 Surefire.JobContext.Items.get -> System.Collections.Generic.IDictionary<string!, object?>!
 Surefire.JobContext.JobContext() -> void
 Surefire.JobContext.JobName.get -> string!
 Surefire.JobContext.JobName.init -> void
+Surefire.JobContext.NewGuidAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Guid>
+Surefire.JobContext.NewGuidV7Async(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Guid>
+Surefire.JobContext.NextDoubleAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<double>
+Surefire.JobContext.NextInt32Async(int maxValue, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<int>
+Surefire.JobContext.NextInt32Async(int minValue, int maxValue, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<int>
+Surefire.JobContext.NextInt32Async(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<int>
+Surefire.JobContext.RecordAsync<T>(string! name, System.Func<System.Threading.Tasks.ValueTask<T>>! valueFactory, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<T>
 Surefire.JobContext.ReportProgressAsync(double progress) -> System.Threading.Tasks.Task!
 Surefire.JobContext.Result.get -> object?
 Surefire.JobContext.RootRunId.get -> string!
@@ -261,6 +339,8 @@ Surefire.JobDefinition.FireAllLimit.get -> int?
 Surefire.JobDefinition.FireAllLimit.set -> void
 Surefire.JobDefinition.IsContinuous.get -> bool
 Surefire.JobDefinition.IsContinuous.set -> void
+Surefire.JobDefinition.IsDurable.get -> bool
+Surefire.JobDefinition.IsDurable.set -> void
 Surefire.JobDefinition.IsEnabled.get -> bool
 Surefire.JobDefinition.IsEnabled.set -> void
 Surefire.JobDefinition.JobDefinition() -> void
@@ -282,6 +362,8 @@ Surefire.JobDefinition.RateLimitName.get -> string?
 Surefire.JobDefinition.RateLimitName.set -> void
 Surefire.JobDefinition.RetryPolicy.get -> Surefire.RetryPolicy!
 Surefire.JobDefinition.RetryPolicy.set -> void
+Surefire.JobDefinition.SourceCode.get -> string?
+Surefire.JobDefinition.SourceCode.set -> void
 Surefire.JobDefinition.Tags.get -> string![]!
 Surefire.JobDefinition.Tags.set -> void
 Surefire.JobDefinition.Timeout.get -> System.TimeSpan?
@@ -330,6 +412,8 @@ Surefire.JobRegistrationDescriptor.ReturnKind.get -> Surefire.ReturnKind
 Surefire.JobRegistrationDescriptor.ReturnKind.init -> void
 Surefire.JobRegistrationDescriptor.ReturnType.get -> System.Type!
 Surefire.JobRegistrationDescriptor.ReturnType.init -> void
+Surefire.JobRegistrationDescriptor.SourceCode.get -> string?
+Surefire.JobRegistrationDescriptor.SourceCode.init -> void
 Surefire.JobRegistrationDescriptor.StreamBinders.get -> System.Collections.Generic.IReadOnlyList<Surefire.InputStreamBinder?>?
 Surefire.JobRegistrationDescriptor.StreamBinders.init -> void
 Surefire.JobRegistrationDescriptor.StreamParameterJsonTypeInfoFactories.get -> System.Collections.Generic.IReadOnlyList<Surefire.JsonTypeInfoFactory?>?
@@ -349,9 +433,15 @@ Surefire.JobRun.CreatedAt.get -> System.DateTimeOffset
 Surefire.JobRun.CreatedAt.init -> void
 Surefire.JobRun.DeduplicationId.get -> string?
 Surefire.JobRun.DeduplicationId.init -> void
+Surefire.JobRun.ExpiresAt.get -> System.DateTimeOffset?
+Surefire.JobRun.ExpiresAt.init -> void
+Surefire.JobRun.FailureCount.get -> int
+Surefire.JobRun.FailureCount.init -> void
 Surefire.JobRun.Id.get -> string!
 Surefire.JobRun.Id.init -> void
 Surefire.JobRun.IsCanceled.get -> bool
+Surefire.JobRun.IsDurable.get -> bool
+Surefire.JobRun.IsDurable.init -> void
 Surefire.JobRun.IsFailure.get -> bool
 Surefire.JobRun.IsSuccess.get -> bool
 Surefire.JobRun.IsTerminal.get -> bool
@@ -377,6 +467,8 @@ Surefire.JobRun.Progress.get -> double
 Surefire.JobRun.Progress.init -> void
 Surefire.JobRun.Reason.get -> string?
 Surefire.JobRun.Reason.init -> void
+Surefire.JobRun.ReplayCount.get -> int
+Surefire.JobRun.ReplayCount.init -> void
 Surefire.JobRun.RerunOfRunId.get -> string?
 Surefire.JobRun.RerunOfRunId.init -> void
 Surefire.JobRun.Result.get -> string?
@@ -415,6 +507,7 @@ Surefire.JobStatus.Failed = 5 -> Surefire.JobStatus
 Surefire.JobStatus.Pending = 0 -> Surefire.JobStatus
 Surefire.JobStatus.Running = 1 -> Surefire.JobStatus
 Surefire.JobStatus.Succeeded = 2 -> Surefire.JobStatus
+Surefire.JobStatus.Suspended = 3 -> Surefire.JobStatus
 Surefire.JobStatusExtensions
 Surefire.JobStatusExtensions.extension(Surefire.JobStatus)
 Surefire.JobStatusExtensions.extension(Surefire.JobStatus).IsTerminal.get -> bool
@@ -558,8 +651,8 @@ Surefire.RunArgumentStream.SerializeItems.get -> System.Func<System.Text.Json.Js
 Surefire.RunArgumentStream.SerializeItems.init -> void
 Surefire.RunConflictException
 Surefire.RunConflictException.RunConflictException(string! message) -> void
-Surefire.RunConflictException.RunConflictException(string! runId, string! message, System.Exception! innerException) -> void
 Surefire.RunConflictException.RunConflictException(string! runId, string! message) -> void
+Surefire.RunConflictException.RunConflictException(string! runId, string! message, System.Exception! innerException) -> void
 Surefire.RunConflictException.RunId.get -> string?
 Surefire.RunEvent
 Surefire.RunEvent.Attempt.get -> int
@@ -619,6 +712,8 @@ Surefire.RunNotFoundException.RunNotFoundException(string! runId) -> void
 Surefire.RunOptions
 Surefire.RunOptions.DeduplicationId.get -> string?
 Surefire.RunOptions.DeduplicationId.init -> void
+Surefire.RunOptions.ExpiresAt.get -> System.DateTimeOffset?
+Surefire.RunOptions.ExpiresAt.init -> void
 Surefire.RunOptions.NotAfter.get -> System.DateTimeOffset?
 Surefire.RunOptions.NotAfter.init -> void
 Surefire.RunOptions.NotBefore.get -> System.DateTimeOffset?
@@ -639,6 +734,8 @@ Surefire.RunStatusTransition.CompletedAt.get -> System.DateTimeOffset?
 Surefire.RunStatusTransition.CompletedAt.init -> void
 Surefire.RunStatusTransition.Events.get -> System.Collections.Generic.IReadOnlyList<Surefire.RunEvent!>?
 Surefire.RunStatusTransition.Events.init -> void
+Surefire.RunStatusTransition.ExpectedLeaseEpoch.get -> long
+Surefire.RunStatusTransition.ExpectedLeaseEpoch.init -> void
 Surefire.RunStatusTransition.ExpectedStatus.get -> Surefire.JobStatus
 Surefire.RunStatusTransition.ExpectedStatus.init -> void
 Surefire.RunStatusTransition.HasRequiredFields() -> bool
@@ -683,8 +780,8 @@ Surefire.SubtreeCancellation.SubtreeCancellation(System.Collections.Generic.IRea
 Surefire.SurefireDiagnostics
 Surefire.SurefireOptions
 Surefire.SurefireOptions.AddFixedWindowLimiter(string! name, int maxPermits, System.TimeSpan window) -> Surefire.SurefireOptions!
-Surefire.SurefireOptions.AddQueue(string! name, System.Action<Surefire.QueueDefinition!>! configure) -> Surefire.SurefireOptions!
 Surefire.SurefireOptions.AddQueue(string! name) -> Surefire.SurefireOptions!
+Surefire.SurefireOptions.AddQueue(string! name, System.Action<Surefire.QueueDefinition!>! configure) -> Surefire.SurefireOptions!
 Surefire.SurefireOptions.AddSlidingWindowLimiter(string! name, int maxPermits, System.TimeSpan window) -> Surefire.SurefireOptions!
 Surefire.SurefireOptions.AutoMigrate.get -> bool
 Surefire.SurefireOptions.AutoMigrate.set -> void
@@ -709,6 +806,8 @@ Surefire.SurefireOptions.RetentionCheckInterval.get -> System.TimeSpan
 Surefire.SurefireOptions.RetentionCheckInterval.set -> void
 Surefire.SurefireOptions.RetentionPeriod.get -> System.TimeSpan?
 Surefire.SurefireOptions.RetentionPeriod.set -> void
+Surefire.SurefireOptions.RunExpirationPeriod.get -> System.TimeSpan?
+Surefire.SurefireOptions.RunExpirationPeriod.set -> void
 Surefire.SurefireOptions.SerializerOptions.get -> System.Text.Json.JsonSerializerOptions!
 Surefire.SurefireOptions.SerializerOptions.set -> void
 Surefire.SurefireOptions.ShutdownTimeout.get -> System.TimeSpan
@@ -728,3 +827,5 @@ Surefire.TimelineBucket.Start.get -> System.DateTimeOffset
 Surefire.TimelineBucket.Start.init -> void
 Surefire.TimelineBucket.Succeeded.get -> int
 Surefire.TimelineBucket.Succeeded.init -> void
+Surefire.TimelineBucket.Suspended.get -> int
+Surefire.TimelineBucket.Suspended.init -> void

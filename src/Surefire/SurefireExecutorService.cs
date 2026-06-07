@@ -6,6 +6,7 @@ using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
 namespace Surefire;
 
 internal sealed partial class SurefireExecutorService(
@@ -367,7 +368,7 @@ internal sealed partial class SurefireExecutorService(
             // Durable runs get a PendingAwaitSet that IJobClient methods populate before yielding;
             // the executor's catch-yield path reads it to assemble the wait set for the store's
             // TrySuspendRunAsync call. Non-durable runs don't allocate one.
-            PendingAwaitSet? pendingAwaits = job.Definition.IsDurable ? new PendingAwaitSet() : null;
+            var pendingAwaits = job.Definition.IsDurable ? new PendingAwaitSet() : null;
             DurableExecutionSnapshot? snapshot = null;
             if (job.Definition.IsDurable)
             {
@@ -423,7 +424,7 @@ internal sealed partial class SurefireExecutorService(
                     bestEffortCts.Token);
             }
         }
-        catch (Exception ex) when (UnwrapDurableYield(ex) is not null)
+        catch (Exception ex) when (UnwrapDurableYield(ex) is { })
         {
             // Handlers may surface DurableYieldException directly (canonical `await` form) or
             // wrapped in nested AggregateException (Task.WhenAll(...).Wait(), Parallel.For,
@@ -435,7 +436,7 @@ internal sealed partial class SurefireExecutorService(
             // A recorded child terminated Failed / Canceled and the orchestrator didn't catch the
             // resulting JobRunException. Replay would reproduce the same outcome, so we dead-letter
             // immediately without burning a retry.
-            await HandleRunFailureAsync(context, run, jre, stoppingToken, forceDeadLetter: true);
+            await HandleRunFailureAsync(context, run, jre, stoppingToken, true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -589,7 +590,7 @@ internal sealed partial class SurefireExecutorService(
                     "iterator methods). Wrap external IO, timers, or non-deterministic work in a child " +
                     "job so its result is recorded for deterministic replay."),
                 stoppingToken,
-                forceDeadLetter: true);
+                true);
             return;
         }
 
@@ -630,7 +631,8 @@ internal sealed partial class SurefireExecutorService(
 
         if (current is null || current.Status != JobStatus.Running || current.LeaseEpoch != run.LeaseEpoch)
         {
-            Log.DurableSuspendCasLost(logger, run.Id, run.JobName, run.LeaseEpoch, current?.Status, current?.LeaseEpoch);
+            Log.DurableSuspendCasLost(logger, run.Id, run.JobName, run.LeaseEpoch, current?.Status,
+                current?.LeaseEpoch);
             return;
         }
 
@@ -641,7 +643,7 @@ internal sealed partial class SurefireExecutorService(
                 "Durable suspend CAS missed, but the run is still Running with the same lease epoch. " +
                 "This indicates a store protocol violation."),
             cancellationToken,
-            forceDeadLetter: true);
+            true);
     }
 
     private async Task HandleRunFailureAsyncCore(JobContext? context, JobRun run, Exception ex,
@@ -693,7 +695,7 @@ internal sealed partial class SurefireExecutorService(
                 // The retry callback sees the logical user-code attempt. The callback runs outside
                 // the orchestrator scope, so IsReplaying is naturally false.
                 var retryContext = CreateJobContext(run, bestEffortToken, ex,
-                    isDurable: job.Definition.IsDurable);
+                    job.Definition.IsDurable);
 
                 await InvokeLifecycleCallbacksAsync(
                     [.. options.CompiledOnRetryCallbacks, .. job.OnRetryCallbacks],
@@ -781,7 +783,7 @@ internal sealed partial class SurefireExecutorService(
             await using var callbackScope = scopeFactory.CreateAsyncScope();
             // Dead-letter callback sees the logical user-code attempt.
             var callbackContext = CreateJobContext(run, bestEffortToken, ex,
-                isDurable: job is { Definition.IsDurable: true });
+                job is { Definition.IsDurable: true });
 
             await InvokeLifecycleCallbacksAsync(
                 [.. options.CompiledOnDeadLetterCallbacks, .. jobDeadLetterCallbacks],
@@ -954,7 +956,7 @@ internal sealed partial class SurefireExecutorService(
     {
         var attempt = run.Attempt;
         string? orchestratorRunId = null;
-        int highestRecordedStep = 0;
+        var highestRecordedStep = 0;
         if (isDurable)
         {
             orchestratorRunId = run.Id;

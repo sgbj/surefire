@@ -32,7 +32,7 @@ public sealed class MaintenanceServiceTests
         var childReason = "Canceled because parent run 'root-run' expired.";
         var store = new ExpirationStore
         {
-            ExpiredResult = new SubtreeCancellation(
+            ExpiredResult = new(
                 [new(root.Id, root.BatchId), child],
                 [new("batch-1", JobStatus.Canceled, time.GetUtcNow())])
             {
@@ -145,7 +145,7 @@ public sealed class MaintenanceServiceTests
         public List<(string RootRunId, string? Reason, bool IncludeRoot)> CascadeCalls { get; } = [];
         public int GetRunCalls { get; private set; }
         public SubtreeCancellation ExpiredResult { get; init; } = SubtreeCancellation.Empty;
-        public SubtreeCancellation CascadeResult { get; init; } = SubtreeCancellation.Empty;
+        public SubtreeCancellation CascadeResult { get; } = SubtreeCancellation.Empty;
 
         public override Task UpsertJobsAsync(IReadOnlyList<JobDefinition> jobs, CancellationToken ct = default) =>
             Task.CompletedTask;

@@ -22,7 +22,7 @@ export function SectionHeader({
       )}
     >
       <div className="min-w-0 flex-1">
-        <div className="min-w-0 text-base font-semibold tracking-tight text-foreground">
+        <div className="min-w-0 text-base font-bold tracking-tight text-foreground">
           {title}
         </div>
         {children}

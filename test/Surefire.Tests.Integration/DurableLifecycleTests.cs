@@ -1,7 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Surefire.Tests.Conformance;
 using Surefire.Tests.Testing;
 using static Surefire.Tests.Testing.TestConcurrency;
 
@@ -14,7 +12,6 @@ namespace Surefire.Tests.Integration;
 /// </summary>
 public sealed class DurableLifecycleTests
 {
-
     [Fact]
     public async Task Durable_StreamBatch_Does_Not_Cancel_Batch_On_First_Suspend()
     {
@@ -339,7 +336,7 @@ public sealed class DurableLifecycleTests
         await harness.StartAsync(ct);
 
         var run = await harness.Client.TriggerAsync("ExpiringWait",
-            options: new RunOptions { NotAfter = DateTimeOffset.UtcNow.AddMilliseconds(200) },
+            options: new() { NotAfter = DateTimeOffset.UtcNow.AddMilliseconds(200) },
             cancellationToken: ct);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(30));

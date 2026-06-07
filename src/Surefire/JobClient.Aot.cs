@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
+
 namespace Surefire;
 
 /// <summary>
@@ -17,7 +18,7 @@ internal sealed partial class JobClient
     {
         var runOptions = options ?? new();
         string? derivedId = null;
-        int durableStep = 0;
+        var durableStep = 0;
         string? orchestratorRunId = null;
         if (JobContext.Current is { OrchestratorRunId: { } orchId } ctx)
         {
@@ -59,11 +60,12 @@ internal sealed partial class JobClient
             };
         }
 
-        var (requestedPriority, isDurable) = await ResolveTriggerMetadataAsync(job, runOptions.Priority, cancellationToken);
+        var (requestedPriority, isDurable) =
+            await ResolveTriggerMetadataAsync(job, runOptions.Priority, cancellationToken);
         var resolvedArgs = args ?? RunArguments.Empty;
         var argumentsJson = MaterializeJson(resolvedArgs);
         var run = CreateRun(job, argumentsJson, runOptions, timeProvider.GetUtcNow(),
-            requestedPriority ?? 0, runId: derivedId, isDurable: isDurable);
+            requestedPriority ?? 0, derivedId, isDurable: isDurable);
         var initialEvents = BuildInitialEventsFromAot(run.Id, resolvedArgs.Streams);
 
         // Atomically update the orchestrator's highest_recorded_step alongside the child run
@@ -503,7 +505,7 @@ internal sealed partial class JobClient
         // On replay (ResumeFromSequence > 0), skip items the prior attempt already wrote and
         // continue numbering past LastSequence so the event log stays monotonic.
         var skip = stream.ResumeFromSequence;
-        long sequence = skip;
+        var sequence = skip;
         long emitted = 0;
         try
         {
@@ -518,13 +520,13 @@ internal sealed partial class JobClient
 
                 sequence++;
                 if (!await AppendInputEventAsync(runId, RunEventType.Input, new()
-                {
-                    Argument = stream.ArgumentName,
-                    Sequence = sequence,
-                    Payload = serialized,
-                    IsComplete = false,
-                    Error = null
-                }, cancellationToken))
+                    {
+                        Argument = stream.ArgumentName,
+                        Sequence = sequence,
+                        Payload = serialized,
+                        IsComplete = false,
+                        Error = null
+                    }, cancellationToken))
                 {
                     return;
                 }

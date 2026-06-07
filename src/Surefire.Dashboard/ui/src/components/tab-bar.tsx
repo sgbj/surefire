@@ -31,7 +31,7 @@ export function ToolBar({
   return (
     <div
       className={cn(
-        "flex min-h-[2.625rem] shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card/95 px-6 py-1 backdrop-blur-sm",
+        "flex min-h-[3rem] shrink-0 flex-wrap items-center gap-3 border-b border-border px-6 py-2",
         className,
       )}
     >

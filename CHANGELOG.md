@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-07
+
+### Added
+
+- Durable orchestration: mark a job `.Durable()` to coordinate multi-step workflows that trigger child runs, suspend while they wait, and replay from recorded history, surviving restarts and crashes.
+- Replay-safe helpers on `JobContext` — `RecordAsync`, `NewGuidAsync`, `NewGuidV7Async`, `GetUtcNowAsync`, `NextInt32Async`, and `NextDoubleAsync` — plus `IsDurable` and `IsReplaying` for deterministic durable handlers.
+- `Suspended` run status for durable runs waiting on children, surfaced across the dashboard timeline and status filters; suspended runs are not claimed by workers and hold no concurrency slot.
+- Run expiration via `RunOptions.ExpiresAt`, `BatchRunOptions.ExpiresAt`, and `SurefireOptions.RunExpirationPeriod` to cancel runs that outlive a deadline.
+- Job source code on the dashboard through `JobDefinition.SourceCode`.
+- `DurableExecutionSnapshot`, `DurableRecord`, `DurableStepRecord`, `DurableReplayMismatchException`, `DurableSuspendOutcome`, `InputPumpArgumentState`, and `InvalidInputHistoryException` for the durable execution and input-history APIs.
+
+### Changed
+
+- `IJobStore` now coordinates durable runs: status transitions key off a lease epoch (`RunStatusTransition.ExpectedLeaseEpoch`), and run/batch creation records durable steps. New `TrySuspendRunAsync`, `CreateDurableRecordAsync`, `LoadExecutionSnapshotAsync`, and `GetInputPumpStateAsync` members support suspension and replay.
+- The dashboard shows job source code and reports durable suspension, run expiration, and replay/failure counts, alongside further UI improvements.
+
+### Breaking changes
+
+- `IJobStore.CreateBatchAsync` and `IJobStore.TryCreateRunAsync` now take an optional `DurableStepRecord?` parameter. Custom `IJobStore` implementations must update these signatures.
+
 ## [0.3.0] - 2026-05-14
 
 ### Added

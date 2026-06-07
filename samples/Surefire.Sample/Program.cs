@@ -121,17 +121,17 @@ app.AddJob("Flaky", (ILogger<Program> logger) =>
     .WithDescription("Demonstrates retries and dead-letter behavior")
     .WithTags("retry", "lifecycle-hooks")
     .WithRetry(2)
-    .OnSuccess((JobContext ctx, ILogger<Program> logger) =>
+    .OnSuccess((JobContext context, ILogger<Program> logger) =>
     {
-        logger.LogInformation("{JobName} succeeded after attempt {Attempt}", ctx.JobName, ctx.Attempt);
+        logger.LogInformation("{JobName} succeeded after attempt {Attempt}", context.JobName, context.Attempt);
     })
-    .OnRetry((JobContext ctx, ILogger<Program> logger) =>
+    .OnRetry((JobContext context, ILogger<Program> logger) =>
     {
-        logger.LogWarning("{JobName} retry scheduled after attempt {Attempt}", ctx.JobName, ctx.Attempt);
+        logger.LogWarning("{JobName} retry scheduled after attempt {Attempt}", context.JobName, context.Attempt);
     })
-    .OnDeadLetter((JobContext ctx, ILogger<Program> logger) =>
+    .OnDeadLetter((JobContext context, ILogger<Program> logger) =>
     {
-        logger.LogError("{JobName} dead-lettered after attempt {Attempt}", ctx.JobName, ctx.Attempt);
+        logger.LogError("{JobName} dead-lettered after attempt {Attempt}", context.JobName, context.Attempt);
     });
 
 app.AddJob("GenerateNumbers", (CancellationToken ct, int count = 60) =>
@@ -217,7 +217,7 @@ app.AddJob("Batch", async (IJobClient client, ILogger<Program> logger, Cancellat
     .WithTags("batch", "durable")
     .Durable();
 
-app.AddJob("StreamBatch", async (IJobClient client, JobContext ctx, ILogger<Program> logger,
+app.AddJob("StreamBatch", async (IJobClient client, JobContext context, ILogger<Program> logger,
         CancellationToken ct) =>
     {
         var results = client.StreamBatchAsync<AddRandomResult>("AddRandom", new object?[1_000], cancellationToken: ct);

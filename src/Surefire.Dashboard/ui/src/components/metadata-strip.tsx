@@ -41,7 +41,7 @@ export function MetadataStrip({items}: { items: MetadataItem[] }) {
     <div className={`border-b border-border px-6 pt-5 ${canExpand ? "pb-3" : "pb-5"}`}>
       <dl
         ref={gridRef}
-        className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-6 gap-y-5"
+        className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-x-6 gap-y-5"
       >
         {fullWidth.map((item) => (
           <DtDd key={item.key} label={item.label} align={item.align} className="col-span-full">
