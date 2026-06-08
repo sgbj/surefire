@@ -31,3 +31,4 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+.playwright-mcp/
