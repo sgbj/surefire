@@ -115,14 +115,12 @@ public sealed class DashboardAuthRegistrationTests
     {
         var services = new ServiceCollection();
         services.AddLogging();
+        services.AddAuthentication();
         services.AddSurefireDashboard(o => o.AuthMode = mode);
         await using var provider = services.BuildServiceProvider();
 
-        var schemes = provider.GetService<IAuthenticationSchemeProvider>();
-        if (schemes is not null)
-        {
-            Assert.Null(await schemes.GetSchemeAsync(SurefireDashboardAuthentication.AuthenticationScheme));
-        }
+        var schemes = provider.GetRequiredService<IAuthenticationSchemeProvider>();
+        Assert.Null(await schemes.GetSchemeAsync(SurefireDashboardAuthentication.AuthenticationScheme));
     }
 }
 
@@ -166,6 +164,11 @@ public sealed class DashboardBrowserTokenAuthTests
         var cookie = GetAuthCookie(response);
         Assert.NotNull(cookie);
 
+        var setCookie = response.Headers.GetValues("Set-Cookie")
+            .Single(v => v.StartsWith(".Surefire.Dashboard=", StringComparison.Ordinal));
+        Assert.Contains("httponly", setCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("samesite=lax", setCookie, StringComparison.OrdinalIgnoreCase);
+
         using var authed = new HttpRequestMessage(HttpMethod.Get, "/surefire/api/jobs");
         authed.Headers.Add("Cookie", cookie);
         var apiResponse = await client.SendAsync(authed, ct);
@@ -192,6 +195,7 @@ public sealed class DashboardBrowserTokenAuthTests
     [InlineData("https://evil.example/")]
     [InlineData("//evil.example")]
     [InlineData(@"/\evil.example")]
+    [InlineData("/\t/evil.example")]
     public async Task Login_NonLocalReturnUrl_IsIgnored(string returnUrl)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -218,6 +222,33 @@ public sealed class DashboardBrowserTokenAuthTests
     }
 
     [Fact]
+    public async Task Login_InvalidToken_PreservesReturnUrl()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAuthAppAsync();
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync("/surefire/login?t=wrong&returnUrl=%2Fsurefire%2Fqueues", ct);
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        var location = response.Headers.Location!.ToString();
+        Assert.Contains("error=1", location);
+        Assert.Contains(Uri.EscapeDataString("/surefire/queues"), location);
+        Assert.DoesNotContain("wrong", location);
+    }
+
+    [Fact]
+    public async Task PostToSpaPath_Returns405()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAuthAppAsync();
+        using var client = app.GetTestClient();
+        var cookie = GetAuthCookie(await client.GetAsync($"/surefire/login?t={Token}", ct));
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/surefire/jobs");
+        request.Headers.Add("Cookie", cookie!);
+        var response = await client.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+    }
+
+    [Fact]
     public async Task LoginPage_IsServedAnonymously()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -225,6 +256,7 @@ public sealed class DashboardBrowserTokenAuthTests
         using var client = app.GetTestClient();
         var response = await client.GetAsync("/surefire/login", ct);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         Assert.StartsWith("text/html", response.Content.Headers.ContentType!.ToString());
         Assert.Contains("token", await response.Content.ReadAsStringAsync(ct));
     }
@@ -325,6 +357,7 @@ public sealed class DashboardBrowserTokenAuthTests
     {
         // A shared key ring makes the old cookie decrypt here, so the 401 comes from the fingerprint check.
         var ct = TestContext.Current.CancellationToken;
+        var sink = new ListLoggerProvider();
         var keyDir = Directory.CreateTempSubdirectory("surefire-auth-test");
         void ShareKeys(WebApplicationBuilder b) => b.Services.AddDataProtection()
             .PersistKeysToFileSystem(keyDir)
@@ -338,12 +371,18 @@ public sealed class DashboardBrowserTokenAuthTests
             Assert.NotNull(cookie);
         }
 
-        await using var newApp = await CreateAuthAppAsync(configureBuilder: ShareKeys);
+        await using var newApp = await CreateAuthAppAsync(configureBuilder: b =>
+        {
+            ShareKeys(b);
+            b.Logging.AddProvider(sink);
+        });
         using var client = newApp.GetTestClient();
         using var request = new HttpRequestMessage(HttpMethod.Get, "/surefire/api/jobs");
         request.Headers.Add("Cookie", cookie!);
         var response = await client.SendAsync(request, ct);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Contains(sink.Snapshot(), m =>
+            m.Level == LogLevel.Warning && m.Message.Contains("different browser token"));
     }
 
     [Fact]
@@ -483,8 +522,9 @@ public sealed class DashboardHostAuthorizationTests
 
         using var client = app.GetTestClient();
         var response = await client.GetAsync("/surefire/api/jobs", ct);
-        // Challenge may redirect or 401 depending on endpoint metadata; either way not 200.
-        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+        // Challenge may redirect or 401 depending on endpoint metadata; either way denied.
+        Assert.True(response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Redirect or HttpStatusCode.Found,
+            $"unexpected status {response.StatusCode}");
     }
 
     [Fact]
@@ -502,7 +542,8 @@ public sealed class DashboardHostAuthorizationTests
 
         using var client = app.GetTestClient();
         var response = await client.GetAsync("/surefire/api/jobs", ct);
-        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Redirect or HttpStatusCode.Found,
+            $"unexpected status {response.StatusCode}");
     }
 
     [Fact]

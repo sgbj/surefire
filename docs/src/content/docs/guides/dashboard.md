@@ -94,7 +94,7 @@ builder.Services.AddSurefireDashboard(options =>
 
 - Built-in auth uses a dedicated cookie scheme and authorization policy (both named `"SurefireDashboard"`), so it never interferes with your app's own schemes, and your app's default scheme can't accidentally unlock the dashboard.
 - It relies on the standard authentication and authorization middleware. `WebApplication` inserts that automatically when auth services are registered; hosts building the pipeline by hand need `UseAuthentication()` and `UseAuthorization()` between `UseRouting()` and `UseEndpoints()`.
-- The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. State-changing dashboard endpoints only accept `application/json`, which cross-site forms can't send, so no separate antiforgery setup is needed.
+- The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS. `SameSite=Lax` keeps browsers from attaching it to cross-site POSTs, and endpoints that accept a body additionally require `application/json`, so no separate antiforgery setup is needed.
 - Additional policies chained onto `MapSurefireDashboard()` combine with the built-in token policy (all must pass); they don't replace it. To fully own auth, use `HostAuthorization`.
 
 ## Home

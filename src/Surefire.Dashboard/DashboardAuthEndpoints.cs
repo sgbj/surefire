@@ -33,8 +33,8 @@ internal static class DashboardAuthEndpoints
                 break;
             case DashboardAuthMode.Unsecured:
                 group.AllowAnonymous();
-                endpoints.ServiceProvider.GetService<ILoggerFactory>()
-                    ?.CreateLogger("Surefire.Dashboard")
+                endpoints.ServiceProvider.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger("Surefire.Dashboard")
                     .LogWarning(
                         "Surefire dashboard authentication is disabled (DashboardAuthMode.Unsecured). " +
                         "Anyone who can reach {Prefix} can view job data and trigger, cancel, or rerun jobs.",
@@ -124,7 +124,11 @@ internal static class DashboardAuthEndpoints
     /// </summary>
     private static string SafeReturnUrl(HttpContext context, string? returnUrl, string normalizedPrefix)
     {
-        if (returnUrl is ['/', not ('/' or '\\'), ..])
+        // Same-origin absolute paths only, and no control characters: browsers strip tab/CR/LF,
+        // which would turn "/\t/evil" into a protocol-relative redirect.
+        if (returnUrl is ['/', not ('/' or '\\'), ..]
+            && !returnUrl.AsSpan().ContainsAnyInRange('\0', '\u001f')
+            && !returnUrl.Contains('\u007f'))
         {
             return returnUrl;
         }
@@ -208,20 +212,24 @@ internal static class DashboardAuthEndpoints
             const params = new URLSearchParams(location.search);
             const err = document.getElementById("err");
             if (params.get("error")) err.style.display = "block";
+            // Trailing-slash requests also serve this page, so resolve the POST path absolutely.
+            const loginPath = location.pathname.replace(/\/+$/, "");
             document.getElementById("f").addEventListener("submit", async (e) => {
                 e.preventDefault();
                 try {
-                    const res = await fetch("login", {
+                    const res = await fetch(loginPath, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ token: document.getElementById("t").value.trim() })
                     });
                     if (res.ok) {
                         const ret = params.get("returnUrl");
-                        location.assign(ret && ret.startsWith("/") && !ret.startsWith("//") && !ret.startsWith("/\\") ? ret : ".");
+                        const ok = ret && ret.startsWith("/") && !ret.startsWith("//") && !ret.startsWith("/\\") && !/[\x00-\x1f\x7f]/.test(ret);
+                        location.assign(ok ? ret : loginPath.slice(0, loginPath.lastIndexOf("/") + 1));
                         return;
                     }
-                } catch {
+                } catch (e) {
+                    console.error(e);
                 }
                 err.style.display = "block";
             });
