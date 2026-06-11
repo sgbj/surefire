@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Surefire.Dashboard;
@@ -112,11 +113,11 @@ public static class SurefireDashboardServiceCollectionExtensions
                     .AddAuthenticationSchemes(SurefireDashboardAuthentication.AuthenticationScheme)
                     .RequireClaim(SurefireDashboardAuthentication.TokenClaimType)));
 
-            // The login URL logger hosted service is registered by a later task.
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, DashboardLoginUrlLogger>());
         }
         else if (options.AuthMode == DashboardAuthMode.HostAuthorization)
         {
-            services.AddSingleton<IHostedService, DashboardAuthStartupCheck>();
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, DashboardAuthStartupCheck>());
         }
 
         return services;

@@ -543,7 +543,16 @@ public sealed class DashboardHostAuthorizationTests
         var app = builder.Build();
         var group = app.MapSurefireDashboard();
         configureGroup?.Invoke(group);
-        await app.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await app.StartAsync(TestContext.Current.CancellationToken);
+        }
+        catch
+        {
+            await app.DisposeAsync();
+            throw;
+        }
+
         return app;
     }
 }
@@ -568,7 +577,7 @@ public sealed class DashboardUnsecuredTests
         app.MapSurefireDashboard();
         await app.StartAsync(ct);
 
-        Assert.Contains(sink.Messages, m =>
+        Assert.Contains(sink.Snapshot(), m =>
             m.Level == LogLevel.Warning && m.Message.Contains("Unsecured") && m.Message.Contains("/surefire"));
     }
 
@@ -598,12 +607,45 @@ public sealed class DashboardUnsecuredTests
     }
 }
 
+public sealed class DashboardLoginUrlLoggerTests
+{
+    [Fact]
+    public async Task GeneratedToken_LoginUrlIsLogged()
+    {
+        var sink = new ListLoggerProvider();
+        await using var app = await DashboardBrowserTokenAuthTests.CreateAuthAppAsync(
+            token: null,
+            configureBuilder: builder => builder.Logging.AddProvider(sink));
+
+        var entry = Assert.Single(sink.Snapshot(), m => m.Message.Contains("/surefire/login?t="));
+        Assert.Matches("t=[0-9a-f]{32}", entry.Message);
+    }
+
+    [Fact]
+    public async Task ConfiguredToken_IsNeverLogged()
+    {
+        var sink = new ListLoggerProvider();
+        await using var app = await DashboardBrowserTokenAuthTests.CreateAuthAppAsync(
+            configureBuilder: builder => builder.Logging.AddProvider(sink));
+
+        Assert.DoesNotContain(sink.Snapshot(), m => m.Message.Contains("test-token-123"));
+    }
+}
+
 /// <summary>Shared log sink for dashboard auth tests.</summary>
 internal sealed class ListLoggerProvider : ILoggerProvider
 {
-    public List<(LogLevel Level, string Message)> Messages { get; } = [];
+    private readonly List<(LogLevel Level, string Message)> _messages = [];
 
-    public ILogger CreateLogger(string categoryName) => new ListLogger(Messages);
+    public (LogLevel Level, string Message)[] Snapshot()
+    {
+        lock (_messages)
+        {
+            return _messages.ToArray();
+        }
+    }
+
+    public ILogger CreateLogger(string categoryName) => new ListLogger(_messages);
 
     public void Dispose()
     {
