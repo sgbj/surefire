@@ -50,8 +50,9 @@ public static class DashboardEndpoints
     /// <returns>A convention builder over the entire dashboard route group.</returns>
     /// <remarks>
     ///     Requires <c>services.AddSurefireDashboard()</c> to be called during DI configuration.
-    ///     The dashboard requires browser-token sign-in by default; see
-    ///     <see cref="DashboardAuthMode" /> for the other modes.
+    ///     The dashboard requires browser-token authentication by default; see
+    ///     <see cref="Surefire.Dashboard.SurefireDashboardOptions.AuthMode" /> to integrate with the
+    ///     host's own authentication or opt out.
     /// </remarks>
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
         string prefix = "/surefire")

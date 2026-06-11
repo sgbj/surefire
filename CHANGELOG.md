@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Dashboard authentication. The dashboard is now secure by default: it requires a browser token
+  (Aspire-style) exchanged for a cookie at `{prefix}/login`. Configure via
+  `SurefireDashboardOptions.AuthMode` (`BrowserToken` (default), `HostAuthorization`, or
+  `Unsecured`) and `SurefireDashboardOptions.BrowserToken` (or the
+  `Surefire:Dashboard:BrowserToken` configuration key).
+
+### Breaking changes
+
+- The dashboard requires authentication by default. On upgrade: hosts that already chain their
+  own `.RequireAuthorization(...)` on `MapSurefireDashboard()` should set
+  `options.AuthMode = DashboardAuthMode.HostAuthorization` (chained policies otherwise combine
+  with the built-in token policy); local-dev setups that want the old open behavior must opt in
+  explicitly with `options.AuthMode = DashboardAuthMode.Unsecured`. With no configuration, the
+  login URL (including a generated token) is logged at startup.
+
 ## [0.4.0] - 2026-06-07
 
 ### Added
