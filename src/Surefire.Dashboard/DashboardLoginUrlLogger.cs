@@ -30,6 +30,7 @@ internal sealed class DashboardLoginUrlLogger(
                 .Replace("0.0.0.0", "localhost", StringComparison.Ordinal)
                 .Replace("[::]", "localhost", StringComparison.Ordinal)
                 .Replace("+", "localhost", StringComparison.Ordinal)
+                .Replace("*", "localhost", StringComparison.Ordinal)
                 .TrimEnd('/') ?? "";
 
             logger.LogInformation("Surefire dashboard: {LoginUrl}", $"{origin}{prefix}/login?t={token}");

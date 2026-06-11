@@ -7,6 +7,12 @@ interface ProblemDetailsLike {
 
 async function fetchApi<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);
+  if (res.status === 401) {
+    // Session missing or expired. Reload so the server-side auth challenge decides where to
+    // send the browser; the challenge preserves the current URL as the post-login returnUrl.
+    location.reload();
+    return new Promise<T>(() => {}); // page is navigating away; never settle
+  }
   if (!res.ok) {
     const contentType = res.headers.get("content-type") ?? "";
     if (contentType.includes("application/problem+json")) {

@@ -197,7 +197,7 @@ internal static class DashboardAuthEndpoints
         <body>
         <main>
             <h1>Surefire</h1>
-            <p>Enter the dashboard token to sign in. It is printed in the application logs at startup.</p>
+            <p>Enter the dashboard token to sign in. Generated tokens are printed in the application logs at startup.</p>
             <form id="f">
                 <input id="t" type="password" placeholder="Token" autocomplete="off" autofocus required>
                 <button type="submit">Sign in</button>
