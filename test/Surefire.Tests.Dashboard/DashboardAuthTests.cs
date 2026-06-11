@@ -1,3 +1,7 @@
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using System.Security.Claims;
 using Surefire.Dashboard;
 
@@ -77,5 +81,42 @@ public sealed class SurefireDashboardAuthenticationTests
         Assert.Equal(fingerprint, SurefireDashboardAuthentication.Fingerprint("secret"));
         Assert.NotEqual(fingerprint, SurefireDashboardAuthentication.Fingerprint("other"));
         Assert.NotEqual("secret", fingerprint);
+    }
+}
+
+public sealed class DashboardAuthRegistrationTests
+{
+    [Fact]
+    public async Task BrowserTokenMode_RegistersCookieSchemeAndPolicy()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSurefireDashboard();
+        await using var provider = services.BuildServiceProvider();
+
+        var schemes = provider.GetRequiredService<IAuthenticationSchemeProvider>();
+        Assert.NotNull(await schemes.GetSchemeAsync(SurefireDashboardAuthentication.AuthenticationScheme));
+
+        var policies = provider.GetRequiredService<IAuthorizationPolicyProvider>();
+        var policy = await policies.GetPolicyAsync(SurefireDashboardAuthentication.PolicyName);
+        Assert.NotNull(policy);
+        Assert.Contains(SurefireDashboardAuthentication.AuthenticationScheme, policy.AuthenticationSchemes);
+    }
+
+    [Theory]
+    [InlineData(DashboardAuthMode.HostAuthorization)]
+    [InlineData(DashboardAuthMode.Unsecured)]
+    public async Task NonBrowserTokenModes_DoNotRegisterScheme(DashboardAuthMode mode)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSurefireDashboard(o => o.AuthMode = mode);
+        await using var provider = services.BuildServiceProvider();
+
+        var schemes = provider.GetService<IAuthenticationSchemeProvider>();
+        if (schemes is not null)
+        {
+            Assert.Null(await schemes.GetSchemeAsync(SurefireDashboardAuthentication.AuthenticationScheme));
+        }
     }
 }
