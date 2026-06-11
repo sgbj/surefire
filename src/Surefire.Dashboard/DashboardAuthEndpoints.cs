@@ -84,9 +84,13 @@ internal static class DashboardAuthEndpoints
             }
 
             var auth = await context.AuthenticateAsync(SurefireDashboardAuthentication.AuthenticationScheme);
-            return auth.Succeeded
-                ? Results.Redirect(target)
-                : Results.Content(LoginPageHtml, "text/html; charset=utf-8");
+            if (auth.Succeeded)
+            {
+                return Results.Redirect(target);
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Content(LoginPageHtml, "text/html; charset=utf-8");
         }).AllowAnonymous();
 
         group.MapPost("/login",
@@ -206,17 +210,20 @@ internal static class DashboardAuthEndpoints
             if (params.get("error")) err.style.display = "block";
             document.getElementById("f").addEventListener("submit", async (e) => {
                 e.preventDefault();
-                const res = await fetch("login", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ token: document.getElementById("t").value.trim() })
-                });
-                if (res.ok) {
-                    const ret = params.get("returnUrl");
-                    location.assign(ret && ret.startsWith("/") && !ret.startsWith("//") && !ret.startsWith("/\\") ? ret : ".");
-                } else {
-                    err.style.display = "block";
+                try {
+                    const res = await fetch("login", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ token: document.getElementById("t").value.trim() })
+                    });
+                    if (res.ok) {
+                        const ret = params.get("returnUrl");
+                        location.assign(ret && ret.startsWith("/") && !ret.startsWith("//") && !ret.startsWith("/\\") ? ret : ".");
+                        return;
+                    }
+                } catch {
                 }
+                err.style.display = "block";
             });
         </script>
         </body>
