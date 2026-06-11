@@ -1,1 +1,9 @@
 #nullable enable
+Surefire.Dashboard.DashboardAuthMode
+Surefire.Dashboard.DashboardAuthMode.BrowserToken = 0 -> Surefire.Dashboard.DashboardAuthMode
+Surefire.Dashboard.DashboardAuthMode.HostAuthorization = 1 -> Surefire.Dashboard.DashboardAuthMode
+Surefire.Dashboard.DashboardAuthMode.Unsecured = 2 -> Surefire.Dashboard.DashboardAuthMode
+Surefire.Dashboard.SurefireDashboardOptions.AuthMode.get -> Surefire.Dashboard.DashboardAuthMode
+Surefire.Dashboard.SurefireDashboardOptions.AuthMode.set -> void
+Surefire.Dashboard.SurefireDashboardOptions.BrowserToken.get -> string?
+Surefire.Dashboard.SurefireDashboardOptions.BrowserToken.set -> void
