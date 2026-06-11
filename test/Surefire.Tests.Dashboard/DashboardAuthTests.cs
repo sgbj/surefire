@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Security.Claims;
 using Surefire.Dashboard;
 
@@ -464,4 +465,162 @@ public sealed class DashboardBrowserTokenAuthTests
     }
 }
 
+public sealed class DashboardHostAuthorizationTests
+{
+    [Fact]
+    public async Task ChainedRequireAuthorization_ProtectsDashboard()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateHostAuthAppAsync(
+            configureServices: services =>
+            {
+                services.AddAuthentication().AddCookie("HostCookie");
+                services.AddAuthorization(o => o.AddPolicy("HostPolicy", p => p
+                    .AddAuthenticationSchemes("HostCookie")
+                    .RequireAuthenticatedUser()));
+            },
+            configureGroup: group => group.RequireAuthorization("HostPolicy"));
 
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync("/surefire/api/jobs", ct);
+        // Challenge may redirect or 401 depending on endpoint metadata; either way not 200.
+        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FallbackPolicy_CountsAsProtection()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateHostAuthAppAsync(
+            configureServices: services =>
+            {
+                services.AddAuthentication().AddCookie("HostCookie");
+                services.AddAuthorization(o => o.FallbackPolicy = new AuthorizationPolicyBuilder("HostCookie")
+                    .RequireAuthenticatedUser()
+                    .Build());
+            });
+
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync("/surefire/api/jobs", ct);
+        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task NoProtection_FailsAppStartup()
+    {
+        // The startup check forces endpoint building, so the unprotected dashboard kills the
+        // deploy instead of the first production request.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateHostAuthAppAsync());
+        Assert.Contains("HostAuthorization", ex.Message);
+        Assert.Contains("RequireAuthorization", ex.Message);
+        Assert.Contains("Unsecured", ex.Message);
+    }
+
+    [Fact]
+    public async Task ExplicitAllowAnonymous_IsHonored()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateHostAuthAppAsync(
+            configureGroup: group => group.AllowAnonymous());
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync("/surefire/api/jobs", ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private static async Task<WebApplication> CreateHostAuthAppAsync(
+        Action<IServiceCollection>? configureServices = null,
+        Action<IEndpointConventionBuilder>? configureGroup = null)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        configureServices?.Invoke(builder.Services);
+        builder.Services.AddSurefire(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(10);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+        });
+        builder.Services.AddSurefireDashboard(static o => o.AuthMode = DashboardAuthMode.HostAuthorization);
+        var app = builder.Build();
+        var group = app.MapSurefireDashboard();
+        configureGroup?.Invoke(group);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        return app;
+    }
+}
+
+public sealed class DashboardUnsecuredTests
+{
+    [Fact]
+    public async Task UnsecuredMode_LogsWarningAtMapTime()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var sink = new ListLoggerProvider();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.AddProvider(sink);
+        builder.Services.AddSurefire(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(10);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+        });
+        builder.Services.AddSurefireDashboard(static o => o.AuthMode = DashboardAuthMode.Unsecured);
+        await using var app = builder.Build();
+        app.MapSurefireDashboard();
+        await app.StartAsync(ct);
+
+        Assert.Contains(sink.Messages, m =>
+            m.Level == LogLevel.Warning && m.Message.Contains("Unsecured") && m.Message.Contains("/surefire"));
+    }
+
+    [Fact]
+    public async Task Unsecured_AllowsAnonymous_DespiteFallbackPolicy()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddAuthentication().AddCookie("HostCookie");
+        builder.Services.AddAuthorization(o => o.FallbackPolicy = new AuthorizationPolicyBuilder("HostCookie")
+            .RequireAuthenticatedUser()
+            .Build());
+        builder.Services.AddSurefire(options =>
+        {
+            options.PollingInterval = TimeSpan.FromMilliseconds(10);
+            options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
+        });
+        builder.Services.AddSurefireDashboard(static o => o.AuthMode = DashboardAuthMode.Unsecured);
+        await using var app = builder.Build();
+        app.MapSurefireDashboard();
+        await app.StartAsync(ct);
+
+        using var client = app.GetTestClient();
+        var response = await client.GetAsync("/surefire/api/jobs", ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+}
+
+/// <summary>Shared log sink for dashboard auth tests.</summary>
+internal sealed class ListLoggerProvider : ILoggerProvider
+{
+    public List<(LogLevel Level, string Message)> Messages { get; } = [];
+
+    public ILogger CreateLogger(string categoryName) => new ListLogger(Messages);
+
+    public void Dispose()
+    {
+    }
+
+    private sealed class ListLogger(List<(LogLevel, string)> messages) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (messages)
+            {
+                messages.Add((logLevel, formatter(state, exception)));
+            }
+        }
+    }
+}

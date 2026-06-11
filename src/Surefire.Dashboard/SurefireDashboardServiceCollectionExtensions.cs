@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Surefire.Dashboard;
 
@@ -115,7 +116,7 @@ public static class SurefireDashboardServiceCollectionExtensions
         }
         else if (options.AuthMode == DashboardAuthMode.HostAuthorization)
         {
-            // The startup endpoint-build check hosted service is registered by a later task.
+            services.AddSingleton<IHostedService, DashboardAuthStartupCheck>();
         }
 
         return services;
