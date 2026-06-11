@@ -87,7 +87,7 @@ builder.Services.AddSurefireDashboard(options =>
 ```
 
 :::caution
-`Unsecured` means anyone who can reach the dashboard can manage your jobs. Never expose it beyond local development.
+`Unsecured` means anyone who can reach the dashboard can manage your jobs. Never expose it beyond local development. In this mode `AllowAnonymous` is applied to every dashboard endpoint, so authorization policies chained on the builder returned by `MapSurefireDashboard()` have no effect.
 :::
 
 ### Notes

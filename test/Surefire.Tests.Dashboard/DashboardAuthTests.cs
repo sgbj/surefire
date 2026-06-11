@@ -211,7 +211,9 @@ public sealed class DashboardBrowserTokenAuthTests
     public async Task Login_InvalidToken_StripsTokenAndSetsNoCookie()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var app = await CreateAuthAppAsync();
+        var sink = new ListLoggerProvider();
+        await using var app = await CreateAuthAppAsync(
+            configureBuilder: builder => builder.Logging.AddProvider(sink));
         using var client = app.GetTestClient();
         var response = await client.GetAsync("/surefire/login?t=wrong", ct);
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
@@ -219,6 +221,8 @@ public sealed class DashboardBrowserTokenAuthTests
         Assert.DoesNotContain("wrong", location);
         Assert.Contains("error=1", location);
         Assert.Null(GetAuthCookie(response));
+        Assert.Contains(sink.Snapshot(), m =>
+            m.Level == LogLevel.Warning && m.Message.Contains("invalid token"));
     }
 
     [Fact]
@@ -246,6 +250,34 @@ public sealed class DashboardBrowserTokenAuthTests
         request.Headers.Add("Cookie", cookie!);
         var response = await client.SendAsync(request, ct);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task HeadToSpaPath_IsServed()
+    {
+        // Uptime probes use HEAD; the SPA catch-all must serve it alongside GET.
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAuthAppAsync();
+        using var client = app.GetTestClient();
+        var cookie = GetAuthCookie(await client.GetAsync($"/surefire/login?t={Token}", ct));
+        using var request = new HttpRequestMessage(HttpMethod.Head, "/surefire/jobs");
+        request.Headers.Add("Cookie", cookie!);
+        var response = await client.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task LoginPage_ContainsClientReturnUrlGuard()
+    {
+        // The page script is the only returnUrl validation on the JSON POST flow, so pin its
+        // guard expressions; if the script changes, revisit the open-redirect protection.
+        var ct = TestContext.Current.CancellationToken;
+        await using var app = await CreateAuthAppAsync();
+        using var client = app.GetTestClient();
+        var html = await client.GetStringAsync("/surefire/login", ct);
+        Assert.Contains("""startsWith("//")""", html);
+        Assert.Contains("""startsWith("/\\")""", html);
+        Assert.Contains("/[\\x00-\\x1f\\x7f]/", html);
     }
 
     [Fact]
@@ -291,11 +323,15 @@ public sealed class DashboardBrowserTokenAuthTests
     public async Task PostLogin_InvalidToken_Returns401WithoutCookie()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var app = await CreateAuthAppAsync();
+        var sink = new ListLoggerProvider();
+        await using var app = await CreateAuthAppAsync(
+            configureBuilder: builder => builder.Logging.AddProvider(sink));
         using var client = app.GetTestClient();
         var response = await client.PostAsJsonAsync("/surefire/login", new { token = "wrong" }, ct);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Null(GetAuthCookie(response));
+        Assert.Contains(sink.Snapshot(), m =>
+            m.Level == LogLevel.Warning && m.Message.Contains("invalid token"));
     }
 
     [Fact]

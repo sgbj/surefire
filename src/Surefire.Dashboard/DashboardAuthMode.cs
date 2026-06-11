@@ -26,6 +26,8 @@ public enum DashboardAuthMode
     /// <summary>
     ///     No authentication at all, even when the host has a fallback policy. An explicit opt-out
     ///     for local development; a warning is logged when the dashboard is mapped.
+    ///     AllowAnonymous is applied to every dashboard endpoint, so authorization policies chained
+    ///     on the returned builder have no effect in this mode.
     /// </summary>
     Unsecured
 }

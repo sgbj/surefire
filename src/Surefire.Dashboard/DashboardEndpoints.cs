@@ -484,8 +484,8 @@ public static class DashboardEndpoints
 
         var contentTypeProvider = new FileExtensionContentTypeProvider();
 
-        // GET-only so non-GET requests to auth routes get accurate status codes instead of the SPA shell.
-        group.MapGet("{**path}", async context =>
+        // GET/HEAD only so other methods get accurate status codes instead of the SPA shell.
+        group.MapMethods("{**path}", [HttpMethods.Get, HttpMethods.Head], async context =>
         {
             var path = context.Request.RouteValues["path"]?.ToString() ?? "";
 

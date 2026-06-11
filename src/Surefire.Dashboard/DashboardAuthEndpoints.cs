@@ -76,6 +76,8 @@ internal static class DashboardAuthEndpoints
                     return Results.Redirect(target);
                 }
 
+                LogRejectedSignIn(context);
+
                 // Redirect so the bad token is stripped from the address bar.
                 var query = returnUrl is null
                     ? "?error=1"
@@ -102,6 +104,7 @@ internal static class DashboardAuthEndpoints
                     return TypedResults.NoContent();
                 }
 
+                LogRejectedSignIn(context);
                 return TypedResults.Problem(
                     statusCode: StatusCodes.Status401Unauthorized,
                     title: "Unauthorized",
@@ -118,6 +121,12 @@ internal static class DashboardAuthEndpoints
     private static string? NonEmpty(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value;
 
+    // Never log the attempted token value.
+    private static void LogRejectedSignIn(HttpContext context)
+        => context.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("Surefire.Dashboard")
+            .LogWarning("A dashboard sign-in attempt was rejected: invalid token.");
+
     /// <summary>
     ///     Honors only same-origin absolute paths so the login endpoint cannot be used as an
     ///     open redirector.
@@ -126,7 +135,7 @@ internal static class DashboardAuthEndpoints
     {
         // Same-origin absolute paths only, and no control characters: browsers strip tab/CR/LF,
         // which would turn "/\t/evil" into a protocol-relative redirect.
-        if (returnUrl is ['/', not ('/' or '\\'), ..]
+        if (returnUrl is "/" or ['/', not ('/' or '\\'), ..]
             && !returnUrl.AsSpan().ContainsAnyInRange('\0', '\u001f')
             && !returnUrl.Contains('\u007f'))
         {
