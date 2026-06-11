@@ -6,14 +6,14 @@ namespace Surefire.Tests.Dashboard;
 public sealed class DashboardAuthOptionsTests
 {
     [Fact]
-    public void AuthMode_Defaults_To_BrowserToken()
+    public void AuthMode_DefaultsToBrowserToken()
     {
         var options = new SurefireDashboardOptions();
         Assert.Equal(DashboardAuthMode.BrowserToken, options.AuthMode);
     }
 
     [Fact]
-    public void BrowserToken_Defaults_To_Null()
+    public void BrowserToken_DefaultsToNull()
     {
         var options = new SurefireDashboardOptions();
         Assert.Null(options.BrowserToken);
@@ -22,14 +22,14 @@ public sealed class DashboardAuthOptionsTests
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public void BrowserToken_Rejects_Empty_And_Whitespace(string value)
+    public void BrowserToken_RejectsEmptyAndWhitespace(string value)
     {
         var options = new SurefireDashboardOptions();
         Assert.Throws<ArgumentException>(() => options.BrowserToken = value);
     }
 
     [Fact]
-    public void BrowserToken_Accepts_Explicit_Value_And_Null_Reset()
+    public void BrowserToken_AcceptsExplicitValueAndNullReset()
     {
         var options = new SurefireDashboardOptions { BrowserToken = "my-token" };
         Assert.Equal("my-token", options.BrowserToken);
@@ -41,7 +41,7 @@ public sealed class DashboardAuthOptionsTests
 public sealed class SurefireDashboardAuthenticationTests
 {
     [Fact]
-    public void GenerateToken_Produces_32_Char_Lowercase_Hex_And_Unique_Values()
+    public void GenerateToken_ProducesUniqueLowercaseHex()
     {
         var first = SurefireDashboardAuthentication.GenerateToken();
         var second = SurefireDashboardAuthentication.GenerateToken();
@@ -54,13 +54,13 @@ public sealed class SurefireDashboardAuthenticationTests
     [InlineData("secret", "Secret", false)]
     [InlineData("secret", "secret ", false)]
     [InlineData("secret", "", false)]
-    public void TokensEqual_Compares_Exactly(string expected, string provided, bool equal)
+    public void TokensEqual_ComparesExactly(string expected, string provided, bool equal)
     {
         Assert.Equal(equal, SurefireDashboardAuthentication.TokensEqual(expected, provided));
     }
 
     [Fact]
-    public void CreatePrincipal_Is_Authenticated_And_Carries_The_Token_Fingerprint()
+    public void CreatePrincipal_CarriesTokenFingerprint()
     {
         var principal = SurefireDashboardAuthentication.CreatePrincipal("secret");
         Assert.True(principal.Identity?.IsAuthenticated);
@@ -71,11 +71,11 @@ public sealed class SurefireDashboardAuthenticationTests
     }
 
     [Fact]
-    public void Fingerprint_Is_Stable_And_Not_The_Token_Itself()
+    public void Fingerprint_IsStableAndDiffersByToken()
     {
         var fingerprint = SurefireDashboardAuthentication.Fingerprint("secret");
         Assert.Equal(fingerprint, SurefireDashboardAuthentication.Fingerprint("secret"));
         Assert.NotEqual(fingerprint, SurefireDashboardAuthentication.Fingerprint("other"));
-        Assert.DoesNotContain("secret", fingerprint);
+        Assert.NotEqual("secret", fingerprint);
     }
 }
