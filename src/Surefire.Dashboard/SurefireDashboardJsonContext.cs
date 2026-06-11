@@ -31,6 +31,7 @@ namespace Surefire.Dashboard;
 [JsonSerializable(typeof(UpdateJobRequest))]
 [JsonSerializable(typeof(UpdateQueueRequest))]
 [JsonSerializable(typeof(RunLookupRequest))]
+[JsonSerializable(typeof(LoginRequest))]
 [JsonSerializable(typeof(LogPageResponse))]
 [JsonSerializable(typeof(RunIdResponse))]
 [JsonSerializable(typeof(ProblemDetails))]

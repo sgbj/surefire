@@ -1406,7 +1406,11 @@ public sealed class DashboardEndpointsTests
             options.PollingInterval = TimeSpan.FromMilliseconds(10);
             options.HeartbeatInterval = TimeSpan.FromMilliseconds(100);
         });
-        builder.Services.AddSurefireDashboard(configureDashboard);
+        builder.Services.AddSurefireDashboard(o =>
+        {
+            o.AuthMode = DashboardAuthMode.Unsecured;
+            configureDashboard?.Invoke(o);
+        });
 
         var app = builder.Build();
         configure?.Invoke(app);

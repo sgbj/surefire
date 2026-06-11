@@ -50,8 +50,8 @@ public static class DashboardEndpoints
     /// <returns>A convention builder over the entire dashboard route group.</returns>
     /// <remarks>
     ///     Requires <c>services.AddSurefireDashboard()</c> to be called during DI configuration.
-    ///     The dashboard is unauthenticated by default; production deployments should chain
-    ///     <c>.RequireAuthorization(...)</c> on the returned builder.
+    ///     The dashboard requires browser-token sign-in by default; see
+    ///     <see cref="DashboardAuthMode" /> for the other modes.
     /// </remarks>
     public static IEndpointConventionBuilder MapSurefireDashboard(this IEndpointRouteBuilder endpoints,
         string prefix = "/surefire")
@@ -62,6 +62,12 @@ public static class DashboardEndpoints
 
         var group = endpoints.MapGroup(prefix);
         var api = group.MapGroup("api");
+
+        var trimmed = prefix.Trim('/');
+        var basePath = trimmed.Length > 0 ? $"/{trimmed}/" : "/";
+        var normalizedPrefix = trimmed.Length > 0 ? $"/{trimmed}" : "";
+
+        DashboardAuthEndpoints.Apply(endpoints, group, options, normalizedPrefix);
 
         api.MapGet("/stats",
             async (DateTimeOffset? since, int? bucketMinutes, IJobStore store, CancellationToken ct) =>
@@ -466,9 +472,6 @@ public static class DashboardEndpoints
         var assembly = typeof(DashboardEndpoints).Assembly;
         var fileProvider = new ManifestEmbeddedFileProvider(assembly, "wwwroot");
 
-        var trimmed = prefix.Trim('/');
-        var basePath = trimmed.Length > 0 ? $"/{trimmed}/" : "/";
-
         var indexFile = fileProvider.GetFileInfo("index.html");
         byte[] indexBytes;
         using (var reader = new StreamReader(indexFile.CreateReadStream()))
@@ -480,7 +483,8 @@ public static class DashboardEndpoints
 
         var contentTypeProvider = new FileExtensionContentTypeProvider();
 
-        group.Map("{**path}", async context =>
+        // GET-only so non-GET requests to auth routes get accurate status codes instead of the SPA shell.
+        group.MapGet("{**path}", async context =>
         {
             var path = context.Request.RouteValues["path"]?.ToString() ?? "";
 
