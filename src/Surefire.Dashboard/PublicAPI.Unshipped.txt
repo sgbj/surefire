@@ -7,3 +7,6 @@ Surefire.Dashboard.SurefireDashboardOptions.AuthMode.get -> Surefire.Dashboard.D
 Surefire.Dashboard.SurefireDashboardOptions.AuthMode.set -> void
 Surefire.Dashboard.SurefireDashboardOptions.BrowserToken.get -> string?
 Surefire.Dashboard.SurefireDashboardOptions.BrowserToken.set -> void
+Surefire.Dashboard.SurefireDashboardAuthentication
+const Surefire.Dashboard.SurefireDashboardAuthentication.AuthenticationScheme = "SurefireDashboard" -> string!
+const Surefire.Dashboard.SurefireDashboardAuthentication.PolicyName = "SurefireDashboard" -> string!
