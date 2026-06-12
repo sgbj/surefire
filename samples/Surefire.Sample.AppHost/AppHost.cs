@@ -5,12 +5,15 @@ var builder = DistributedApplication.CreateBuilder(args);
 var storeProvider = builder.Configuration["Surefire:Store"];
 var notificationsProvider = builder.Configuration["Surefire:Notifications"];
 
+// Replicas must agree on one browser token so a single login works on both. Local replicas
+// share the default Data Protection key ring, so the cookie validates on either replica.
+const string dashboardToken = "surefire-sample-token";
+
 var sample = builder.AddProject<Surefire_Sample>("surefire-sample")
     .WithEnvironment("Surefire__Store", storeProvider)
     .WithEnvironment("Surefire__Notifications", notificationsProvider)
-    // Replicas must agree on one browser token so a single login works on both. Local replicas
-    // share the default Data Protection key ring, so the cookie validates on either replica.
-    .WithEnvironment("Surefire__Dashboard__BrowserToken", "surefire-sample-token")
+    .WithEnvironment("Surefire__Dashboard__BrowserToken", dashboardToken)
+    .WithUrlForEndpoint("http", _ => new() { Url = $"/surefire/login?t={dashboardToken}" })
     .WithReplicas(2);
 
 switch (storeProvider)
